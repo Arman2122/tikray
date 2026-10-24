@@ -616,7 +616,7 @@ docs/
 
 | Milestone | Outcome |
 |---|---|
-| **M0: data-path spike** | **In progress:** the lab runs pass on x86_64 CHR; the ARM64 CHR run and the hardware benchmark are pending. See `docs/superpowers/findings/2026-10-24-m0-data-path.md`. On RouterOS CHR ARM64 and real hardware, prove: xray TUN inbound inside a RouterOS container, mangle routing into it, no source NAT, sniffing with `routeOnly`, UDP, DNS redirect, fallback. Measure throughput and RAM. If something blocks this path, we change the design before building on it. (QUIC sniffing moved to M3: no QUIC fixture in M0.) |
+| **M0: data-path spike** | **Lab done:** all 22 checks pass on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25) with the newest xray; the real-hardware benchmark is pending. See `docs/superpowers/findings/2026-10-24-m0-data-path.md`. On RouterOS CHR ARM64 and real hardware, prove: xray TUN inbound inside a RouterOS container, mangle routing into it, no source NAT, sniffing with `routeOnly`, UDP, DNS redirect, fallback. Measure throughput and RAM. If something blocks this path, we change the design before building on it. (QUIC sniffing moved to M3: no QUIC fixture in M0.) |
 | **M1: runner + artifacts** | Runner with trial protocol; fetch chain, verification, slots; xray update and rollback end to end. |
 | **M2: control-plane core** | `store`, `render`, `xray` client, `sharelink`, `subscription`, `health`, REST API, CLI. |
 | **M3: RouterOS** | `install.rsc`, reconciler, version adapters, watchdog, uninstall, CHR e2e suite. |
@@ -627,7 +627,7 @@ docs/
 
 | Risk | Mitigation |
 |---|---|
-| ~~xray TUN inbound doesn't behave as expected inside a RouterOS container~~ | Retired by M0: works on CHR 7.25 and 7.23.8 x86_64 (ARM64 CHR pending) with xray 26.3.27 and 26.10.21, without `privileged` or `devices` |
+| ~~xray TUN inbound doesn't behave as expected inside a RouterOS container~~ | Retired by M0: works on CHR 7.25 and 7.23.8 x86_64 and 7.25 ARM64, with xray 26.3.27 and 26.10.21, without `privileged` or `devices` |
 | xray throughput on ARM64 MikroTik CPUs is too low | Hybrid steering keeps domestic traffic off xray; M0 benchmark; tuning (sniffing scope, QUIC options) |
 | RouterOS container or API behavior changes between versions | Version adapters + CI matrix on stable and long-term |
 | Flash wear from address-list and file writes | Diff sync, external storage recommended, daily (not more often) geo checks |
