@@ -90,7 +90,9 @@
 # While the runner is down, fail-open devices fall back to the router's own DNS
 # (their routes fall back via check-gateway); kill-switch devices keep pointing
 # at the runner and get no answers. Netwatch runs on RouterOS, without tikray.
-/tool/netwatch/add host=172.31.255.3 interval=5s timeout=1s comment=tikray:runner-watch up-script="/ip/firewall/nat/enable [find where comment~\"tikray:dns-open\"]" down-script="/ip/firewall/nat/disable [find where comment~\"tikray:dns-open\"]"
+# Its default startup-delay (5m) would leave DNS pointing at a dead runner for
+# the first minutes after every boot.
+/tool/netwatch/add host=172.31.255.3 interval=5s timeout=1s startup-delay=0s comment=tikray:runner-watch up-script="/ip/firewall/nat/enable [find where comment~\"tikray:dns-open\"]" down-script="/ip/firewall/nat/disable [find where comment~\"tikray:dns-open\"]"
 
 # Restricted RouterOS user for the control plane, API-SSL only from its IP
 /user/group/add name=tikray policy=read,write,api comment=tikray:group

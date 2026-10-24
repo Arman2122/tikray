@@ -294,15 +294,21 @@ func TestAssumptions(t *testing.T) {
 	})
 	check("xray_dead_fallback", func(t *testing.T, note func(string, ...any)) {
 		// xray dies while the runner container keeps running: fail-open must
-		// still go direct, and come back to the proxy when xray returns.
+		// still go direct, with DNS, and come back to the proxy when xray
+		// returns. Start from the proxied path: the previous check restarted
+		// the runner, and check-gateway takes a while to switch back to it.
+		if _, ok := poll(ctx, 120*time.Second, 2*time.Second, func() bool { return curl("--max-time", "3", "http://203.0.113.30/whoami") == "203.0.113.10" }); !ok {
+			t.Fatal("traffic not proxied before xray was stopped")
+		}
 		code, body, err := httpDo(ctx, http.MethodPost, runnerURL+"/v0/xray/pause?seconds=150", "")
 		if err != nil || code != http.StatusNoContent {
 			t.Fatalf("pause xray: %d %q %v", code, body, err)
 		}
 		took, ok := poll(ctx, 60*time.Second, 2*time.Second, func() bool { return curl("--max-time", "3", "http://203.0.113.30/whoami") == "198.51.100.2" })
+		_, dnsOK := poll(ctx, 30*time.Second, 2*time.Second, func() bool { return isIPv4(dig("foreign.test")) })
 		ans := dig("foreign.test")
 		note("direct %.1fs after xray stopped ok=%v; dns %q", took.Seconds(), ok, ans)
-		if !ok || !isIPv4(ans) {
+		if !ok || !dnsOK {
 			t.Errorf("with xray stopped and the runner up: direct=%v dns=%q, want direct and an answer", ok, ans)
 		}
 		back, ok := poll(ctx, 240*time.Second, 3*time.Second, func() bool { return curl("--max-time", "3", "http://203.0.113.30/whoami") == "203.0.113.10" })
