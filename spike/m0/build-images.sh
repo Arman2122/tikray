@@ -5,6 +5,14 @@
 set -euo pipefail
 
 arch=${1:?usage: build-images.sh <amd64|arm64>}
+
+# RouterOS rejects archives written by Docker's containerd image store ("no
+# config found in manifest"); the classic store's `docker save` output works.
+if docker info 2>/dev/null | grep -q 'driver-type: io.containerd.snapshotter'; then
+  echo 'build-images.sh: Docker uses the containerd image store; RouterOS cannot import its archives.' >&2
+  echo 'Set {"features": {"containerd-snapshotter": false}} in /etc/docker/daemon.json and restart dockerd.' >&2
+  exit 1
+fi
 here=$(cd "$(dirname "$0")" && pwd)
 out="$here/out"
 mkdir -p "$out"

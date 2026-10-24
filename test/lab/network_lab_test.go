@@ -67,3 +67,19 @@ func TestNetworkSetupTeardown(t *testing.T) {
 		t.Errorf("second Teardown: %v", err)
 	}
 }
+
+func TestNetnsCommandsDropProxyEnv(t *testing.T) {
+	t.Setenv("https_proxy", "http://127.0.0.1:1")
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	n := &Network{}
+	for _, cmd := range []*exec.Cmd{n.Client(context.Background(), "env"), n.Inet(context.Background(), "env")} {
+		for _, kv := range cmd.Env {
+			if k, _, _ := strings.Cut(kv, "="); strings.EqualFold(k, "https_proxy") || strings.EqualFold(k, "http_proxy") {
+				t.Errorf("%v carries %s", cmd.Args, kv)
+			}
+		}
+		if len(cmd.Env) == 0 {
+			t.Errorf("%v has an empty environment", cmd.Args)
+		}
+	}
+}

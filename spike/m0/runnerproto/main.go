@@ -33,6 +33,9 @@ type status struct {
 	XrayRSSKB    int               `json:"xray_rss_kb"`
 	RoutesOK     bool              `json:"routes_ok"`
 	XrayRestarts int               `json:"xray_restarts"`
+	// ExecFromMount is "ok" when xray ran straight from the mount, else the
+	// exec error; files placed by RouterOS have no execute bit.
+	ExecFromMount string `json:"exec_from_mount"`
 }
 
 var (
@@ -73,7 +76,41 @@ func ingressLink() (netlink.Link, error) {
 	return nil, fmt.Errorf("no default route")
 }
 
+// stage copies bin to /run/xray with mode 0755, for when the mount copy
+// can't be executed.
+func stage(bin string) (string, error) {
+	b, err := os.ReadFile(bin)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll("/run", 0o755); err != nil {
+		return "", err
+	}
+	const staged = "/run/xray"
+	if err := os.WriteFile(staged+".tmp", b, 0o755); err != nil {
+		return "", err
+	}
+	return staged, os.Rename(staged+".tmp", staged)
+}
+
 func superviseXray(bin, cfg string) {
+	probe := exec.Command(bin, "version")
+	if err := probe.Run(); err != nil {
+		log.Printf("exec %s from mount: %v; staging a copy", bin, err)
+		mu.Lock()
+		st.ExecFromMount = err.Error()
+		mu.Unlock()
+		staged, err := stage(bin)
+		if err != nil {
+			log.Printf("stage %s: %v", bin, err)
+		} else {
+			bin = staged
+		}
+	} else {
+		mu.Lock()
+		st.ExecFromMount = "ok"
+		mu.Unlock()
+	}
 	for {
 		cmd := exec.Command(bin, "run", "-c", cfg)
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr

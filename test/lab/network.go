@@ -3,6 +3,7 @@ package lab
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -128,12 +129,27 @@ func (n *Network) Teardown() error {
 
 // Inet returns a command that runs in the fake-internet namespace.
 func (n *Network) Inet(ctx context.Context, name string, args ...string) *exec.Cmd {
-	return exec.CommandContext(ctx, "ip", append([]string{"netns", "exec", nsInet, name}, args...)...)
+	return inNetns(ctx, nsInet, name, args)
 }
 
 // Client returns a command that runs in the LAN client namespace.
 func (n *Network) Client(ctx context.Context, name string, args ...string) *exec.Cmd {
-	return exec.CommandContext(ctx, "ip", append([]string{"netns", "exec", nsClient, name}, args...)...)
+	return inNetns(ctx, nsClient, name, args)
+}
+
+// inNetns runs name in a lab namespace without the host's proxy settings:
+// lab traffic must never be sent to a proxy outside the lab.
+func inNetns(ctx context.Context, ns, name string, args []string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "ip", append([]string{"netns", "exec", ns, name}, args...)...)
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		switch strings.ToLower(k) {
+		case "http_proxy", "https_proxy", "all_proxy", "no_proxy":
+			continue
+		}
+		cmd.Env = append(cmd.Env, kv)
+	}
+	return cmd
 }
 
 func run(ctx context.Context, args ...string) error {
