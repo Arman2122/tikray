@@ -2,7 +2,7 @@
   "log": {"loglevel": "warning", "access": "/data/run/access.log"},
   "dns": {
     "servers": [
-      {"address": "203.0.113.54", "domains": ["domain:domestic.test"]},
+      {"address": "203.0.113.54", "domains": ["domain:domestic.test"], "skipFallback": true},
       "203.0.113.53"
     ]
   },

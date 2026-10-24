@@ -2,7 +2,7 @@
   "log": {"loglevel": "warning", "access": "/data/run/access.log"},
   "dns": {
     "servers": [
-      {"address": "CHANGE-ME-ISP-DNS", "domains": ["geosite:category-ir"]},
+      {"address": "CHANGE-ME-ISP-DNS", "domains": ["geosite:category-ir"], "skipFallback": true},
       "https://1.1.1.1/dns-query"
     ]
   },

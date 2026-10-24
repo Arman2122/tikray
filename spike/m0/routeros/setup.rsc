@@ -57,16 +57,24 @@
 /ip/firewall/mangle/add chain=tikray-pre dst-address-list=tikray-domestic action=return comment=tikray:skip-domestic
 /ip/firewall/mangle/add chain=tikray-pre src-address-list=tikray-src-smart-open connection-mark=no-mark action=mark-connection new-connection-mark=tikray-open passthrough=yes comment=tikray:conn-open
 /ip/firewall/mangle/add chain=tikray-pre src-address-list=tikray-src-smart-closed connection-mark=no-mark action=mark-connection new-connection-mark=tikray-closed passthrough=yes comment=tikray:conn-closed
-/ip/firewall/mangle/add chain=tikray-pre connection-mark=tikray-open action=mark-routing new-routing-mark=tikray-open passthrough=no comment=tikray:route-open
-/ip/firewall/mangle/add chain=tikray-pre connection-mark=tikray-closed action=mark-routing new-routing-mark=tikray-closed passthrough=no comment=tikray:route-closed
+# Routing marks only for the original direction: replies of masqueraded
+# connections reach mangle prerouting before NAT is undone (dst = the WAN
+# address, not local), so matching on the connection mark alone would route
+# them back out the WAN.
+/ip/firewall/mangle/add chain=tikray-pre src-address-list=tikray-src-smart-open connection-mark=tikray-open action=mark-routing new-routing-mark=tikray-open passthrough=no comment=tikray:route-open
+/ip/firewall/mangle/add chain=tikray-pre src-address-list=tikray-src-smart-closed connection-mark=tikray-closed action=mark-routing new-routing-mark=tikray-closed passthrough=no comment=tikray:route-closed
 /ip/firewall/mangle/add chain=forward protocol=tcp tcp-flags=syn connection-mark=tikray-open action=change-mss new-mss=clamp-to-pmtu passthrough=yes comment=tikray:mss-open
 /ip/firewall/mangle/add chain=forward protocol=tcp tcp-flags=syn connection-mark=tikray-closed action=change-mss new-mss=clamp-to-pmtu passthrough=yes comment=tikray:mss-closed
 
 # Keep marked connections off FastTrack: accept them before the user's FastTrack rule
-:local ft [/ip/firewall/filter/find where action=fasttrack-connection]
-:if ([:len $ft] > 0) do={
-  /ip/firewall/filter/add chain=forward connection-mark=tikray-open action=accept place-before=[:pick $ft 0] comment=tikray:no-fasttrack-open
-  /ip/firewall/filter/add chain=forward connection-mark=tikray-closed action=accept place-before=[:pick $ft 0] comment=tikray:no-fasttrack-closed
+# (one block: /import runs each top-level line on its own, so a :local set on
+# one line is gone on the next)
+{
+  :local ft [/ip/firewall/filter/find where action=fasttrack-connection]
+  :if ([:len $ft] > 0) do={
+    /ip/firewall/filter/add chain=forward connection-mark=tikray-open action=accept place-before=[:pick $ft 0] comment=tikray:no-fasttrack-open
+    /ip/firewall/filter/add chain=forward connection-mark=tikray-closed action=accept place-before=[:pick $ft 0] comment=tikray:no-fasttrack-closed
+  }
 }
 
 # DNS from proxied devices goes to xray in the runner
