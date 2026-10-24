@@ -89,9 +89,9 @@ func (c *CHR) waitSSH(ctx context.Context) error {
 	var last error
 	for {
 		actx, acancel := context.WithTimeout(ctx, 30*time.Second)
-		out, err := c.Get(actx, `"up"`)
+		out, err := c.Run(actx, `:put "up"`)
 		acancel()
-		if err == nil && out == "up" {
+		if err == nil && strings.TrimSpace(out) == "up" {
 			c.logf("ssh up")
 			return nil
 		}
