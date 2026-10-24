@@ -76,7 +76,7 @@
 # Restricted RouterOS user for the control plane, API-SSL only from its IP
 /user/group/add name=tikray policy=read,write,api comment=tikray:group
 /user/add name=tikray group=tikray password=$tikrayApiPass address=172.31.255.2/32 comment=tikray:user
-/certificate/add name=tikray-api common-name=tikray-api key-size=prime256v1 days-valid=3650 key-usage=tls-server
+/certificate/add name=tikray-api common-name=tikray-api key-size=prime256v1 days-valid=3650
 /certificate/sign tikray-api
 /ip/service/set api-ssl certificate=tikray-api disabled=no
 
