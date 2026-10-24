@@ -20,6 +20,7 @@
   /container/remove [find where comment~"^tikray:"]
   /container/mounts/remove [find where comment~"^tikray:"]
   /container/envs/remove [find where comment~"^tikray:"]
+  /tool/netwatch/remove [find where comment~"^tikray:"]
   /ip/firewall/nat/remove [find where comment~"^tikray:"]
   /ip/firewall/filter/remove [find where comment~"^tikray:"]
   /ip/firewall/mangle/remove [find where comment~"^tikray:"]

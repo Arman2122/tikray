@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -95,6 +96,13 @@ func stage(bin string) (string, error) {
 	return staged, os.Rename(staged+".tmp", staged)
 }
 
+// pausedUntil holds xray stopped until that time (test hook for "xray died
+// while the runner is up").
+var (
+	pausedUntil time.Time
+	current     *exec.Cmd
+)
+
 func superviseXray(bin, cfg string) {
 	probe := exec.Command(bin, "version")
 	if err := probe.Run(); err != nil {
@@ -120,6 +128,13 @@ func superviseXray(bin, cfg string) {
 		mu.Unlock()
 	}
 	for {
+		mu.Lock()
+		wait := time.Until(pausedUntil)
+		mu.Unlock()
+		if wait > 0 {
+			time.Sleep(wait)
+			continue
+		}
 		cmd := exec.Command(bin, "run", "-c", cfg)
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 		if err := cmd.Start(); err != nil {
@@ -127,6 +142,7 @@ func superviseXray(bin, cfg string) {
 		} else {
 			mu.Lock()
 			st.XrayPID = cmd.Process.Pid
+			current = cmd
 			mu.Unlock()
 			err = cmd.Wait()
 			log.Printf("xray exited: %v", err)
@@ -136,6 +152,36 @@ func superviseXray(bin, cfg string) {
 		st.XrayRestarts++
 		mu.Unlock()
 		time.Sleep(time.Second)
+	}
+}
+
+// setGateway makes the runner answer ping (healthy) or not: RouterOS
+// check-gateway and netwatch probe the runner with ping, so a runner whose
+// xray is down withdraws itself and fail-open traffic goes direct.
+func setGateway(up bool) {
+	v := "1"
+	if up {
+		v = "0"
+	}
+	const p = "/proc/sys/net/ipv4/icmp_echo_ignore_all"
+	if cur, err := os.ReadFile(p); err == nil && strings.TrimSpace(string(cur)) == v {
+		return
+	}
+	if err := os.WriteFile(p, []byte(v), 0o644); err != nil {
+		log.Printf("gateway up=%v: %v", up, err)
+		return
+	}
+	log.Printf("gateway up=%v", up)
+}
+
+// ensureUnreachable keeps a low-priority "unreachable default" in table 1001,
+// so packets that arrive while xray0 is missing are rejected instead of being
+// sent back to the router (which would route them here again).
+func ensureUnreachable() {
+	_, all, _ := net.ParseCIDR("0.0.0.0/0")
+	r := &netlink.Route{Dst: all, Table: tunTable, Type: unix.RTN_UNREACHABLE, Priority: 100}
+	if err := netlink.RouteReplace(r); err != nil {
+		log.Printf("unreachable default table %d: %v", tunTable, err)
 	}
 }
 
@@ -210,15 +256,19 @@ func main() {
 	log.Printf("ingress link %s", ingress.Attrs().Name)
 
 	go superviseXray(env("XRAY_BIN", "/data/cores/26.3.27/xray"), env("XRAY_CONFIG", "/data/run/config.json"))
+	setGateway(false)
 	go func() {
 		for {
+			ensureUnreachable()
 			ok := ensureRoutes(ingress)
 			mu.Lock()
+			healthy := ok && st.XrayPID > 0
 			if ok != st.RoutesOK {
 				log.Printf("routes_ok=%v", ok)
 			}
 			st.RoutesOK = ok
 			mu.Unlock()
+			setGateway(healthy)
 			time.Sleep(time.Second)
 		}
 	}()
@@ -244,6 +294,26 @@ func main() {
 			return
 		}
 		w.Write(b)
+	})
+	// POST /v0/xray/pause?seconds=N stops xray and keeps it stopped for N s.
+	http.HandleFunc("/v0/xray/pause", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		secs, err := strconv.Atoi(r.URL.Query().Get("seconds"))
+		if err != nil || secs <= 0 {
+			http.Error(w, "seconds must be a positive integer", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		pausedUntil = time.Now().Add(time.Duration(secs) * time.Second)
+		if current != nil && current.Process != nil {
+			current.Process.Kill()
+		}
+		mu.Unlock()
+		log.Printf("xray paused for %ds", secs)
+		w.WriteHeader(http.StatusNoContent)
 	})
 	// POST /v0/write lets a test check that the read-only mount rejects writes.
 	http.HandleFunc("/v0/write", func(w http.ResponseWriter, r *http.Request) {

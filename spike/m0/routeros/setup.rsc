@@ -53,16 +53,20 @@
 
 # Mangle, in tikray's own chain behind one jump
 /ip/firewall/mangle/add chain=prerouting action=jump jump-target=tikray-pre comment=tikray:jump-pre
+# Packets addressed to the router itself are never routed by tikray. This also
+# catches replies of masqueraded (fallen-back) connections, which reach mangle
+# prerouting before NAT is undone with the WAN address as destination: without
+# it they would get the routing mark and go back out the WAN (M0 F14).
+/ip/firewall/mangle/add chain=tikray-pre dst-address-type=local action=return comment=tikray:skip-router
 /ip/firewall/mangle/add chain=tikray-pre dst-address-list=tikray-local action=return comment=tikray:skip-local
 /ip/firewall/mangle/add chain=tikray-pre dst-address-list=tikray-domestic action=return comment=tikray:skip-domestic
 /ip/firewall/mangle/add chain=tikray-pre src-address-list=tikray-src-smart-open connection-mark=no-mark action=mark-connection new-connection-mark=tikray-open passthrough=yes comment=tikray:conn-open
 /ip/firewall/mangle/add chain=tikray-pre src-address-list=tikray-src-smart-closed connection-mark=no-mark action=mark-connection new-connection-mark=tikray-closed passthrough=yes comment=tikray:conn-closed
-# Routing marks only for the original direction: replies of masqueraded
-# connections reach mangle prerouting before NAT is undone (dst = the WAN
-# address, not local), so matching on the connection mark alone would route
-# them back out the WAN.
-/ip/firewall/mangle/add chain=tikray-pre src-address-list=tikray-src-smart-open connection-mark=tikray-open action=mark-routing new-routing-mark=tikray-open passthrough=no comment=tikray:route-open
-/ip/firewall/mangle/add chain=tikray-pre src-address-list=tikray-src-smart-closed connection-mark=tikray-closed action=mark-routing new-routing-mark=tikray-closed passthrough=no comment=tikray:route-closed
+# Routing follows the connection mark alone, so a connection keeps one path for
+# its whole life, even when its device changes policy (tikray's reconciler then
+# removes that device's tracked connections so the new policy applies at once).
+/ip/firewall/mangle/add chain=tikray-pre connection-mark=tikray-open action=mark-routing new-routing-mark=tikray-open passthrough=no comment=tikray:route-open
+/ip/firewall/mangle/add chain=tikray-pre connection-mark=tikray-closed action=mark-routing new-routing-mark=tikray-closed passthrough=no comment=tikray:route-closed
 /ip/firewall/mangle/add chain=forward protocol=tcp tcp-flags=syn connection-mark=tikray-open action=change-mss new-mss=clamp-to-pmtu passthrough=yes comment=tikray:mss-open
 /ip/firewall/mangle/add chain=forward protocol=tcp tcp-flags=syn connection-mark=tikray-closed action=change-mss new-mss=clamp-to-pmtu passthrough=yes comment=tikray:mss-closed
 
@@ -78,11 +82,15 @@
 }
 
 # DNS from proxied devices goes to xray in the runner
-:foreach l in={"tikray-src-smart-open";"tikray-src-smart-closed"} do={
+:foreach k in={"open";"closed"} do={
   :foreach p in={"udp";"tcp"} do={
-    /ip/firewall/nat/add chain=dstnat src-address-list=$l protocol=$p dst-port=53 action=dst-nat to-addresses=172.31.255.3 to-ports=53 comment=("tikray:dns-" . $p)
+    /ip/firewall/nat/add chain=dstnat src-address-list=("tikray-src-smart-" . $k) protocol=$p dst-port=53 action=dst-nat to-addresses=172.31.255.3 to-ports=53 comment=("tikray:dns-" . $k . "-" . $p)
   }
 }
+# While the runner is down, fail-open devices fall back to the router's own DNS
+# (their routes fall back via check-gateway); kill-switch devices keep pointing
+# at the runner and get no answers. Netwatch runs on RouterOS, without tikray.
+/tool/netwatch/add host=172.31.255.3 interval=5s timeout=1s comment=tikray:runner-watch up-script="/ip/firewall/nat/enable [find where comment~\"tikray:dns-open\"]" down-script="/ip/firewall/nat/disable [find where comment~\"tikray:dns-open\"]"
 
 # Restricted RouterOS user for the control plane, API-SSL only from its IP
 /user/group/add name=tikray policy=read,write,api comment=tikray:group
