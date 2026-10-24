@@ -39,6 +39,65 @@ func (c *CHR) dial(ctx context.Context) (*ssh.Client, error) {
 	return ssh.NewClient(sc, chans, reqs), nil
 }
 
+// session opens a session on the shared SSH connection, reconnecting once if
+// it has gone away. One connection for all commands matters: RouterOS
+// rejects logins when they arrive in quick bursts.
+func (c *CHR) session(ctx context.Context) (*ssh.Session, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.client != nil {
+		if s, err := newSession(ctx, c.client); err == nil {
+			return s, nil
+		}
+		c.client.Close()
+		c.client = nil
+	}
+	cl, err := c.dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s, err := newSession(ctx, cl)
+	if err != nil {
+		cl.Close()
+		return nil, err
+	}
+	c.client = cl
+	return s, nil
+}
+
+// newSession is cl.NewSession bounded by ctx (and at most 30 s): on a
+// connection that died without a reset it would otherwise block forever.
+func newSession(ctx context.Context, cl *ssh.Client) (*ssh.Session, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	type res struct {
+		s   *ssh.Session
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		s, err := cl.NewSession()
+		ch <- res{s, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.s, r.err
+	case <-ctx.Done():
+		cl.Close()
+		return nil, fmt.Errorf("open SSH session: %w", ctx.Err())
+	}
+}
+
+// dropClient closes the shared SSH connection, e.g. when the VM restarts.
+func (c *CHR) dropClient() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.client != nil {
+		c.client.Close()
+		c.client = nil
+	}
+}
+
 // Run executes one RouterOS command over SSH and returns its output. Output
 // that RouterOS uses to report a failure is returned as an error.
 func (c *CHR) Run(ctx context.Context, cmd string) (out string, err error) {
@@ -48,12 +107,7 @@ func (c *CHR) Run(ctx context.Context, cmd string) (out string, err error) {
 			c.logf("run %q: %v (%.1fs)", cmd, err, time.Since(start).Seconds())
 		}
 	}()
-	cl, err := c.dial(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer cl.Close()
-	s, err := cl.NewSession()
+	s, err := c.session(ctx)
 	if err != nil {
 		return "", err
 	}

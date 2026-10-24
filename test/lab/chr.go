@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -41,6 +42,9 @@ type CHR struct {
 	con    *console
 	ssh    *ssh.ClientConfig
 	hlog   *os.File
+
+	mu     sync.Mutex
+	client *ssh.Client // shared by all commands; see session
 }
 
 // logf writes a timestamped line to WorkDir/harness.log, the timeline to read
@@ -191,6 +195,7 @@ func (c *CHR) provision(ctx context.Context) error {
 }
 
 func (c *CHR) stop() {
+	c.dropClient()
 	if c.cmd == nil {
 		return
 	}
@@ -209,6 +214,7 @@ func (c *CHR) Reboot(ctx context.Context) error {
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	c.Run(rctx, "/system/reboot")
 	cancel()
+	c.dropClient()
 	if err := c.waitSSHDown(ctx); err != nil {
 		return err
 	}
