@@ -235,3 +235,81 @@ func (c *CHR) Shutdown() error {
 	}
 	return nil
 }
+
+// DataRoot is the lab's tikray data directory on the CHR data disk.
+const DataRoot = "disk1/tikray/data"
+
+// EnableContainers prepares CHR for containers, skipping steps already done:
+// it installs the container package (reboot), turns on container device-mode
+// (confirmed by a cold power cycle), names and formats the data disk as ext4
+// disk1, creates the tikray directories and points the container tmpdir at
+// the data disk.
+func (c *CHR) EnableContainers(ctx context.Context) error {
+	if n, err := c.Get(ctx, "[:len [/system/package/find name=container]]"); err != nil {
+		return err
+	} else if n != "1" {
+		npk := c.opts.Artifacts.ContainerNPK
+		if err := c.Push(ctx, npk, filepath.Base(npk)); err != nil {
+			return err
+		}
+		if err := c.Reboot(ctx); err != nil {
+			return err
+		}
+		if n, err := c.Get(ctx, "[:len [/system/package/find name=container]]"); err != nil || n != "1" {
+			return fmt.Errorf("container package not installed after reboot (%q, %v)", n, err)
+		}
+		c.logf("container package installed")
+	}
+
+	if mode, err := c.Get(ctx, "/system/device-mode/get container"); err != nil {
+		return err
+	} else if mode != "true" && mode != "yes" {
+		// The update blocks until the change is confirmed by a power cycle.
+		uctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		c.Run(uctx, "/system/device-mode/update container=yes")
+		cancel()
+		if err := c.PowerCycle(ctx); err != nil {
+			return err
+		}
+		if mode, err := c.Get(ctx, "/system/device-mode/get container"); err != nil || (mode != "true" && mode != "yes") {
+			return fmt.Errorf("device-mode container is %q after power cycle (%v)", mode, err)
+		}
+		c.logf("device-mode container enabled")
+	}
+
+	// The data disk is the second virtio disk (serial vdb). RouterOS names
+	// its slot after the bus (pcie1 on 7.25); rename it to disk1 so lab paths
+	// don't depend on the bus.
+	if n, err := c.Get(ctx, "[:len [/disk/find slot=disk1]]"); err != nil {
+		return err
+	} else if n != "1" {
+		if _, err := c.Run(ctx, "/disk/set [find serial=vdb] slot=disk1"); err != nil {
+			return err
+		}
+	}
+	if fs, _ := c.Get(ctx, "/disk/get [find slot=disk1] fs"); fs != "ext4" {
+		if _, err := c.Run(ctx, "/disk/format [find slot=disk1] file-system=ext4"); err != nil {
+			return err
+		}
+		if fs, err := c.Get(ctx, "/disk/get [find slot=disk1] fs"); err != nil || fs != "ext4" {
+			return fmt.Errorf("disk1 file system %q after format (%v)", fs, err)
+		}
+		c.logf("disk1 formatted ext4")
+	}
+	// Directories made before the disk is mounted would land on internal
+	// flash and shadow the mount point.
+	if mp, err := c.Get(ctx, "/disk/get [find slot=disk1] mount-point"); err != nil || mp != "disk1" {
+		return fmt.Errorf("disk1 mount-point %q (%v)", mp, err)
+	}
+
+	for _, d := range []string{"disk1/tikray/tmp", "disk1/tikray/images", "disk1/tikray/containers", DataRoot + "/run", DataRoot + "/cores"} {
+		if n, _ := c.Get(ctx, fmt.Sprintf(`[:len [/file/find name="%s"]]`, d)); n == "1" {
+			continue
+		}
+		if _, err := c.Run(ctx, fmt.Sprintf(`/file/add type=directory name="%s"`, d)); err != nil {
+			return err
+		}
+	}
+	_, err := c.Run(ctx, "/container/config/set tmpdir=disk1/tikray/tmp")
+	return err
+}
