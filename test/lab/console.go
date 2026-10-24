@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -187,13 +188,24 @@ func (c *console) login(ctx context.Context, password string) error {
 	}
 }
 
-// command sends one line at the shell prompt and waits for the next prompt.
+// command sends one line at the shell prompt, waits for the next prompt and
+// fails if RouterOS printed an error.
 func (c *console) command(ctx context.Context, line string) error {
 	if err := c.send(line + "\r"); err != nil {
 		return err
 	}
-	_, err := c.expect(ctx, time.Minute, shellPrompt)
-	return err
+	if _, err := c.expect(ctx, time.Minute, shellPrompt); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	out := c.pending.String()
+	c.mu.Unlock()
+	for _, l := range strings.Split(out, "\n") {
+		if rosError.MatchString(l) {
+			return fmt.Errorf("RouterOS: %s", strings.TrimSpace(l))
+		}
+	}
+	return nil
 }
 
 func (c *console) close() {

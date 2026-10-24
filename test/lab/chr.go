@@ -186,6 +186,8 @@ func (c *CHR) provision(ctx context.Context) error {
 	}
 	c.logf("console login done")
 	for _, line := range []string{
+		// arm64 CHR shows the login prompt before its NICs are registered.
+		":local i 0; :while ([:len [/interface/ethernet/find]] < 2 && $i < 120) do={:delay 1s; :set i ($i + 1)}",
 		"/ip/address/add address=198.51.100.2/24 interface=ether1 comment=lab:wan",
 		"/ip/address/add address=192.168.88.1/24 interface=ether2 comment=lab:lan",
 		"/ip/route/add gateway=198.51.100.254 comment=lab:default",
