@@ -5,8 +5,10 @@ package m0
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -40,6 +42,11 @@ func httpDo(ctx context.Context, method, url, body string) (int, string, error) 
 	return resp.StatusCode, strings.TrimSpace(string(b)), nil
 }
 
+func isIPv4(s string) bool {
+	ip := net.ParseIP(s)
+	return ip != nil && ip.To4() != nil
+}
+
 // poll calls f every interval until it returns true or d passes, and
 // returns how long it took.
 func poll(ctx context.Context, d, interval time.Duration, f func() bool) (time.Duration, bool) {
@@ -67,7 +74,11 @@ func TestAssumptions(t *testing.T) {
 		dir := filepath.Join(spikeDir(), "results")
 		os.MkdirAll(dir, 0o755)
 		b, _ := json.MarshalIndent(results, "", "  ")
-		path := filepath.Join(dir, fmt.Sprintf("%s-%s-xray%s.json", l.Version, l.Arch, l.XrayVersion))
+		name := fmt.Sprintf("%s-%s-xray%s", l.Version, l.Arch, l.XrayVersion)
+		if f := flag.Lookup("test.run"); f != nil && strings.Contains(f.Value.String(), "/") {
+			name += "-partial" // a filtered run must not replace the full results
+		}
+		path := filepath.Join(dir, name+".json")
 		if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
 			t.Error(err)
 		}
@@ -126,10 +137,12 @@ func TestAssumptions(t *testing.T) {
 		}
 	})
 	check("exec_from_mount", func(t *testing.T, note func(string, ...any)) {
+		// M0 found that RouterOS-placed files have no execute bit; the design
+		// now stages the core (spec §3.3). Record the finding, require xray up.
 		s, _ := l.RunnerStatus(ctx)
-		note("exec_from_mount=%q xray_pid=%d (runner falls back to a staged copy)", s.ExecFromMount, s.XrayPID)
-		if s.ExecFromMount != "ok" {
-			t.Errorf("xray could not run from the /data/cores mount: %s", s.ExecFromMount)
+		note("exec_from_mount=%q xray_pid=%d (staged copy used when not ok)", s.ExecFromMount, s.XrayPID)
+		if s.XrayPID <= 0 {
+			t.Errorf("xray not running (exec from mount: %s)", s.ExecFromMount)
 		}
 	})
 	check("proxied_ip", func(t *testing.T, note func(string, ...any)) {
@@ -235,6 +248,13 @@ func TestAssumptions(t *testing.T) {
 		if !ok {
 			t.Error("traffic did not fall back to direct within 60 s")
 		}
+		// Fail-open must keep name resolution too, not just routes.
+		_, dnsOK := poll(ctx, 30*time.Second, 2*time.Second, func() bool { return isIPv4(dig("foreign.test")) })
+		ans := dig("foreign.test")
+		note("dns with runner stopped: %q", ans)
+		if !dnsOK {
+			t.Errorf("DNS for a fail-open device with the runner stopped: %q, want an answer", ans)
+		}
 	})
 	check("fallback_recovery", func(t *testing.T, note func(string, ...any)) {
 		container("start", "tikray-runner")
@@ -270,6 +290,50 @@ func TestAssumptions(t *testing.T) {
 		note("answer with runner stopped: %q", leaked)
 		if !viaProxy || leaked != "" {
 			t.Errorf("closed policy: proxied while up %v (want true), answer while down %q (want none)", viaProxy, leaked)
+		}
+	})
+	check("xray_dead_fallback", func(t *testing.T, note func(string, ...any)) {
+		// xray dies while the runner container keeps running: fail-open must
+		// still go direct, and come back to the proxy when xray returns.
+		code, body, err := httpDo(ctx, http.MethodPost, runnerURL+"/v0/xray/pause?seconds=150", "")
+		if err != nil || code != http.StatusNoContent {
+			t.Fatalf("pause xray: %d %q %v", code, body, err)
+		}
+		took, ok := poll(ctx, 60*time.Second, 2*time.Second, func() bool { return curl("--max-time", "3", "http://203.0.113.30/whoami") == "198.51.100.2" })
+		ans := dig("foreign.test")
+		note("direct %.1fs after xray stopped ok=%v; dns %q", took.Seconds(), ok, ans)
+		if !ok || !isIPv4(ans) {
+			t.Errorf("with xray stopped and the runner up: direct=%v dns=%q, want direct and an answer", ok, ans)
+		}
+		back, ok := poll(ctx, 240*time.Second, 3*time.Second, func() bool { return curl("--max-time", "3", "http://203.0.113.30/whoami") == "203.0.113.10" })
+		note("proxied again %.1fs later ok=%v", back.Seconds(), ok)
+		if !ok {
+			t.Error("traffic did not return to the proxy after xray came back")
+		}
+	})
+	check("policy_switch_existing_conn", func(t *testing.T, note func(string, ...any)) {
+		// Turning the kill switch on for a device must not strand its open
+		// connections: a download in flight must complete intact.
+		type res struct {
+			sum string
+			err error
+		}
+		ch := make(chan res, 1)
+		go func() {
+			b, err := l.Net.Client(ctx, "sh", "-c", "curl -s --noproxy '*' --max-time 120 http://203.0.113.30/blob2m | sha256sum").Output()
+			sum, _, _ := strings.Cut(string(b), " ")
+			ch <- res{sum, err}
+		}()
+		time.Sleep(5 * time.Second)
+		if err := l.SetSourcePolicy(ctx, "tikray-src-smart-closed"); err != nil {
+			t.Fatal(err)
+		}
+		r := <-ch
+		l.SetSourcePolicy(ctx, "tikray-src-smart-open")
+		ok := r.sum == labinet.BlobSHA256()
+		note("download across the policy switch sha_ok=%v err=%v", ok, r.err)
+		if !ok {
+			t.Errorf("download that started before the kill switch was turned on: sha %q (%v), want intact", r.sum, r.err)
 		}
 	})
 	check("shared_mount", func(t *testing.T, note func(string, ...any)) {
