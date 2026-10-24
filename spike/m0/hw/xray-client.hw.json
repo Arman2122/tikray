@@ -1,0 +1,52 @@
+{
+  "log": {"loglevel": "warning", "access": "/data/run/access.log"},
+  "dns": {
+    "servers": [
+      {"address": "CHANGE-ME-ISP-DNS", "domains": ["geosite:category-ir"]},
+      "https://1.1.1.1/dns-query"
+    ]
+  },
+  "inbounds": [
+    {
+      "tag": "tun-in",
+      "protocol": "tun",
+      "settings": {"name": "xray0", "MTU": 1500},
+      "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true}
+    },
+    {
+      "tag": "dns-in",
+      "listen": "0.0.0.0",
+      "port": 53,
+      "protocol": "dokodemo-door",
+      "settings": {"address": "1.1.1.1", "port": 53, "network": "tcp,udp"}
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "proxy",
+      "comment": "Replace with your server's outbound (VLESS + Reality shown).",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{
+          "address": "CHANGE-ME-SERVER",
+          "port": 443,
+          "users": [{"id": "CHANGE-ME-UUID", "encryption": "none", "flow": "xtls-rprx-vision"}]
+        }]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {"serverName": "CHANGE-ME-SNI", "fingerprint": "chrome", "publicKey": "CHANGE-ME-PBK", "shortId": "CHANGE-ME-SID"}
+      }
+    },
+    {"tag": "direct", "protocol": "freedom"},
+    {"tag": "block", "protocol": "blackhole"},
+    {"tag": "dns-out", "protocol": "dns"}
+  ],
+  "routing": {
+    "rules": [
+      {"inboundTag": ["dns-in"], "outboundTag": "dns-out"},
+      {"network": "tcp,udp", "outboundTag": "proxy"}
+    ]
+  }
+}
