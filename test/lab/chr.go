@@ -137,7 +137,9 @@ func (c *CHR) qemuArgs() []string {
 		"-monitor", "none",
 	}
 	if c.opts.Arch == ArchARM64 {
-		return append([]string{"qemu-system-aarch64", "-M", "virt", "-cpu", "max",
+		// Not "-cpu max": RouterOS's arm64 kernel hangs right after the EFI
+		// stub on it.
+		return append([]string{"qemu-system-aarch64", "-M", "virt", "-cpu", "cortex-a72",
 			"-bios", "/usr/share/qemu-efi-aarch64/QEMU_EFI.fd"}, common...)
 	}
 	return append([]string{"qemu-system-x86_64"}, common...)
