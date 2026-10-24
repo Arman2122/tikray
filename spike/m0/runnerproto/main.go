@@ -7,6 +7,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -236,6 +237,19 @@ func main() {
 			return
 		}
 		w.Write(b)
+	})
+	// POST /v0/write lets a test check that the read-only mount rejects writes.
+	http.HandleFunc("/v0/write", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		if err := os.WriteFile(r.URL.Query().Get("path"), b, 0o644); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
