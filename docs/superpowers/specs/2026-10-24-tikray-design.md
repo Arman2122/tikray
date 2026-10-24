@@ -30,6 +30,7 @@ never interrupts traffic.
 | Management | Web UI (English) + REST API + CLI |
 | v1 traffic features | Split routing, per-device policy, multi-server failover, kill switch option |
 | IPv6 (v1) | Leak guard only; full IPv6 proxying in v1.1 |
+| xray-core | The newest release (minimum 26.1.18 for the TUN inbound) |
 | Control-plane language | Go (see Appendix A for the measured Go vs Rust comparison) |
 | License | GPL-3.0 |
 | Container topology | Two containers: control plane + data plane |
@@ -92,11 +93,17 @@ RouterOS v7 (ARM64)
 The runner does only what is needed to carry traffic safely:
 
 - **Network setup** inside its namespace via netlink (no iproute2 needed):
-  enables forwarding and adds a policy route that sends packets arriving on `eth0`
-  into xray's TUN interface. xray's own outbound traffic leaves through `eth0`
-  using the main table.
+  enables forwarding and sets `rp_filter=0` through `/proc/sys`, then adds
+  `iif <ingress> lookup 1001` and `default dev xray0 table 1001`, re-adding them
+  whenever xray recreates `xray0`. xray's own outbound traffic leaves through the
+  ingress link using the main table. The ingress link is found from the default
+  route: in a RouterOS container it is named after the veth, not `eth0`. (All
+  confirmed in M0, with `privileged=no` and no `devices`.)
 - **Process supervision:** starts xray from the version named in
-  `/data/run/active.json` and restarts it if it crashes.
+  `/data/run/active.json` and restarts it if it crashes. Core binaries placed by
+  RouterOS (`/tool fetch`, Winbox uploads) have no execute bit and RouterOS has no
+  `chmod`, so the runner copies the active core into its own filesystem with mode
+  0755 and runs that copy (M0).
 - **Control API**, listening only on the bridge and protected by a token
   (`/data/run/runner.token`): `status`, `reload`, `restart`, `trial`, `commit`,
   and `xray-api` (runs `xray api <cmd>` with the active core binary, so JSON →
@@ -163,13 +170,18 @@ roughly 150 MB:
 ```
 
 Mounts: `tikray` gets `/data` read-write. `tikray-runner` gets `/data/cores` and
-`/data/geo` read-only and `/data/run` read-write.
+`/data/geo` read-only and `/data/run` read-write. RouterOS mounts are
+`/container/mounts/add list=<name> src= dst= mode=ro|rw` and containers reference
+them with `mountlists=`; `mode=ro` is enforced (M0).
 
 ### 3.6 Networking
 
 - One bridge `tikray`, default subnet `172.31.255.0/29` (configurable at install
   time to avoid clashing with the LAN): router `.1`, `tikray` `.2`, runner `.3`.
 - NAT masquerade for the container subnet out to the WAN.
+- Every container sets `dns=` explicitly (the router's bridge address): RouterOS
+  refuses to start a container without DNS ("no default dns servers") even when
+  `/ip/dns` has servers (M0).
 - The firewall allows LAN → `tikray` web UI only. The runner's SOCKS, DNS and
   control ports are reachable only from `tikray` and the router. WAN can't reach
   anything on the bridge.
@@ -261,8 +273,11 @@ Runner updates are rare because the runner holds no xray or geo code.
 
 ### 4.9 xray compatibility
 
+- tikray targets the **newest xray-core release**. The lab and CI follow the newest
+  XTLS release tag automatically; M0 ran on 26.10.21 (newest) and 26.3.27.
 - `render` keeps a table of xray features and the minimum version each needs,
-  for example the TUN inbound (≥ 26.1.18, to be confirmed in M0).
+  for example the TUN inbound (≥ 26.1.18, confirmed in M0: the first release with
+  `proxy/tun`). 26.10 renamed the TUN `MTU` key to `mtu`; render emits `mtu`.
 - **Tested range** is maintained by CI (§8.2). Newer, untested xray versions are
   allowed and labelled "untested"; the trial and `xray run -test` catch real breakage.
 - Versions too old for features the current config uses are refused with an
@@ -309,9 +324,16 @@ listed explicitly.
     connection, mark routing.
   - `full` sources, destination not in `tikray-local` → mark connection, mark routing.
   - Routing mark `tikray-open` or `tikray-closed` depending on the kill switch.
+  - **Mark routing only in the original direction**: the `mark-routing` rules match
+    the source list as well as the connection mark. Replies of masqueraded
+    (fallen-back) connections reach mangle prerouting before NAT is undone, with
+    the WAN address as destination, and would otherwise be routed back out the WAN,
+    which breaks fail-open fallback (found in M0).
   - MSS clamp on marked connections for the tunnel MTU.
 - **FastTrack:** one rule "accept tikray-marked connections", placed directly
   before the user's FastTrack rule. This is the only rule tikray places in a user chain.
+  (RouterOS 7.25 doesn't fast-path packets of routing-marked connections anyway, but
+  it still flags them; the rule keeps them unflagged. M0.)
 - **Routing tables:**
   - `tikray-open`: default via the runner (`check-gateway=ping`, distance 1),
     fallback via the main WAN gateway (distance 2).
@@ -343,7 +365,9 @@ listed explicitly.
 - For `smart` and `full` devices, the reconciler dst-NATs TCP/UDP 53 to the
   runner's DNS endpoint (xray DNS):
   - Domestic domains → domestic resolver (default: the router itself, so its
-    normal upstream is used), direct.
+    normal upstream is used), direct. The domestic server is rendered with
+    `skipFallback: true`: in xray a server with `domains` is otherwise also a
+    fallback for every other domain, which sends non-domestic lookups direct (M0).
   - Everything else → DoH through the proxy.
   - `queryStrategy: UseIPv4` for these devices while the IPv6 leak guard is active.
 - Browsers that use their own DoH still route correctly, because routing uses
@@ -389,14 +413,19 @@ file through Winbox/WebFig when GitHub is blocked.
    - Enough free disk (~150 MB) and RAM.
 2. **Network:** bridge, veths, IPs, NAT, firewall rules (§3.6).
 3. **Containers:** container config (tmp dir, registry), both containers with
-   mounts, env, start-on-boot, and memory limits where the RouterOS version
-   supports them.
+   mount lists, env lists, explicit `dns=`, start-on-boot, and memory limits
+   (`memory-high`/`memory-max` exist on 7.25).
 4. **RouterOS user** `tikray` in group `tikray`: policies `read,write,api` only
    (no `policy`, `password`, `sensitive`), allowed address = the `tikray`
    container IP only, random password passed to the container.
-5. **API-SSL:** enables `api-ssl` with a self-signed certificate if needed. It only
-   *adds* the container IP to the service's allowed addresses and never removes
-   the user's entries.
+5. **API-SSL:** enables `api-ssl` with a self-signed certificate if needed (the
+   template keeps `key-cert-sign`, or `/certificate/sign` fails with "CA not
+   found"). It only *adds* the container IP to the service's allowed addresses and
+   never removes the user's entries.
+
+Script steps that need a value from an earlier step run inside one `{ }` block:
+`/import` runs each top-level line on its own, so a `:local` is gone on the next
+line (M0: this silently skipped the FastTrack exemption).
 6. **Watchdog** scheduler script (§6.3).
 7. **Finish:** prints the UI URL, the TLS fingerprint and a **one-time setup code**.
 
@@ -416,8 +445,12 @@ reconciler. It is idempotent and safe to re-run.
 - **Triggers:** settings changes, startup, `/listen` events on tikray-owned
   objects (drift repair, shown as "drift corrected"), and a periodic full check.
 - **Version adapters:** RouterOS version differences (for example the container
-  networking change in 7.20.7) live in `internal/routeros/adapters`, selected by
-  detected version, and are covered by the CI matrix.
+  networking change in 7.20.7, mounts' `list=`, `/disk/format` replacing
+  `format-drive`) live in `internal/routeros/adapters`, selected by detected
+  version, and are covered by the CI matrix.
+- **One connection:** the API client keeps one connection open and backs off on a
+  refused login. RouterOS throttles bursts of logins, and rejects a correct one
+  right after a failed one (M0).
 
 ### 6.3 Watchdog (RouterOS scheduler)
 
@@ -476,7 +509,10 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
 ### 8.2 xray compatibility matrix
 
 - CI renders every golden scenario and runs `xray run -test` against the oldest
-  supported, latest-1 and latest xray releases.
+  supported, latest-1 and latest xray releases, and runs the CHR end-to-end suite
+  (§8.4) on the latest release. Config checks alone are not enough: xray 26.10
+  changed a server-side `freedom` default (blocking private/reserved targets)
+  that passed `-test` and only failed with real traffic (M0).
 - A scheduled workflow watches XTLS releases: for each new version it runs the
   matrix, publishes the signed hash index entry, and opens a PR to extend the
   tested range (or an issue describing the break).
@@ -490,6 +526,12 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
 
 - RouterOS CHR in QEMU, **stable** and **long-term** channels. x86 CHR runs on
   every PR (same logic, amd64 images); ARM64 CHR runs nightly.
+- The `test/lab` harness from M0 is the base: fake LAN and internet in network
+  namespaces, serial/SSH provisioning, device-mode confirmed by a power cycle, and
+  a cached "ready" image per RouterOS version so each run skips the package install
+  and device-mode reboots. Runners need KVM for practical boot times (TCG takes
+  minutes per boot). CHR's free license caps each interface at ~1 Mbps, so CI
+  checks correctness only; throughput comes from §8.5.
 - Setup: a LAN client network namespace → CHR → runner/xray → a test VLESS
   server inside CI → a target HTTP server.
 - Scenarios:
@@ -514,7 +556,10 @@ connections), RAM and CPU for xray and tikray. Run in M0 and before every releas
 - `tikray`: tags `vX.Y.Z`. Each release publishes:
   - ARM64 (and amd64 for CHR) images to ghcr.io, mirrored to Docker Hub;
   - image `.tar` files attached to the GitHub release, for file-based install
-    on RouterOS;
+    on RouterOS. They must be archives RouterOS can import: Docker's containerd
+    image store produces archives RouterOS rejects ("no config found in
+    manifest"), the classic store's `docker save` output works (M0). CI imports
+    every release archive into CHR before publishing;
   - cosign signatures and SBOM;
   - `install.rsc` / `uninstall.rsc`.
 - `tikray-runner`: tags `runner-vX.Y.Z`, same publishing steps, released only when
@@ -542,7 +587,7 @@ docs/
 
 | Milestone | Outcome |
 |---|---|
-| **M0: data-path spike** | On RouterOS CHR ARM64 and real hardware, prove: xray TUN inbound inside a RouterOS container, mangle routing into it, no source NAT, sniffing with `routeOnly`, UDP/QUIC, DNS redirect. Measure throughput and RAM. If something blocks this path, we change the design before building on it. |
+| **M0: data-path spike** | **Done**, see `docs/superpowers/findings/2026-10-24-m0-data-path.md` (hardware benchmark pending). On RouterOS CHR ARM64 and real hardware, prove: xray TUN inbound inside a RouterOS container, mangle routing into it, no source NAT, sniffing with `routeOnly`, UDP/QUIC, DNS redirect. Measure throughput and RAM. If something blocks this path, we change the design before building on it. |
 | **M1: runner + artifacts** | Runner with trial protocol; fetch chain, verification, slots; xray update and rollback end to end. |
 | **M2: control-plane core** | `store`, `render`, `xray` client, `sharelink`, `subscription`, `health`, REST API, CLI. |
 | **M3: RouterOS** | `install.rsc`, reconciler, version adapters, watchdog, uninstall, CHR e2e suite. |
@@ -553,11 +598,12 @@ docs/
 
 | Risk | Mitigation |
 |---|---|
-| xray TUN inbound doesn't behave as expected inside a RouterOS container | M0 spike first; fallback design is a TPROXY + `dokodemo-door` inbound set up by the runner via nftables netlink |
+| ~~xray TUN inbound doesn't behave as expected inside a RouterOS container~~ | Retired by M0: works on 7.25 and 7.23.8 with xray 26.3.27 and 26.10.21, without `privileged` or `devices` |
 | xray throughput on ARM64 MikroTik CPUs is too low | Hybrid steering keeps domestic traffic off xray; M0 benchmark; tuning (sniffing scope, QUIC options) |
 | RouterOS container or API behavior changes between versions | Version adapters + CI matrix on stable and long-term |
 | Flash wear from address-list and file writes | Diff sync, external storage recommended, daily (not more often) geo checks |
-| Upstream xray config deprecations | Compatibility matrix + scheduled upstream watch |
+| Upstream xray config deprecations and default changes | Compatibility matrix + scheduled upstream watch, including the CHR end-to-end suite on each new release (§8.2) |
+| RouterOS can't import an image archive format | CI imports every release archive into CHR (§8.6) |
 | Users on blocked networks can't fetch anything | Fetch chain ending in manual upload; installer available as a file |
 | Device IP changes break per-device policies | Static DHCP lease creation in the UI; MAC used for IPv6 guard |
 
