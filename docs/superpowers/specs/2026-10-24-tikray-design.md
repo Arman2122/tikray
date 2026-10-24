@@ -98,7 +98,14 @@ The runner does only what is needed to carry traffic safely:
   whenever xray recreates `xray0`. xray's own outbound traffic leaves through the
   ingress link using the main table. The ingress link is found from the default
   route: in a RouterOS container it is named after the veth, not `eth0`. (All
-  confirmed in M0, with `privileged=no` and no `devices`.)
+  confirmed in M0 on CHR, with `privileged=no` and no `devices`.)
+- **Health signal:** the runner answers ping only while xray is running and its
+  routes are in place; otherwise it sets `icmp_echo_ignore_all`. RouterOS
+  `check-gateway` and netwatch probe the runner with ping, so they see a dead
+  xray, not only a dead container. Table 1001 also holds a low-priority
+  `unreachable` default, so packets that arrive while `xray0` is gone are
+  rejected instead of being sent back to the router, which would route them to
+  the runner again (M0).
 - **Process supervision:** starts xray from the version named in
   `/data/run/active.json` and restarts it if it crashes. Core binaries placed by
   RouterOS (`/tool fetch`, Winbox uploads) have no execute bit and RouterOS has no
@@ -324,21 +331,29 @@ listed explicitly.
     connection, mark routing.
   - `full` sources, destination not in `tikray-local` → mark connection, mark routing.
   - Routing mark `tikray-open` or `tikray-closed` depending on the kill switch.
-  - **Mark routing only in the original direction**: the `mark-routing` rules match
-    the source list as well as the connection mark. Replies of masqueraded
-    (fallen-back) connections reach mangle prerouting before NAT is undone, with
-    the WAN address as destination, and would otherwise be routed back out the WAN,
-    which breaks fail-open fallback (found in M0).
+  - **Packets addressed to the router are never marked:** the chain's first rule
+    returns on `dst-address-type=local`. Replies of masqueraded (fallen-back)
+    connections reach mangle prerouting before NAT is undone, with the WAN address
+    as destination. Without this rule they get the routing mark and go back out
+    the WAN, which breaks fail-open fallback (found in M0).
+  - **Routing follows the connection mark alone**, so a connection keeps one path
+    for its whole life. When a device changes policy, the reconciler removes that
+    device's tracked connections, so the new policy applies at once instead of
+    when old connections end. (An M0 variant that also matched the source list in
+    `mark-routing` sent a moved device's open connections out the WAN without NAT.)
   - MSS clamp on marked connections for the tunnel MTU.
 - **FastTrack:** one rule "accept tikray-marked connections", placed directly
   before the user's FastTrack rule. This is the only rule tikray places in a user chain.
-  (RouterOS 7.25 doesn't fast-path packets of routing-marked connections anyway, but
-  it still flags them; the rule keeps them unflagged. M0.)
+  (In one M0 run on 7.25 without the rule, routing-marked connections were flagged
+  but none of their packets were fast-pathed. One run isn't a guarantee, so the
+  rule stays.)
 - **Routing tables:**
   - `tikray-open`: default via the runner (`check-gateway=ping`, distance 1),
     fallback via the main WAN gateway (distance 2).
   - `tikray-closed`: default via the runner (`check-gateway=ping`, distance 1),
     fallback blackhole (distance 2).
+- **Netwatch** `tikray:runner-watch` on the runner, which switches fail-open
+  devices' DNS (§5.4).
 - **No source NAT** into the container: xray sees each device's real IP.
 
 ### 5.3 Inside xray
@@ -370,6 +385,14 @@ listed explicitly.
     fallback for every other domain, which sends non-domestic lookups direct (M0).
   - Everything else → DoH through the proxy.
   - `queryStrategy: UseIPv4` for these devices while the IPv6 leak guard is active.
+- **DNS follows the fallback.** The dst-NAT rules come in two sets, for fail-open
+  and kill-switch sources. A RouterOS netwatch on the runner disables the
+  fail-open set while the runner doesn't answer ping (§3.3), so fail-open devices
+  move to the router's own DNS together with their routes. Kill-switch devices
+  keep pointing at the runner and get no answers. This runs on RouterOS alone,
+  without tikray. The router's DNS must accept LAN requests
+  (`allow-remote-requests=yes`); the installer checks it. Lookups already tracked
+  to the runner keep their NAT until their conntrack entry expires (M0).
 - Browsers that use their own DoH still route correctly, because routing uses
   sniffing, not DNS.
 - xray's DoH upstream uses the `proxy-open` balancer. During a full outage, DNS
@@ -392,7 +415,7 @@ listed explicitly.
 |---|---|---|
 | One server down | xray balancer + observatory | Switches to a healthy server within seconds |
 | All servers down | Balancer fallback | `proxy-open` → direct, `proxy-closed` → block |
-| xray or runner dead | RouterOS `check-gateway` | Fallback route: WAN (open) or blackhole (closed); works without tikray |
+| xray or runner dead | Runner stops answering ping (§3.3); RouterOS `check-gateway` and netwatch | Fallback route: WAN (open) or blackhole (closed); fail-open devices' DNS moves to the router (§5.4); works without tikray |
 | tikray dead | Nothing needed for traffic | Watchdog restarts it (§6.3) |
 | Bad xray / geo update | Runner trial | Automatic revert |
 | Bad tikray update | Watchdog | Previous image + state restored |
@@ -411,6 +434,8 @@ file through Winbox/WebFig when GitHub is blocked.
    - Container device-mode on (starts `/system/device-mode/update container=yes`
      and tells the user to press the button or power-cycle).
    - Enough free disk (~150 MB) and RAM.
+   - Router DNS accepts LAN requests (`allow-remote-requests=yes`), needed for
+     the DNS fallback (§5.4).
 2. **Network:** bridge, veths, IPs, NAT, firewall rules (§3.6).
 3. **Containers:** container config (tmp dir, registry), both containers with
    mount lists, env lists, explicit `dns=`, start-on-boot, and memory limits
@@ -422,12 +447,12 @@ file through Winbox/WebFig when GitHub is blocked.
    template keeps `key-cert-sign`, or `/certificate/sign` fails with "CA not
    found"). It only *adds* the container IP to the service's allowed addresses and
    never removes the user's entries.
+6. **Watchdog** scheduler script (§6.3).
+7. **Finish:** prints the UI URL, the TLS fingerprint and a **one-time setup code**.
 
 Script steps that need a value from an earlier step run inside one `{ }` block:
 `/import` runs each top-level line on its own, so a `:local` is gone on the next
 line (M0: this silently skipped the FastTrack exemption).
-6. **Watchdog** scheduler script (§6.3).
-7. **Finish:** prints the UI URL, the TLS fingerprint and a **one-time setup code**.
 
 The installer only bootstraps. It creates no traffic rules; those belong to the
 reconciler. It is idempotent and safe to re-run.
@@ -530,14 +555,18 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
   namespaces, serial/SSH provisioning, device-mode confirmed by a power cycle, and
   a cached "ready" image per RouterOS version so each run skips the package install
   and device-mode reboots. Runners need KVM for practical boot times (TCG takes
-  minutes per boot). CHR's free license caps each interface at ~1 Mbps, so CI
-  checks correctness only; throughput comes from §8.5.
+  minutes per boot). ARM64 CHR needs QEMU's `-cpu cortex-a72`: on `-cpu max` its
+  kernel hangs right after the EFI stub (M0). CHR's free license caps each
+  interface at ~1 Mbps, so CI checks correctness only; throughput comes from §8.5.
 - Setup: a LAN client network namespace → CHR → runner/xray → a test VLESS
   server inside CI → a target HTTP server.
 - Scenarios:
   - install from scratch and re-install (idempotent);
   - `direct` / `smart` / `full` paths reach the right egress;
-  - kill switch blocks and open policy falls back, for all-servers-down;
+  - kill switch blocks and open policy falls back (routes and DNS), for
+    all-servers-down, a stopped runner, xray dead inside a running runner, and
+    the first minutes after a reboot;
+  - a device changing policy mid-connection;
   - failover between two servers;
   - DNS paths and the IPv6 leak guard;
   - drift repair after deleting a tikray rule;
@@ -587,7 +616,7 @@ docs/
 
 | Milestone | Outcome |
 |---|---|
-| **M0: data-path spike** | **Done**, see `docs/superpowers/findings/2026-10-24-m0-data-path.md` (hardware benchmark pending). On RouterOS CHR ARM64 and real hardware, prove: xray TUN inbound inside a RouterOS container, mangle routing into it, no source NAT, sniffing with `routeOnly`, UDP/QUIC, DNS redirect. Measure throughput and RAM. If something blocks this path, we change the design before building on it. |
+| **M0: data-path spike** | **In progress:** the lab runs pass on x86_64 CHR; the ARM64 CHR run and the hardware benchmark are pending. See `docs/superpowers/findings/2026-10-24-m0-data-path.md`. On RouterOS CHR ARM64 and real hardware, prove: xray TUN inbound inside a RouterOS container, mangle routing into it, no source NAT, sniffing with `routeOnly`, UDP, DNS redirect, fallback. Measure throughput and RAM. If something blocks this path, we change the design before building on it. (QUIC sniffing moved to M3: no QUIC fixture in M0.) |
 | **M1: runner + artifacts** | Runner with trial protocol; fetch chain, verification, slots; xray update and rollback end to end. |
 | **M2: control-plane core** | `store`, `render`, `xray` client, `sharelink`, `subscription`, `health`, REST API, CLI. |
 | **M3: RouterOS** | `install.rsc`, reconciler, version adapters, watchdog, uninstall, CHR e2e suite. |
@@ -598,7 +627,7 @@ docs/
 
 | Risk | Mitigation |
 |---|---|
-| ~~xray TUN inbound doesn't behave as expected inside a RouterOS container~~ | Retired by M0: works on 7.25 and 7.23.8 with xray 26.3.27 and 26.10.21, without `privileged` or `devices` |
+| ~~xray TUN inbound doesn't behave as expected inside a RouterOS container~~ | Retired by M0: works on CHR 7.25 and 7.23.8 x86_64 (ARM64 CHR pending) with xray 26.3.27 and 26.10.21, without `privileged` or `devices` |
 | xray throughput on ARM64 MikroTik CPUs is too low | Hybrid steering keeps domestic traffic off xray; M0 benchmark; tuning (sniffing scope, QUIC options) |
 | RouterOS container or API behavior changes between versions | Version adapters + CI matrix on stable and long-term |
 | Flash wear from address-list and file writes | Diff sync, external storage recommended, daily (not more often) geo checks |
