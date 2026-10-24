@@ -24,11 +24,30 @@ func TestXrayCoreVersion(t *testing.T) {
 
 func TestLabXrayVersion(t *testing.T) {
 	t.Setenv("TIKRAY_LAB_XRAY", "")
-	if got := LabXrayVersion(); got != "v1.260327.0" {
-		t.Errorf("default %q, want v1.260327.0", got)
+	if got := LabXrayVersion(); got != "latest" {
+		t.Errorf("default %q, want latest", got)
 	}
 	t.Setenv("TIKRAY_LAB_XRAY", "v26.10.21")
 	if got := LabXrayVersion(); got != "v26.10.21" {
 		t.Errorf("override %q, want v26.10.21", got)
+	}
+}
+
+func TestLatestReleaseTag(t *testing.T) {
+	refs := []string{
+		"abc\trefs/tags/v1.260327.0",
+		"abc\trefs/tags/v26.9.30",
+		"abc\trefs/tags/v26.10.21",
+		"abc\trefs/tags/v26.10.3",
+		"abc\trefs/tags/v26.2.6",
+		"abc\trefs/tags/v25.12.8",
+		"abc\trefs/tags/v26.11.1-beta",
+		"abc\trefs/heads/main",
+	}
+	if got := latestReleaseTag(refs); got != "v26.10.21" {
+		t.Errorf("latestReleaseTag = %q, want v26.10.21", got)
+	}
+	if got := latestReleaseTag(nil); got != "" {
+		t.Errorf("latestReleaseTag(nil) = %q, want empty", got)
 	}
 }

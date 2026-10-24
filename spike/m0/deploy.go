@@ -75,7 +75,11 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 		t.Fatal(err)
 	}
 	goarch := l.Arch.GOARCH()
-	if l.XrayVersion, err = lab.XrayCoreVersion(lab.LabXrayVersion()); err != nil {
+	xrayTag, err := lab.ResolveXrayVersion(ctx, lab.LabXrayVersion())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.XrayVersion, err = lab.XrayCoreVersion(xrayTag); err != nil {
 		t.Fatal(err)
 	}
 	xray, err := lab.XrayBinary(ctx, lab.CacheDir(), goarch)
