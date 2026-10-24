@@ -305,13 +305,17 @@ func (c *CHR) EnableContainers(ctx context.Context) error {
 		c.logf("device-mode container enabled")
 	}
 
-	// The data disk is the second virtio disk (serial vdb). RouterOS names
-	// its slot after the bus (pcie1 on 7.25); rename it to disk1 so lab paths
-	// don't depend on the bus.
+	// The data disk is the only hardware disk CHR lists (the system disk
+	// isn't). RouterOS names its slot after the bus (pcie1 on 7.25); rename
+	// it to disk1 so lab paths don't depend on the bus. arm64 CHR reports no
+	// serial for it, so match by type.
 	if n, err := c.Get(ctx, "[:len [/disk/find slot=disk1]]"); err != nil {
 		return err
 	} else if n != "1" {
-		if _, err := c.Run(ctx, "/disk/set [find serial=vdb] slot=disk1"); err != nil {
+		if hw, err := c.Get(ctx, "[:len [/disk/find where type=hardware]]"); err != nil || hw != "1" {
+			return fmt.Errorf("want exactly one hardware disk to rename to disk1, found %q (%v)", hw, err)
+		}
+		if _, err := c.Run(ctx, "/disk/set [find where type=hardware] slot=disk1"); err != nil {
 			return err
 		}
 	}
