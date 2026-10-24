@@ -41,7 +41,13 @@ func (c *CHR) dial(ctx context.Context) (*ssh.Client, error) {
 
 // Run executes one RouterOS command over SSH and returns its output. Output
 // that RouterOS uses to report a failure is returned as an error.
-func (c *CHR) Run(ctx context.Context, cmd string) (string, error) {
+func (c *CHR) Run(ctx context.Context, cmd string) (out string, err error) {
+	start := time.Now()
+	defer func() {
+		if err != nil {
+			c.logf("run %q: %v (%.1fs)", cmd, err, time.Since(start).Seconds())
+		}
+	}()
 	cl, err := c.dial(ctx)
 	if err != nil {
 		return "", err
