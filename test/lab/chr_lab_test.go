@@ -43,7 +43,7 @@ func bootLab(t *testing.T, ctx context.Context, channel string) (*Network, *CHR,
 		Version:   version,
 		Arch:      arch,
 		Artifacts: art,
-		WorkDir:   t.TempDir(),
+		WorkDir:   workDir(t),
 		Password:  "tikray-lab",
 	})
 	if err != nil {
@@ -51,6 +51,24 @@ func bootLab(t *testing.T, ctx context.Context, channel string) (*Network, *CHR,
 	}
 	t.Cleanup(func() { c.Shutdown() })
 	return n, c, version
+}
+
+// workDir is a per-test VM directory that is kept, and named in the log,
+// when the test fails: its console.log and harness.log are the evidence.
+func workDir(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("", "tikray-lab-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("kept VM work dir %s", d)
+			return
+		}
+		os.RemoveAll(d)
+	})
+	return d
 }
 
 func TestBootCHR(t *testing.T) {

@@ -92,8 +92,10 @@ func (c *CHR) waitSSH(ctx context.Context) error {
 		out, err := c.Get(actx, `"up"`)
 		acancel()
 		if err == nil && out == "up" {
+			c.logf("ssh up")
 			return nil
 		}
+		c.logf("ssh not up: %v", err)
 		last = err
 		select {
 		case <-ctx.Done():
