@@ -5,7 +5,8 @@
 //
 // Modes: ok (serves until SIGTERM, then exits 0), badconfig (rejects "run
 // -test"), exit2s and exit15s (exit 1 after 2 s or 15 s), stubborn (ignores
-// SIGTERM, so only SIGKILL stops it).
+// SIGTERM, so only SIGKILL stops it), slowtest (takes 1 s to accept "run
+// -test").
 package main
 
 import (
@@ -27,9 +28,12 @@ func main() {
 	case len(args) == 3 && args[0] == "run" && args[1] == "-c":
 		serve(args[2])
 	case len(args) == 4 && args[0] == "run" && args[1] == "-test" && args[2] == "-c":
-		if mode == "badconfig" {
+		switch mode {
+		case "badconfig":
 			fmt.Println("Failed to start: failed to load config")
 			os.Exit(23)
+		case "slowtest":
+			time.Sleep(time.Second)
 		}
 		fmt.Println("Configuration OK.")
 	default:

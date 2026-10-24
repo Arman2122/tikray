@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -348,6 +349,46 @@ func TestEnvWithoutLimitOrGeo(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitLog(t, f.log, "env GOMEMLIMIT= XRAY_LOCATION_ASSET=\n")
+}
+
+// TestStageWhileForking stages fresh cores and runs them while another
+// goroutine keeps forking, as the control API's xray api calls will. A child
+// that inherited the copy's write descriptor would make the exec fail with
+// ETXTBSY.
+func TestStageWhileForking(t *testing.T) {
+	f := newFixture(t, "ok", nil)
+	src, err := os.ReadFile(f.d.CoreBinary(f.sel.Core))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Running the core on the mount forks, then fails to exec it for want of
+	// the execute bit: as many forks as possible, at no cost.
+	noexec := f.d.CoreBinary(f.sel.Core)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				exec.Command(noexec).Run()
+			}
+		}()
+	}
+	defer func() { close(stop); wg.Wait() }()
+	for i := range 40 {
+		sel := f.sel
+		sel.Core = fmt.Sprintf("26.10.%d", 100+i)
+		writeFile(t, f.d.CoreBinary(sel.Core), string(src))
+		if _, err := f.sup.Test(t.Context(), sel); err != nil {
+			t.Fatalf("core %s: %v", sel.Core, err)
+		}
+	}
 }
 
 func TestConcurrentUse(t *testing.T) {

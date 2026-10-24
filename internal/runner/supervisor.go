@@ -88,11 +88,16 @@ func NewSupervisor(c SupervisorConfig) *Supervisor {
 // a core again is cheap. The copy appears atomically, so a running xray is
 // never disturbed and a failed copy leaves nothing behind.
 func (s *Supervisor) Stage(sel runnerapi.Selection) (string, error) {
-	dst := filepath.Join(s.cfg.StageDir, sel.Core, "xray")
+	dst := s.stagedPath(sel)
 	if err := stageCopy(s.cfg.Dirs.CoreBinary(sel.Core), dst); err != nil {
 		return "", fmt.Errorf("runner: stage core %s: %w", sel.Core, err)
 	}
 	return dst, nil
+}
+
+// stagedPath is where Stage puts the selection's core.
+func (s *Supervisor) stagedPath(sel runnerapi.Selection) string {
+	return filepath.Join(s.cfg.StageDir, sel.Core, "xray")
 }
 
 func stageCopy(src, dst string) (err error) {
@@ -116,6 +121,11 @@ func stageCopy(src, dst string) (err error) {
 	if err = os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	// A child forked while the copy is open for writing holds that descriptor
+	// until it execs, and exec'ing the copy meanwhile fails with ETXTBSY. No
+	// fork may happen until the copy is closed.
+	syscall.ForkLock.Lock()
+	defer syscall.ForkLock.Unlock()
 	tmp, err := os.CreateTemp(dir, ".xray.tmp-*")
 	if err != nil {
 		return err
