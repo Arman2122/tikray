@@ -13,8 +13,8 @@
   },
   {
     "id": "exec_from_mount",
-    "pass": false,
-    "detail": "exec_from_mount=\"fork/exec /data/cores/26.10.21/xray: permission denied\" xray_pid=14 (runner falls back to a staged copy)",
+    "pass": true,
+    "detail": "exec_from_mount=\"fork/exec /data/cores/26.10.21/xray: permission denied\" xray_pid=15 (staged copy used when not ok)",
     "seconds": 0
   },
   {
@@ -39,7 +39,7 @@
     "id": "sniffed_domain_proxied",
     "pass": true,
     "detail": "whoami=\"203.0.113.10\"",
-    "seconds": 0
+    "seconds": 0.1
   },
   {
     "id": "no_src_nat",
@@ -57,7 +57,7 @@
     "id": "dns_domestic_direct",
     "pass": true,
     "detail": "answer=\"10.10.34.34\"",
-    "seconds": 0
+    "seconds": 0.1
   },
   {
     "id": "udp_proxied",
@@ -68,26 +68,26 @@
   {
     "id": "large_transfer",
     "pass": true,
-    "detail": "direct 2 MiB 14.4s sha_ok=true; proxied 2 MiB 27.7s sha_ok=true",
-    "seconds": 42.1
+    "detail": "direct 2 MiB 14.4s sha_ok=true; proxied 2 MiB 36.5s sha_ok=true",
+    "seconds": 50.9
   },
   {
     "id": "no_fasttrack_marked",
     "pass": true,
     "detail": "marked=2 fasttracked=0 err=\u003cnil\u003e",
-    "seconds": 28.8
+    "seconds": 28.7
   },
   {
     "id": "fallback_open",
     "pass": true,
-    "detail": "direct after 28.7s ok=true",
-    "seconds": 28.8
+    "detail": "direct after 29.7s ok=true; dns with runner stopped: \"10.10.34.34\"",
+    "seconds": 29.9
   },
   {
     "id": "fallback_recovery",
     "pass": true,
-    "detail": "proxied again 2.1s after routes_ok, ok=true",
-    "seconds": 7.3
+    "detail": "proxied again 10.2s after routes_ok, ok=true",
+    "seconds": 16.1
   },
   {
     "id": "fallback_closed",
@@ -96,27 +96,39 @@
     "seconds": 64.9
   },
   {
+    "id": "xray_dead_fallback",
+    "pass": true,
+    "detail": "direct 31.3s after xray stopped ok=true; dns \"10.10.34.34\"; proxied again 129.9s later ok=true",
+    "seconds": 166.4
+  },
+  {
+    "id": "policy_switch_existing_conn",
+    "pass": true,
+    "detail": "download across the policy switch sha_ok=true err=\u003cnil\u003e",
+    "seconds": 27.8
+  },
+  {
     "id": "shared_mount",
     "pass": true,
     "detail": "ctl write run: 204 \"\" \u003cnil\u003e; runner read \"hello-m0\"; ctl write cores (rw): 204 \"\"; runner read \"cores-m0\"; runner write to its ro cores mount: 500 \"open /data/cores/runner-probe: read-only file system\"",
-    "seconds": 0
+    "seconds": 0.1
   },
   {
     "id": "api_listen_restricted",
     "pass": true,
-    "detail": "api-probe: 200 \"{\\\".id\\\":\\\"*A\\\",\\\"address\\\":\\\"192.0.2.1\\\",\\\"comment\\\":\\\"lab:probe\\\",\\\"creation-time\\\":\\\"2026-10-24 20:54:41\\\",\\\"disabled\\\":\\\"false\\\",\\\"dynamic\\\":\\\"false\\\",\\\"list\\\":\\\"tikray-probe\\\"}\" \u003cnil\u003e; ssh as tikray: ssh: handshake failed: ssh: unable to authenticate, attempted methods [none password], no supported methods remain",
-    "seconds": 6.2
+    "detail": "api-probe: 200 \"{\\\".id\\\":\\\"*A\\\",\\\"address\\\":\\\"192.0.2.1\\\",\\\"comment\\\":\\\"lab:probe\\\",\\\"creation-time\\\":\\\"2026-10-24 22:33:12\\\",\\\"disabled\\\":\\\"false\\\",\\\"dynamic\\\":\\\"false\\\",\\\"list\\\":\\\"tikray-probe\\\"}\" \u003cnil\u003e; ssh as tikray: ssh: handshake failed: ssh: unable to authenticate, attempted methods [none password], no supported methods remain",
+    "seconds": 6.3
   },
   {
     "id": "memory",
     "pass": true,
-    "detail": "xray_rss_kb=28916 runner_memory_current=73691136 ctl_memory_current=2146304",
+    "detail": "xray_rss_kb=29356 runner_memory_current=46505984 ctl_memory_current=1880064",
     "seconds": 0.1
   },
   {
     "id": "reboot_persistence",
     "pass": true,
-    "detail": "routes_ok 3s after SSH; whoami=\"203.0.113.10\"",
-    "seconds": 267.8
+    "detail": "routes_ok 4s after SSH; whoami=\"203.0.113.10\"",
+    "seconds": 221.3
   }
 ]
