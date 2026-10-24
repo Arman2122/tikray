@@ -14,6 +14,14 @@
     }
   ],
   "outbounds": [
-    {"tag": "out", "protocol": "freedom", "sendThrough": "203.0.113.10"}
+    {
+      "tag": "out",
+      "protocol": "freedom",
+      "sendThrough": "203.0.113.10",
+      "settings": {
+        "comment": "xray >= 26.10 blocks private and reserved targets on server inbounds by default; the lab internet is TEST-NET-3",
+        "finalRules": [{"action": "allow", "ip": ["203.0.113.0/24"]}]
+      }
+    }
   ]
 }
