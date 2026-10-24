@@ -20,7 +20,9 @@ Run these in the RouterOS terminal. Each step is safe to repeat.
 1. **Install the container package:** download `all_packages-arm64-<version>.zip` for your exact RouterOS version from mikrotik.com, upload `container-<version>-arm64.npk` through Winbox → Files, then `/system/reboot`.
 2. **Enable containers:** `/system/device-mode/update container=yes`, then press the reset button briefly (or power-cycle) within 5 minutes. Check with `/system/device-mode/print` → `container: yes`.
 3. **Name the disk disk1:** plug in the USB stick, find it with `/disk/print`, then `/disk/set [find slot=usb1] slot=disk1` (use the slot you saw). If it isn't ext4 yet: `/disk/format [find slot=disk1] file-system=ext4` (this erases it).
-4. **Container settings:** `/container/config/set tmpdir=disk1/tikray/tmp`.
+4. **Directories:** create the folders the containers use (repeat for each path):
+   `/file/add type=directory name=disk1/tikray/tmp`, then the same for `disk1/tikray/images`, `disk1/tikray/containers`, `disk1/tikray/data/run` and `disk1/tikray/data/cores`.
+5. **Container settings:** `/container/config/set tmpdir=disk1/tikray/tmp`.
 
 ## 2. Upload the files
 
@@ -36,6 +38,8 @@ With Winbox → Files (drag and drop), create these paths:
 
 Edit `xray-client.hw.json`: replace every `CHANGE-ME` with your server's details and your ISP's DNS server. Any xray outbound works; replace the whole `proxy` outbound if yours isn't VLESS + Reality.
 
+The config sends `.ir` domains to your ISP's DNS (`domain:ir`) so it needs no geo files. Rules such as `geosite:category-ir` need a `geosite.dat` next to xray, which this kit doesn't install, and xray won't start without it.
+
 Edit `bench.rsc`: set `tikrayLanClient` to the PC's IP, `tikrayWanIf` and `tikrayWanGw` to your WAN interface and gateway, `tikrayApiPass` to any password, and `tikrayXrayVersion` to the version folder you uploaded xray into.
 
 `setup.rsc` adds the lab's "domestic" test range `203.0.113.20/32` (a documentation address); it's harmless on a real network.
@@ -44,8 +48,13 @@ Edit `bench.rsc`: set `tikrayLanClient` to the PC's IP, `tikrayWanIf` and `tikra
 
 ```
 /import bench.rsc
+/interface/list/member/add list=LAN interface=tikray
 /container/start [find where comment~"^tikray:"]
 ```
+
+The `interface/list` line lets the containers use the router as their DNS server: with MikroTik's default firewall, only interfaces in the `LAN` list may query it. Skip it if your router has no `LAN` interface list.
+
+The router's DNS must answer LAN requests (`/ip/dns/print` shows `allow-remote-requests: yes`, as in MikroTik's default configuration). While the runner is down, the PC's DNS falls back to the router.
 
 Wait until `/container/print` shows both containers as `R` (running). Then, from the PC, `http://172.31.255.3:8080/v0/status` should show `"routes_ok":true`.
 

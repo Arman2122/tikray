@@ -6,5 +6,9 @@ test:
 lab-deps:
 	scripts/lab-deps.sh
 
+# Lab tests share one host network and QEMU taps, so packages run one at a
+# time (-p 1), never from the test cache (-count=1: results depend on the
+# current RouterOS channels and the newest xray release), with room for arm64
+# emulation. Needs root.
 lab:
-	go test -tags lab -timeout 180m ./test/lab/... ./spike/m0/...
+	go test -tags lab -p 1 -count=1 -timeout 420m ./test/lab/... ./spike/m0/...
