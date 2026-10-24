@@ -45,9 +45,11 @@ func DNSAnswer(qname string, src netip.Addr) (addr netip.Addr, ok bool) {
 	return poisoned, true
 }
 
-const blobSize = 10 * 1024 * 1024
+// blobSize keeps the transfer test short under CHR's ~1 Mbps free-license
+// cap while still spanning well over a thousand full-size segments.
+const blobSize = 2 * 1024 * 1024
 
-// startTime is the Last-Modified time of /blob10m.
+// startTime is the Last-Modified time of /blob2m.
 var startTime = time.Now()
 
 var blob = sync.OnceValue(func() []byte {
@@ -58,7 +60,7 @@ var blob = sync.OnceValue(func() []byte {
 	return b
 })
 
-// BlobSHA256 is the hex SHA-256 of the /blob10m body.
+// BlobSHA256 is the hex SHA-256 of the /blob2m body.
 func BlobSHA256() string {
 	sum := sha256.Sum256(blob())
 	return hex.EncodeToString(sum[:])
@@ -71,14 +73,14 @@ func callerIP(remoteAddr string) string {
 	return remoteAddr
 }
 
-// HTTPHandler serves /whoami (the caller's IP) and /blob10m.
+// HTTPHandler serves /whoami (the caller's IP) and /blob2m.
 func HTTPHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/whoami", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(callerIP(r.RemoteAddr)))
 	})
-	mux.HandleFunc("/blob10m", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeContent(w, r, "blob10m", startTime, bytes.NewReader(blob()))
+	mux.HandleFunc("/blob2m", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "blob2m", startTime, bytes.NewReader(blob()))
 	})
 	return mux
 }

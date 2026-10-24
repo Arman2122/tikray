@@ -106,7 +106,7 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 		}
 		os.RemoveAll(wd)
 	})
-	if l.CHR, err = lab.BootCHR(ctx, l.Net, lab.BootOptions{
+	if l.CHR, err = lab.BootReadyCHR(ctx, l.Net, lab.BootOptions{
 		Version: l.Version, Arch: l.Arch, Artifacts: art, WorkDir: wd, Password: "tikray-lab",
 	}); err != nil {
 		t.Fatal(err)

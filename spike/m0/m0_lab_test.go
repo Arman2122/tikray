@@ -198,22 +198,22 @@ func TestAssumptions(t *testing.T) {
 	check("large_transfer", func(t *testing.T, note func(string, ...any)) {
 		want := labinet.BlobSHA256()
 		for _, tc := range []struct{ path, url string }{
-			{"direct", "http://203.0.113.20/blob10m"},
-			{"proxied", "http://203.0.113.30/blob10m"},
+			{"direct", "http://203.0.113.20/blob2m"},
+			{"proxied", "http://203.0.113.30/blob2m"},
 		} {
 			start := time.Now()
 			b, _ := l.Net.Client(ctx, "sh", "-c", "curl -s --noproxy '*' --max-time 300 "+tc.url+" | sha256sum").Output()
 			got, _, _ := strings.Cut(string(b), " ")
-			note("%s %.1fs sha_ok=%v", tc.path, time.Since(start).Seconds(), got == want)
+			note("%s 2 MiB %.1fs sha_ok=%v", tc.path, time.Since(start).Seconds(), got == want)
 			if got != want {
-				t.Errorf("%s 10 MiB transfer: sha256 %s, want %s", tc.path, got, want)
+				t.Errorf("%s 2 MiB transfer: sha256 %s, want %s", tc.path, got, want)
 			}
 		}
 	})
 	check("no_fasttrack_marked", func(t *testing.T, note func(string, ...any)) {
 		done := make(chan struct{})
 		go func() {
-			l.ClientCurl(ctx, "--max-time", "30", "-o", "/dev/null", "http://203.0.113.30/blob10m")
+			l.ClientCurl(ctx, "--max-time", "30", "-o", "/dev/null", "http://203.0.113.30/blob2m")
 			close(done)
 		}()
 		time.Sleep(5 * time.Second)

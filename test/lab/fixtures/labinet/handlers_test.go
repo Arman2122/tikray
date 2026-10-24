@@ -46,12 +46,12 @@ func TestWhoami(t *testing.T) {
 }
 
 func TestBlob(t *testing.T) {
-	r := httptest.NewRequest("GET", "/blob10m", nil)
+	r := httptest.NewRequest("GET", "/blob2m", nil)
 	w := httptest.NewRecorder()
 	HTTPHandler().ServeHTTP(w, r)
 	b := w.Body.Bytes()
-	if len(b) != 10*1024*1024 {
-		t.Fatalf("blob length %d, want %d", len(b), 10*1024*1024)
+	if len(b) != 2*1024*1024 {
+		t.Fatalf("blob length %d, want %d", len(b), 2*1024*1024)
 	}
 	sum := sha256.Sum256(b)
 	if got := hex.EncodeToString(sum[:]); got != BlobSHA256() {

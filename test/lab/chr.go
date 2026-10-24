@@ -59,6 +59,31 @@ func (c *CHR) logf(format string, args ...any) {
 // sets the admin password and lab addresses over the serial console, and
 // returns once SSH answers.
 func BootCHR(ctx context.Context, n *Network, opts BootOptions) (*CHR, error) {
+	c, err := newCHR(opts)
+	if err != nil {
+		return nil, err
+	}
+	sys, data := c.disks()
+	if err := run(ctx, "qemu-img", "convert", "-O", "qcow2", c.opts.Artifacts.DiskImage, sys); err != nil {
+		return nil, err
+	}
+	if err := run(ctx, "qemu-img", "create", "-q", "-f", "qcow2", data, strconv.Itoa(c.opts.DataDiskMB)+"M"); err != nil {
+		return nil, err
+	}
+	if err := c.start(ctx); err != nil {
+		return nil, err
+	}
+	if err := c.provision(ctx); err != nil {
+		c.Shutdown()
+		return nil, fmt.Errorf("provision CHR %s %s: %w (console log: %s)", c.opts.Version, c.opts.Arch,
+			err, filepath.Join(c.opts.WorkDir, "console.log"))
+	}
+	return c, nil
+}
+
+// newCHR fills in option defaults and opens the harness log; the VM is not
+// started.
+func newCHR(opts BootOptions) (*CHR, error) {
 	if opts.MemoryMB == 0 {
 		opts.MemoryMB = 1024
 	}
@@ -68,37 +93,25 @@ func BootCHR(ctx context.Context, n *Network, opts BootOptions) (*CHR, error) {
 	if err := os.MkdirAll(opts.WorkDir, 0o755); err != nil {
 		return nil, err
 	}
-	sys := filepath.Join(opts.WorkDir, "system.qcow2")
-	data := filepath.Join(opts.WorkDir, "data.qcow2")
-	if err := run(ctx, "qemu-img", "convert", "-O", "qcow2", opts.Artifacts.DiskImage, sys); err != nil {
+	hlog, err := os.OpenFile(filepath.Join(opts.WorkDir, "harness.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
 		return nil, err
 	}
-	if err := run(ctx, "qemu-img", "create", "-q", "-f", "qcow2", data, strconv.Itoa(opts.DataDiskMB)+"M"); err != nil {
-		return nil, err
-	}
-	c := &CHR{
+	return &CHR{
 		opts: opts,
+		hlog: hlog,
 		ssh: &ssh.ClientConfig{
 			User:            "admin+ct",
 			Auth:            []ssh.AuthMethod{ssh.Password(opts.Password)},
 			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 			Timeout:         30 * time.Second,
 		},
-	}
-	hlog, err := os.OpenFile(filepath.Join(opts.WorkDir, "harness.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	c.hlog = hlog
-	if err := c.start(ctx); err != nil {
-		return nil, err
-	}
-	if err := c.provision(ctx); err != nil {
-		c.Shutdown()
-		return nil, fmt.Errorf("provision CHR %s %s: %w (console log: %s)", opts.Version, opts.Arch,
-			err, filepath.Join(opts.WorkDir, "console.log"))
-	}
-	return c, nil
+	}, nil
+}
+
+// disks are the VM's system and data disk paths in WorkDir.
+func (c *CHR) disks() (system, data string) {
+	return filepath.Join(c.opts.WorkDir, "system.qcow2"), filepath.Join(c.opts.WorkDir, "data.qcow2")
 }
 
 // bootTimeout is how long one boot may take. CHR runs under TCG emulation
@@ -184,6 +197,11 @@ func (c *CHR) provision(ctx context.Context) error {
 	if err := c.waitSSH(ctx); err != nil {
 		return err
 	}
+	return c.checkWAN(ctx)
+}
+
+// checkWAN makes sure the WAN tap really became ether1.
+func (c *CHR) checkWAN(ctx context.Context) error {
 	mac, err := c.Get(ctx, "/interface/ethernet/get ether1 mac-address")
 	if err != nil {
 		return err
