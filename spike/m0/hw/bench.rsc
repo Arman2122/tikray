@@ -12,12 +12,14 @@
 :global tikrayWanGw "CHANGE-ME"
 :global tikrayArch "arm64"
 :global tikrayApiPass "CHANGE-ME-TOO"
+:global tikrayXrayVersion "26.10.21"
 
 :if ($tikrayBenchUninstall) do={
   :foreach c in=[/container/find where comment~"^tikray:"] do={ /container/stop $c }
   :delay 10s
   /container/remove [find where comment~"^tikray:"]
   /container/mounts/remove [find where comment~"^tikray:"]
+  /container/envs/remove [find where comment~"^tikray:"]
   /ip/firewall/nat/remove [find where comment~"^tikray:"]
   /ip/firewall/filter/remove [find where comment~"^tikray:"]
   /ip/firewall/mangle/remove [find where comment~"^tikray:"]

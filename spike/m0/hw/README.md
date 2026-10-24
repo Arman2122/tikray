@@ -11,7 +11,7 @@ It's throwaway spike tooling, not the tikray installer.
 - One VPS running an xray server you can connect to (VLESS + Reality is the reference), plus `iperf3 -s` running on the same VPS.
 - From this repo, on a Linux machine with Go and Docker (classic image store; `build-images.sh` explains if not):
   - `bash spike/m0/build-images.sh arm64` → `spike/m0/out/runnerproto-arm64.tar` and `ctlproto-arm64.tar`.
-  - The official xray-core 26.3.27 (or newer) **linux-arm64-v8a** binary from the XTLS releases page, unzipped, named `xray`.
+  - The official xray-core **linux-arm64-v8a** binary from the XTLS releases page (26.1.18 or newer; the lab tested 26.3.27 and 26.10.21), unzipped, named `xray`.
 
 ## 1. Prepare the router
 
@@ -30,13 +30,13 @@ With Winbox → Files (drag and drop), create these paths:
 |---|---|
 | `runnerproto-arm64.tar` | `disk1/tikray/images/runnerproto-arm64.tar` |
 | `ctlproto-arm64.tar` | `disk1/tikray/images/ctlproto-arm64.tar` |
-| `xray` | `disk1/tikray/data/cores/26.3.27/xray` |
+| `xray` | `disk1/tikray/data/cores/<version>/xray`, e.g. `disk1/tikray/data/cores/26.10.21/xray` |
 | `xray-client.hw.json`, after editing (below) | `disk1/tikray/data/run/config.json` |
 | `../routeros/setup.rsc` and `bench.rsc`, after editing (below) | the root of Files |
 
 Edit `xray-client.hw.json`: replace every `CHANGE-ME` with your server's details and your ISP's DNS server. Any xray outbound works; replace the whole `proxy` outbound if yours isn't VLESS + Reality.
 
-Edit `bench.rsc`: set `tikrayLanClient` to the PC's IP, `tikrayWanIf` and `tikrayWanGw` to your WAN interface and gateway, and `tikrayApiPass` to any password.
+Edit `bench.rsc`: set `tikrayLanClient` to the PC's IP, `tikrayWanIf` and `tikrayWanGw` to your WAN interface and gateway, `tikrayApiPass` to any password, and `tikrayXrayVersion` to the version folder you uploaded xray into.
 
 `setup.rsc` adds the lab's "domestic" test range `203.0.113.20/32` (a documentation address); it's harmless on a real network.
 

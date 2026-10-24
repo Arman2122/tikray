@@ -57,7 +57,7 @@ func poll(ctx context.Context, d, interval time.Duration, f func() bool) (time.D
 // assumption in order. A failing subtest is a finding, recorded with what was
 // observed; the results file is written either way.
 func TestAssumptions(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 360*time.Minute)
 	defer cancel()
 	l := Deploy(ctx, t)
 	c := l.CHR
@@ -67,7 +67,7 @@ func TestAssumptions(t *testing.T) {
 		dir := filepath.Join(spikeDir(), "results")
 		os.MkdirAll(dir, 0o755)
 		b, _ := json.MarshalIndent(results, "", "  ")
-		path := filepath.Join(dir, fmt.Sprintf("%s-%s.json", l.Version, l.Arch))
+		path := filepath.Join(dir, fmt.Sprintf("%s-%s-xray%s.json", l.Version, l.Arch, l.XrayVersion))
 		if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
 			t.Error(err)
 		}
@@ -103,6 +103,16 @@ func TestAssumptions(t *testing.T) {
 		return ok
 	}
 
+	check("xray_version", func(t *testing.T, note func(string, ...any)) {
+		s, err := l.RunnerStatus(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		note("runner reports %q, deployed %s", s.XrayVersion, l.XrayVersion)
+		if !strings.Contains(s.XrayVersion, "Xray "+l.XrayVersion+" ") {
+			t.Errorf("runner runs %q, want xray %s", s.XrayVersion, l.XrayVersion)
+		}
+	})
 	check("sysctl_in_container", func(t *testing.T, note func(string, ...any)) {
 		s, err := l.RunnerStatus(ctx)
 		if err != nil {

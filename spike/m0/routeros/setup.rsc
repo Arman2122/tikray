@@ -7,6 +7,7 @@
 #   tikrayWanGw      WAN gateway (fallback route of tikray-open)
 #   tikrayArch       image architecture: amd64 or arm64
 #   tikrayApiPass    password for the restricted tikray RouterOS user
+#   tikrayXrayVersion xray release in disk1/tikray/data/cores/<version>/xray
 #
 # Differences found on RouterOS 7.25 vs. the plan:
 #   - container mounts take list= (not name=) and mode=ro|rw; containers use mountlists=
@@ -18,11 +19,13 @@
 :global tikrayWanGw
 :global tikrayArch
 :global tikrayApiPass
+:global tikrayXrayVersion
 :if ([:typeof $tikrayLanClient] = "nothing") do={ :set tikrayLanClient "192.168.88.10" }
 :if ([:typeof $tikrayWanIf] = "nothing") do={ :set tikrayWanIf "ether1" }
 :if ([:typeof $tikrayWanGw] = "nothing") do={ :set tikrayWanGw "198.51.100.254" }
 :if ([:typeof $tikrayArch] = "nothing") do={ :set tikrayArch "amd64" }
 :if ([:typeof $tikrayApiPass] = "nothing") do={ :set tikrayApiPass "tikray-lab-api" }
+:if ([:typeof $tikrayXrayVersion] = "nothing") do={ :set tikrayXrayVersion "26.3.27" }
 
 # Bridge and veths: router .1, control .2, runner .3
 /interface/bridge/add name=tikray comment=tikray:bridge
@@ -85,5 +88,6 @@
 /container/mounts/add list=tikray-runner src=disk1/tikray/data/cores dst=/data/cores mode=ro comment=tikray:mount-runner-cores
 /container/mounts/add list=tikray-ctl src=disk1/tikray/data/run dst=/data/run mode=rw comment=tikray:mount-ctl-run
 /container/mounts/add list=tikray-ctl src=disk1/tikray/data/cores dst=/data/cores mode=rw comment=tikray:mount-ctl-cores
-/container/add name=tikray-runner file=("disk1/tikray/images/runnerproto-" . $tikrayArch . ".tar") interface=tikray-runner root-dir=disk1/tikray/containers/runner mountlists=tikray-runner dns=172.31.255.1 logging=yes start-on-boot=yes comment=tikray:runner
+/container/envs/add list=tikray-runner key=XRAY_BIN value=("/data/cores/" . $tikrayXrayVersion . "/xray") comment=tikray:env-xray-bin
+/container/add name=tikray-runner file=("disk1/tikray/images/runnerproto-" . $tikrayArch . ".tar") interface=tikray-runner root-dir=disk1/tikray/containers/runner mountlists=tikray-runner envlists=tikray-runner dns=172.31.255.1 logging=yes start-on-boot=yes comment=tikray:runner
 /container/add name=tikray-ctl file=("disk1/tikray/images/ctlproto-" . $tikrayArch . ".tar") interface=tikray-ctl root-dir=disk1/tikray/containers/ctl mountlists=tikray-ctl dns=172.31.255.1 logging=yes start-on-boot=yes comment=tikray:ctl

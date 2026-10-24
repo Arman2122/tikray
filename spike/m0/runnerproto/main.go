@@ -37,6 +37,7 @@ type status struct {
 	// ExecFromMount is "ok" when xray ran straight from the mount, else the
 	// exec error; files placed by RouterOS have no execute bit.
 	ExecFromMount string `json:"exec_from_mount"`
+	XrayVersion   string `json:"xray_version"`
 }
 
 var (
@@ -110,6 +111,12 @@ func superviseXray(bin, cfg string) {
 	} else {
 		mu.Lock()
 		st.ExecFromMount = "ok"
+		mu.Unlock()
+	}
+	if b, err := exec.Command(bin, "version").Output(); err == nil {
+		first, _, _ := strings.Cut(string(b), "\n")
+		mu.Lock()
+		st.XrayVersion = first
 		mu.Unlock()
 	}
 	for {

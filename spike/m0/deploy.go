@@ -22,11 +22,12 @@ import (
 // prototypes in containers, the tikray RouterOS objects from setup.rsc, and
 // the fake internet behind ether1.
 type Lab struct {
-	Net      *lab.Network
-	CHR      *lab.CHR
-	Arch     lab.Arch
-	Version  string
-	StopInet func()
+	Net         *lab.Network
+	CHR         *lab.CHR
+	Arch        lab.Arch
+	Version     string // RouterOS
+	XrayVersion string // xray release, e.g. 26.3.27
+	StopInet    func()
 }
 
 // RunnerStatus is runnerproto's /v0/status.
@@ -38,6 +39,7 @@ type RunnerStatus struct {
 	RoutesOK      bool              `json:"routes_ok"`
 	XrayRestarts  int               `json:"xray_restarts"`
 	ExecFromMount string            `json:"exec_from_mount"`
+	XrayVersion   string            `json:"xray_version"`
 }
 
 const (
@@ -57,9 +59,10 @@ func env(key, def string) string {
 	return def
 }
 
-// Deploy brings the whole lab up for $TIKRAY_LAB_CHANNEL (default stable) and
-// $TIKRAY_LAB_ARCH (default x86_64) and tears it down when t ends. The VM
-// work dir is kept when the test fails.
+// Deploy brings the whole lab up for $TIKRAY_LAB_CHANNEL (default stable),
+// $TIKRAY_LAB_ARCH (default x86_64) and $TIKRAY_LAB_XRAY (see
+// lab.LabXrayVersion) and tears it down when t ends. The VM work dir is kept
+// when the test fails.
 func Deploy(ctx context.Context, t *testing.T) *Lab {
 	t.Helper()
 	l := &Lab{Arch: lab.Arch(env("TIKRAY_LAB_ARCH", string(lab.ArchX86)))}
@@ -72,6 +75,9 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 		t.Fatal(err)
 	}
 	goarch := l.Arch.GOARCH()
+	if l.XrayVersion, err = lab.XrayCoreVersion(lab.LabXrayVersion()); err != nil {
+		t.Fatal(err)
+	}
 	xray, err := lab.XrayBinary(ctx, lab.CacheDir(), goarch)
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +118,7 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 	}
 
 	for local, remote := range map[string]string{
-		xray: lab.DataRoot + "/cores/26.3.27/xray",
+		xray: lab.DataRoot + "/cores/" + l.XrayVersion + "/xray",
 		filepath.Join(spikeDir(), "config", "xray-client.json"):        lab.DataRoot + "/run/config.json",
 		filepath.Join(spikeDir(), "out", "runnerproto-"+goarch+".tar"): "disk1/tikray/images/runnerproto-" + goarch + ".tar",
 		filepath.Join(spikeDir(), "out", "ctlproto-"+goarch+".tar"):    "disk1/tikray/images/ctlproto-" + goarch + ".tar",
@@ -129,7 +135,7 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 		t.Fatal(err)
 	}
 	withArch := filepath.Join(wd, "setup.rsc")
-	header := fmt.Sprintf(":global tikrayArch %q\n", goarch)
+	header := fmt.Sprintf(":global tikrayArch %q\n:global tikrayXrayVersion %q\n", goarch, l.XrayVersion)
 	if err := os.WriteFile(withArch, append([]byte(header), setup...), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +151,11 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 // startContainers starts both containers once their images are extracted,
 // which takes minutes under emulation, and waits for their HTTP endpoints.
 func (l *Lab) startContainers(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	d := 15 * time.Minute
+	if l.Arch == lab.ArchARM64 {
+		d = 45 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
 	for name, url := range map[string]string{"tikray-runner": runnerURL + "/v0/status", "tikray-ctl": ctlURL + "/v0/write"} {
 		for {
