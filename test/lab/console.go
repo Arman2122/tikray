@@ -42,6 +42,8 @@ var shellPrompt = regexp.MustCompile(`\] > $`)
 type console struct {
 	conn net.Conn
 	log  *os.File
+	tl   *os.File // console lines with timestamps
+	line []byte
 
 	mu      sync.Mutex
 	pending bytes.Buffer
@@ -69,7 +71,13 @@ func openConsole(ctx context.Context, sock, logPath string) (*console, error) {
 		conn.Close()
 		return nil, err
 	}
-	c := &console{conn: conn, log: f, last: time.Now(), changed: make(chan struct{}, 1), closed: make(chan struct{})}
+	tl, err := os.OpenFile(logPath+".timeline", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		conn.Close()
+		f.Close()
+		return nil, err
+	}
+	c := &console{conn: conn, log: f, tl: tl, last: time.Now(), changed: make(chan struct{}, 1), closed: make(chan struct{})}
 	go c.read()
 	return c, nil
 }
@@ -81,6 +89,7 @@ func (c *console) read() {
 		n, err := c.conn.Read(b)
 		if n > 0 {
 			c.log.Write(b[:n])
+			c.timeline(b[:n])
 			c.mu.Lock()
 			c.pending.Write(b[:n])
 			c.last = time.Now()
@@ -93,6 +102,19 @@ func (c *console) read() {
 		if err != nil {
 			return
 		}
+	}
+}
+
+func (c *console) timeline(b []byte) {
+	for _, ch := range b {
+		if ch != '\n' && ch != '\r' {
+			c.line = append(c.line, ch)
+			continue
+		}
+		if len(bytes.TrimSpace(c.line)) > 0 {
+			fmt.Fprintf(c.tl, "%s %q\n", time.Now().Format("15:04:05.000"), c.line)
+		}
+		c.line = c.line[:0]
 	}
 }
 
@@ -178,4 +200,5 @@ func (c *console) close() {
 	c.conn.Close()
 	<-c.closed
 	c.log.Close()
+	c.tl.Close()
 }

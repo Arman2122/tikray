@@ -40,6 +40,15 @@ type CHR struct {
 	exited chan struct{}
 	con    *console
 	ssh    *ssh.ClientConfig
+	hlog   *os.File
+}
+
+// logf writes a timestamped line to WorkDir/harness.log, the timeline to read
+// next to console.log when a boot goes wrong.
+func (c *CHR) logf(format string, args ...any) {
+	if c.hlog != nil {
+		fmt.Fprintf(c.hlog, "%s "+format+"\n", append([]any{time.Now().Format("15:04:05.000")}, args...)...)
+	}
 }
 
 // BootCHR copies the CHR image into WorkDir, boots it with an empty data disk,
@@ -72,6 +81,11 @@ func BootCHR(ctx context.Context, n *Network, opts BootOptions) (*CHR, error) {
 			Timeout:         30 * time.Second,
 		},
 	}
+	hlog, err := os.OpenFile(filepath.Join(opts.WorkDir, "harness.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	c.hlog = hlog
 	if err := c.start(ctx); err != nil {
 		return nil, err
 	}
@@ -124,8 +138,14 @@ func (c *CHR) start(ctx context.Context) error {
 		logf.Close()
 		return err
 	}
+	c.logf("qemu started: pid %d", cmd.Process.Pid)
 	exited := make(chan struct{})
-	go func() { cmd.Wait(); logf.Close(); close(exited) }()
+	go func() {
+		err := cmd.Wait()
+		c.logf("qemu exited: %v", err)
+		logf.Close()
+		close(exited)
+	}()
 	c.cmd, c.exited = cmd, exited
 
 	dctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -145,6 +165,7 @@ func (c *CHR) provision(ctx context.Context) error {
 	if err := c.con.login(ctx, c.opts.Password); err != nil {
 		return err
 	}
+	c.logf("console login done")
 	for _, line := range []string{
 		"/ip/address/add address=198.51.100.2/24 interface=ether1 comment=lab:wan",
 		"/ip/address/add address=192.168.88.1/24 interface=ether2 comment=lab:lan",
@@ -154,6 +175,7 @@ func (c *CHR) provision(ctx context.Context) error {
 		if err := c.con.command(ctx, line); err != nil {
 			return fmt.Errorf("%s: %w", line, err)
 		}
+		c.logf("console: %s", line)
 	}
 	if err := c.waitSSH(ctx); err != nil {
 		return err
@@ -183,6 +205,7 @@ func (c *CHR) stop() {
 
 // Reboot does a soft /system/reboot and waits for SSH to come back.
 func (c *CHR) Reboot(ctx context.Context) error {
+	c.logf("reboot")
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	c.Run(rctx, "/system/reboot")
 	cancel()
@@ -195,6 +218,7 @@ func (c *CHR) Reboot(ctx context.Context) error {
 // PowerCycle kills QEMU (a cold power-off), starts it again on the same
 // disks, and waits for SSH.
 func (c *CHR) PowerCycle(ctx context.Context) error {
+	c.logf("power cycle")
 	c.stop()
 	if err := c.start(ctx); err != nil {
 		return err
@@ -205,5 +229,9 @@ func (c *CHR) PowerCycle(ctx context.Context) error {
 // Shutdown powers the VM off. It is safe to call more than once.
 func (c *CHR) Shutdown() error {
 	c.stop()
+	if c.hlog != nil {
+		c.hlog.Close()
+		c.hlog = nil
+	}
 	return nil
 }
