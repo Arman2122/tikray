@@ -33,6 +33,8 @@ jobs:
           scripts/build-images.sh arm64
       - name: Check the archives
         run: |
-          for arch in amd64 arm64; do
-            tar -xOf "out/tikray-runner-$arch.tar" manifest.json | grep -q '"Layers"'
+          for image in tikray-runner tikray; do
+            for arch in amd64 arm64; do
+              tar -xOf "out/$image-$arch.tar" manifest.json | grep -q '"Layers"'
+            done
           done
