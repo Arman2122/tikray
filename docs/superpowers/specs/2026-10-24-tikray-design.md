@@ -166,6 +166,13 @@ M2 builds the control plane in two parts:
   Core updates and rollbacks render the config for the core they switch to
   (§4.5 step 2). It runs as the one-shot CLI inside the `tikray` container:
   `tikray config render`, `tikray apply`, `tikray core update|rollback`.
+  Until a state file is saved, the state is the default one, whose render
+  sends everything direct: apply, update and rollback then refuse to put it
+  in place of a config the runner already runs (such as an M1 `--config`
+  one), and only a runner with no core yet starts from it. A subscription
+  fetch can refuse a body (`Fetcher.Accept`) as a failed attempt, so that the
+  refresh M2b schedules treats a block page or an expiry notice with no
+  servers in it as a failure, never as an empty subscription.
 - **M2b**, the long-running service on top: the REST API and its
   authentication, the `xray` gRPC client, the `health` monitor, hot changes,
   subscription scheduling, and the CLI over REST.
