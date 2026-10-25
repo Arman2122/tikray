@@ -19,6 +19,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/Arman2122/tikray/internal/xraypolicy"
 )
 
 // maxNameRunes is the longest name a link can give a server.
@@ -49,24 +51,54 @@ var ErrUnsupported = errors.New("sharelink: unsupported")
 // Parse turns a share link into the server it describes. The scheme is case
 // insensitive. A link that is not valid gives an error; a valid link that
 // tikray cannot use gives an error that wraps ErrUnsupported.
+//
+// That includes a link whose outbound the newest xray-core refuses, such as
+// VLESS with no TLS and no encryption to a public address: one such server
+// would make every config that holds it fail to load. The error then wraps
+// xraypolicy.ErrRefused as well, and its text names the protocol and the reason.
 func Parse(link string) (Server, error) {
 	link = strings.TrimSpace(link)
 	scheme, _, ok := strings.Cut(link, "://")
 	if !ok || !validScheme(scheme) {
 		return Server{}, errors.New("sharelink: not a share link")
 	}
+	var (
+		s   Server
+		err error
+	)
 	switch strings.ToLower(scheme) {
 	case "vless":
-		return parseVLESS(link)
+		s, err = parseVLESS(link)
 	case "trojan":
-		return parseTrojan(link)
+		s, err = parseTrojan(link)
 	case "vmess":
-		return parseVMess(link)
+		s, err = parseVMess(link)
 	case "ss":
-		return parseSS(link)
+		s, err = parseSS(link)
+	default:
+		return Server{}, fmt.Errorf("%w scheme %q", ErrUnsupported, scheme)
 	}
-	return Server{}, fmt.Errorf("%w scheme %q", ErrUnsupported, scheme)
+	if err != nil {
+		return Server{}, err
+	}
+	if err := xraypolicy.Check(s.Outbound); err != nil {
+		var refusal *xraypolicy.Refusal
+		if !errors.As(err, &refusal) {
+			return Server{}, err
+		}
+		return Server{}, &refusedLink{refusal}
+	}
+	return s, nil
 }
+
+// refusedLink is the error for a link whose outbound xray-core refuses. It is
+// both ErrUnsupported and xraypolicy.ErrRefused. Its text is the reason, which
+// names the protocol and holds nothing of the link.
+type refusedLink struct{ refusal *xraypolicy.Refusal }
+
+func (e *refusedLink) Error() string { return ErrUnsupported.Error() + ": " + e.refusal.Reason }
+
+func (e *refusedLink) Unwrap() []error { return []error{ErrUnsupported, e.refusal} }
 
 // validScheme reports whether s looks like a URL scheme, so that an error
 // message can name it. It is not a limit on which schemes are known.

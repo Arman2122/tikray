@@ -13,6 +13,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/Arman2122/tikray/internal/xraypolicy"
 )
 
 const (
@@ -131,8 +133,10 @@ func (p *problems) servers(servers []Server, subscriptions map[string]bool) map[
 }
 
 // outbound checks that raw is the outbound object of a proxy and carries no
-// tag, which tikray assigns. Xray reads keys without regard to case, so the
-// checks do the same.
+// tag, which tikray assigns, and that it is not one the newest xray-core
+// refuses (see xraypolicy): one such server would make every config that holds
+// it fail to load. Xray reads keys without regard to case, so the checks do
+// the same.
 func (p *problems) outbound(path string, raw json.RawMessage) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
@@ -156,6 +160,14 @@ func (p *problems) outbound(path string, raw json.RawMessage) {
 	}
 	if !hasProtocol {
 		p.add(path+".protocol", "is required")
+	}
+	if err := xraypolicy.Check(raw); err != nil {
+		reason := err.Error()
+		var refusal *xraypolicy.Refusal
+		if errors.As(err, &refusal) {
+			reason = refusal.Reason
+		}
+		p.add(path, "%s", reason)
 	}
 }
 

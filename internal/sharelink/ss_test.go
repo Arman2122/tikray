@@ -44,6 +44,16 @@ const (
 	ssUserAlphabetText = "aes-256-gcm:?????>?"
 )
 
+const (
+	// ss2022Key16 and ss2022Key32 are the base64 of 16 and of 32 bytes, the key
+	// lengths of the 2022 ciphers, and the Link forms are their percent-encoded
+	// userinfo.
+	ss2022Key16     = "AAECAwQFBgcICQoLDA0ODw=="
+	ss2022Key16Link = "AAECAwQFBgcICQoLDA0ODw%3D%3D"
+	ss2022Key32     = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+	ss2022Key32Link = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8%3D"
+)
+
 // ssCases are the Shadowsocks links Parse must read or refuse. The fuzz test
 // seeds from them too.
 var ssCases = []parseCase{
@@ -275,10 +285,24 @@ var ssCases = []parseCase{
 	{name: "chacha20-ietf-poly1305 is chacha20-poly1305", link: "ss://chacha20-ietf-poly1305:pw@h.example:443", wantName: "h.example:443", wantJSON: ssOut("h.example", "443", "chacha20-poly1305", "pw")},
 	{name: "xchacha20-poly1305", link: "ss://xchacha20-poly1305:pw@h.example:443", wantName: "h.example:443", wantJSON: ssOut("h.example", "443", "xchacha20-poly1305", "pw")},
 	{name: "xchacha20-ietf-poly1305 is xchacha20-poly1305", link: "ss://xchacha20-ietf-poly1305:pw@h.example:443", wantName: "h.example:443", wantJSON: ssOut("h.example", "443", "xchacha20-poly1305", "pw")},
-	{name: "2022-blake3-aes-256-gcm", link: "ss://2022-blake3-aes-256-gcm:pw@h.example:443", wantName: "h.example:443", wantJSON: ssOut("h.example", "443", "2022-blake3-aes-256-gcm", "pw")},
-	{name: "2022-blake3-chacha20-poly1305", link: "ss://2022-blake3-chacha20-poly1305:pw@h.example:443", wantName: "h.example:443", wantJSON: ssOut("h.example", "443", "2022-blake3-chacha20-poly1305", "pw")},
-	{name: "none", link: "ss://none:pw@h.example:443", wantName: "h.example:443", wantJSON: ssOut("h.example", "443", "none", "pw")},
+	{name: "2022-blake3-aes-256-gcm", link: "ss://2022-blake3-aes-256-gcm:" + ss2022Key32Link + "@h.example:443", wantName: "h.example:443", wantJSON: ssOut("h.example", "443", "2022-blake3-aes-256-gcm", ss2022Key32)},
+	{name: "2022-blake3-chacha20-poly1305", link: "ss://2022-blake3-chacha20-poly1305:" + ss2022Key32Link + "@h.example:443", wantName: "h.example:443", wantJSON: ssOut("h.example", "443", "2022-blake3-chacha20-poly1305", ss2022Key32)},
+	{
+		name:     "2022-blake3-aes-256-gcm with a server key and a user key",
+		link:     "ss://2022-blake3-aes-256-gcm:" + ss2022Key32Link + ":" + ss2022Key32Link + "@h.example:443",
+		wantName: "h.example:443",
+		wantJSON: ssOut("h.example", "443", "2022-blake3-aes-256-gcm", ss2022Key32+":"+ss2022Key32),
+	},
 	{name: "method in upper case", link: "ss://" + ssUser("AES-256-GCM:pw") + "@h.example:443", wantName: "h.example:443", wantJSON: ssOut("h.example", "443", "aes-256-gcm", "pw")},
+
+	// xray-core 26.7.11 and newer refuse the whole config for these.
+	{name: "none", link: "ss://none:pw@h.example:443", wantErr: kindUnsupported, refused: true, errContains: "Shadowsocks", secret: "pw"},
+	{name: "none, as a SIP002 userinfo", link: "ss://" + ssUser("none:hunter2") + "@h.example:443", wantErr: kindUnsupported, refused: true, errContains: "Shadowsocks", secret: "hunter2"},
+	{name: "none on a legacy link", link: ssLegacy("none:hunter2@h.example:443"), wantErr: kindUnsupported, refused: true, errContains: "Shadowsocks", secret: "hunter2"},
+	{name: "2022-blake3-aes-256-gcm with a short key", link: "ss://2022-blake3-aes-256-gcm:" + ss2022Key16Link + "@h.example:443", wantErr: kindUnsupported, refused: true, errContains: "2022", secret: ss2022Key16},
+	{name: "2022-blake3-aes-128-gcm with a long key", link: "ss://2022-blake3-aes-128-gcm:" + ss2022Key32Link + "@h.example:443", wantErr: kindUnsupported, refused: true, errContains: "2022", secret: ss2022Key32},
+	{name: "2022-blake3-aes-128-gcm with a password that is not base64", link: "ss://2022-blake3-aes-128-gcm:hunter2hunter2@h.example:443", wantErr: kindUnsupported, refused: true, errContains: "2022", secret: "hunter2hunter2"},
+	{name: "2022-blake3-chacha20-poly1305 with two keys", link: "ss://2022-blake3-chacha20-poly1305:" + ss2022Key32Link + ":" + ss2022Key32Link + "@h.example:443", wantErr: kindUnsupported, refused: true, errContains: "chacha20-poly1305", secret: ss2022Key32},
 
 	// refused
 	{name: "plugin", link: "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388/?plugin=obfs-local%3Bobfs%3Dhttp#a", wantErr: kindUnsupported, errContains: "plugin", secret: "pass"},

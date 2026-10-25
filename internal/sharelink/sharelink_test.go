@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Arman2122/tikray/internal/xraypolicy"
 )
 
 // errKind is how a parse case is expected to end.
@@ -34,6 +36,9 @@ type parseCase struct {
 	errContains string
 	// secret is a part of the link that no error message may repeat.
 	secret string
+	// refused means the error also wraps xraypolicy.ErrRefused: the link is
+	// valid, but the outbound it gives is one that xray-core refuses.
+	refused bool
 }
 
 // canonical decodes b and encodes it again, which sorts every object's keys.
@@ -65,6 +70,9 @@ func runParseCases(t *testing.T, cases []parseCase) {
 				}
 				if is := errors.Is(err, ErrUnsupported); is != (tc.wantErr == kindUnsupported) {
 					t.Errorf("errors.Is(%q, ErrUnsupported) = %v, want %v", err, is, !is)
+				}
+				if is := errors.Is(err, xraypolicy.ErrRefused); is != tc.refused {
+					t.Errorf("errors.Is(%q, xraypolicy.ErrRefused) = %v, want %v", err, is, !is)
 				}
 				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
 					t.Errorf("error %q does not contain %q", err, tc.errContains)
@@ -106,17 +114,17 @@ func runParseCases(t *testing.T, cases []parseCase) {
 }
 
 const (
-	dispatchVLESS  = `{"protocol":"vless","settings":{"vnext":[{"address":"example.com","port":443,"users":[{"encryption":"none","id":"` + vlessID + `"}]}]},"streamSettings":{"network":"tcp"}}`
+	dispatchVLESS  = `{"protocol":"vless","settings":{"vnext":[{"address":"nas.lan","port":443,"users":[{"encryption":"none","id":"` + vlessID + `"}]}]},"streamSettings":{"network":"tcp"}}`
 	dispatchTrojan = `{"protocol":"trojan","settings":{"servers":[{"address":"example.com","port":443,"password":"pw"}]},"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{}}}`
 )
 
 // dispatchCases are links that Parse's choice of scheme alone decides. The
 // fuzz test seeds from them too.
 var dispatchCases = []parseCase{
-	{name: "vless", link: "vless://" + vlessID + "@example.com:443", wantName: "example.com:443", wantJSON: dispatchVLESS},
-	{name: "vless upper case scheme", link: "VLESS://" + vlessID + "@example.com:443", wantName: "example.com:443", wantJSON: dispatchVLESS},
-	{name: "vless mixed case scheme", link: "VLess://" + vlessID + "@example.com:443", wantName: "example.com:443", wantJSON: dispatchVLESS},
-	{name: "surrounding whitespace", link: " \t vless://" + vlessID + "@example.com:443\r\n", wantName: "example.com:443", wantJSON: dispatchVLESS},
+	{name: "vless", link: "vless://" + vlessID + "@nas.lan:443", wantName: "nas.lan:443", wantJSON: dispatchVLESS},
+	{name: "vless upper case scheme", link: "VLESS://" + vlessID + "@nas.lan:443", wantName: "nas.lan:443", wantJSON: dispatchVLESS},
+	{name: "vless mixed case scheme", link: "VLess://" + vlessID + "@nas.lan:443", wantName: "nas.lan:443", wantJSON: dispatchVLESS},
+	{name: "surrounding whitespace", link: " \t vless://" + vlessID + "@nas.lan:443\r\n", wantName: "nas.lan:443", wantJSON: dispatchVLESS},
 	{name: "trojan", link: "trojan://pw@example.com:443", wantName: "example.com:443", wantJSON: dispatchTrojan},
 	{name: "trojan upper case scheme", link: "TROJAN://pw@example.com:443", wantName: "example.com:443", wantJSON: dispatchTrojan},
 

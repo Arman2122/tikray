@@ -20,9 +20,39 @@ var trojanCases = []parseCase{
 	},
 	{
 		name:     "security none has no tls settings",
-		link:     "trojan://pw@1.2.3.4:443?security=none&type=ws&path=/t",
+		link:     "trojan://pw@10.1.2.3:443?security=none&type=ws&path=/t",
+		wantName: "10.1.2.3:443",
+		wantJSON: trojanOut("10.1.2.3", "443", "pw", `{"network":"ws","wsSettings":{"path":"/t"}}`),
+	},
+	// xray-core 26.7.11 and newer refuse the whole config for Trojan with no
+	// TLS to a public address.
+	{
+		name:        "security none to a public IP is refused",
+		link:        "trojan://hunter2@1.2.3.4:443?security=none&type=ws&path=/t",
+		wantErr:     kindUnsupported,
+		refused:     true,
+		errContains: "Trojan",
+		secret:      "hunter2",
+	},
+	{
+		name:        "security none to a public domain is refused",
+		link:        "trojan://hunter2@example.com:443?security=none",
+		wantErr:     kindUnsupported,
+		refused:     true,
+		errContains: "public address",
+		secret:      "hunter2",
+	},
+	{
+		name:     "security none to a private domain",
+		link:     "trojan://pw@nas.lan:443?security=none",
+		wantName: "nas.lan:443",
+		wantJSON: trojanOut("nas.lan", "443", "pw", `{"network":"tcp"}`),
+	},
+	{
+		name:     "tls to a public IP",
+		link:     "trojan://pw@1.2.3.4:443?security=tls&sni=example.com",
 		wantName: "1.2.3.4:443",
-		wantJSON: trojanOut("1.2.3.4", "443", "pw", `{"network":"ws","wsSettings":{"path":"/t"}}`),
+		wantJSON: trojanOut("1.2.3.4", "443", "pw", `{"network":"tcp","security":"tls","tlsSettings":{"serverName":"example.com"}}`),
 	},
 	{
 		name:     "no query at all is tls",
@@ -75,9 +105,9 @@ var trojanCases = []parseCase{
 	},
 	{
 		name:     "a percent in the name",
-		link:     "trojan://pw@example.com:443?security=none#50%",
+		link:     "trojan://pw@nas.lan:443?security=none#50%",
 		wantName: "50%",
-		wantJSON: trojanOut("example.com", "443", "pw", `{"network":"tcp"}`),
+		wantJSON: trojanOut("nas.lan", "443", "pw", `{"network":"tcp"}`),
 	},
 	{
 		name:     "grpc over tls",
@@ -95,15 +125,15 @@ var trojanCases = []parseCase{
 	},
 	{
 		name:     "password with reserved characters",
-		link:     "trojan://a%2Fb%3Fc%23d%25e@example.com:443?security=none",
-		wantName: "example.com:443",
-		wantJSON: trojanOut("example.com", "443", "a/b?c#d%e", `{"network":"tcp"}`),
+		link:     "trojan://a%2Fb%3Fc%23d%25e@nas.lan:443?security=none",
+		wantName: "nas.lan:443",
+		wantJSON: trojanOut("nas.lan", "443", "a/b?c#d%e", `{"network":"tcp"}`),
 	},
 	{
 		name:     "password with a quote",
-		link:     "trojan://say%22hi@example.com:443?security=none",
-		wantName: "example.com:443",
-		wantJSON: trojanOut("example.com", "443", `say\"hi`, `{"network":"tcp"}`),
+		link:     "trojan://say%22hi@nas.lan:443?security=none",
+		wantName: "nas.lan:443",
+		wantJSON: trojanOut("nas.lan", "443", `say\"hi`, `{"network":"tcp"}`),
 	},
 
 	{name: "kcp", link: "trojan://secret@example.com:443?type=kcp", wantErr: kindUnsupported, secret: "secret"},

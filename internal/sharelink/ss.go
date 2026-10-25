@@ -21,7 +21,9 @@ var ssMethods = map[string]string{
 	"2022-blake3-aes-128-gcm":       "2022-blake3-aes-128-gcm",
 	"2022-blake3-aes-256-gcm":       "2022-blake3-aes-256-gcm",
 	"2022-blake3-chacha20-poly1305": "2022-blake3-chacha20-poly1305",
-	"none":                          "none",
+	// none is read so that xraypolicy refuses its link with a reason of its
+	// own, not as a method nobody knows.
+	"none": "none",
 }
 
 // parseSS reads a Shadowsocks link in either of its two forms.
@@ -103,7 +105,7 @@ func parseSS(link string) (Server, error) {
 	method, ok = ssMethods[strings.ToLower(strings.TrimSpace(method))]
 	if !ok {
 		return Server{}, fmt.Errorf("%w shadowsocks method, want aes-128-gcm, aes-256-gcm, chacha20-poly1305, "+
-			"xchacha20-poly1305, 2022-blake3-aes-128-gcm, 2022-blake3-aes-256-gcm, 2022-blake3-chacha20-poly1305 or none", ErrUnsupported)
+			"xchacha20-poly1305, 2022-blake3-aes-128-gcm, 2022-blake3-aes-256-gcm or 2022-blake3-chacha20-poly1305", ErrUnsupported)
 	}
 	if password == "" {
 		return Server{}, errors.New("sharelink: shadowsocks link has no password")

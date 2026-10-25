@@ -130,6 +130,29 @@ func TestParseSkipsBadLines(t *testing.T) {
 	}
 }
 
+// TestParseSkipsRefusedLines checks that a line xray-core refuses (VLESS with no
+// TLS and no encryption to a public address) is skipped with the reason, and
+// that the lines around it still give their servers.
+func TestParseSkipsRefusedLines(t *testing.T) {
+	const secret = "SeCrEtSeCrEt-id"
+	refused := "vless://" + secret + "@1.2.3.4:443?type=tcp#plain"
+	res := Parse([]byte(linkVLESS + "\n" + refused + "\n" + linkTrojan + "\n"))
+
+	if len(res.Entries) != 2 || res.Entries[0].Server.Name != "alpha" || res.Entries[1].Server.Name != "beta" {
+		t.Fatalf("got entries %+v, want alpha and beta", res.Entries)
+	}
+	if len(res.Skipped) != 1 {
+		t.Fatalf("got %d skipped lines, want 1: %+v", len(res.Skipped), res.Skipped)
+	}
+	got := res.Skipped[0]
+	if got.Line != refused {
+		t.Errorf("Line = %q, want the refused link %q", got.Line, refused)
+	}
+	if !strings.Contains(got.Err, "xray-core refuses VLESS") || strings.Contains(got.Err, secret) {
+		t.Errorf("Err = %q, want the reason without the id", got.Err)
+	}
+}
+
 func TestParse(t *testing.T) {
 	t.Run("base64 body", func(t *testing.T) {
 		res := Parse([]byte(base64.StdEncoding.EncodeToString([]byte(list))))

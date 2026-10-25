@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/netip"
 	"reflect"
 	"regexp"
@@ -269,6 +270,18 @@ func withOutbound(raw string) func(*State) {
 	return func(s *State) { s.Servers[0].Outbound = json.RawMessage(raw) }
 }
 
+// Outbounds that xray-core 26.7.11 and newer refuse, or accept, as raw JSON
+// would give them. The id and the passwords are secrets that no error repeats.
+const (
+	vlessPlainTo = `{"protocol":"vless","settings":{"vnext":[{"address":"%s","port":443,"users":[{"id":"s3cret-id","encryption":"none"}]}]}}`
+	vlessTLSTo   = `{"protocol":"vless","settings":{"vnext":[{"address":"%s","port":443,"users":[{"id":"s3cret-id","encryption":"none"}]}]},"streamSettings":{"security":"tls"}}`
+	trojanPlain  = `{"protocol":"trojan","settings":{"servers":[{"address":"%s","port":443,"password":"s3cret-pw"}]}}`
+	trojanTLS    = `{"protocol":"trojan","settings":{"servers":[{"address":"%s","port":443,"password":"s3cret-pw"}]},"streamSettings":{"security":"tls"}}`
+	ssMethod     = `{"protocol":"shadowsocks","settings":{"servers":[{"address":"1.2.3.4","port":8388,"method":"%s","password":"%s"}]}}`
+	// key16 is the base64 of 16 bytes.
+	key16 = "AAECAwQFBgcICQoLDA0ODw=="
+)
+
 func TestValidBaseIsValid(t *testing.T) {
 	if err := valid().Validate(); err != nil {
 		t.Fatalf("valid().Validate() = %v", err)
@@ -320,6 +333,11 @@ func TestValidateRejects(t *testing.T) {
 		{"outbound tag", withOutbound(`{"protocol":"vless","tag":"mine"}`), "servers[0].outbound.tag"},
 		{"outbound tag in capitals", withOutbound(`{"protocol":"vless","Tag":"mine"}`), "servers[0].outbound.tag"},
 		{"outbound empty tag", withOutbound(`{"protocol":"vless","tag":""}`), "servers[0].outbound.tag"},
+		{"outbound vless without tls or encryption to a public IP", withOutbound(fmt.Sprintf(vlessPlainTo, "1.2.3.4")), "servers[0].outbound"},
+		{"outbound vless without tls or encryption to a public domain", withOutbound(fmt.Sprintf(vlessPlainTo, "example.com")), "servers[0].outbound"},
+		{"outbound trojan without tls to a public IP", withOutbound(fmt.Sprintf(trojanPlain, "1.2.3.4")), "servers[0].outbound"},
+		{"outbound shadowsocks method none", withOutbound(fmt.Sprintf(ssMethod, "none", "s3cret-pw")), "servers[0].outbound"},
+		{"outbound shadowsocks 2022 with a short key", withOutbound(fmt.Sprintf(ssMethod, "2022-blake3-aes-256-gcm", key16)), "servers[0].outbound"},
 		{"server subscription missing", func(s *State) { s.Servers[0].Subscription = "deadbeef" }, "servers[0].subscription"},
 
 		{"subscription id uppercase", func(s *State) {
@@ -464,7 +482,53 @@ func TestValidateKeepsSecretsOutOfErrors(t *testing.T) {
 	}
 }
 
+// TestValidateRefusedOutboundsNameTheReason checks that the problem for an
+// outbound xray-core refuses says why, and repeats no id, password or key.
+func TestValidateRefusedOutboundsNameTheReason(t *testing.T) {
+	for _, tt := range []struct{ name, outbound, reason string }{
+		{"vless", fmt.Sprintf(vlessPlainTo, "1.2.3.4"), "xray-core refuses VLESS without TLS or encryption to a public address"},
+		{"trojan", fmt.Sprintf(trojanPlain, "1.2.3.4"), "xray-core refuses Trojan without TLS to a public address"},
+		{"shadowsocks none", fmt.Sprintf(ssMethod, "none", "s3cret-pw"), "xray-core refuses the Shadowsocks methods none and plain"},
+		{"shadowsocks 2022", fmt.Sprintf(ssMethod, "2022-blake3-aes-256-gcm", "s3cret-pw"), "xray-core refuses a Shadowsocks 2022 password"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := valid()
+			withOutbound(tt.outbound)(&s)
+			err := s.Validate()
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			want := "servers[0].outbound: " + tt.reason
+			if !strings.HasPrefix(err.Error(), want) {
+				t.Errorf("error %q does not start with %q", err, want)
+			}
+			for _, secret := range []string{"s3cret", "xraypolicy"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("error repeats %q: %v", secret, err)
+				}
+			}
+		})
+	}
+}
+
 func TestValidateAccepts(t *testing.T) {
+	for _, tt := range []struct{ name, outbound string }{
+		{"vless without tls or encryption to a private IP", fmt.Sprintf(vlessPlainTo, "203.0.113.10")},
+		{"vless without tls or encryption to a private domain", fmt.Sprintf(vlessPlainTo, "foo.test")},
+		{"vless with tls to a public IP", fmt.Sprintf(vlessTLSTo, "1.2.3.4")},
+		{"trojan without tls to a private IP", fmt.Sprintf(trojanPlain, "10.1.2.3")},
+		{"trojan with tls to a public IP", fmt.Sprintf(trojanTLS, "1.2.3.4")},
+		{"shadowsocks aes-256-gcm", fmt.Sprintf(ssMethod, "aes-256-gcm", "s3cret-pw")},
+		{"shadowsocks 2022 with a 16-byte key", fmt.Sprintf(ssMethod, "2022-blake3-aes-128-gcm", key16)},
+	} {
+		t.Run("outbound "+tt.name, func(t *testing.T) {
+			s := valid()
+			withOutbound(tt.outbound)(&s)
+			if err := s.Validate(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
 	for _, m := range []string{
 		"domain:example.com", "full:a.b", "keyword:x", `regexp:^a\.b$`, "geosite:category-ir", "example",
 		"ext:geo.dat:ads", "geosite:google@cn",
