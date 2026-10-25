@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -228,9 +229,14 @@ func TestServerSettings(t *testing.T) {
 	if s.ReadHeaderTimeout != 10*time.Second || s.IdleTimeout != 60*time.Second {
 		t.Errorf("ReadHeaderTimeout = %v, IdleTimeout = %v; want 10s and 60s", s.ReadHeaderTimeout, s.IdleTimeout)
 	}
-	// Core updates and applies take minutes: nothing may cut a response short.
-	if s.WriteTimeout != 0 || s.ReadTimeout != 0 {
-		t.Errorf("WriteTimeout = %v, ReadTimeout = %v; want none", s.WriteTimeout, s.ReadTimeout)
+	// A request must arrive within a minute, a body of 1 MiB included. Core
+	// updates and applies take minutes to answer: nothing may cut a response
+	// short.
+	if s.ReadTimeout != time.Minute {
+		t.Errorf("ReadTimeout = %v, want 1m", s.ReadTimeout)
+	}
+	if s.WriteTimeout != 0 {
+		t.Errorf("WriteTimeout = %v, want none", s.WriteTimeout)
 	}
 	if s.TLSConfig.MinVersion != tls.VersionTLS12 {
 		t.Errorf("MinVersion = %#x, want TLS 1.2", s.TLSConfig.MinVersion)
@@ -305,5 +311,72 @@ func TestServeStopsWithItsContext(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve did not stop")
+	}
+}
+
+// A caller can declare a body and never send it. net/http reads what is left
+// of a body before it answers, so without a ReadTimeout that holds the
+// connection, and the goroutine, for good: with or without the token.
+func TestServeBoundsABodyThatNeverComes(t *testing.T) {
+	old := readTimeout
+	readTimeout = 300 * time.Millisecond
+	defer func() { readTimeout = old }()
+	r := start(t, NewHandler(newFake(), testToken))
+	host := strings.TrimPrefix(r.url, "https://")
+	auth := "Authorization: Bearer " + testToken + "\r\n"
+
+	for _, c := range []struct{ name, request string }{
+		{"no token, a length and no body", "POST /v1/apply HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n"},
+		{"no token, chunked and no chunk", "POST /v1/apply HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"},
+		{"the token, a route that ignores the body", "POST /v1/apply HTTP/1.1\r\nHost: x\r\n" + auth + "Content-Length: 100\r\n\r\n"},
+		{"the token, a body that stops half way", "PUT /v1/policy HTTP/1.1\r\nHost: x\r\n" + auth + "Content-Length: 100\r\n\r\n{\"mode\""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			conn, err := tls.Dial("tcp", host, &tls.Config{InsecureSkipVerify: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			if _, err := io.WriteString(conn, c.request); err != nil {
+				t.Fatal(err)
+			}
+			began := time.Now()
+			conn.SetReadDeadline(began.Add(5 * time.Second))
+			_, err = io.Copy(io.Discard, conn) // until the server closes it
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatal("the server still held the connection after 5 s")
+			}
+			if took := time.Since(began); took > 3*time.Second {
+				t.Errorf("the server closed the connection after %v, with a ReadTimeout of 300ms", took)
+			}
+		})
+	}
+}
+
+// The ReadTimeout is for the request. Once it has been read, an operation may
+// take as long as it takes.
+func TestServeAnOperationMayOutlastTheReadTimeout(t *testing.T) {
+	old := readTimeout
+	readTimeout = 300 * time.Millisecond
+	defer func() { readTimeout = old }()
+	f := newFake()
+	f.onStatus = func() { time.Sleep(900 * time.Millisecond) }
+	f.gate = func(string, context.Context) { time.Sleep(900 * time.Millisecond) }
+	r := start(t, NewHandler(f, testToken))
+	client := pinnedClient(r.fp)
+
+	if code, body := get(t, client, r.url+"/v1/status", testToken); code != 200 {
+		t.Errorf("a request without a body: %d %s", code, body)
+	}
+	// With a body, which is read to its end before the handler goes on.
+	req, _ := http.NewRequest("PUT", r.url+"/v1/policy", strings.NewReader(`{"mode":"full"}`))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("a request with a body: %d", resp.StatusCode)
 	}
 }

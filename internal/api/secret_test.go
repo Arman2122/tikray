@@ -168,21 +168,84 @@ func TestCertMismatchIsAnError(t *testing.T) {
 	}
 }
 
-func TestCertWithOneFileMissingIsAnError(t *testing.T) {
-	for _, drop := range []string{"tls.crt", "tls.key"} {
-		t.Run("without "+drop, func(t *testing.T) {
-			dir := t.TempDir()
+// A certificate without its key may be pinned by a client already, so that
+// making another would lock it out without a word: that is an error.
+func TestCertWithoutItsKeyIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	if _, _, err := LoadOrCreateCert(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	crt := readFile(t, filepath.Join(dir, "tls.crt"))
+	if err := os.Remove(filepath.Join(dir, "tls.key")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadOrCreateCert(dir, nil); err == nil || !strings.HasPrefix(err.Error(), "api: ") {
+		t.Fatalf("got %v, want an api: error", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tls.key")); !os.IsNotExist(err) {
+		t.Error("a key was made")
+	}
+	if !bytes.Equal(crt, readFile(t, filepath.Join(dir, "tls.crt"))) {
+		t.Error("the certificate was rewritten")
+	}
+}
+
+// A crash between the two writes of the first start leaves a key and no
+// certificate. Nothing was ever served with that key, so a new pair is made.
+func TestKeyWithoutACertificateIsMadeAgain(t *testing.T) {
+	for name, key := range map[string]func(t *testing.T, dir string) []byte{
+		"a key from an earlier start": func(t *testing.T, dir string) []byte {
 			if _, _, err := LoadOrCreateCert(dir, nil); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Remove(filepath.Join(dir, drop)); err != nil {
+			if err := os.Remove(filepath.Join(dir, "tls.crt")); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := LoadOrCreateCert(dir, nil); err == nil {
-				t.Fatal("no error")
+			return readFile(t, filepath.Join(dir, "tls.key"))
+		},
+		"a key that is garbage": func(t *testing.T, dir string) []byte {
+			if err := os.WriteFile(filepath.Join(dir, "tls.key"), []byte("not pem\n"), 0o600); err != nil {
+				t.Fatal(err)
 			}
-			if _, err := os.Stat(filepath.Join(dir, drop)); !os.IsNotExist(err) {
-				t.Errorf("%s was made again", drop)
+			return []byte("not pem\n")
+		},
+		"a key with a wider mode": func(t *testing.T, dir string) []byte {
+			if err := os.WriteFile(filepath.Join(dir, "tls.key"), []byte("old"), 0o666); err != nil {
+				t.Fatal(err)
+			}
+			return []byte("old")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			old := key(t, dir)
+
+			cert, fp, err := LoadOrCreateCert(dir, []net.IP{net.ParseIP("172.31.255.2")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Equal(old, readFile(t, filepath.Join(dir, "tls.key"))) {
+				t.Error("the old key was kept")
+			}
+			for file, want := range map[string]os.FileMode{"tls.crt": 0o644, "tls.key": 0o600} {
+				if got := modeOf(t, filepath.Join(dir, file)); got != want {
+					t.Errorf("%s mode = %o, want %o", file, got, want)
+				}
+			}
+			// The pair is a pair, and the next start reuses it.
+			again, fp2, err := LoadOrCreateCert(dir, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fp2 != fp || !bytes.Equal(again.Certificate[0], cert.Certificate[0]) {
+				t.Error("the next start made another certificate")
+			}
+			leaf, err := x509.ParseCertificate(cert.Certificate[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := leaf.IPAddresses[0].String(); got != "172.31.255.2" {
+				t.Errorf("first IP = %s, want the one given", got)
 			}
 		})
 	}

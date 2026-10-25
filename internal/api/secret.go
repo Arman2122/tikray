@@ -83,28 +83,27 @@ func LoadOrCreateToken(dir string) (string, error) {
 // missing.
 //
 // Files that exist are used as they are, with the addresses they have: ips
-// counts only for a new certificate. Only one of the two files, or a key that
-// is not the certificate's, is an error and never a new certificate: the
-// clients that pinned the old one would not connect, and the person should
-// know why.
+// counts only for a new certificate. A certificate without its key, or a key
+// that is not the certificate's, is an error and never a new certificate: a
+// client may have pinned the old one, and would not connect, and the person
+// should know why. A key without a certificate is not: the certificate is
+// written after the key, so that it is what a crash on the first start leaves,
+// and nothing was ever served with that key; a new pair replaces it.
 func LoadOrCreateCert(dir string, ips []net.IP) (tls.Certificate, string, error) {
 	crtPath, keyPath := filepath.Join(dir, certFile), filepath.Join(dir, keyFile)
 	crtPEM, crtErr := os.ReadFile(crtPath)
-	keyPEM, keyErr := os.ReadFile(keyPath)
-	crtMissing, keyMissing := errors.Is(crtErr, fs.ErrNotExist), errors.Is(keyErr, fs.ErrNotExist)
 	switch {
-	case crtErr != nil && !crtMissing:
-		return tls.Certificate{}, "", fmt.Errorf("api: reading the certificate: %w", crtErr)
-	case keyErr != nil && !keyMissing:
-		return tls.Certificate{}, "", fmt.Errorf("api: reading the key: %w", keyErr)
-	case crtMissing && keyMissing:
+	case errors.Is(crtErr, fs.ErrNotExist):
 		return createCert(dir, ips)
-	case crtMissing || keyMissing:
-		have, lack := certFile, keyFile
-		if crtMissing {
-			have, lack = keyFile, certFile
-		}
-		return tls.Certificate{}, "", fmt.Errorf("api: %s has no %s beside it in %s; restore it, or remove both to make new ones", have, lack, dir)
+	case crtErr != nil:
+		return tls.Certificate{}, "", fmt.Errorf("api: reading the certificate: %w", crtErr)
+	}
+	keyPEM, keyErr := os.ReadFile(keyPath)
+	switch {
+	case errors.Is(keyErr, fs.ErrNotExist):
+		return tls.Certificate{}, "", fmt.Errorf("api: %s has no %s beside it in %s; restore the key, or remove the certificate to make a new pair (clients that pinned this one must pin the new one)", certFile, keyFile, dir)
+	case keyErr != nil:
+		return tls.Certificate{}, "", fmt.Errorf("api: reading the key: %w", keyErr)
 	}
 	cert, err := tls.X509KeyPair(crtPEM, keyPEM)
 	if err != nil {
@@ -159,9 +158,9 @@ func createCert(dir string, ips []net.IP) (tls.Certificate, string, error) {
 	if err := atomicfile.WriteFile(keyPath, keyPEM, 0o600); err != nil {
 		return tls.Certificate{}, "", fmt.Errorf("api: writing the key: %w", err)
 	}
+	// The key goes first: a crash between the two leaves a key and no
+	// certificate, which LoadOrCreateCert makes a new pair of.
 	if err := atomicfile.WriteFile(crtPath, crtPEM, 0o644); err != nil {
-		// A key alone would stop the next start, so that it is not left.
-		os.Remove(keyPath)
 		return tls.Certificate{}, "", fmt.Errorf("api: writing the certificate: %w", err)
 	}
 	return cert, fingerprint(cert), nil

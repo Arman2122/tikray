@@ -13,9 +13,21 @@ import (
 // serving. It is a variable for the tests.
 var shutdownTimeout = 10 * time.Second
 
-// newServer is the http.Server of the API. It has no ReadTimeout or
-// WriteTimeout: a core update or an apply takes minutes, and the response
-// comes when it is done.
+// readTimeout is how long a caller has to send a request, its body included
+// (1 MiB at most). It is a variable for the tests.
+var readTimeout = 60 * time.Second
+
+// newServer is the http.Server of the API.
+//
+// It has a ReadTimeout, which a long operation does not run into: net/http
+// clears the read deadline when there is no body to read, and when the
+// handler has read the body to its end. Without a ReadTimeout, a caller
+// that declares a body and never sends it holds its connection for good,
+// because net/http reads what is left of the body before it answers, a 401
+// included, and by then no deadline is set.
+//
+// It has no WriteTimeout: a core update or an apply takes minutes, and the
+// response comes when it is done.
 func newServer(h http.Handler, cert tls.Certificate) *http.Server {
 	return &http.Server{
 		Handler: h,
@@ -24,6 +36,7 @@ func newServer(h http.Handler, cert tls.Certificate) *http.Server {
 			MinVersion:   tls.VersionTLS12,
 		},
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       readTimeout,
 		IdleTimeout:       60 * time.Second,
 	}
 }

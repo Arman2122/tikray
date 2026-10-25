@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
@@ -63,8 +65,8 @@ type refreshResponse struct {
 	Via     string        `json:"via"`
 }
 
-// skippedLine is a line of a subscription that gave no server, and why. Both
-// are redacted: the line may be a share link.
+// skippedLine is a line of a subscription that gave no server, and why. Line
+// is not the line (see lineLabel), and Reason is redacted.
 type skippedLine struct {
 	Line   string `json:"line"`
 	Reason string `json:"reason"`
@@ -73,9 +75,57 @@ type skippedLine struct {
 func newRefreshResponse(r service.RefreshResult, redact func(string) string) refreshResponse {
 	out := refreshResponse{Added: r.Added, Updated: r.Updated, Removed: r.Removed, Kept: r.Kept, Via: r.Via, Skipped: []skippedLine{}}
 	for _, s := range r.Skipped {
-		out.Skipped = append(out.Skipped, skippedLine{Line: redact(s.Line), Reason: redact(s.Err)})
+		out.Skipped = append(out.Skipped, skippedLine{Line: redact(lineLabel(s.Line)), Reason: redact(s.Err)})
 	}
 	return out
+}
+
+// lineLabel says which line of a subscription was skipped without showing it.
+// A share link that did not parse holds a credential that is in no state, so
+// that no redactor knows it: the label is the link's scheme, "://…", and
+// "#<name>" when the link has a fragment, which is the name it shows (as the
+// parser reads it: unescaped, without the characters a name may not hold).
+// A line that is no URL is "…".
+//
+// The fragment starts at the first "#", as in any URL. A link that is broken
+// by a raw "#" in its credential shows what follows it; this is the one
+// place the label can show part of one.
+func lineLabel(line string) string {
+	const none = "…"
+	i := strings.Index(line, "://")
+	if i <= 0 || !isScheme(line[:i]) {
+		return none
+	}
+	label := line[:i] + "://…"
+	if _, frag, ok := strings.Cut(line[i:], "#"); ok {
+		if name, err := url.PathUnescape(frag); err == nil {
+			frag = name
+		}
+		frag = strings.Map(func(r rune) rune {
+			if store.ForbiddenInName(r) {
+				return -1
+			}
+			return r
+		}, frag)
+		if frag != "" {
+			label += "#" + frag
+		}
+	}
+	return label
+}
+
+// isScheme reports whether s is a URL scheme: a letter, then letters,
+// digits, "+", "-" or ".".
+func isScheme(s string) bool {
+	for i, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		case i > 0 && (c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.'):
+		default:
+			return false
+		}
+	}
+	return s != ""
 }
 
 // coreResponse is service.CoreInfo on the wire.

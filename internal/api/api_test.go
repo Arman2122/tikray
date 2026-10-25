@@ -76,6 +76,9 @@ type fakeBackend struct {
 
 	// onStatus, if set, runs inside Status.
 	onStatus func()
+	// gate, if set, runs inside ApplyNow, CoreUpdate, CoreRollback,
+	// RefreshSubscription and SetDefaultPolicy, with the context they got.
+	gate func(method string, ctx context.Context)
 }
 
 func newFake() *fakeBackend {
@@ -107,6 +110,13 @@ func (f *fakeBackend) recorded() []call {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]call(nil), f.calls...)
+}
+
+// enter runs the gate, if there is one.
+func (f *fakeBackend) enter(method string, ctx context.Context) {
+	if f.gate != nil {
+		f.gate(method, ctx)
+	}
 }
 
 // change records a mutation, and fails it as the store would on a stale
@@ -150,18 +160,21 @@ func (f *fakeBackend) Core(context.Context) (service.CoreInfo, error) {
 	return f.core, f.err
 }
 
-func (f *fakeBackend) ApplyNow(context.Context) (artifacts.Result, error) {
+func (f *fakeBackend) ApplyNow(ctx context.Context) (artifacts.Result, error) {
 	f.rec("ApplyNow", 0)
+	f.enter("ApplyNow", ctx)
 	return f.result, f.err
 }
 
-func (f *fakeBackend) CoreUpdate(_ context.Context, version string, o artifacts.UpdateOptions) (artifacts.Result, error) {
+func (f *fakeBackend) CoreUpdate(ctx context.Context, version string, o artifacts.UpdateOptions) (artifacts.Result, error) {
 	f.rec("CoreUpdate", 0, version, o)
+	f.enter("CoreUpdate", ctx)
 	return f.result, f.err
 }
 
-func (f *fakeBackend) CoreRollback(context.Context) (artifacts.Result, error) {
+func (f *fakeBackend) CoreRollback(ctx context.Context) (artifacts.Result, error) {
 	f.rec("CoreRollback", 0)
+	f.enter("CoreRollback", ctx)
 	return f.result, f.err
 }
 
@@ -193,11 +206,12 @@ func (f *fakeBackend) RemoveSubscription(_ context.Context, rev uint64, id strin
 	return f.change("RemoveSubscription", rev, id)
 }
 
-func (f *fakeBackend) RefreshSubscription(_ context.Context, id string) (service.RefreshResult, error) {
+func (f *fakeBackend) RefreshSubscription(ctx context.Context, id string) (service.RefreshResult, error) {
 	f.rec("RefreshSubscription", 0, id)
+	f.enter("RefreshSubscription", ctx)
 	return service.RefreshResult{
 		Added: 1, Updated: 2, Removed: 3, Kept: 4,
-		Skipped: []subscription.Skipped{{Line: "trojan://" + secretID + "@host", Err: "bad port"}, {Line: "hello", Err: "scheme is not supported"}},
+		Skipped: []subscription.Skipped{{Line: "trojan://" + secretID + "@host#lab-b", Err: "bad port"}, {Line: "hello", Err: "scheme is not supported"}},
 		Via:     "direct",
 	}, f.err
 }
@@ -210,7 +224,8 @@ func (f *fakeBackend) RemoveDevice(_ context.Context, rev uint64, a netip.Prefix
 	return f.change("RemoveDevice", rev, a)
 }
 
-func (f *fakeBackend) SetDefaultPolicy(_ context.Context, rev uint64, p store.Policy) (uint64, error) {
+func (f *fakeBackend) SetDefaultPolicy(ctx context.Context, rev uint64, p store.Policy) (uint64, error) {
+	f.enter("SetDefaultPolicy", ctx)
 	return f.change("SetDefaultPolicy", rev, p)
 }
 
@@ -373,7 +388,7 @@ func routes(t testing.TB) []routeCase {
 		{name: "refresh a subscription", method: "POST", path: "/v1/subscriptions/9be8f7a6/refresh", status: 200, etag: curRev,
 			calls: []call{{Method: "RefreshSubscription", Args: []any{"9be8f7a6"}}},
 			response: `{"added":1,"updated":2,"removed":3,"kept":4,"via":"direct","skipped":[` +
-				`{"line":"trojan://‹redacted›@host","reason":"bad port"},{"line":"hello","reason":"scheme is not supported"}]}`},
+				`{"line":"trojan://…#lab-b","reason":"bad port"},{"line":"…","reason":"scheme is not supported"}]}`},
 
 		{name: "list devices", method: "GET", path: "/v1/devices", status: 200, etag: curRev, response: mustJSON(t, st.Devices)},
 		{name: "set a device, escaped CIDR", method: "PUT", path: "/v1/devices/192.168.88.10%2F32", body: `{"name":"tv","policy":{"mode":"smart"}}`, status: 200, etag: nextRev,
@@ -550,18 +565,147 @@ func TestListsAreNeverNull(t *testing.T) {
 	sameJSON(t, r.body, `{"active":"","slots":[],"history":[]}`)
 
 	// A refresh that skipped nothing says so with a list, too.
-	g := newFake()
-	srv2 := httptest.NewServer(NewHandler(&noSkips{g}, testToken))
+	srv2 := httptest.NewServer(NewHandler(&withSkips{newFake(), nil}, testToken))
 	defer srv2.Close()
 	r = request(t, srv2, "POST", "/v1/subscriptions/9be8f7a6/refresh", "", authed())
 	sameJSON(t, r.body, `{"added":0,"updated":0,"removed":0,"kept":0,"skipped":[],"via":"direct"}`)
 }
 
-// noSkips is a fake whose refresh skips nothing.
-type noSkips struct{ *fakeBackend }
+// withSkips is a fake whose refresh skips these lines.
+type withSkips struct {
+	*fakeBackend
+	skipped []subscription.Skipped
+}
 
-func (noSkips) RefreshSubscription(context.Context, string) (service.RefreshResult, error) {
-	return service.RefreshResult{Via: "direct"}, nil
+func (w *withSkips) RefreshSubscription(context.Context, string) (service.RefreshResult, error) {
+	return service.RefreshResult{Via: "direct", Skipped: w.skipped}, nil
+}
+
+// A skipped line may be a share link that holds a credential the state does
+// not know, so that no redactor can hide it: the body shows its scheme and its
+// name (the fragment) and nothing else.
+func TestSkippedLinesCarryNoCredential(t *testing.T) {
+	const password = "s3cretPassw0rd"
+	for _, c := range []struct{ name, line, want string }{
+		{"a trojan link", "trojan://" + password + "@host.example:443?sni=x#Frankfurt%202", "trojan://…#Frankfurt 2"},
+		{"a link without a name", "ss://YWVzLTI1Ni1nY206" + password + "@1.2.3.4:8388", "ss://…"},
+		{"a base64 link", "vmess://eyJhZGQiOiJob3N0In0=", "vmess://…"},
+		{"a credential in the query", "trojan://p@h?password=" + password, "trojan://…"},
+		{"the name starts at the first #", "trojan://" + password + "@h#a#b", "trojan://…#a#b"},
+		{"a name that does not unescape", "trojan://" + password + "@h#100%zz", "trojan://…#100%zz"},
+		{"a name with an escape character", "vless://" + password + "@h#ev\x1b[31mil", "vless://…#ev[31mil"},
+		{"a name with a bidi override", "vless://" + password + "@h#ab\u202ecd", "vless://…#abcd"},
+		{"text", "hello", "…"},
+		{"a page", "<html>blocked</html>", "…"},
+		{"text that holds ://", "not a url ://" + password, "…"},
+		{"no scheme", "://" + password, "…"},
+		{"a # before the ://", "x#y://" + password, "…"},
+		{"a credential and no scheme", password, "…"},
+		{"empty", "", "…"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			skipped := []subscription.Skipped{{Line: c.line, Err: "bad port"}}
+			srv := httptest.NewServer(NewHandler(&withSkips{newFake(), skipped}, testToken))
+			defer srv.Close()
+			r := request(t, srv, "POST", "/v1/subscriptions/9be8f7a6/refresh", "", authed())
+			if r.status != 200 {
+				t.Fatalf("status = %d", r.status)
+			}
+			if strings.Contains(string(r.body), password) {
+				t.Error("the body shows the credential")
+			}
+			var got struct {
+				Skipped []struct{ Line, Reason string }
+			}
+			if err := json.Unmarshal(r.body, &got); err != nil || len(got.Skipped) != 1 {
+				t.Fatalf("body = %s (%v)", r.body, err)
+			}
+			if got.Skipped[0].Line != c.want {
+				t.Errorf("line = %q, want %q", got.Skipped[0].Line, c.want)
+			}
+		})
+	}
+
+	t.Run("the reason is redacted", func(t *testing.T) {
+		skipped := []subscription.Skipped{{Line: "trojan://x@h", Err: "xray rejects id " + secretID}}
+		srv := httptest.NewServer(NewHandler(&withSkips{newFake(), skipped}, testToken))
+		defer srv.Close()
+		r := request(t, srv, "POST", "/v1/subscriptions/9be8f7a6/refresh", "", authed())
+		if strings.Contains(string(r.body), secretID) || !strings.Contains(string(r.body), "‹redacted›") {
+			t.Error("the reason was not redacted")
+		}
+	})
+}
+
+// A client that goes away must not stop an apply, an update, a rollback or a
+// refresh half way, with a trial open on the router: they run on a context
+// of their own. A change keeps the request's.
+func TestOperationsOutliveTheirRequest(t *testing.T) {
+	for _, c := range []struct {
+		name, method, path, body, call string
+		detached                       bool
+	}{
+		{"apply", "POST", "/v1/apply", "", "ApplyNow", true},
+		{"core update", "POST", "/v1/core/update", `{"version":"latest"}`, "CoreUpdate", true},
+		{"core rollback", "POST", "/v1/core/rollback", "", "CoreRollback", true},
+		{"refresh", "POST", "/v1/subscriptions/9be8f7a6/refresh", "", "RefreshSubscription", true},
+		// The control: here the disconnect does reach the backend's context,
+		// so that the others show nothing for want of a way to see it.
+		{"a change", "PUT", "/v1/policy", `{"mode":"full"}`, "SetDefaultPolicy", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFake()
+			got, release := make(chan context.Context, 1), make(chan struct{})
+			f.gate = func(method string, ctx context.Context) {
+				if method == c.call {
+					got <- ctx
+					<-release
+				}
+			}
+			srv := serve(t, f)
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			t.Cleanup(unblock) // before the server's Close, which waits for the handler
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req, err := http.NewRequestWithContext(ctx, c.method, srv.URL+c.path, strings.NewReader(c.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+testToken)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				if resp, err := srv.Client().Do(req); err == nil {
+					resp.Body.Close()
+				}
+			}()
+
+			var backendCtx context.Context
+			select {
+			case backendCtx = <-got:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the backend was not called")
+			}
+			cancel() // the client goes away
+			<-done
+
+			if c.detached {
+				time.Sleep(300 * time.Millisecond)
+				if err := backendCtx.Err(); err != nil {
+					t.Errorf("the backend's context ended with the request: %v", err)
+				}
+			} else {
+				select {
+				case <-backendCtx.Done():
+				case <-time.After(5 * time.Second):
+					t.Error("control: the server never saw the client go")
+				}
+			}
+			unblock()
+		})
+	}
 }
 
 func TestUnknownRoute(t *testing.T) {

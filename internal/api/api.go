@@ -9,7 +9,8 @@
 // honours If-Match: "<revision>" and fails with 409 conflict when the state
 // has moved on; without the header it is made on the state as it is. The
 // routes that do not change the state on a revision a caller read (apply, core
-// update and rollback, refresh) take none and ignore the header.
+// update and rollback, refresh) take none and ignore the header, and run
+// detached from the request: a caller that disconnects does not stop them.
 //
 // An error is {"error": code, "detail": text}, the text redacted of every
 // secret of the state. Neither the token nor the Authorization header is ever
@@ -288,10 +289,20 @@ func (h *handler) patchSubscription(w http.ResponseWriter, r *http.Request) {
 	h.reply(w, http.StatusOK, newRev, sub)
 }
 
-// refreshSubscription fetches the subscription now. It is no change a caller
-// makes on a revision: the refresh merges into the state as it is.
+// detached is the context of an operation that must run to its end whether
+// or not the caller waits: an apply, an update or a rollback has a trial open
+// on the router, and a caller that is interrupted would stop it half way. It
+// has the request's values and none of its cancellation; the operation is
+// bounded by the service's own lifetime and the updater's deadlines.
+func detached(r *http.Request) context.Context {
+	return context.WithoutCancel(r.Context())
+}
+
+// refreshSubscription fetches the subscription now, detached from the
+// request. It is no change a caller makes on a revision: the refresh merges
+// into the state as it is.
 func (h *handler) refreshSubscription(w http.ResponseWriter, r *http.Request) {
-	res, err := h.b.RefreshSubscription(r.Context(), r.PathValue("id"))
+	res, err := h.b.RefreshSubscription(detached(r), r.PathValue("id"))
 	if err != nil {
 		h.fail(w, err)
 		return
@@ -410,7 +421,7 @@ func remove(h *handler, do func(ctx context.Context, rev uint64, id string) (uin
 // --- the operations on the core
 
 func (h *handler) apply(w http.ResponseWriter, r *http.Request) {
-	res, err := h.b.ApplyNow(r.Context())
+	res, err := h.b.ApplyNow(detached(r))
 	h.outcome(w, res, err)
 }
 
@@ -423,12 +434,12 @@ func (h *handler) coreUpdate(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, codeBadRequest, `version is required: "latest" or a release such as "26.10.21"`)
 		return
 	}
-	res, err := h.b.CoreUpdate(r.Context(), in.Version, artifacts.UpdateOptions{AllowUnverified: in.AllowUnverified})
+	res, err := h.b.CoreUpdate(detached(r), in.Version, artifacts.UpdateOptions{AllowUnverified: in.AllowUnverified})
 	h.outcome(w, res, err)
 }
 
 func (h *handler) coreRollback(w http.ResponseWriter, r *http.Request) {
-	res, err := h.b.CoreRollback(r.Context())
+	res, err := h.b.CoreRollback(detached(r))
 	h.outcome(w, res, err)
 }
 
