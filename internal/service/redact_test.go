@@ -74,17 +74,21 @@ func TestRedactorCoversSecrets(t *testing.T) {
 }
 
 // Secrets sit at any depth of an outbound, under keys in any case (xray reads
-// its keys without regard to case), and in lists under those keys.
+// its keys without regard to case), and in lists under those keys. WireGuard's
+// private key is secretKey in xray; a public key and a number are no secrets.
 func TestRedactorFindsSecretsAnywhere(t *testing.T) {
 	st := store.Default()
 	st.Servers = []store.Server{
-		server("00000001", `{"protocol":"wireguard","settings":{"secretKey":"not-a-listed-key","privateKey":"wg-private-key-1","peers":[{"publicKey":"wg-public","preSharedKey":"wg-psk-2"}]}}`),
+		server("00000001", `{"protocol":"wireguard","settings":{"secretKey":"wg-secret-key-0","privateKey":"wg-private-key-1","peers":[{"publicKey":"wg-public","preSharedKey":"wg-psk-2"}]}}`),
 		server("00000002", `{"protocol":"vless","streamSettings":{"kcpSettings":{"seed":"kcp-seed-3"}},"settings":{"vnext":[{"users":[{"ID":"upper-case-id-4"}]}]}}`),
 		server("00000003", `{"protocol":"trojan","settings":{"servers":[{"PassWord":["list-pass-5","list-pass-6"],"id":12345678}]}}`),
+		server("00000004", `{"protocol":"wireguard","settings":{"SecretKey":"wg-secret-key-7"}}`),
 	}
-	got := RedactorFor(st)("wg-private-key-1 wg-psk-2 kcp-seed-3 upper-case-id-4 list-pass-5 list-pass-6 12345678 wg-public not-a-listed-key")
-	want := strings.Repeat(redacted+" ", 6) + "12345678 wg-public not-a-listed-key"
+	got := RedactorFor(st)("wg-secret-key-0 wg-private-key-1 wg-psk-2 kcp-seed-3 upper-case-id-4 list-pass-5 list-pass-6 wg-secret-key-7 12345678 wg-public")
+	want := strings.Repeat(redacted+" ", 8) + "12345678 wg-public"
 	wantText(t, got, want,
+		secret{"the WireGuard secret key", "wg-secret-key-0"},
+		secret{"the other WireGuard secret key", "wg-secret-key-7"},
 		secret{"the WireGuard key", "wg-private-key-1"},
 		secret{"the pre-shared key", "wg-psk-2"},
 		secret{"the mKCP seed", "kcp-seed-3"},

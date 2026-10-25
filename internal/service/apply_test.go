@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -192,6 +193,63 @@ func TestApplyRetriesWhenRunnerDown(t *testing.T) {
 	}
 }
 
+// A runner that restarts during the trial reverts it on boot and records the
+// outcome reboot: the loop tries again, and Status says pending until then.
+func TestApplyRetriesAfterRunnerReboot(t *testing.T) {
+	e := newEnv(t)
+	st, _ := e.edit()
+	e.outOfSync()
+	e.runner.hold()
+	e.start()
+	e.clock.advance(2 * time.Second)
+	within(t, "the trial", e.runner.waiting)
+	e.runner.rebootNext()
+	e.runner.release()
+	e.settle()
+
+	got := wantStatus(t, e.s, false, true)
+	if got.LastApply == nil || got.LastApply.Outcome != runnerapi.OutcomeReboot {
+		t.Fatalf("LastApply = %+v, want reboot", got.LastApply)
+	}
+	if p := e.clock.pending(); !slices.Equal(p, []time.Duration{10 * time.Second}) {
+		t.Fatalf("timers armed for %v after the reboot, want a retry after 10s", p)
+	}
+	e.advance(10 * time.Second)
+	wantTrials(t, e, configOf(t, st), configOf(t, st))
+	wantStatus(t, e.s, true, false)
+	e.wantNoTimers()
+}
+
+// A runner that goes away during the health check fails it, and its abort:
+// the outcome is unhealthy, but the runner can't be reached, so the loop
+// tries again. (An unhealthy outcome from a runner that answers is not
+// retried: TestRejectedIsNotRetried.)
+func TestApplyRetriesWhenRunnerGoesAwayInTrial(t *testing.T) {
+	e := newEnv(t)
+	st, _ := e.edit()
+	e.outOfSync()
+	e.health.failThen(errors.New("xray's API does not answer"), func() { e.runner.setDown(true) })
+	e.start()
+	e.advance(2 * time.Second)
+
+	got := wantStatus(t, e.s, false, true)
+	if got.LastApply == nil || got.LastApply.Outcome != artifacts.OutcomeUnhealthy {
+		t.Fatalf("LastApply = %+v, want unhealthy", got.LastApply)
+	}
+	if p := e.clock.pending(); !slices.Equal(p, []time.Duration{10 * time.Second}) {
+		t.Fatalf("timers armed for %v, want a retry after 10s", p)
+	}
+	if applies := e.eventsOf(KindApply); len(applies) != 1 || !strings.Contains(applies[0], "trying again in 10s") {
+		t.Errorf("apply events %q, want one that tries again", applies)
+	}
+	e.health.failThen(nil, nil)
+	e.runner.restart()
+	e.advance(10 * time.Second)
+	wantTrials(t, e, configOf(t, st), configOf(t, st))
+	wantStatus(t, e.s, true, false)
+	e.wantNoTimers()
+}
+
 // The wait between retries doubles up to 5 minutes, and a kick meanwhile
 // starts the debounce without resetting it.
 func TestRetryBackoff(t *testing.T) {
@@ -226,6 +284,11 @@ func TestRejectedIsNotRetried(t *testing.T) {
 		}, runnerapi.OutcomeRejected},
 		{"unhealthy", func(e *env) {
 			e.health.fail(errors.New("xray's API does not answer for user " + vlessID))
+		}, artifacts.OutcomeUnhealthy},
+		// A probe through the proxy fails as net/http's calls do, with a
+		// *url.Error, while the runner answers: still the config's fault.
+		{"unhealthy probe", func(e *env) {
+			e.health.fail(&url.Error{Op: "Get", URL: "https://www.gstatic.com/generate_204", Err: errors.New("socks connect: user " + vlessID + " refused")})
 		}, artifacts.OutcomeUnhealthy},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

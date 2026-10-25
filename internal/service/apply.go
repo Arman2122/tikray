@@ -134,7 +134,7 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 		}
 	}
 	res, err := u.Apply(ctx)
-	again = retryable(res, err) && ctx.Err() == nil
+	again = s.retryable(ctx, res, err) && ctx.Err() == nil
 	if !again {
 		retry = 0
 	}
@@ -144,13 +144,23 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 
 // retryable reports whether an apply that ended with res and err may work if
 // tried again later without a change: the runner could not be reached, or
-// another update holds the artifacts lock, or a trial is open that will end
-// by its deadline. A config that xray rejected, or that failed the health
-// check, waits for a change.
-func retryable(res artifacts.Result, err error) bool {
+// restarted during the trial (reboot), or another update holds the artifacts
+// lock, or a trial is open that will end by its deadline. A config that xray
+// rejected waits for a change, and so does one that failed the health check,
+// unless the runner can't be reached now: then it was the runner going away
+// that failed the check. The error alone can't tell, as a failing probe
+// through the proxy is a *url.Error too.
+func (s *Service) retryable(ctx context.Context, res artifacts.Result, err error) bool {
 	switch {
-	case err == nil, res.Outcome == runnerapi.OutcomeRejected, res.Outcome == artifacts.OutcomeUnhealthy:
+	case err == nil, res.Outcome == runnerapi.OutcomeRejected:
 		return false
+	case res.Outcome == runnerapi.OutcomeReboot:
+		return true
+	case res.Outcome == artifacts.OutcomeUnhealthy:
+		sctx, cancel := context.WithTimeout(ctx, statusTimeout)
+		defer cancel()
+		_, serr := s.runner.Status(sctx)
+		return serr != nil && unreachable(serr)
 	}
 	return errors.Is(err, artifacts.ErrLocked) || errors.Is(err, runnerapi.ErrBusy) || unreachable(err)
 }

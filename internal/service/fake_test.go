@@ -140,6 +140,10 @@ type fakeRunner struct {
 	trials []runnerapi.Candidate
 	// reject, when set, is the xray output a trial is rejected with.
 	reject string
+	// reboot, when set, makes the next trial start and the runner restart
+	// at once, as its boot finds the trial open: it reverts and records the
+	// outcome reboot.
+	reboot bool
 	// gate, when set, holds each trial until it is closed; waiting gets a
 	// value when a trial starts to wait at it.
 	gate    chan struct{}
@@ -178,6 +182,24 @@ func (f *fakeRunner) setReject(output string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reject = output
+}
+
+// rebootNext makes the next trial end in a restart of the runner.
+func (f *fakeRunner) rebootNext() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reboot = true
+}
+
+// restart brings a runner that went down back up as its boot does: a trial
+// that was open is reverted, with the outcome reboot.
+func (f *fakeRunner) restart() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.down = false
+	if f.st.State == runnerapi.StateTrial {
+		f.revert(runnerapi.OutcomeReboot)
+	}
 }
 
 // hold makes the next trials wait until release.
@@ -279,6 +301,10 @@ func (f *fakeRunner) trial(ctx context.Context) *http.Response {
 	}
 	f.st.State, f.st.Candidate = runnerapi.StateTrial, &c
 	f.st.XrayVersion, f.st.RoutesOK, f.st.GatewayUp = fakeXrayVersion(c.Core), true, true
+	if f.reboot {
+		f.reboot = false
+		f.revert(runnerapi.OutcomeReboot)
+	}
 	return reply(http.StatusNoContent, nil)
 }
 
@@ -290,15 +316,25 @@ func (f *fakeRunner) end(outcome string) *http.Response {
 	if f.st.State != runnerapi.StateTrial {
 		return reply(http.StatusConflict, map[string]string{"error": "no_trial"})
 	}
+	f.revert(outcome)
+	return reply(http.StatusNoContent, nil)
+}
+
+// revert closes the open trial with outcome: a commit makes the candidate
+// active, anything else leaves the active selection as it was. mu must be
+// held.
+func (f *fakeRunner) revert(outcome string) {
 	c := *f.st.Candidate
 	if outcome == runnerapi.OutcomeCommitted {
 		sel := c.Selection
 		f.st.Active = &sel
 	}
 	f.st.State, f.st.Candidate = runnerapi.StateRunning, nil
+	if f.st.Active != nil {
+		f.st.XrayVersion = fakeXrayVersion(f.st.Active.Core)
+	}
 	f.st.LastTrial = &runnerapi.TrialResult{Candidate: c, Outcome: outcome, At: t0}
 	os.Remove(filepath.Join(f.run, "candidate.json"))
-	return reply(http.StatusNoContent, nil)
 }
 
 func reply(code int, v any) *http.Response {
@@ -317,22 +353,35 @@ func fakeXrayVersion(core string) string {
 	return "Xray " + core + " (Xray, Penetrates Everything.) fake (go1.24.7 linux/amd64)"
 }
 
-// stubHealth is the updater's health check: it fails with err when set.
+// stubHealth is the updater's health check: it fails with err when set, and
+// calls then, when set, at each check.
 type stubHealth struct {
-	mu  sync.Mutex
-	err error
+	mu   sync.Mutex
+	err  error
+	then func()
 }
 
 func (h *stubHealth) Check(context.Context) error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.err
+	err, then := h.err, h.then
+	h.mu.Unlock()
+	if then != nil {
+		then()
+	}
+	return err
 }
 
 func (h *stubHealth) fail(err error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.err = err
+}
+
+// failThen makes each check fail with err after calling then.
+func (h *stubHealth) failThen(err error, then func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.err, h.then = err, then
 }
 
 // renderFor is the fake renderer: the state, the core and the geo as JSON,

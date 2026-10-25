@@ -56,7 +56,9 @@ type Runner interface {
 // Updaters builds the CoreUpdater for a state and its revision: Render renders
 // st, NoState is rev == 0 (a state never saved), and Health and ProxyHealth
 // check the trial. The service sets Redact on what it returns, so the factory
-// needn't.
+// needn't. The service calls it from several goroutines at once (Status, the
+// loop's pass, the operations), so it must be safe for that, and return a
+// new CoreUpdater each time.
 type Updaters func(st store.State, rev uint64) *artifacts.CoreUpdater
 
 // Config is what New makes a service from. Store, Updaters, Runner and Data

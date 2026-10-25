@@ -20,13 +20,14 @@ const minSecret = 4
 
 // secretKeys are the keys of an outbound whose string values are
 // credentials, in lower case: xray matches its keys without regard to case.
-var secretKeys = map[string]bool{"id": true, "password": true, "privatekey": true, "presharedkey": true, "seed": true}
+// secretKey is WireGuard's private key, as xray names it.
+var secretKeys = map[string]bool{"id": true, "password": true, "privatekey": true, "presharedkey": true, "seed": true, "secretkey": true}
 
 // RedactorFor returns a function that replaces every secret of st in a text
 // with ‹redacted›. The secrets are:
 //   - in each server's outbound, the strings under the keys id, password,
-//     privateKey, preSharedKey and seed, at any depth, and the strings of a
-//     list under them;
+//     privateKey, preSharedKey, seed and secretKey (WireGuard's private key),
+//     in any case and at any depth, and the strings of a list under them;
 //   - each server's share link, which encodes its credentials (an SS link
 //     holds its password in base64);
 //   - each subscription URL, as it is, as its parsed form, with its password
