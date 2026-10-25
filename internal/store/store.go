@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,6 +24,11 @@ const Current = 1
 // ErrConflict is what Update returns when the revision it was given is not
 // the current one: someone else changed the state first.
 var ErrConflict = errors.New("store: the state changed since it was read")
+
+// AnyRevision is the revision to give Update to skip the check on the
+// revision. It is never the revision of a state: Open refuses a file that
+// has it.
+const AnyRevision uint64 = math.MaxUint64
 
 // stateFileRE matches the name of a state file, state.v<N>.json with N a
 // positive decimal number. Anything else in the directory is not ours.
@@ -61,6 +67,8 @@ type Store struct {
 	mu    sync.Mutex // held across the write in Update
 	state State
 	rev   uint64
+
+	degraded []string // what Open disabled; never changed after it
 }
 
 // Open opens the state in dir, creating dir (mode 0700) if it is missing. It
@@ -69,8 +77,17 @@ type Store struct {
 // file gives Default() at revision 0, and nothing is written until the first
 // Update.
 //
-// A file that cannot be read, parsed or validated makes Open fail, with an
-// error that starts with "store: " and the file's name. The file is never
+// A server that fails the checks on its own (its name, the shape and protocol
+// of its outbound, and what xraypolicy refuses) does not make Open fail, as it
+// does not make the rest of the state wrong: a newer tikray, or a newer
+// xray-core policy, may refuse what an older one saved. Open disables such a
+// server in memory and gives the reason in Invalid, and Degraded lists it. The
+// file is not written: the next Update writes the server as it is held. When
+// the state passes Validate only after that, Open succeeds.
+//
+// A file that cannot be read, parsed or validated otherwise makes Open fail,
+// with an error that starts with "store: " and the file's name; the error holds
+// the problems that remain once those servers are disabled. The file is never
 // repaired or replaced. Files of a newer version are left alone and ignored;
 // if they are all there is, Open fails, so that a program that is too old
 // does not start from an empty state.
@@ -99,13 +116,38 @@ func openWith(dir string, current int, steps map[int]migration) (*Store, error) 
 	if err != nil {
 		return nil, fmt.Errorf("store: %s: %w", name, err)
 	}
+	held, degraded, err := admit(st)
+	if err != nil {
+		return nil, fmt.Errorf("store: %s: %w", name, err)
+	}
 	if version != current {
+		// The file of the new version is the older one as it was migrated:
+		// what Open disabled stays in memory, as it does without a migration.
 		if err := s.write(st, rev); err != nil {
 			return nil, fmt.Errorf("store: %s: %w", stateName(current), err)
 		}
 	}
-	s.state, s.rev = st, rev
+	s.state, s.rev, s.degraded = held, rev, degraded
 	return s, nil
+}
+
+// admit checks a loaded state with Validate. A state that fails it only for
+// servers that fail the checks on their own (see State.degrade) is returned
+// with those servers disabled, and their IDs. Any other failure is an error:
+// the one Validate gives for the state with those servers disabled.
+func admit(st State) (State, []string, error) {
+	err := st.Validate()
+	if err == nil {
+		return st, []string{}, nil
+	}
+	held, ids := st.degrade()
+	if len(ids) == 0 {
+		return State{}, nil, err
+	}
+	if err := held.Validate(); err != nil {
+		return State{}, nil, err
+	}
+	return held, ids, nil
 }
 
 // scan returns the highest version up to current that dir has a state file
@@ -133,8 +175,9 @@ func scan(dir string, current int) (found, newer int, err error) {
 	return found, newer, nil
 }
 
-// read loads the state file at path, which is of the given version, migrates
-// its state up to current and validates it. It writes nothing.
+// read loads the state file at path, which is of the given version, and
+// migrates its state up to current. It writes nothing, and does not validate
+// the state: that is admit's.
 func read(path string, version, current int, steps map[int]migration) (State, uint64, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -159,8 +202,8 @@ func read(path string, version, current int, steps map[int]migration) (State, ui
 		return State{}, 0, err
 	}
 	st.normalize()
-	if err := st.Validate(); err != nil {
-		return State{}, 0, err
+	if f.Revision == AnyRevision {
+		return State{}, 0, fmt.Errorf("revision is %d, which Update takes for any revision", f.Revision)
 	}
 	return st, f.Revision, nil
 }
@@ -213,25 +256,33 @@ func (s *Store) State() (State, uint64) {
 	return s.state.Clone(), s.rev
 }
 
+// Degraded returns the IDs of the servers that Open disabled because they fail
+// this tikray's checks, in state order, or an empty list if there are none. It
+// is what Open found and does not change: a server that the file already held
+// disabled with a reason (Server.Invalid) is not Open's doing, and neither is
+// one that an Update disabled later.
+func (s *Store) Degraded() []string { return append([]string{}, s.degraded...) }
+
 // Update changes the state. It calls fn with a copy of the state, checks that
 // the result passes Validate, writes it as the next revision and makes it the
 // state, and returns it with its revision.
 //
-// A rev of 0 skips the check on the revision. Any other value must be the
-// current revision, as State returned it, or Update fails with ErrConflict
-// without calling fn. When fn or Validate fails, nothing is written or
-// changed, and Update returns their error as it is. When the write fails
-// the error starts with "store: " and the file's name; the state is as it
-// was, though if the failure was the final sync of the directory, the new file
-// may already be in place. On any error the state and revision returned are
-// zero.
+// A rev of AnyRevision skips the check on the revision. Any other value, 0
+// included, must be the current revision, as State returned it, or Update
+// fails with ErrConflict without calling fn: a store that nothing has been
+// written to is at revision 0, and a caller that read it passes 0 back. When
+// fn or Validate fails, nothing is written or changed, and Update returns
+// their error as it is. When the write fails the error starts with "store: "
+// and the file's name; the state is as it was, though if the failure was the
+// final sync of the directory, the new file may already be in place. On any
+// error the state and revision returned are zero.
 //
 // Update holds the store's lock while fn runs and while the file is written,
 // so fn must not call the store.
 func (s *Store) Update(rev uint64, fn func(*State) error) (State, uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if rev != 0 && rev != s.rev {
+	if rev != AnyRevision && rev != s.rev {
 		return State{}, 0, ErrConflict
 	}
 	next := s.state.Clone()

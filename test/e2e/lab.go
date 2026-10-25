@@ -725,7 +725,7 @@ func writeStateFile(dir string, st store.State) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, _, err := s.Update(0, func(next *store.State) error {
+	if _, _, err := s.Update(store.AnyRevision, func(next *store.State) error {
 		*next = st
 		return nil
 	}); err != nil {

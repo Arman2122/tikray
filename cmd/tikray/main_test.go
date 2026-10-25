@@ -691,7 +691,7 @@ func writeState(t *testing.T, data string, change func(*store.State)) store.Stat
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, _, err := s.Update(0, func(st *store.State) error {
+	st, _, err := s.Update(store.AnyRevision, func(st *store.State) error {
 		change(st)
 		return nil
 	})

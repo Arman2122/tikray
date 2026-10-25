@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -179,7 +181,7 @@ func TestUpdateWritesAtomically(t *testing.T) {
 	dir := t.TempDir()
 	s := mustOpen(t, dir)
 	srv := server("alpha")
-	got, rev, err := s.Update(0, func(st *State) error {
+	got, rev, err := s.Update(AnyRevision, func(st *State) error {
 		st.Servers = append(st.Servers, srv)
 		return nil
 	})
@@ -233,7 +235,7 @@ func TestUpdateKeepsURLsReadable(t *testing.T) {
 	dir := t.TempDir()
 	s := mustOpen(t, dir)
 	const probe = "https://probe.example/204?a=1&b=2"
-	got, _, err := s.Update(0, func(st *State) error {
+	got, _, err := s.Update(AnyRevision, func(st *State) error {
 		st.Health.ProbeURL = probe
 		st.Servers = append(st.Servers, Server{ID: NewID(), Name: "a<b", Outbound: json.RawMessage(`{"protocol":"vless","note":"x&y<z>"}`)})
 		return nil
@@ -258,13 +260,14 @@ func TestUpdateConflict(t *testing.T) {
 	dir := t.TempDir()
 	s := mustOpen(t, dir)
 	for _, name := range []string{"one", "two"} {
-		if _, _, err := s.Update(0, add(name)); err != nil {
+		if _, _, err := s.Update(AnyRevision, add(name)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	before := get(t, dir, "state.v1.json")
 	stBefore, _ := s.State()
-	for _, stale := range []uint64{1, 3, 1 << 63} {
+	// Revision 0 is no different from any other: it is stale at revision 2.
+	for _, stale := range []uint64{0, 1, 3, 1 << 63} {
 		called := false
 		st, rev, err := s.Update(stale, func(st *State) error {
 			called = true
@@ -293,9 +296,10 @@ func TestUpdateConflict(t *testing.T) {
 func TestUpdateRevisions(t *testing.T) {
 	dir := t.TempDir()
 	s := mustOpen(t, dir)
-	// A revision of 0 skips the check; the current revision passes it.
+	// The current revision passes the check, and so does AnyRevision. The first
+	// Update of a new store is at revision 0, which is an exact check too.
 	var rev uint64
-	for i, check := range []uint64{0, 1, 0, 3} {
+	for i, check := range []uint64{0, 1, AnyRevision, 3} {
 		var err error
 		_, rev, err = s.Update(check, add(fmt.Sprint("server", i)))
 		if err != nil {
@@ -324,7 +328,7 @@ func TestUpdateInvalidWritesNothing(t *testing.T) {
 		if want == nil {
 			t.Fatal("the test state is valid")
 		}
-		_, _, err := s.Update(0, func(st *State) error {
+		_, _, err := s.Update(AnyRevision, func(st *State) error {
 			st.DefaultPolicy.Mode = "bogus"
 			return nil
 		})
@@ -342,7 +346,7 @@ func TestUpdateInvalidWritesNothing(t *testing.T) {
 	t.Run("with a file", func(t *testing.T) {
 		dir := t.TempDir()
 		s := mustOpen(t, dir)
-		if _, _, err := s.Update(0, add("alpha")); err != nil {
+		if _, _, err := s.Update(AnyRevision, add("alpha")); err != nil {
 			t.Fatal(err)
 		}
 		before := get(t, dir, "state.v1.json")
@@ -394,7 +398,7 @@ func TestUpdateFnError(t *testing.T) {
 	}
 
 	// With no file yet.
-	if _, _, err := s.Update(0, fail); err != boom {
+	if _, _, err := s.Update(AnyRevision, fail); err != boom {
 		t.Errorf("Update = %v, want the error fn returned, unchanged", err)
 	}
 	if got := names(t, dir); len(got) != 0 {
@@ -402,7 +406,7 @@ func TestUpdateFnError(t *testing.T) {
 	}
 
 	// With a file.
-	if _, _, err := s.Update(0, add("alpha")); err != nil {
+	if _, _, err := s.Update(AnyRevision, add("alpha")); err != nil {
 		t.Fatal(err)
 	}
 	before := get(t, dir, "state.v1.json")
@@ -426,7 +430,7 @@ func TestUpdateWriteFailure(t *testing.T) {
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := s.Update(0, add("alpha"))
+	_, _, err := s.Update(AnyRevision, add("alpha"))
 	if err == nil || !strings.HasPrefix(err.Error(), "store: state.v1.json: ") {
 		t.Fatalf("Update = %v, want a store: state.v1.json: error", err)
 	}
@@ -438,7 +442,7 @@ func TestUpdateWriteFailure(t *testing.T) {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, rev, err := s.Update(0, add("alpha")); err != nil || rev != 1 {
+	if _, rev, err := s.Update(AnyRevision, add("alpha")); err != nil || rev != 1 {
 		t.Errorf("Update after the directory came back = revision %d, %v; want 1", rev, err)
 	}
 }
@@ -446,7 +450,7 @@ func TestUpdateWriteFailure(t *testing.T) {
 func TestStateIsACopy(t *testing.T) {
 	s := mustOpen(t, t.TempDir())
 	var kept *State
-	got, _, err := s.Update(0, func(st *State) error {
+	got, _, err := s.Update(AnyRevision, func(st *State) error {
 		kept = st
 		return add("alpha")(st)
 	})
@@ -485,7 +489,7 @@ func TestConcurrentUpdates(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := range each {
-				if _, _, err := s.Update(0, add(fmt.Sprintf("w%d-%d", w, i))); err != nil {
+				if _, _, err := s.Update(AnyRevision, add(fmt.Sprintf("w%d-%d", w, i))); err != nil {
 					t.Error(err)
 				}
 			}
@@ -572,7 +576,7 @@ func TestOpenNormalisesNilLists(t *testing.T) {
 				func(st *State) error { st.DefaultPolicy.Mode = ModeSmart; return nil },
 				func(st *State) error { st.Servers, st.Subscriptions, st.Devices = nil, nil, nil; return nil },
 			} {
-				st, _, err := s.Update(0, edit)
+				st, _, err := s.Update(AnyRevision, edit)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -764,7 +768,7 @@ func TestIgnoresNewer(t *testing.T) {
 			t.Error("the version 1 file changed")
 		}
 		// Updates go to the version this program writes.
-		if _, _, err := s.Update(0, add("alpha")); err != nil {
+		if _, _, err := s.Update(AnyRevision, add("alpha")); err != nil {
 			t.Fatal(err)
 		}
 		if !bytes.Equal(get(t, dir, "state.v3.json"), future) {
@@ -880,7 +884,7 @@ func TestIgnoresOtherFiles(t *testing.T) {
 		t.Errorf("State() = %+v, %d; want Default() at 0", st, rev)
 	}
 	// None of it is touched, nor does the first Update care about it.
-	if _, _, err := s.Update(0, add("alpha")); err != nil {
+	if _, _, err := s.Update(AnyRevision, add("alpha")); err != nil {
 		t.Fatal(err)
 	}
 	for name, data := range junk {
@@ -890,5 +894,319 @@ func TestIgnoresOtherFiles(t *testing.T) {
 	}
 	if len(names(t, dir)) != len(junk)+1 {
 		t.Errorf("the directory holds %v, want the junk and state.v1.json", names(t, dir))
+	}
+}
+
+func TestUpdateAnyRevision(t *testing.T) {
+	if AnyRevision != math.MaxUint64 {
+		t.Errorf("AnyRevision is %d, want the largest uint64", uint64(AnyRevision))
+	}
+	dir := t.TempDir()
+	put(t, dir, "state.v1.json", fileJSON(1, 5, stateWithProbe("https://www.gstatic.com/generate_204")))
+	s := mustOpen(t, dir)
+	st, rev, err := s.Update(AnyRevision, add("alpha"))
+	if err != nil || rev != 6 || len(st.Servers) != 1 {
+		t.Fatalf("Update(AnyRevision) = %d servers at revision %d, %v; want 1 at 6", len(st.Servers), rev, err)
+	}
+	if f := readFields(t, dir, "state.v1.json"); f.Revision != 6 {
+		t.Errorf("the file has revision %d, want 6", f.Revision)
+	}
+}
+
+// TestUpdateRevisionZeroIsChecked: 0 is a revision like the others, the one of
+// a store nothing has been written to. It does not skip the check.
+func TestUpdateRevisionZeroIsChecked(t *testing.T) {
+	dir := t.TempDir()
+	s := mustOpen(t, dir)
+	if _, rev, err := s.Update(0, add("alpha")); err != nil || rev != 1 {
+		t.Fatalf("Update(0) on a new store = revision %d, %v; want 1", rev, err)
+	}
+	before := get(t, dir, "state.v1.json")
+	called := false
+	_, rev, err := s.Update(0, func(st *State) error {
+		called = true
+		return add("beta")(st)
+	})
+	if !errors.Is(err, ErrConflict) || rev != 0 {
+		t.Errorf("Update(0) at revision 1 = revision %d, %v; want ErrConflict", rev, err)
+	}
+	if called {
+		t.Error("Update(0) ran fn at revision 1")
+	}
+	if after := get(t, dir, "state.v1.json"); !bytes.Equal(after, before) {
+		t.Errorf("Update(0) changed the file:\n%s\nwas\n%s", after, before)
+	}
+	if st, rev := s.State(); rev != 1 || len(st.Servers) != 1 {
+		t.Errorf("State() = %d servers at revision %d, want 1 at 1", len(st.Servers), rev)
+	}
+}
+
+// TestOpenRefusesTheRevisionOfAnyRevision: a state at AnyRevision would hand
+// its callers a revision that checks nothing.
+func TestOpenRefusesTheRevisionOfAnyRevision(t *testing.T) {
+	dir := t.TempDir()
+	data := fileJSON(1, AnyRevision, stateWithProbe("https://www.gstatic.com/generate_204"))
+	put(t, dir, "state.v1.json", data)
+	_, err := Open(dir)
+	if err == nil || !strings.HasPrefix(err.Error(), "store: state.v1.json: ") || !strings.Contains(err.Error(), "revision") {
+		t.Errorf("Open = %v, want a store: state.v1.json: error about the revision", err)
+	}
+	if !bytes.Equal(get(t, dir, "state.v1.json"), data) {
+		t.Error("Open changed the file")
+	}
+}
+
+// refused is a server whose outbound is not a proxy's, which this tikray
+// refuses.
+func refused(name string) Server {
+	return Server{ID: NewID(), Name: name, Outbound: json.RawMessage(`{"protocol":"direct"}`)}
+}
+
+// stateWith is the default state holding servers, as the compact JSON of a
+// state file's "state".
+func stateWith(t *testing.T, servers ...Server) string {
+	t.Helper()
+	st := Default()
+	st.Servers = servers
+	return compact(t, st)
+}
+
+func TestOpenDegradesRefusedServer(t *testing.T) {
+	dir := t.TempDir()
+	good, bad := server("good"), refused("bad")
+	data := fileJSON(1, 3, stateWith(t, good, bad))
+	put(t, dir, "state.v1.json", data)
+
+	s := mustOpen(t, dir)
+	st, rev := s.State()
+	if rev != 3 || len(st.Servers) != 2 {
+		t.Fatalf("State() = %d servers at revision %d, want 2 at 3", len(st.Servers), rev)
+	}
+	if g := st.Servers[0]; g.Disabled || g.Invalid != "" {
+		t.Errorf("the valid server is disabled=%t invalid=%q, want it left alone", g.Disabled, g.Invalid)
+	}
+	b := st.Servers[1]
+	if !b.Disabled || !strings.Contains(b.Invalid, "direct") {
+		t.Errorf("the refused server is disabled=%t invalid=%q, want it disabled for direct", b.Disabled, b.Invalid)
+	}
+	if strings.Contains(b.Invalid, "servers[") || strings.Contains(b.Invalid, "outbound") {
+		t.Errorf("the reason %q holds the problem's path", b.Invalid)
+	}
+	if got := s.Degraded(); !slices.Equal(got, []string{bad.ID}) {
+		t.Errorf("Degraded() = %v, want [%s]", got, bad.ID)
+	}
+	if err := st.Validate(); err != nil {
+		t.Errorf("the degraded state does not validate: %v", err)
+	}
+
+	// Open writes nothing.
+	if after := get(t, dir, "state.v1.json"); !bytes.Equal(after, data) {
+		t.Errorf("Open changed the file:\n%s\nwas\n%s", after, data)
+	}
+	if n := names(t, dir); !slices.Equal(n, []string{"state.v1.json"}) {
+		t.Errorf("the directory holds %v", n)
+	}
+
+	// The next Update does, with the server disabled and the reason in it.
+	if _, rev, err := s.Update(3, func(st *State) error { st.DefaultPolicy.Mode = ModeSmart; return nil }); err != nil || rev != 4 {
+		t.Fatalf("Update = revision %d, %v; want 4", rev, err)
+	}
+	var onDisk struct {
+		Servers []struct {
+			ID       string `json:"id"`
+			Disabled bool   `json:"disabled"`
+			Invalid  string `json:"invalid"`
+		} `json:"servers"`
+	}
+	if err := json.Unmarshal(readFields(t, dir, "state.v1.json").State, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if len(onDisk.Servers) != 2 || onDisk.Servers[0].Disabled || onDisk.Servers[0].Invalid != "" ||
+		onDisk.Servers[1].ID != bad.ID || !onDisk.Servers[1].Disabled || onDisk.Servers[1].Invalid != b.Invalid {
+		t.Errorf("the file's servers are %+v, want the valid one as it was and the refused one disabled with invalid %q", onDisk.Servers, b.Invalid)
+	}
+
+	// The reopened store has it already: Open disables nothing this time, and
+	// the reason is kept.
+	again := mustOpen(t, dir)
+	st2, rev2 := again.State()
+	if rev2 != 4 || !st2.Servers[1].Disabled || st2.Servers[1].Invalid != b.Invalid {
+		t.Errorf("reopened: revision %d, server %+v; want 4 and the reason kept", rev2, st2.Servers[1])
+	}
+	if got := again.Degraded(); len(got) != 0 {
+		t.Errorf("Degraded() = %v after the file was written with the server disabled, want none", got)
+	}
+}
+
+// TestOpenDegradesEachCheckOfAServer: each check a server has on its own
+// disables it, with that check's text as the reason, and none of the reasons
+// repeats a credential, a name or a path.
+func TestOpenDegradesEachCheckOfAServer(t *testing.T) {
+	srv := func(name, outbound string) Server {
+		return Server{ID: NewID(), Name: name, Outbound: json.RawMessage(outbound)}
+	}
+	for _, c := range []struct {
+		name string
+		srv  Server
+		want string
+	}{
+		{"protocol that is not a proxy", srv("n", `{"protocol":"direct"}`), `"direct" is not a proxy protocol`},
+		{"no protocol", srv("n", `{"settings":{}}`), "is required"},
+		{"a tag", srv("n", `{"protocol":"vless","tag":"x"}`), "must not be set: tikray tags the outbound itself"},
+		{"not an object", srv("n", `"vless"`), "must be a JSON object"},
+		{"refused by xray-core", srv("n", fmt.Sprintf(vlessPlainTo, "1.2.3.4")), "xray-core refuses VLESS without TLS or encryption to a public address"},
+		{"empty name", srv("", `{"protocol":"vless"}`), "must not be empty"},
+		{"name with an escape", srv("Frank\x1b[2Jfurt", `{"protocol":"vless"}`), "must not hold control characters or bidi overrides"},
+		{"name too long", srv(strings.Repeat("a", MaxNameRunes+1), `{"protocol":"vless"}`), fmt.Sprintf("must be at most %d characters", MaxNameRunes)},
+		{"name and outbound", srv("", `{"protocol":"direct"}`), `must not be empty; "direct" is not a proxy protocol`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			put(t, dir, "state.v1.json", fileJSON(1, 0, stateWith(t, server("good"), c.srv)))
+			s := mustOpen(t, dir)
+			st, _ := s.State()
+			if got := st.Servers[1]; !got.Disabled || got.Invalid != c.want {
+				t.Errorf("the server is disabled=%t invalid=%q, want it disabled for %q", got.Disabled, got.Invalid, c.want)
+			}
+			if st.Servers[0].Disabled || st.Servers[0].Invalid != "" {
+				t.Errorf("the valid server was changed: %+v", st.Servers[0])
+			}
+			if got := s.Degraded(); !slices.Equal(got, []string{c.srv.ID}) {
+				t.Errorf("Degraded() = %v, want [%s]", got, c.srv.ID)
+			}
+			if strings.Contains(st.Servers[1].Invalid, "s3cret") {
+				t.Errorf("the reason repeats a secret: %q", st.Servers[1].Invalid)
+			}
+		})
+	}
+}
+
+// TestOpenDegradesInOrderAndKeepsMarkedServers: Degraded lists the servers
+// Open disabled in state order, a server the operator had disabled is marked
+// invalid as well, and one that is marked already keeps its reason and is not
+// listed.
+func TestOpenDegradesInOrderAndKeepsMarkedServers(t *testing.T) {
+	marked := refused("marked")
+	marked.Disabled, marked.Invalid = true, "an older reason"
+	off := refused("off")
+	off.Disabled = true
+	first, second := refused("first"), refused("second")
+	dir := t.TempDir()
+	put(t, dir, "state.v1.json", fileJSON(1, 0, stateWith(t, first, marked, server("good"), off, second)))
+	s := mustOpen(t, dir)
+	st, _ := s.State()
+	if got, want := s.Degraded(), []string{first.ID, off.ID, second.ID}; !slices.Equal(got, want) {
+		t.Errorf("Degraded() = %v, want %v", got, want)
+	}
+	if st.Servers[1].Invalid != "an older reason" {
+		t.Errorf("a marked server's reason is %q, want it kept", st.Servers[1].Invalid)
+	}
+	for i, want := range []bool{true, true, false, true, true} {
+		if st.Servers[i].Disabled != want {
+			t.Errorf("servers[%d] disabled = %t, want %t", i, st.Servers[i].Disabled, want)
+		}
+	}
+	if !strings.Contains(st.Servers[3].Invalid, "direct") {
+		t.Errorf("the server the operator disabled has reason %q, want it marked too", st.Servers[3].Invalid)
+	}
+}
+
+// TestOpenDegradesNothingWhenItIsValid: Degraded is empty, not nil, when
+// there is nothing to degrade.
+func TestOpenDegradesNothingWhenItIsValid(t *testing.T) {
+	dir := t.TempDir()
+	put(t, dir, "state.v1.json", fileJSON(1, 1, stateWith(t, server("good"))))
+	if got := mustOpen(t, dir).Degraded(); got == nil || len(got) != 0 {
+		t.Errorf("Degraded() = %#v, want an empty list", got)
+	}
+	if got := mustOpen(t, t.TempDir()).Degraded(); got == nil || len(got) != 0 {
+		t.Errorf("Degraded() of a new store = %#v, want an empty list", got)
+	}
+}
+
+func TestOpenStillFailsOnStructure(t *testing.T) {
+	overlap := func(st *State) {
+		st.Devices = []Device{
+			{Address: netip.MustParsePrefix("192.168.1.0/24"), Policy: Policy{Mode: ModeSmart}},
+			{Address: netip.MustParsePrefix("192.168.1.5/32"), Policy: Policy{Mode: ModeSmart}},
+		}
+	}
+	for _, c := range []struct {
+		name string
+		edit func(*State)
+		want string // part of the error
+	}{
+		{"overlapping devices", overlap, "devices[1].address: overlaps devices[0]"},
+		{"overlapping devices beside a refused server", func(st *State) {
+			overlap(st)
+			st.Servers = []Server{refused("bad")}
+		}, "devices[1].address: overlaps devices[0]"},
+		{"a refused server with a bad ID", func(st *State) {
+			st.Servers = []Server{refused("bad")}
+			st.Servers[0].ID = "NOT-HEX"
+		}, "servers[0].id: must be 8 lowercase hex digits"},
+		{"two refused servers with one ID", func(st *State) {
+			a := refused("a")
+			st.Servers = []Server{a, a}
+		}, "servers[1].id: duplicates servers[0]"},
+		{"a refused server of no subscription", func(st *State) {
+			st.Servers = []Server{refused("bad")}
+			st.Servers[0].Subscription = "00ff00ff"
+		}, `servers[0].subscription: names no subscription: "00ff00ff"`},
+		{"a server that is invalid but enabled", func(st *State) {
+			st.Servers = []Server{refused("bad")}
+			st.Servers[0].Invalid = "an older reason"
+		}, "servers[0]: a server that failed this tikray's checks stays disabled"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			st := Default()
+			c.edit(&st)
+			data := fileJSON(1, 2, compact(t, st))
+			put(t, dir, "state.v1.json", data)
+			_, err := Open(dir)
+			if err == nil {
+				t.Fatal("Open succeeded")
+			}
+			if msg := err.Error(); !strings.HasPrefix(msg, "store: state.v1.json: ") || !strings.Contains(msg, c.want) {
+				t.Errorf("Open = %q, want store: state.v1.json: … %s", msg, c.want)
+			}
+			if after := get(t, dir, "state.v1.json"); !bytes.Equal(after, data) {
+				t.Errorf("Open changed the file to %q, was %q", after, data)
+			}
+		})
+	}
+}
+
+// TestOpenWritesAMigrationAsItIs: the older file migrated to the new version
+// is written as the migration made it. What Open disabled stays in memory, as
+// it does when nothing is migrated.
+func TestOpenWritesAMigrationAsItIs(t *testing.T) {
+	dir := t.TempDir()
+	// The older state has no health section, which version 2 requires.
+	v1 := fileJSON(1, 7, `{"servers":[{"id":"a1b2c3d4","name":"bad","outbound":{"protocol":"direct"}}],"subscriptions":[],"devices":[],`+stateTail+`}`)
+	put(t, dir, "state.v1.json", v1)
+
+	s, err := openWith(dir, 2, map[int]migration{1: addHealth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Degraded(); !slices.Equal(got, []string{"a1b2c3d4"}) {
+		t.Errorf("Degraded() = %v, want [a1b2c3d4]", got)
+	}
+	if held, rev := s.State(); rev != 7 || !held.Servers[0].Disabled || held.Servers[0].Invalid == "" {
+		t.Errorf("State() = %+v at revision %d, want the server disabled and invalid at 7", held.Servers, rev)
+	}
+	var onDisk struct {
+		Servers []Server `json:"servers"`
+	}
+	if err := json.Unmarshal(readFields(t, dir, "state.v2.json").State, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if len(onDisk.Servers) != 1 || onDisk.Servers[0].Disabled || onDisk.Servers[0].Invalid != "" {
+		t.Errorf("state.v2.json holds %+v, want the server as the migration left it", onDisk.Servers)
+	}
+	if !bytes.Equal(get(t, dir, "state.v1.json"), v1) {
+		t.Error("the version 1 file changed")
 	}
 }

@@ -66,13 +66,29 @@ var notProxies = map[string]bool{
 // installs no such file, so xray would refuse the config (checkDomain).
 var domainPrefixes = []string{"domain", "full", "keyword", "regexp", "geosite"}
 
+// problem is one fault in a state: the path of the field at fault, and what is
+// wrong with it.
+type problem struct{ path, msg string }
+
+func (e problem) Error() string { return e.path + ": " + e.msg }
+
 // problems collects what is wrong with a state.
-type problems []error
+type problems []problem
 
 // add records a problem at path. Messages never repeat a URL or an outbound:
 // those carry credentials, and errors end up in logs.
 func (p *problems) add(path, format string, args ...any) {
-	*p = append(*p, errors.New(path+": "+fmt.Sprintf(format, args...)))
+	*p = append(*p, problem{path, fmt.Sprintf(format, args...)})
+}
+
+// err joins the problems into one error (see errors.Join), or returns nil if
+// there are none.
+func (p problems) err() error {
+	errs := make([]error, len(p))
+	for i, e := range p {
+		errs[i] = e
+	}
+	return errors.Join(errs...)
 }
 
 // Validate reports everything wrong with the state, as one error that joins a
@@ -91,7 +107,7 @@ func (s State) Validate() error {
 	if !httpURL(s.Health.ProbeURL) {
 		p.add("health.probe_url", "must be an absolute http or https URL")
 	}
-	return errors.Join(p...)
+	return p.err()
 }
 
 // ids checks the IDs of the entries of a list found at prefix, such as
@@ -154,13 +170,55 @@ func (p *problems) servers(servers []Server, subscriptions map[string]bool) map[
 	held := p.ids("servers", ids)
 	for i, sv := range servers {
 		path := fmt.Sprintf("servers[%d]", i)
-		p.name(path+".name", sv.Name)
+		switch {
+		case sv.Invalid == "":
+			p.own(path, sv)
+		case !sv.Disabled:
+			p.add(path, "a server that failed this tikray's checks stays disabled until its outbound is replaced")
+		}
 		if sv.Subscription != "" && !subscriptions[sv.Subscription] {
 			p.add(path+".subscription", "names no subscription: %q", sv.Subscription)
 		}
-		p.outbound(path+".outbound", sv.Outbound)
 	}
 	return held
+}
+
+// own checks what is wrong with a server on its own, whatever the rest of the
+// state holds: its name and its outbound. These are the checks that Open
+// answers to by disabling the server instead of failing (see degrade). A server
+// with a reason in Invalid is not checked again.
+func (p *problems) own(path string, sv Server) {
+	p.name(path+".name", sv.Name)
+	p.outbound(path+".outbound", sv.Outbound)
+}
+
+// degrade returns a copy of the state in which every server that fails its
+// own checks (see own) is disabled and has the reason in Invalid, and the IDs of
+// those servers in state order. The reason is the text of the problems without
+// their paths, joined with "; ". A server that already has a reason is left as
+// it is, and is not listed. The other checks are not run: the state may still
+// fail Validate.
+func (s State) degrade() (State, []string) {
+	d := s.Clone()
+	ids := []string{}
+	for i := range d.Servers {
+		sv := &d.Servers[i]
+		if sv.Invalid != "" {
+			continue
+		}
+		var p problems
+		p.own("", *sv)
+		if len(p) == 0 {
+			continue
+		}
+		reasons := make([]string, len(p))
+		for j, e := range p {
+			reasons[j] = e.msg
+		}
+		sv.Disabled, sv.Invalid = true, strings.Join(reasons, "; ")
+		ids = append(ids, sv.ID)
+	}
+	return d, ids
 }
 
 // outbound checks that raw is the outbound object of a proxy and carries no
