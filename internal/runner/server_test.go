@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -27,6 +29,7 @@ var routes = []struct{ method, path string }{
 	{http.MethodPost, "/v1/restart"},
 	{http.MethodPost, "/v1/reload"},
 	{http.MethodPost, "/v1/xray-api"},
+	{http.MethodPost, "/v1/test"},
 }
 
 // api is the server over a rig's runner, with a client for it and the number
@@ -406,6 +409,161 @@ func TestServerCancel(t *testing.T) {
 	g.wantNoLastTrial(t)
 }
 
+func TestServerTest(t *testing.T) {
+	const config = `{"outbounds":[{"protocol":"freedom","tag":"direct"}]}`
+	for _, tc := range []struct {
+		mode   string // of the running core
+		ok     bool
+		output string
+	}{
+		{mode: "ok", ok: true, output: "Configuration OK."},
+		{mode: "badconfig", ok: false, output: "failed to load config"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			g := newRig(t, nil)
+			g.active(t, tc.mode)
+			g.boot(t)
+			a := newAPI(t, g, nil)
+			before := g.r.Status()
+
+			res, err := a.c.Test(t.Context(), []byte(config))
+			if err != nil {
+				t.Fatalf("Test: %v", err)
+			}
+			if res.OK != tc.ok || !strings.Contains(res.Output, tc.output) {
+				t.Errorf("Test = %+v, want ok %v and output containing %q", res, tc.ok, tc.output)
+			}
+
+			resp, body := send(t, a.url, http.MethodPost, "/v1/test", "Bearer "+testToken, config)
+			var raw map[string]any
+			if resp.StatusCode != http.StatusOK || json.Unmarshal([]byte(body), &raw) != nil || raw["ok"] != tc.ok || raw["output"] == nil {
+				t.Errorf("POST /v1/test = %d %s; want 200 with ok %v and an output", resp.StatusCode, body, tc.ok)
+			}
+			if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", ct)
+			}
+
+			// Nothing about the runner changed: the same xray runs, and no
+			// trial was recorded.
+			if after := g.r.Status(); !reflect.DeepEqual(after, before) {
+				t.Errorf("Status after Test = %+v, before it was %+v", after, before)
+			}
+			g.wantNoLastTrial(t)
+			if left := testLeftovers(t, g.d); len(left) != 0 {
+				t.Errorf("Test left %v", left)
+			}
+		})
+	}
+}
+
+func TestServerTestNoCore(t *testing.T) {
+	g := newRig(t, nil)
+	g.boot(t) // no active.json: the runner stays empty
+	a := newAPI(t, g, nil)
+	if res, err := a.c.Test(t.Context(), []byte(`{}`)); !errors.Is(err, runnerapi.ErrNoCore) {
+		t.Errorf("Test with no xray = %+v, %v; want ErrNoCore", res, err)
+	}
+	if left := testLeftovers(t, g.d); len(left) != 0 {
+		t.Errorf("Test left %v", left)
+	}
+}
+
+// TestServerTestDuringTrial checks that a test answers during a trial, with
+// the core that runs now: the active core here rejects every config and the
+// candidate's accepts them.
+func TestServerTestDuringTrial(t *testing.T) {
+	g := newRig(t, nil)
+	g.active(t, "badconfig")
+	g.boot(t)
+	a := newAPI(t, g, nil)
+	ctx := t.Context()
+	if res, err := a.c.Test(ctx, []byte(`{}`)); err != nil || res.OK {
+		t.Fatalf("Test before the trial = %+v, %v; want the active core's rejection", res, err)
+	}
+
+	g.candidate(t, "ok", 10*time.Second)
+	g.trial(t)
+	before := g.r.Status()
+	if res, err := a.c.Test(ctx, []byte(`{}`)); err != nil || !res.OK {
+		t.Errorf("Test during the trial = %+v, %v; want the candidate's acceptance", res, err)
+	}
+	if after := g.r.Status(); !reflect.DeepEqual(after, before) {
+		t.Errorf("Status after Test = %+v, before it was %+v", after, before)
+	}
+	g.wantState(t, runnerapi.StateTrial, newCore)
+
+	if err := a.c.Abort(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := a.c.Test(ctx, []byte(`{}`)); err != nil || res.OK {
+		t.Errorf("Test after Abort = %+v, %v; want the active core's rejection", res, err)
+	}
+	if left := testLeftovers(t, g.d); len(left) != 0 {
+		t.Errorf("Test left %v", left)
+	}
+}
+
+// TestServerTestWhileTheRunnerIsBusy checks that a test does not queue behind
+// the runner's goroutine: it answers while a trial's own xray run -test holds
+// that goroutine.
+func TestServerTestWhileTheRunnerIsBusy(t *testing.T) {
+	g := runningRig(t)
+	a := newAPI(t, g, nil)
+	g.candidate(t, "slowtest", 10*time.Second) // its xray run -test takes a second
+	errc := make(chan error, 1)
+	go func() { errc <- a.c.Trial(t.Context()) }()
+	// The trial stages the candidate's core right before it tests it.
+	waitFor(t, 5*time.Second, "the candidate's core to be staged", func() bool {
+		_, err := os.Stat(filepath.Join(g.stage, newCore, "xray"))
+		return err == nil
+	})
+
+	res, err := a.c.Test(t.Context(), []byte(`{}`))
+	if err != nil || !res.OK {
+		t.Errorf("Test while the trial tests its candidate = %+v, %v; want the active core's acceptance", res, err)
+	}
+	select {
+	case err := <-errc:
+		t.Fatalf("the trial ended (%v) before Test answered; want Test to answer while the trial's xray run -test runs", err)
+	default:
+	}
+	if err := <-errc; err != nil {
+		t.Fatalf("Trial: %v", err)
+	}
+	g.wantState(t, runnerapi.StateTrial, newCore)
+}
+
+func TestServerTestBody(t *testing.T) {
+	g := runningRig(t)
+	a := newAPI(t, g, nil)
+	// jsonOf is a JSON object of exactly n bytes.
+	jsonOf := func(n int) string { return `{"x":"` + strings.Repeat("y", n-len(`{"x":""}`)) + `"}` }
+
+	resp, body := send(t, a.url, http.MethodPost, "/v1/test", "Bearer "+testToken, jsonOf(1<<20))
+	var res runnerapi.TestResult
+	if resp.StatusCode != http.StatusOK || json.Unmarshal([]byte(body), &res) != nil || !res.OK {
+		t.Errorf("POST /v1/test of 1 MiB = %d %.200s; want 200 and ok", resp.StatusCode, body)
+	}
+	resp, body = send(t, a.url, http.MethodPost, "/v1/test", "Bearer "+testToken, jsonOf(1<<20+1))
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("POST /v1/test of 1 MiB and a byte = %d %.200s; want 413", resp.StatusCode, body)
+	} else if code, _ := errorBody(t, body); code != "too_large" {
+		t.Errorf("error code = %q, want too_large", code)
+	}
+	resp, body = send(t, a.url, http.MethodPost, "/v1/test", "Bearer "+testToken, `{"outbounds":[`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST /v1/test of a body that is not JSON = %d %s; want 400", resp.StatusCode, body)
+	}
+	// xray-api keeps its own, smaller cap.
+	resp, body = send(t, a.url, http.MethodPost, "/v1/xray-api", "Bearer "+testToken, `{"args":["`+strings.Repeat("x", 64<<10)+`"]}`)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "too large") {
+		t.Errorf("POST /v1/xray-api over 64 KiB = %d %s; want 400 too large", resp.StatusCode, body)
+	}
+	if left := testLeftovers(t, g.d); len(left) != 0 {
+		t.Errorf("Test left %v", left)
+	}
+}
+
 // TestServerStatusCodes pins the status code and error code of each answer.
 func TestServerStatusCodes(t *testing.T) {
 	trialOpen := func(t *testing.T, g *rig) {
@@ -454,6 +612,12 @@ func TestServerStatusCodes(t *testing.T) {
 			method: "POST", path: "/v1/trial", status: 422, code: "test_failed", detail: "failed to load config"},
 
 		{name: "xray-api with no xray", noActive: true, method: "POST", path: "/v1/xray-api", body: `{"args":["adi"]}`, status: 503, code: "no_xray"},
+
+		{name: "test with no xray", noActive: true, method: "POST", path: "/v1/test", body: `{}`, status: 409, code: "no_core"},
+		{name: "test with an empty body", method: "POST", path: "/v1/test", status: 400, code: "bad_request"},
+		{name: "test of a body that is not JSON", method: "POST", path: "/v1/test", body: `{"outbounds":`, status: 400, code: "bad_request"},
+		{name: "test of two JSON values", method: "POST", path: "/v1/test", body: `{} {}`, status: 400, code: "bad_request"},
+		{name: "test of a body over 1 MiB", method: "POST", path: "/v1/test", body: `"` + strings.Repeat("x", 1<<20) + `"`, status: 413, code: "too_large"},
 
 		{name: "restart with no active selection", noActive: true, method: "POST", path: "/v1/restart", status: 500, code: "internal", detail: "no active selection"},
 		{name: "reload of a corrupt active.json", setup: func(t *testing.T, g *rig) { writeFile(t, g.d.Active(), "{not json") },

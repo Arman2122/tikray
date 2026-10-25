@@ -19,7 +19,11 @@ const (
 	maxErrText = 1024
 )
 
-var defaultHTTP = &http.Client{Timeout: 10 * time.Second}
+var (
+	defaultHTTP = &http.Client{Timeout: 10 * time.Second}
+	// testHTTP is Test's default: the runner gives xray run -test 20 s.
+	testHTTP = &http.Client{Timeout: 30 * time.Second}
+)
 
 // Client calls the runner's control API.
 type Client struct {
@@ -80,11 +84,33 @@ func (c *Client) XrayAPI(ctx context.Context, args ...string) (XrayAPIResponse, 
 	return resp, err
 }
 
-// do sends one request. A 2xx answer is decoded into out when out is non-nil;
-// anything else becomes an error, see statusError.
+// Test has the runner run "xray run -test" on config, an xray config in JSON,
+// with the core that runs now. A config xray rejects is a TestResult with OK
+// false, not an error. It returns ErrNoCore when no xray runs. The runner
+// takes up to 20 s; with HTTP nil the client waits 30 s, and an HTTP of its
+// own must allow as much.
+func (c *Client) Test(ctx context.Context, config []byte) (TestResult, error) {
+	var res TestResult
+	err := c.send(ctx, testHTTP, http.MethodPost, "/v1/test", config, &res)
+	return res, err
+}
+
+// do sends one request, see send.
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
+	return c.send(ctx, defaultHTTP, method, path, in, out)
+}
+
+// send sends one request with c.HTTP, or with def when that is nil. in is
+// encoded as JSON, except that a []byte is sent as it is. A 2xx answer is
+// decoded into out when out is non-nil; anything else becomes an error, see
+// statusError.
+func (c *Client) send(ctx context.Context, def *http.Client, method, path string, in, out any) error {
 	var body io.Reader
-	if in != nil {
+	switch in := in.(type) {
+	case nil:
+	case []byte:
+		body = bytes.NewReader(in)
+	default:
 		b, err := json.Marshal(in)
 		if err != nil {
 			return fmt.Errorf("runnerapi: %s %s: %w", method, path, err)
@@ -101,7 +127,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	}
 	hc := c.HTTP
 	if hc == nil {
-		hc = defaultHTTP
+		hc = def
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -133,6 +159,8 @@ func statusError(method, path string, resp *http.Response, raw []byte) error {
 		return wrapDetail(ErrBusy, eb.Detail)
 	case resp.StatusCode == http.StatusConflict && eb.Error == "no_trial":
 		return wrapDetail(ErrNoTrial, eb.Detail)
+	case resp.StatusCode == http.StatusConflict && eb.Error == "no_core":
+		return wrapDetail(ErrNoCore, eb.Detail)
 	case resp.StatusCode == http.StatusUnprocessableEntity:
 		out := eb.Detail
 		if out == "" {

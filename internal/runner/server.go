@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -16,6 +17,8 @@ const (
 	// maxRequestBody bounds what the server reads from a caller; the largest
 	// request is the argument list of xray api.
 	maxRequestBody = 64 << 10
+	// maxTestBody bounds the config of POST /v1/test instead.
+	maxTestBody = 1 << 20
 	// xrayAPITimeout bounds one xray api call.
 	xrayAPITimeout = 10 * time.Second
 )
@@ -48,6 +51,7 @@ func NewServer(r *Runner, token string, xrayAPI func(ctx context.Context, args [
 	mux.HandleFunc("POST /v1/restart", act(r.Restart))
 	mux.HandleFunc("POST /v1/reload", act(r.Reload))
 	mux.HandleFunc("POST /v1/xray-api", s.xrayAPIRoute)
+	mux.HandleFunc("POST /v1/test", s.test)
 	return s.authenticated(mux)
 }
 
@@ -60,7 +64,11 @@ func (s *server) authenticated(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "")
 			return
 		}
-		req.Body = http.MaxBytesReader(w, req.Body, maxRequestBody)
+		limit := int64(maxRequestBody)
+		if req.URL.Path == "/v1/test" {
+			limit = maxTestBody
+		}
+		req.Body = http.MaxBytesReader(w, req.Body, limit)
 		next.ServeHTTP(w, req)
 	})
 }
@@ -114,6 +122,31 @@ func (s *server) xrayAPIRoute(w http.ResponseWriter, req *http.Request) {
 	reply(w, http.StatusOK, s.xrayAPI(ctx, in.Args))
 }
 
+// test serves POST /v1/test: the body is the config to test, see
+// Runner.TestConfig.
+func (s *server) test(w http.ResponseWriter, req *http.Request) {
+	config, err := io.ReadAll(req.Body)
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "too_large", "the config is over 1 MiB")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "bad_request", "reading the body: "+err.Error())
+		return
+	}
+	if !json.Valid(config) {
+		writeError(w, http.StatusBadRequest, "bad_request", "the body is not a JSON value")
+		return
+	}
+	res, err := s.r.TestConfig(req.Context(), config)
+	if err != nil {
+		writeFailure(w, err)
+		return
+	}
+	reply(w, http.StatusOK, res)
+}
+
 // writeFailure maps an error from the runner to its status code.
 func writeFailure(w http.ResponseWriter, err error) {
 	var tf *runnerapi.TestFailedError
@@ -126,6 +159,8 @@ func writeFailure(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "busy", "")
 	case errors.Is(err, runnerapi.ErrNoTrial):
 		writeError(w, http.StatusConflict, "no_trial", "")
+	case errors.Is(err, runnerapi.ErrNoCore):
+		writeError(w, http.StatusConflict, "no_core", "")
 	default:
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 	}

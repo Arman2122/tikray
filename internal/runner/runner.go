@@ -56,6 +56,9 @@ type Runner struct {
 	quit chan struct{}
 	done chan struct{}
 	once sync.Once
+	// testTimeout (20 s) bounds TestConfig's xray run -test; a test of
+	// this package shortens it.
+	testTimeout time.Duration
 
 	// Owned by the loop goroutine.
 	v        view
@@ -113,22 +116,24 @@ func New(c Config) *Runner {
 		c.Now = time.Now
 	}
 	r := &Runner{
-		cfg:      c,
-		sup:      NewSupervisor(c.Supervisor),
-		reqs:     make(chan request),
-		quit:     make(chan struct{}),
-		done:     make(chan struct{}),
-		v:        view{state: runnerapi.StateEmpty},
-		versions: map[string]coreVersion{},
+		cfg:         c,
+		sup:         NewSupervisor(c.Supervisor),
+		reqs:        make(chan request),
+		quit:        make(chan struct{}),
+		done:        make(chan struct{}),
+		testTimeout: defaultTestTimeout,
+		v:           view{state: runnerapi.StateEmpty},
+		versions:    map[string]coreVersion{},
 	}
 	r.publish()
 	go r.loop()
 	return r
 }
 
-// Boot ends a trial that was open when the runner stopped, then starts
-// active.json, or stays empty without one. An unreadable active.json is
-// returned as an error and leaves the runner empty but usable.
+// Boot ends a trial that was open when the runner stopped, removes the
+// directories of TestConfig calls it interrupted, then starts active.json, or
+// stays empty without one. An unreadable active.json is returned as an error
+// and leaves the runner empty but usable.
 func (r *Runner) Boot() error { return r.do(context.Background(), r.boot) }
 
 // Trial tests candidate.json with xray run -test and switches to it. It
@@ -227,13 +232,24 @@ func (r *Runner) Healthy() bool {
 // RunningBinary is the staged core of the xray running now: the candidate
 // during a trial, otherwise the active one. ok is false when none runs.
 func (r *Runner) RunningBinary() (path string, ok bool) {
+	sel, ok := r.runningSelection()
+	if !ok {
+		return "", false
+	}
+	return r.sup.stagedPath(sel), true
+}
+
+// runningSelection is the selection of the xray running now, the one
+// RunningBinary names. Like Status, it never waits for the runner's
+// goroutine.
+func (r *Runner) runningSelection() (runnerapi.Selection, bool) {
 	r.mu.Lock()
 	sel := r.pub.running
 	r.mu.Unlock()
 	if sel == nil || r.sup.PID() == 0 {
-		return "", false
+		return runnerapi.Selection{}, false
 	}
-	return r.sup.stagedPath(*sel), true
+	return *sel, true
 }
 
 // Close stops xray and the runner's goroutine. An open trial stays in
@@ -302,6 +318,7 @@ func (r *Runner) boot() error {
 	}
 	r.booted = true
 	d := r.dirs()
+	cleanTestDirs(d)
 	active, aerr := ReadActive(d)
 	r.v.active = active
 	last, err := ReadLastTrial(d)

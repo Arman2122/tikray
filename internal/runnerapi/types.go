@@ -4,10 +4,11 @@
 //
 //	GET  /v1/status
 //	POST /v1/trial, /v1/commit, /v1/abort, /v1/restart, /v1/reload, /v1/xray-api
+//	POST /v1/test (the body is an xray config, at most 1 MiB)
 //
 // Errors are JSON bodies {"error": "<code>", "detail": "<text>"} with the
-// codes busy and no_trial (409), test_failed (422), bad_request and
-// unauthorized.
+// codes busy, no_trial and no_core (409), test_failed (422), too_large (413),
+// bad_request and unauthorized.
 package runnerapi
 
 import (
@@ -109,12 +110,22 @@ type XrayAPIResponse struct {
 	Stderr   string `json:"stderr"`
 }
 
+// TestResult is the answer to POST /v1/test: whether "xray run -test"
+// accepted the config, and what xray printed, at most 8 KiB of it.
+type TestResult struct {
+	OK     bool   `json:"ok"`
+	Output string `json:"output"`
+}
+
 // Errors the runner reports with a 409.
 var (
 	// ErrBusy means the runner is occupied, for example by an open trial.
 	ErrBusy = errors.New("runnerapi: runner is busy")
 	// ErrNoTrial means commit or abort found no open trial.
 	ErrNoTrial = errors.New("runnerapi: no trial is open")
+	// ErrNoCore means a config could not be tested because no xray runs,
+	// and so there is no core to test it with.
+	ErrNoCore = errors.New("runnerapi: no xray is running to test with")
 )
 
 // TestFailedError is what Trial returns when "xray run -test" rejects the
