@@ -417,6 +417,98 @@ func TestNetworkSourcesDoNotHang(t *testing.T) {
 	}
 }
 
+// HTTPClient with no address goes direct; with one it goes through the SOCKS5
+// server, which resolves the names. Both have the transport's bounds and the
+// caller's overall timeout.
+func TestHTTPClient(t *testing.T) {
+	origin := serve(t, text("body"))
+	_, port, _ := net.SplitHostPort(origin.Listener.Addr().String())
+	// The name cannot resolve locally: only the SOCKS server can map it.
+	host := "sub.invalid:" + port
+	socks, asked := startSOCKS5(t, map[string]string{host: origin.Listener.Addr().String()})
+
+	get := func(t *testing.T, hc *http.Client, rawURL string) (string, error) {
+		t.Helper()
+		resp, err := hc.Get(rawURL)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		return string(b), err
+	}
+
+	t.Run("direct", func(t *testing.T) {
+		hc := HTTPClient("", 7*time.Second)
+		if hc.Timeout != 7*time.Second {
+			t.Errorf("Timeout = %v, want 7s", hc.Timeout)
+		}
+		if got, err := get(t, hc, origin.URL); err != nil || got != "body" {
+			t.Errorf("got %q, %v", got, err)
+		}
+		if _, err := get(t, hc, "http://"+host); err == nil {
+			t.Error("a direct client resolved a name only the SOCKS server knows")
+		}
+		if n := len(asked()); n != 0 {
+			t.Errorf("the SOCKS server saw %d connections from the direct client", n)
+		}
+	})
+
+	t.Run("socks", func(t *testing.T) {
+		hc := HTTPClient(socks, 7*time.Second)
+		if hc.Timeout != 7*time.Second {
+			t.Errorf("Timeout = %v, want 7s", hc.Timeout)
+		}
+		if got, err := get(t, hc, "http://"+host+"/sub"); err != nil || got != "body" {
+			t.Errorf("got %q, %v", got, err)
+		}
+		if got := asked(); len(got) != 1 || got[0] != host {
+			t.Errorf("the SOCKS server was asked for %v, want [%s]", got, host)
+		}
+	})
+
+	// A peer that accepts the connection and holds it fails the attempt at the
+	// transport's bound, long before the caller's timeout.
+	t.Run("bounds", func(t *testing.T) {
+		shorten(t, &responseHeaderTimeout, 100*time.Millisecond)
+		base, addr := holdingServer(t, "headers")
+		_, port, _ := net.SplitHostPort(addr)
+		held := "held.invalid:" + port
+		viaSocks, _ := startSOCKS5(t, map[string]string{held: addr})
+		for _, tc := range []struct{ name, socks, url string }{
+			{"direct", "", base},
+			{"socks", viaSocks, "http://" + held},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				start := time.Now()
+				_, err := get(t, HTTPClient(tc.socks, time.Minute), tc.url)
+				if err == nil || !strings.Contains(err.Error(), "timeout awaiting response headers") {
+					t.Errorf("error %v, want a response header timeout", err)
+				}
+				if d := time.Since(start); d > 1500*time.Millisecond {
+					t.Errorf("took %v to give up", d)
+				}
+			})
+		}
+	})
+
+	t.Run("overall timeout", func(t *testing.T) {
+		slow := serve(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+			case <-time.After(3 * time.Second): // a client with no timeout gets here
+			}
+		})
+		_, err := get(t, HTTPClient("", 200*time.Millisecond), slow.URL)
+		var ne net.Error
+		if !errors.As(err, &ne) || !ne.Timeout() {
+			t.Errorf("error %v, want a timeout while reading the body", err)
+		}
+	})
+}
+
 // An attempt that stops receiving data is cancelled after Stall, however long
 // its Timeout, and the next source is used.
 func TestChainStallWatchdog(t *testing.T) {
