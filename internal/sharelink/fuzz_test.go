@@ -81,6 +81,15 @@ func checkServer(t *testing.T, s Server) {
 	if !utf8.ValidString(s.Name) {
 		t.Errorf("Name is not valid UTF-8: %q", s.Name)
 	}
+	if strings.ContainsFunc(s.Name, store.ForbiddenInName) {
+		t.Errorf("Name holds a control character or a bidi override: %q", s.Name)
+	}
+	// The store takes the server as it is.
+	state := store.Default()
+	state.Servers = []store.Server{{ID: "a1b2c3d4", Name: s.Name, Outbound: s.Outbound}}
+	if err := state.Validate(); err != nil {
+		t.Errorf("the store refuses the server: %v", err)
+	}
 
 	// nil means nothing to say; an empty slice would say that wrongly.
 	if s.Warnings != nil && len(s.Warnings) == 0 {

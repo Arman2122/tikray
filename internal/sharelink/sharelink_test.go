@@ -203,6 +203,19 @@ var fragmentCases = []parseCase{
 	{name: "good escapes beside a bad one stay raw", link: fragmentLink + "#a%20b%", wantName: "a%20b%", wantJSON: fragmentOut},
 	{name: "second hash", link: fragmentLink + "#a#b", wantName: "a#b", wantJSON: fragmentOut},
 	{name: "only a bad escape", link: fragmentLink + "#%", wantName: "%", wantJSON: fragmentOut},
+	// Control characters and bidi overrides are dropped before the trim: they
+	// could rewrite a terminal or reverse the text around a name.
+	{name: "an escape sequence", link: fragmentLink + "#red%1B%5B31m%1B%5B2Jalert", wantName: "red[31m[2Jalert", wantJSON: fragmentOut},
+	{name: "a raw escape sequence", link: fragmentLink + "#red\x1b[31m", wantName: "red[31m", wantJSON: fragmentOut},
+	{name: "a newline", link: fragmentLink + "#one%0Atwo%0D%0A", wantName: "onetwo", wantJSON: fragmentOut},
+	{name: "a tab, DEL and a C1 control", link: fragmentLink + "#a%09b%7Fc%C2%9Bd", wantName: "abcd", wantJSON: fragmentOut},
+	{name: "a right-to-left override", link: fragmentLink + "#evil%E2%80%AEtxt.exe", wantName: "eviltxt.exe", wantJSON: fragmentOut},
+	{name: "the bidi embeddings and isolates", link: fragmentLink + "#a‪b‫c‬d‭e⁦f⁧g⁨h⁩i", wantName: "abcdefghi", wantJSON: fragmentOut},
+	{name: "spaces behind a control character are trimmed", link: fragmentLink + "#%0A%20name%20%1B", wantName: "name", wantJSON: fragmentOut},
+	{name: "nothing but control characters", link: fragmentLink + "#%1B%0A%E2%80%AE%20", wantName: "example.com:443", wantJSON: fragmentOut},
+	// Marks that Persian text needs stay: the zero-width non-joiner and the
+	// right-to-left mark are neither.
+	{name: "a zero-width non-joiner and a right-to-left mark", link: fragmentLink + "#%D9%85%DB%8C%E2%80%8C%D8%B1%D9%88%D8%AF‏", wantName: "می‌رود‏", wantJSON: fragmentOut},
 }
 
 func TestParseFragment(t *testing.T) { runParseCases(t, fragmentCases) }

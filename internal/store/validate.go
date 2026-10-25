@@ -22,6 +22,16 @@ import (
 // is cut to it (sharelink).
 const MaxNameRunes = 128
 
+// ForbiddenInName reports whether r may not be in a server's or a
+// subscription's name: a C0 or C1 control character or DEL
+// (unicode.IsControl), or a bidi embedding, override or isolate (U+202A to
+// U+202E, U+2066 to U+2069). Wherever a name is shown, in a terminal, a log or
+// a page, the first kind could rewrite what is around it and the second could
+// reverse it. A share link's name drops them (sharelink).
+func ForbiddenInName(r rune) bool {
+	return unicode.IsControl(r) || r >= '‪' && r <= '‮' || r >= '⁦' && r <= '⁩'
+}
+
 const (
 	// minInterval is the shortest time between two fetches of a subscription.
 	minInterval = time.Hour
@@ -106,6 +116,10 @@ func (p *problems) name(path, name string) {
 	switch {
 	case strings.TrimSpace(name) == "":
 		p.add(path, "must not be empty")
+	case strings.ContainsFunc(name, ForbiddenInName):
+		// The name itself is not repeated: the point is to keep it out of
+		// what is shown.
+		p.add(path, "must not hold control characters or bidi overrides")
 	case utf8.RuneCountInString(name) > MaxNameRunes:
 		p.add(path, "must be at most %d characters", MaxNameRunes)
 	}

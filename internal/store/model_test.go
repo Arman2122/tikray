@@ -317,6 +317,16 @@ func TestValidateRejects(t *testing.T) {
 		{"server name blank", func(s *State) { s.Servers[0].Name = "  " }, "servers[0].name"},
 		{"server name too long", func(s *State) { s.Servers[0].Name = strings.Repeat("a", 129) }, "servers[0].name"},
 		{"server name too long in runes", func(s *State) { s.Servers[0].Name = strings.Repeat("é", 129) }, "servers[0].name"},
+		// A control character or a bidi override in a name could rewrite a
+		// terminal or reverse the text around the name where it is shown.
+		{"server name with an escape", func(s *State) { s.Servers[0].Name = "Frank\x1b[2Jfurt" }, "servers[0].name"},
+		{"server name with a newline", func(s *State) { s.Servers[0].Name = "Frank\nfurt" }, "servers[0].name"},
+		{"server name with a right-to-left override", func(s *State) { s.Servers[0].Name = "Frank‮furt" }, "servers[0].name"},
+		{"server name with DEL", func(s *State) { s.Servers[0].Name = "Frank\x7ffurt" }, "servers[0].name"},
+		{"server name with a C1 control", func(s *State) { s.Servers[0].Name = "Frank\u009bfurt" }, "servers[0].name"},
+		{"server name with a bidi isolate", func(s *State) { s.Servers[0].Name = "Frank⁦furt⁩" }, "servers[0].name"},
+		{"server name with a trailing escape", func(s *State) { s.Servers[0].Name = "Frankfurt\x1b" }, "servers[0].name"},
+		{"server name of a newline", func(s *State) { s.Servers[0].Name = "\n" }, "servers[0].name"},
 		{"outbound missing", func(s *State) { s.Servers[0].Outbound = nil }, "servers[0].outbound"},
 		{"outbound null", withOutbound(`null`), "servers[0].outbound"},
 		{"outbound array", withOutbound(`[{"protocol":"vless"}]`), "servers[0].outbound"},
@@ -362,6 +372,9 @@ func TestValidateRejects(t *testing.T) {
 		{"subscription id duplicate", func(s *State) { s.Subscriptions = append(s.Subscriptions, s.Subscriptions[0]) }, "subscriptions[1].id"},
 		{"subscription name empty", func(s *State) { s.Subscriptions[0].Name = "" }, "subscriptions[0].name"},
 		{"subscription name too long", func(s *State) { s.Subscriptions[0].Name = strings.Repeat("a", 129) }, "subscriptions[0].name"},
+		{"subscription name with an escape", func(s *State) { s.Subscriptions[0].Name = "Main\x1b]0;owned\x07" }, "subscriptions[0].name"},
+		{"subscription name with a newline", func(s *State) { s.Subscriptions[0].Name = "Main\r\nSecond" }, "subscriptions[0].name"},
+		{"subscription name with a right-to-left override", func(s *State) { s.Subscriptions[0].Name = "Main‮" }, "subscriptions[0].name"},
 		{"subscription url ftp", func(s *State) { s.Subscriptions[0].URL = "ftp://x" }, "subscriptions[0].url"},
 		{"subscription url relative", func(s *State) { s.Subscriptions[0].URL = "/sub/token" }, "subscriptions[0].url"},
 		{"subscription url without scheme", func(s *State) { s.Subscriptions[0].URL = "sub.example.com/token" }, "subscriptions[0].url"},
@@ -607,6 +620,19 @@ func TestValidateAccepts(t *testing.T) {
 				s.DNS.Domestic = netip.MustParseAddr(tt.domestic)
 			}
 			s.DNS.Remote = tt.remote
+			if err := s.Validate(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+
+	// The zero-width non-joiner and joiner, the right-to-left mark and a
+	// no-break space are none of what a name may not hold.
+	for _, name := range []string{"سرور‌آلمان", "‏فرانکفورت‏", "👨‍💻 lab", "Frank furt", "🇩🇪 Frankfurt #2"} {
+		t.Run("name "+name, func(t *testing.T) {
+			s := valid()
+			s.Servers[0].Name = name
+			s.Subscriptions[0].Name = name
 			if err := s.Validate(); err != nil {
 				t.Error(err)
 			}
