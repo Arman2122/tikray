@@ -1,11 +1,13 @@
 // Package xraypolicy knows which outbounds the newest xray-core refuses.
 //
-// Since xray-core 26.7.11 a config with one such outbound does not load at all,
-// so one server that holds it makes every later apply fail `xray run -test`.
-// Check finds those outbounds when a server is added, from a share link or
-// from raw JSON, so that they never reach a config. The rules are xray's own,
-// read from v26.10.21: infra/conf/xray.go (validateOutboundTransportSecurity),
-// infra/conf/shadowsocks.go and proxy/shadowsocks_2022.
+// A config with one such outbound does not load at all, so one server that
+// holds it makes every later apply fail `xray run -test`. Check finds those
+// outbounds when a server is added, from a share link or from raw JSON, so
+// that they never reach a config. The rules are xray's own, read from
+// v26.10.21: infra/conf/xray.go (validateOutboundTransportSecurity, since
+// 26.7.11), infra/conf/shadowsocks.go, proxy/shadowsocks_2022 and, for
+// allowInsecure (since 26.3.27, once past 2026-06-01),
+// infra/conf/transport_internet.go.
 //
 // Errors here never repeat a user id, a password or a key: they end up in
 // logs, in the answers of the API and in the list of lines a subscription
@@ -152,6 +154,11 @@ func alphaNum(c byte) bool {
 // Check returns nil if xray accepts the outbound, or a *Refusal that wraps
 // ErrRefused if it refuses it, which are:
 //
+//   - an outbound of any protocol whose streamSettings.tlsSettings.allowInsecure
+//     is true, whatever its security says: xray 26.3.27 and later refuse it
+//     once past 2026-06-01 (with security tls, the only one xray reads
+//     tlsSettings for), 26.1.18 skips the check of the server's certificate
+//     with it, and tikray never lets a server ask for that;
 //   - VLESS with no encryption (empty or "none") over a stream with no
 //     security, to a server that is not PrivateAddress;
 //   - Trojan over a stream with no security, to a server that is not
@@ -178,6 +185,10 @@ func Check(outbound json.RawMessage) error {
 	if json.Unmarshal(outbound, &ob) != nil {
 		return nil
 	}
+	if insecureTLS(ob.StreamSettings) {
+		return refuse("xray-core refuses allowInsecure, which turns off the check of the server's TLS certificate: " +
+			"pin the certificate with pinnedPeerCertSha256 instead")
+	}
 	switch strings.ToLower(ob.Protocol) {
 	case "vless":
 		return checkVLESS(ob.Settings, ob.StreamSettings)
@@ -187,6 +198,21 @@ func Check(outbound json.RawMessage) error {
 		return checkShadowsocks(ob.Settings)
 	}
 	return nil
+}
+
+// insecureTLS reports whether streamSettings.tlsSettings.allowInsecure is
+// true. A value that is not a bool, or tlsSettings that are not an object, are
+// not Check's to refuse: xray cannot read them either.
+func insecureTLS(streamSettings json.RawMessage) bool {
+	var ss struct {
+		TLSSettings struct {
+			AllowInsecure bool `json:"allowInsecure"`
+		} `json:"tlsSettings"`
+	}
+	if len(streamSettings) == 0 || json.Unmarshal(streamSettings, &ss) != nil {
+		return false
+	}
+	return ss.TLSSettings.AllowInsecure
 }
 
 // plainStream reports whether the stream has no security: streamSettings is

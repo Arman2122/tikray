@@ -248,12 +248,18 @@ Each source is tried in order until one returns a file that passes verification:
   explicit confirmation. A core installed that way needs it again on every
   later update to it; once its hash becomes known, the installed zip must match
   it.
-- **Servers' TLS certificates** are always verified: tikray never emits
-  `allowInsecure`, which xray refuses outright since 26.3.27 once past
-  2026-06-01 (§4.9). A share link's `pcs` and `vcn` map to xray's
-  `pinnedPeerCertSha256` and `verifyPeerCertByName`, so a self-signed server
-  can be pinned. A link that asks for `allowInsecure` (or `insecure`) is
-  imported with verification on and a warning, unless it also pins with `pcs`.
+- **Servers' TLS certificates** are always verified. xray 26.3.27 and later
+  refuse `allowInsecure` once past 2026-06-01, and 26.1.18 skips the check
+  with it (§4.9), so no server can carry it:
+  - a share link that asks for `allowInsecure` (or `insecure`) is imported
+    with verification on and a warning, unless it also pins with `pcs`; the
+    parser never emits `allowInsecure`;
+  - a raw-JSON server whose `streamSettings.tlsSettings.allowInsecure` is
+    `true` is refused when it is added, whatever its protocol or security,
+    with the advice to pin the certificate with `pinnedPeerCertSha256`.
+
+  A share link's `pcs` and `vcn` map to xray's `pinnedPeerCertSha256` and
+  `verifyPeerCertByName`, so a self-signed server can be pinned.
 
 ### 4.4 Slots and retention
 
@@ -328,8 +334,9 @@ Runner updates are rare because the runner holds no xray or geo code.
   its `xray run -test`. tikray follows the newest release and refuses these
   servers when they are added, from a share link (a subscription skips the
   line, with the reason) or as raw JSON (`internal/xraypolicy`):
-  - xray ≥ 26.3.27 refuses `allowInsecure` after 2026-06-01, so tikray never
-    emits it (§4.3).
+  - xray ≥ 26.3.27 refuses `tlsSettings.allowInsecure: true` after
+    2026-06-01. A share link never brings it in (§4.3); a raw-JSON outbound
+    of any protocol that holds it is refused.
   - xray ≥ 26.7.11 refuses VLESS without TLS or VLESS encryption, and Trojan
     without TLS, to an address outside xray's private lists, and refuses
     Shadowsocks `none` (and `plain`). tikray also refuses 2022-blake3 keys

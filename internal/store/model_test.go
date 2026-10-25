@@ -277,7 +277,9 @@ const (
 	vlessTLSTo   = `{"protocol":"vless","settings":{"vnext":[{"address":"%s","port":443,"users":[{"id":"s3cret-id","encryption":"none"}]}]},"streamSettings":{"security":"tls"}}`
 	trojanPlain  = `{"protocol":"trojan","settings":{"servers":[{"address":"%s","port":443,"password":"s3cret-pw"}]}}`
 	trojanTLS    = `{"protocol":"trojan","settings":{"servers":[{"address":"%s","port":443,"password":"s3cret-pw"}]},"streamSettings":{"security":"tls"}}`
-	ssMethod     = `{"protocol":"shadowsocks","settings":{"servers":[{"address":"1.2.3.4","port":8388,"method":"%s","password":"%s"}]}}`
+	// vlessInsecure is VLESS over TLS with allowInsecure set to %t.
+	vlessInsecure = `{"protocol":"vless","settings":{"vnext":[{"address":"1.2.3.4","port":443,"users":[{"id":"s3cret-id","encryption":"none"}]}]},"streamSettings":{"security":"tls","tlsSettings":{"allowInsecure":%t}}}`
+	ssMethod      = `{"protocol":"shadowsocks","settings":{"servers":[{"address":"1.2.3.4","port":8388,"method":"%s","password":"%s"}]}}`
 	// key16 is the base64 of 16 bytes.
 	key16 = "AAECAwQFBgcICQoLDA0ODw=="
 )
@@ -338,6 +340,7 @@ func TestValidateRejects(t *testing.T) {
 		{"outbound trojan without tls to a public IP", withOutbound(fmt.Sprintf(trojanPlain, "1.2.3.4")), "servers[0].outbound"},
 		{"outbound shadowsocks method none", withOutbound(fmt.Sprintf(ssMethod, "none", "s3cret-pw")), "servers[0].outbound"},
 		{"outbound shadowsocks 2022 with a short key", withOutbound(fmt.Sprintf(ssMethod, "2022-blake3-aes-256-gcm", key16)), "servers[0].outbound"},
+		{"outbound tls with allowInsecure", withOutbound(fmt.Sprintf(vlessInsecure, true)), "servers[0].outbound"},
 		{"server subscription missing", func(s *State) { s.Servers[0].Subscription = "deadbeef" }, "servers[0].subscription"},
 
 		{"subscription id uppercase", func(s *State) {
@@ -490,6 +493,7 @@ func TestValidateRefusedOutboundsNameTheReason(t *testing.T) {
 		{"trojan", fmt.Sprintf(trojanPlain, "1.2.3.4"), "xray-core refuses Trojan without TLS to a public address"},
 		{"shadowsocks none", fmt.Sprintf(ssMethod, "none", "s3cret-pw"), "xray-core refuses the Shadowsocks methods none and plain"},
 		{"shadowsocks 2022", fmt.Sprintf(ssMethod, "2022-blake3-aes-256-gcm", "s3cret-pw"), "xray-core refuses a Shadowsocks 2022 password"},
+		{"allowInsecure", fmt.Sprintf(vlessInsecure, true), "xray-core refuses allowInsecure"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := valid()
@@ -518,6 +522,7 @@ func TestValidateAccepts(t *testing.T) {
 		{"vless with tls to a public IP", fmt.Sprintf(vlessTLSTo, "1.2.3.4")},
 		{"trojan without tls to a private IP", fmt.Sprintf(trojanPlain, "10.1.2.3")},
 		{"trojan with tls to a public IP", fmt.Sprintf(trojanTLS, "1.2.3.4")},
+		{"vless with tls and allowInsecure false", fmt.Sprintf(vlessInsecure, false)},
 		{"shadowsocks aes-256-gcm", fmt.Sprintf(ssMethod, "aes-256-gcm", "s3cret-pw")},
 		{"shadowsocks 2022 with a 16-byte key", fmt.Sprintf(ssMethod, "2022-blake3-aes-128-gcm", key16)},
 	} {

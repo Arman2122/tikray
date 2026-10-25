@@ -145,7 +145,17 @@ func ssFlat(method, password string) string {
 		method, password)
 }
 
+// vmessWith is a VMess outbound to a public address, with the stream JSON (a
+// `"streamSettings":{...}` member) after the settings.
+func vmessWith(stream string) string {
+	return fmt.Sprintf(`{"protocol":"vmess","settings":{"vnext":[{"address":"1.2.3.4","port":443,"users":[{"id":%q,"security":"auto"}]}]},%s}`,
+		testID, stream)
+}
+
 const (
+	tlsInsecure = `"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"serverName":"example.com","allowInsecure":true}}`
+	tlsSecure   = `"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"serverName":"example.com","allowInsecure":false}}`
+
 	tls     = `"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"serverName":"example.com"}}`
 	reality = `"streamSettings":{"network":"tcp","security":"reality"}`
 	secNone = `"streamSettings":{"network":"tcp","security":"none"}`
@@ -228,6 +238,35 @@ func TestCheck(t *testing.T) {
 		{name: "trojan flat without security to a public IP", outbound: trojanFlat("1.2.3.4", ""), reason: "Trojan"},
 		{name: "trojan flat tls to a public IP", outbound: trojanFlat("1.2.3.4", tls)},
 		{name: "trojan flat without security to a private IP", outbound: trojanFlat("10.1.2.3", "")},
+
+		// allowInsecure, for every protocol: xray ≥26.3.27 refuses it once past
+		// 2026-06-01, and 26.1.18 skips the certificate check with it.
+		{name: "vless tls with allowInsecure to a public IP", outbound: vlessNested("1.2.3.4", "none", tlsInsecure), reason: "pinnedPeerCertSha256"},
+		{name: "vless tls with allowInsecure to a private IP", outbound: vlessNested("203.0.113.10", "none", tlsInsecure), reason: "allowInsecure"},
+		{name: "vless flat tls with allowInsecure", outbound: vlessFlat("1.2.3.4", "none", tlsInsecure), reason: "allowInsecure"},
+		{name: "trojan tls with allowInsecure", outbound: trojanNested("1.2.3.4", tlsInsecure), reason: "allowInsecure"},
+		{name: "vmess tls with allowInsecure", outbound: vmessWith(tlsInsecure), reason: "allowInsecure"},
+		{name: "shadowsocks over tls with allowInsecure", outbound: `{"protocol":"shadowsocks","settings":{"servers":[{"address":"1.2.3.4","port":443,"method":"aes-256-gcm","password":"` + testPassword + `"}]},` + tlsInsecure + `}`, reason: "allowInsecure"},
+		{name: "unknown protocol with allowInsecure", outbound: `{"protocol":"wireguard","settings":{},` + tlsInsecure + `}`, reason: "allowInsecure"},
+		{name: "allowInsecure beside a pinned certificate", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","tlsSettings":{"allowInsecure":true,"pinnedPeerCertSha256":"`+strings.Repeat("ab", 32)+`"}}`), reason: "allowInsecure"},
+		{
+			// xray reads tlsSettings only with security tls, but the key asks
+			// that the server's certificate not be checked, which tikray never
+			// lets a server ask.
+			name:     "allowInsecure under another security",
+			outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"reality","tlsSettings":{"allowInsecure":true}}`),
+			reason:   "allowInsecure",
+		},
+		{name: "allowInsecure with keys in other cases", outbound: vlessNested("1.2.3.4", "none", `"StreamSettings":{"Security":"TLS","TLSSettings":{"AllowInsecure":true}}`), reason: "allowInsecure"},
+		{name: "vless tls with allowInsecure false", outbound: vlessNested("1.2.3.4", "none", tlsSecure)},
+		{name: "trojan tls with allowInsecure false", outbound: trojanNested("1.2.3.4", tlsSecure)},
+		{name: "vmess tls with allowInsecure false", outbound: vmessWith(tlsSecure)},
+		{name: "vmess tls without allowInsecure", outbound: vmessWith(tls)},
+		{name: "allowInsecure null", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","tlsSettings":{"allowInsecure":null}}`)},
+		// Not a bool: xray's -test refuses the config, as it does any
+		// tlsSettings it cannot read.
+		{name: "allowInsecure is a string", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","tlsSettings":{"allowInsecure":"true"}}`)},
+		{name: "tlsSettings is a string", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","tlsSettings":"x"}`)},
 
 		// Shadowsocks methods.
 		{name: "ss method none", outbound: ssNested("none", "pw-for-none-method"), reason: "Shadowsocks", secrets: []string{"pw-for-none-method"}},
