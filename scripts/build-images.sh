@@ -22,7 +22,11 @@ images=(
 
 # RouterOS rejects archives written by Docker's containerd image store ("no
 # config found in manifest"); the classic store's `docker save` output works.
-if docker info 2>/dev/null | grep -q 'driver-type: io.containerd.snapshotter'; then
+# `docker info` is captured first, not piped into `grep -q`: grep exits at the
+# first match, docker then dies of SIGPIPE, and pipefail would read the match as
+# no match, so the refusal would be skipped.
+docker_info=$(docker info 2>/dev/null || true)
+if grep -q 'driver-type: io.containerd.snapshotter' <<<"$docker_info"; then
   echo 'build-images.sh: Docker uses the containerd image store; RouterOS cannot import its archives.' >&2
   echo 'Set {"features": {"containerd-snapshotter": false}} in /etc/docker/daemon.json and restart dockerd.' >&2
   exit 1
