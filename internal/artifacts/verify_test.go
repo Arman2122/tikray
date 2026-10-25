@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Arman2122/tikray/internal/xrayver"
 )
@@ -577,5 +578,64 @@ func TestExpectedCanceledContext(t *testing.T) {
 	}
 	if n := idxHits.Load(); n != 0 {
 		t.Errorf("the index was fetched %d times after cancellation", n)
+	}
+}
+
+func TestDgstChainClamps(t *testing.T) {
+	const big = 10 * indexTimeout
+	tests := []struct {
+		name        string
+		in          Chain
+		wantMax     int64
+		wantTimeout time.Duration
+	}{
+		{"zero values", Chain{}, dgstMaxBytes, indexTimeout},
+		{"above the limits", Chain{MaxBytes: 1 << 30, Timeout: big}, dgstMaxBytes, indexTimeout},
+		{"negative", Chain{MaxBytes: -1, Timeout: -time.Second}, dgstMaxBytes, indexTimeout},
+		{"exactly at the limits", Chain{MaxBytes: dgstMaxBytes, Timeout: indexTimeout}, dgstMaxBytes, indexTimeout},
+		{"below the limits stays", Chain{MaxBytes: 1 << 10, Timeout: 200 * time.Millisecond}, 1 << 10, 200 * time.Millisecond},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			src := Direct("", nil)
+			in := tc.in
+			in.Sources = []Source{src}
+			got := dgstChain(in)
+			if got.MaxBytes != tc.wantMax || got.Timeout != tc.wantTimeout {
+				t.Errorf("dgstChain = MaxBytes %d, Timeout %v; want %d, %v", got.MaxBytes, got.Timeout, tc.wantMax, tc.wantTimeout)
+			}
+			if len(got.Sources) != 1 || got.Sources[0] != src {
+				t.Errorf("dgstChain changed the sources: %v", got.Sources)
+			}
+			if in.MaxBytes != tc.in.MaxBytes || in.Timeout != tc.in.Timeout {
+				t.Errorf("the caller's chain became MaxBytes %d, Timeout %v", in.MaxBytes, in.Timeout)
+			}
+		})
+	}
+}
+
+// A black-holed upstream costs one attempt timeout per source, then the index answers.
+func TestExpectedHangingUpstreamReachesIndex(t *testing.T) {
+	release := make(chan struct{})
+	hang := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	})
+	t.Cleanup(func() { close(release) }) // runs before the server's Close, so no handler outlives it
+
+	key := newKey(t, elliptic.P256())
+	data := testIndex(t, hashB)
+	idxSrv, _ := indexServer(t, data, sign(t, key, data))
+	up := upstreamOf(hang, hang)
+	up.Timeout = 200 * time.Millisecond
+	v := Verifier{Upstream: up, IndexURLs: []string{idxSrv.URL + "/index.json"}, IndexPub: pubPEM(t, key)}
+
+	start := time.Now()
+	got, err := v.Expected(context.Background(), testReq)
+	wantVerified(t, got, err, hashB, "index")
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("Expected took %v with two hanging upstream sources and a 200 ms attempt timeout", d)
 	}
 }

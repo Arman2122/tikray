@@ -29,7 +29,7 @@ const (
 	dgstMaxBytes = 64 << 10
 	// indexMaxBytes caps the hash index and its signature, each.
 	indexMaxBytes = 8 << 20
-	// indexTimeout bounds one request when Verifier.HTTP is nil.
+	// indexTimeout bounds one request when Verifier.HTTP is nil, and one .dgst attempt.
 	indexTimeout = 30 * time.Second
 )
 
@@ -187,6 +187,20 @@ func (v Verifier) Expected(ctx context.Context, r Request) (Verified, error) {
 	return Verified{Method: "unverified"}, fmt.Errorf("%w %s: %s", ErrNoHash, r.File, strings.Join(why, "; "))
 }
 
+// dgstChain returns a copy of c fit for a .dgst, which is a few hundred bytes:
+// at most dgstMaxBytes and, so that a black-holed upstream cannot stall the
+// fall back to the index for minutes, at most indexTimeout per attempt. It only
+// lowers the caller's limits; a zero limit counts as the chain's large default.
+func dgstChain(c Chain) Chain {
+	if c.MaxBytes <= 0 || c.MaxBytes > dgstMaxBytes {
+		c.MaxBytes = dgstMaxBytes
+	}
+	if c.Timeout <= 0 || c.Timeout > indexTimeout {
+		c.Timeout = indexTimeout
+	}
+	return c
+}
+
 // fromDgst fetches and parses <file>.dgst through the upstream chain, in a
 // private directory that is removed afterwards.
 func (v Verifier) fromDgst(ctx context.Context, r Request) (string, error) {
@@ -196,10 +210,7 @@ func (v Verifier) fromDgst(ctx context.Context, r Request) (string, error) {
 	}
 	defer os.RemoveAll(dir)
 
-	chain := v.Upstream // a copy; the cap changes only here
-	if chain.MaxBytes <= 0 || chain.MaxBytes > dgstMaxBytes {
-		chain.MaxBytes = dgstMaxBytes
-	}
+	chain := dgstChain(v.Upstream)
 	dgst := r
 	dgst.File = r.File + ".dgst"
 	var hash string
