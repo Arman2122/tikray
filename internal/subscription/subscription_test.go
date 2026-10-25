@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -77,6 +78,12 @@ func TestDecode(t *testing.T) {
 		{"base64 with spaces and tabs", " " + std[:20] + " \t" + std[20:] + " ", threeLinks},
 		{"base64 of a CRLF list", base64.StdEncoding.EncodeToString([]byte(strings.ReplaceAll(list, "\n", "\r\n"))), threeLinks},
 		{"lines without ://", "vless:/x\nhello\n" + linkSS + "\nhttp:x\n", []string{linkSS}},
+		// Providers put their own details in comment lines, URLs included.
+		{"comments that hold URLs", "#support-url: https://t.me/x\n#profile-web-page-url: https://example.com/page\n" + linkSS, []string{linkSS}},
+		{"comments between links", linkSS + "\n# see http://example.com\n" + linkTrojan + "\n   \t#indented: https://t.me/x\n", []string{linkSS, linkTrojan}},
+		{"a link that is commented out", "#" + linkVLESS + "\n# " + linkTrojan + "\n" + linkSS, []string{linkSS}},
+		{"base64 of comments that hold URLs", base64.StdEncoding.EncodeToString([]byte("#support-url: https://t.me/x\n" + linkSS + "\n")), []string{linkSS}},
+		{"a # inside a link is part of it", linkSS + "\n" + linkVLESS, []string{linkSS, linkVLESS}},
 		{"links are kept in order and with repeats", linkSS + "\n" + linkSS + "\n" + linkTrojan, []string{linkSS, linkSS, linkTrojan}},
 		{"empty", "", nil},
 		{"blank", " \r\n\t\n", nil},
@@ -154,8 +161,19 @@ func TestParse(t *testing.T) {
 		}
 	})
 
+	// The provider's own details are not failed lines.
+	t.Run("comments that hold URLs are not skipped", func(t *testing.T) {
+		body := "#support-url: https://t.me/x\n#profile-web-page-url: https://example.com/page\n" + linkSS + "\n"
+		for _, b := range [][]byte{[]byte(body), []byte(base64.StdEncoding.EncodeToString([]byte(body)))} {
+			res := Parse(b)
+			if len(res.Entries) != 1 || len(res.Skipped) != 0 {
+				t.Errorf("got %d entries and skipped %+v, want 1 entry and nothing skipped", len(res.Entries), res.Skipped)
+			}
+		}
+	})
+
 	t.Run("nothing to parse", func(t *testing.T) {
-		for _, body := range []string{"", "\n\n", "#only a comment", "not a list"} {
+		for _, body := range []string{"", "\n\n", "#only a comment", "#url: https://t.me/x", "not a list"} {
 			res := Parse([]byte(body))
 			if len(res.Entries) != 0 || len(res.Skipped) != 0 {
 				t.Errorf("Parse(%q) = %+v, want nothing", body, res)
@@ -462,4 +480,231 @@ func TestMergeIsStable(t *testing.T) {
 	if !reflect.DeepEqual(first, second) {
 		t.Errorf("a second refresh changed the servers:\n%+v\n%+v", second, first)
 	}
+}
+
+// The outbounds the identity tests give their servers.
+const (
+	outboundA = `{"protocol":"vless","settings":{"vnext":[{"address":"a.example.com","port":443}]}}`
+	outboundB = `{"protocol":"trojan","settings":{"servers":[{"address":"b.example.com","port":443}]}}`
+	outboundC = `{"protocol":"shadowsocks","settings":{"servers":[{"address":"c.example.com","port":8388}]}}`
+)
+
+func srvOut(id, name, link, sub, outbound string) store.Server {
+	return store.Server{ID: id, Name: name, Link: link, Subscription: sub, Outbound: json.RawMessage(outbound)}
+}
+
+func entryOut(name, link, outbound string) Entry {
+	e := Entry{Link: link}
+	e.Server.Name = name
+	e.Server.Outbound = json.RawMessage(outbound)
+	return e
+}
+
+// vmessLink is the link of a VMess server whose provider put ps in its name.
+func vmessLink(ps string) string {
+	obj := `{"v":"2","ps":` + strconv.Quote(ps) + `,"add":"vm.example.com","port":"443",` +
+		`"id":"22222222-2222-2222-2222-222222222222","aid":"0","net":"tcp","type":"none","tls":""}`
+	return "vmess://" + base64.StdEncoding.EncodeToString([]byte(obj))
+}
+
+// Providers write volatile text, such as the traffic left or the expiry, in
+// the name of a link. A server is the same server while its outbound is, so
+// that its ID, Disabled and the references to it survive a refresh.
+func TestMergeMatchesByOutbound(t *testing.T) {
+	t.Run("a changed fragment keeps the ID and Disabled", func(t *testing.T) {
+		first := Merge(nil, "s1", Parse([]byte(linkVLESS+"\n"+linkTrojan+"\n"+linkSS)).Entries)
+		if len(first) != 3 {
+			t.Fatalf("got %d servers, want 3", len(first))
+		}
+		first[0].Disabled = true
+		before := clone(first)
+
+		volatile := strings.Replace(linkVLESS, "#alpha", "#alpha | 12.5 GB left, expires 2026-12-01", 1)
+		res := Parse([]byte(volatile + "\n" + linkTrojan + "\n" + linkSS))
+		if len(res.Entries) != 3 {
+			t.Fatalf("got %d entries, want 3 (skipped %+v)", len(res.Entries), res.Skipped)
+		}
+		got := Merge(first, "s1", res.Entries)
+
+		if !reflect.DeepEqual(first, before) {
+			t.Error("Merge changed its input")
+		}
+		if len(got) != 3 || !slices.Equal(ids(got), ids(first)) {
+			t.Fatalf("IDs = %v, want %v", ids(got), ids(first))
+		}
+		want := first[0]
+		want.Link = volatile
+		want.Name = "alpha | 12.5 GB left, expires 2026-12-01"
+		if !reflect.DeepEqual(got[0], want) {
+			t.Errorf("got[0] = %+v, want %+v (disabled, with the new link and name)", got[0], want)
+		}
+		if !reflect.DeepEqual(got[1:], first[1:]) {
+			t.Errorf("the other servers changed: %+v", got[1:])
+		}
+
+		// The next refresh finds the server by its new link.
+		again := Merge(got, "s1", res.Entries)
+		if !reflect.DeepEqual(again, got) {
+			t.Errorf("a second refresh changed the servers:\n%+v\n%+v", again, got)
+		}
+	})
+
+	t.Run("a VMess link whose ps changed keeps the ID", func(t *testing.T) {
+		old, changed := vmessLink("vm | 40 GB left"), vmessLink("vm | 39 GB left")
+		first := Merge(nil, "s1", Parse([]byte(old)).Entries)
+		res := Parse([]byte(changed))
+		if len(first) != 1 || len(res.Entries) != 1 {
+			t.Fatalf("got %d servers and %d entries (skipped %+v), want 1 and 1", len(first), len(res.Entries), res.Skipped)
+		}
+		if old == changed || first[0].Name != "vm | 40 GB left" || res.Entries[0].Server.Name != "vm | 39 GB left" {
+			t.Fatalf("the test links do not differ in the name: %q, %q", first[0].Name, res.Entries[0].Server.Name)
+		}
+		got := Merge(first, "s1", res.Entries)
+		if len(got) != 1 || got[0].ID != first[0].ID || got[0].Name != "vm | 39 GB left" || got[0].Link != changed {
+			t.Errorf("got %+v, want the server %s renamed", got, first[0].ID)
+		}
+	})
+
+	t.Run("the whole server is kept but its link, name and outbound", func(t *testing.T) {
+		old := srvOut("0000000a", "A", "link://a", "s1", outboundA)
+		old.Disabled = true
+		got := Merge([]store.Server{old}, "s1", []Entry{entryOut("A renamed", "link://a2", outboundA)})
+		want := old
+		want.Link, want.Name, want.Outbound = "link://a2", "A renamed", json.RawMessage(outboundA)
+		if len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+			t.Errorf("got %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("the outbound is compared as JSON, not as bytes", func(t *testing.T) {
+		stored := "{\n  \"settings\": {\"vnext\": [ {\"port\": 443, \"address\": \"a.example.com\"} ]},\n  \"protocol\": \"vless\"\n}\n"
+		old := srvOut("0000000a", "A", "link://a", "s1", stored)
+		got := Merge([]store.Server{old}, "s1", []Entry{entryOut("A", "link://a2", outboundA)})
+		if len(got) != 1 || got[0].ID != "0000000a" {
+			t.Errorf("got %+v, want the old server's ID", got)
+		}
+	})
+
+	t.Run("another outbound is another server", func(t *testing.T) {
+		old := srvOut("0000000a", "A", "link://a", "s1", outboundA)
+		for _, other := range []string{
+			outboundB,
+			strings.Replace(outboundA, "443", "444", 1),
+			strings.Replace(outboundA, "443", "443.0", 1),
+			strings.Replace(outboundA, "a.example.com", "A.example.com", 1),
+		} {
+			got := Merge([]store.Server{old}, "s1", []Entry{entryOut("A", "link://a2", other)})
+			if len(got) != 1 || got[0].ID == "0000000a" {
+				t.Errorf("outbound %s: got %+v, want a new ID", other, got)
+			}
+		}
+	})
+
+	t.Run("only the subscription's own servers match", func(t *testing.T) {
+		manual := srvOut("00000001", "Manual", "", "", outboundA)
+		other := srvOut("00000002", "Other", "link://o", "s2", outboundA)
+		got := Merge([]store.Server{manual, other}, "s1", []Entry{entryOut("A", "link://a", outboundA)})
+		if len(got) != 3 || !reflect.DeepEqual(got[:2], []store.Server{manual, other}) {
+			t.Fatalf("got %+v, want the manual server and the s2 server untouched", got)
+		}
+		if id := got[2].ID; id == manual.ID || id == other.ID || got[2].Subscription != "s1" {
+			t.Errorf("got[2] = %+v, want a new server in s1", got[2])
+		}
+	})
+
+	t.Run("an outbound that is not JSON, or empty, matches nothing", func(t *testing.T) {
+		for _, out := range []string{"", "{", "null", "[1,"} {
+			old := srvOut("0000000a", "A", "link://a", "s1", out)
+			got := Merge([]store.Server{old}, "s1", []Entry{entryOut("A", "link://a2", out)})
+			if len(got) != 1 || got[0].ID == "0000000a" {
+				t.Errorf("outbound %q: got %+v, want a new ID", out, got)
+			}
+		}
+	})
+}
+
+// A server is claimed by one entry at most, and a link beats an outbound.
+func TestMergeIdentityRules(t *testing.T) {
+	t.Run("identical outbounds, different links: one matches, the other is new", func(t *testing.T) {
+		old := srvOut("0000000a", "A", "link://a", "s1", outboundA)
+		got := Merge([]store.Server{old}, "s1", []Entry{
+			entryOut("first", "link://b", outboundA),
+			entryOut("second", "link://c", outboundA),
+		})
+		if len(got) != 2 {
+			t.Fatalf("got %d servers, want 2: %+v", len(got), got)
+		}
+		if got[0].ID != "0000000a" || got[0].Name != "first" || got[1].Name != "second" {
+			t.Errorf("got %+v, want the first entry to take the old ID", got)
+		}
+		if got[1].ID == "0000000a" || !hexID.MatchString(got[1].ID) {
+			t.Errorf("the second entry's ID is %q, want a new one", got[1].ID)
+		}
+	})
+
+	t.Run("two old servers with one outbound go to two entries, in order", func(t *testing.T) {
+		a := srvOut("0000000a", "A", "link://a", "s1", outboundA)
+		b := srvOut("0000000b", "B", "link://b", "s1", outboundA)
+		got := Merge([]store.Server{a, b}, "s1", []Entry{
+			entryOut("x", "link://x", outboundA),
+			entryOut("y", "link://y", outboundA),
+			entryOut("z", "link://z", outboundA),
+		})
+		if len(got) != 3 || got[0].ID != "0000000a" || got[1].ID != "0000000b" || slices.Contains([]string{"0000000a", "0000000b"}, got[2].ID) {
+			t.Errorf("IDs = %v, want the two old ones in order and a new one", ids(got))
+		}
+	})
+
+	t.Run("a link match wins over an outbound match", func(t *testing.T) {
+		a := srvOut("0000000a", "A", "link://a", "s1", outboundA)
+		b := srvOut("0000000b", "B", "link://b", "s1", outboundA)
+		// B's link and A's outbound: B it is, whatever the order of the old servers.
+		for _, servers := range [][]store.Server{{a, b}, {b, a}} {
+			got := Merge(servers, "s1", []Entry{entryOut("new", "link://b", outboundA)})
+			if len(got) != 1 || got[0].ID != "0000000b" {
+				t.Errorf("got %+v, want B's ID", got)
+			}
+		}
+	})
+
+	t.Run("an entry that matches by link is not outbid by an earlier entry's outbound", func(t *testing.T) {
+		a := srvOut("0000000a", "A", "link://a", "s1", outboundA)
+		b := srvOut("0000000b", "B", "link://b", "s1", outboundB)
+		// The first entry has B's outbound, the second B's link.
+		got := Merge([]store.Server{a, b}, "s1", []Entry{
+			entryOut("by outbound", "link://c", outboundB),
+			entryOut("by link", "link://b", outboundC),
+		})
+		if len(got) != 2 {
+			t.Fatalf("got %d servers, want 2: %+v", len(got), got)
+		}
+		if got[1].ID != "0000000b" || got[1].Name != "by link" {
+			t.Errorf("got[1] = %+v, want B's ID, through its link", got[1])
+		}
+		if got[0].ID == "0000000a" || got[0].ID == "0000000b" || !hexID.MatchString(got[0].ID) {
+			t.Errorf("got[0].ID = %q, want a new ID: B was taken, and A's outbound is another", got[0].ID)
+		}
+	})
+
+	t.Run("link matches and outbound matches together", func(t *testing.T) {
+		a := srvOut("0000000a", "A", "link://a", "s1", outboundA)
+		b := srvOut("0000000b", "B", "link://b", "s1", outboundA)
+		c := srvOut("0000000c", "C", "link://c", "s1", outboundC)
+		got := Merge([]store.Server{a, b, c}, "s1", []Entry{
+			entryOut("same A outbound, new link", "link://d", outboundA), // B is taken by link: this is A
+			entryOut("by link", "link://b", outboundA),
+			entryOut("C moved", "link://e", outboundC),
+		})
+		if want := []string{"0000000a", "0000000b", "0000000c"}; !slices.Equal(ids(got), want) {
+			t.Errorf("IDs = %v, want %v", ids(got), want)
+		}
+	})
+
+	t.Run("a removed server's ID is not reused", func(t *testing.T) {
+		a := srvOut("0000000a", "A", "link://a", "s1", outboundA)
+		got := Merge([]store.Server{a}, "s1", []Entry{entryOut("B", "link://b", outboundB)})
+		if len(got) != 1 || got[0].ID == "0000000a" {
+			t.Errorf("got %+v, want a new ID", got)
+		}
+	})
 }

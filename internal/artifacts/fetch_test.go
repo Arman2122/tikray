@@ -443,6 +443,16 @@ func TestHTTPClient(t *testing.T) {
 		if hc.Timeout != 7*time.Second {
 			t.Errorf("Timeout = %v, want 7s", hc.Timeout)
 		}
+		// A direct client honours the environment's proxy settings, like Direct.
+		// The test must not depend on them, though, and t.Setenv cannot take
+		// them out: http.ProxyFromEnvironment reads the variables once per
+		// process, so it is too late whenever an earlier test made a request.
+		// The client's proxy function is dropped instead.
+		tr := hc.Transport.(*http.Transport)
+		if tr.Proxy == nil {
+			t.Error("a direct client ignores the environment's proxy settings")
+		}
+		tr.Proxy = nil
 		if got, err := get(t, hc, origin.URL); err != nil || got != "body" {
 			t.Errorf("got %q, %v", got, err)
 		}

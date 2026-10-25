@@ -9,6 +9,8 @@ package subscription
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
+	"io"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -28,8 +30,10 @@ var byteOrderMark = []byte{0xEF, 0xBB, 0xBF}
 // The body is the base64 of a list of links, or the list itself. The base64 may
 // be in the standard or the URL alphabet, with or without padding, and may be
 // wrapped: line breaks and spaces in it are ignored. In the list a line is a
-// link; it is trimmed, and a blank line or a line without "://" is dropped. A
-// link is not checked, nor are repeats removed: Parse does both.
+// link; it is trimmed, and a blank line, a comment (a line that starts with
+// "#", such as the "#support-url: https://t.me/x" that providers add) and a
+// line without "://" are dropped. A link is not checked, nor are repeats
+// removed: Parse does both.
 func Decode(body []byte) []string {
 	text := bytes.TrimPrefix(body, byteOrderMark)
 	if decoded, ok := decodeBase64(text); ok {
@@ -38,7 +42,7 @@ func Decode(body []byte) []string {
 	var links []string
 	for line := range strings.FieldsFuncSeq(string(text), func(r rune) bool { return r == '\n' || r == '\r' }) {
 		line = strings.TrimSpace(line)
-		if strings.Contains(line, "://") {
+		if !strings.HasPrefix(line, "#") && strings.Contains(line, "://") {
 			links = append(links, line)
 		}
 	}
@@ -145,11 +149,26 @@ var newID = store.NewID
 //
 // The new servers follow the order of entries and take the place of the first
 // old server of the subscription, or the end of the list when there is none.
-// A server whose Link an entry repeats stays the same server: it keeps its ID
-// and Disabled, and takes the entry's Name and Outbound. The other entries get
-// a new ID that no server in servers has, a removed one included, so that a
-// reference to a removed server never lands on another. Every server that is
-// not of the subscription stays where it was.
+// Every server that is not of the subscription stays where it was.
+//
+// An entry that is the same server as an old one of the subscription keeps
+// that server: the result is the old server with the entry's Link, Name and
+// Outbound, so its ID, Disabled and any other field are the old ones. A
+// provider puts volatile text, such as the traffic left or the expiry, in the
+// name of a link, and that changes the link, so the link alone cannot tell the
+// servers apart. An entry matches in this order:
+//
+//  1. An old server with the same Link. This comes first for every entry, so
+//     that no entry's outbound takes a server another entry's link names.
+//  2. Failing that, an old server with the same Outbound, compared as JSON:
+//     the same object whatever the order of its keys or its white space.
+//     An outbound that is not a JSON object matches nothing.
+//
+// An old server matches at most one entry. Among several candidates the first
+// old server in servers matches the first entry in entries. The entries that
+// match nothing get a new ID that no server in servers has, a removed one
+// included, so that a reference to a removed server never lands on another.
+// The old servers that match nothing are removed.
 //
 // Merge never touches Routing. A caller that removes a server that is pinned,
 // or that a rule names, has to fix those references before it stores the
@@ -162,29 +181,65 @@ func Merge(servers []store.Server, subID string, entries []Entry) []store.Server
 	}
 
 	used := make(map[string]bool, len(servers)+len(entries))
-	old := map[string]store.Server{} // by link, the first of each
-	for _, s := range servers {
+	byLink := map[string][]int{} // the indexes in servers of the old servers, by link
+	for i, s := range servers {
 		used[s.ID] = true
-		if _, dup := old[s.Link]; s.Subscription == subID && s.Link != "" && !dup {
-			old[s.Link] = s
+		if s.Subscription == subID && s.Link != "" {
+			byLink[s.Link] = append(byLink[s.Link], i)
+		}
+	}
+
+	// match[i] is the index in servers of the old server that entries[i] keeps,
+	// or -1.
+	match := make([]int, len(entries))
+	taken := make([]bool, len(servers))
+	unmatched := 0
+	for i, e := range entries {
+		match[i] = -1
+		if q := byLink[e.Link]; len(q) > 0 {
+			match[i], byLink[e.Link] = q[0], q[1:]
+			taken[q[0]] = true
+		} else {
+			unmatched++
+		}
+	}
+	if unmatched > 0 {
+		// Only now are the outbounds worth reading: a refresh whose links did not
+		// change does not get here.
+		byOutbound := map[string][]int{}
+		for i, s := range servers {
+			if s.Subscription != subID || taken[i] {
+				continue
+			}
+			if key := outboundKey(s.Outbound); key != "" {
+				byOutbound[key] = append(byOutbound[key], i)
+			}
+		}
+		for i, e := range entries {
+			if match[i] >= 0 {
+				continue
+			}
+			if key := outboundKey(e.Server.Outbound); key != "" {
+				if q := byOutbound[key]; len(q) > 0 {
+					match[i], byOutbound[key] = q[0], q[1:]
+				}
+			}
 		}
 	}
 
 	merged := make([]store.Server, 0, len(entries))
-	for _, e := range entries {
-		s := store.Server{
-			Name:         e.Server.Name,
-			Link:         e.Link,
-			Subscription: subID,
-			Outbound:     slices.Clone(e.Server.Outbound),
-		}
-		if prev, ok := old[e.Link]; ok {
-			// A second entry with the same link is a new server.
-			delete(old, e.Link)
-			s.ID, s.Disabled = prev.ID, prev.Disabled
+	for i, e := range entries {
+		var s store.Server
+		if match[i] >= 0 {
+			// The copy keeps what is not overwritten below, whatever fields the
+			// server has.
+			s = servers[match[i]]
 		} else {
-			s.ID = freshID(used)
+			s = store.Server{ID: freshID(used), Subscription: subID}
 		}
+		s.Link = e.Link
+		s.Name = e.Server.Name
+		s.Outbound = slices.Clone(e.Server.Outbound)
 		merged = append(merged, s)
 	}
 
@@ -202,6 +257,31 @@ func Merge(servers []store.Server, subID string, entries []Entry) []store.Server
 		out = append(out, merged...)
 	}
 	return out
+}
+
+// outboundKey returns the canonical, compact JSON of an outbound: the same for
+// objects that differ only in white space or in the order of their keys.
+// Numbers are kept as written. It returns "" for what is not a JSON object, so
+// that it can be no key.
+func outboundKey(raw json.RawMessage) string {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if dec.Decode(&v) != nil {
+		return ""
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return "" // text after the object
+	}
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	key, err := json.Marshal(obj)
+	if err != nil {
+		return ""
+	}
+	return string(key)
 }
 
 // freshID returns an ID that is not in used, and adds it.
