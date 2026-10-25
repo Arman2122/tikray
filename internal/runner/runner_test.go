@@ -735,6 +735,33 @@ func TestTrialCanceled(t *testing.T) {
 	g.wantNoLastTrial(t)
 }
 
+// TestTrialTestTimeout gives a candidate whose xray run -test takes a second
+// a 300 ms deadline: the test is cut off at the deadline and rejected, and
+// the active xray is left alone.
+func TestTrialTestTimeout(t *testing.T) {
+	g := newRig(t, nil)
+	g.active(t, "ok")
+	g.boot(t)
+	pid := g.r.Status().XrayPID
+	cand := g.candidate(t, "slowtest", 300*time.Millisecond)
+	start := time.Now()
+	err := g.r.Trial(t.Context())
+	took := time.Since(start)
+	var tf *runnerapi.TestFailedError
+	if !errors.As(err, &tf) || !strings.Contains(tf.Output, "did not finish") {
+		t.Fatalf("Trial = %v; want a *TestFailedError saying the test did not finish", err)
+	}
+	if took > 900*time.Millisecond {
+		t.Errorf("Trial took %v; want xray run -test cut off at the 300ms deadline", took)
+	}
+	g.wantState(t, runnerapi.StateRunning, oldCore)
+	if got := g.r.Status().XrayPID; got != pid || gone(pid) {
+		t.Errorf("PID %d (old %d gone = %v); want the active xray untouched", got, pid, gone(pid))
+	}
+	g.wantLastTrial(t, runnerapi.OutcomeRejected, cand)
+	g.wantNoCandidate(t)
+}
+
 func TestRestartAndReload(t *testing.T) {
 	g := newRig(t, nil)
 	if err := g.r.Restart(t.Context()); err == nil {
