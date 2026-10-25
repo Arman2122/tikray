@@ -189,7 +189,8 @@ func (c *CHR) waitSSHDown(ctx context.Context) error {
 // Push copies a local file to dstPath on the router: the host serves it over
 // HTTP on the WAN bridge and RouterOS fetches it (see fetchFile). When the
 // fetch had to be retried, Push says so in harness.log and through
-// BootOptions.Notef, so that a run that passes still shows it.
+// BootOptions.Notef. The Notef line (t.Logf) is what shows it in a run that
+// passes, whose work dir, harness.log with it, is removed.
 func (c *CHR) Push(ctx context.Context, localPath, dstPath string) error {
 	st, err := os.Stat(localPath)
 	if err != nil {

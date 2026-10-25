@@ -250,13 +250,16 @@ Each source is tried in order until one returns a file that passes verification:
   it.
 - **Servers' TLS certificates** are always verified. xray 26.3.27 and later
   refuse `allowInsecure` once past 2026-06-01, and 26.1.18 skips the check
-  with it (§4.9), so no server can carry it:
+  with it (§4.9), so tikray keeps `allowInsecure: true` out of every
+  `tlsSettings` xray reads for a server:
   - a share link that asks for `allowInsecure` (or `insecure`) is imported
     with verification on and a warning, unless it also pins with `pcs`; the
     parser never emits `allowInsecure`;
-  - a raw-JSON server whose `streamSettings.tlsSettings.allowInsecure` is
-    `true` is refused when it is added, whatever its protocol or security,
-    with the advice to pin the certificate with `pinnedPeerCertSha256`.
+  - a raw-JSON server with `allowInsecure: true` in any `tlsSettings` under
+    its `streamSettings`, at any depth (the stream's own, or a nested
+    stream's such as xhttp's `extra.downloadSettings`), is refused when it is
+    added, whatever its protocol or security, with the advice to pin the
+    certificate with `pinnedPeerCertSha256`.
 
   A share link's `pcs` and `vcn` map to xray's `pinnedPeerCertSha256` and
   `verifyPeerCertByName`, so a self-signed server can be pinned.
@@ -336,7 +339,8 @@ Runner updates are rare because the runner holds no xray or geo code.
   line, with the reason) or as raw JSON (`internal/xraypolicy`):
   - xray ≥ 26.3.27 refuses `tlsSettings.allowInsecure: true` after
     2026-06-01. A share link never brings it in (§4.3); a raw-JSON outbound
-    of any protocol that holds it is refused.
+    of any protocol that holds it, in any `tlsSettings` under its
+    `streamSettings`, is refused.
   - xray ≥ 26.7.11 refuses VLESS without TLS or VLESS encryption, and Trojan
     without TLS, to an address outside xray's private lists, and refuses
     Shadowsocks `none` (and `plain`). tikray also refuses 2022-blake3 keys
@@ -442,7 +446,11 @@ listed explicitly.
 - **Outbounds:** one per server (rendered from share links, subscriptions or raw
   JSON), plus `block` (blackhole), `direct` (freedom) and `dns-out`. `block`
   comes first: xray sends traffic that no rule matches to the first outbound,
-  so that traffic is dropped, never sent direct.
+  so that traffic is dropped, never sent direct. A server's outbound must be
+  a proxy: one whose protocol xray reads as freedom, blackhole, dns or
+  loopback, under any name it knows them by (`direct` and `block` included,
+  in any case), is refused, since it would let proxied and kill-switch
+  traffic out direct.
 - **Share links:** a TLS link with no `sni` takes its server name from the
   first value of `host`, as v2rayN does, so that a CDN-fronted link to a bare
   IP address still handshakes with the right name. Reality takes `sni` only.

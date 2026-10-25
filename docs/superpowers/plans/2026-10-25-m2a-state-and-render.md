@@ -825,17 +825,17 @@
 
 - [ ] **Step 2: Run it on x86_64 stable**
 
-  Run: `TIKRAY_LAB_ROS=stable go test -tags lab -p 1 -count=1 -timeout 240m -run TestConfigApply ./test/e2e/`. Expected: 8/8 pass. (changed: the variable `Deploy` reads is `TIKRAY_LAB_CHANNEL`, as in M0 and M1; `TIKRAY_LAB_ROS` is not read.)
+  Run: `TIKRAY_LAB_ROS=stable go test -tags lab -p 1 -count=1 -v -timeout 240m -run TestConfigApply ./test/e2e/`. Expected: 8/8 pass. (changed: the variable `Deploy` reads is `TIKRAY_LAB_CHANNEL`, as in M0 and M1; `TIKRAY_LAB_ROS` is not read. changed: `-v`, so that a run that passes shows the harness's notes, such as a push it retried: they are `t.Logf` lines, and the work dir with `harness.log` is removed on a pass.)
 
   A check that fails is a finding: debug it with superpowers:systematic-debugging. Fix the code, not the check, unless the check contradicts the spec.
 
 - [ ] **Step 3: Run it on long-term x86_64 and stable arm64**
 
-  Run: the same with `TIKRAY_LAB_ROS=long-term`, and with `TIKRAY_LAB_ARCH=arm64`. Expected: 8/8 each. (changed: as in Step 2, the variable is `TIKRAY_LAB_CHANNEL=long-term`.)
+  Run: the same, `-v` included, with `TIKRAY_LAB_ROS=long-term`, and with `TIKRAY_LAB_ARCH=arm64`. Expected: 8/8 each. (changed: as in Step 2, the variable is `TIKRAY_LAB_CHANNEL=long-term`.)
 
 - [ ] **Step 4: Re-run M1's suite**
 
-  Run: `go test -tags lab -p 1 -count=1 -timeout 240m -run TestCoreLifecycle ./test/e2e/` on x86_64 stable. Expected: 9/9 (the fixture now has the API on the runner's address).
+  Run: `go test -tags lab -p 1 -count=1 -v -timeout 240m -run TestCoreLifecycle ./test/e2e/` on x86_64 stable. Expected: 9/9 (the fixture now has the API on the runner's address). (changed: `-v`, as in Step 2.)
 
 - [ ] **Step 5: Update the spec, and commit**
 

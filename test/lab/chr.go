@@ -33,7 +33,9 @@ type BootOptions struct {
 	DataDiskMB int
 	// Notef, if set, receives what the harness worked around and a run that
 	// passes should still show, such as a push that needed its retry
-	// (fetchFile). harness.log has it either way. A test passes t.Logf.
+	// (fetchFile). A test passes t.Logf, and that line (shown with go test -v)
+	// is what survives a run that passes: harness.log has the note too, but
+	// it is in the work dir, which the e2e suite removes when the test passes.
 	Notef func(format string, args ...any)
 }
 
