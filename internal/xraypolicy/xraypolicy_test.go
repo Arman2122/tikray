@@ -152,6 +152,20 @@ func vmessWith(stream string) string {
 		testID, stream)
 }
 
+// xhttpDownload is the stream JSON (a `"streamSettings":{...}` member) of
+// xhttp over TLS whose download leg goes to another server over TLS with
+// allowInsecure set to insecure. The leg is in xhttpSettings.<in>, or in
+// xhttpSettings itself when in is "". The upload leg checks its certificate.
+func xhttpDownload(in string, insecure bool) string {
+	leg := fmt.Sprintf(`"downloadSettings":{"address":"5.6.7.8","port":443,"network":"xhttp","security":"tls",`+
+		`"tlsSettings":{"serverName":"dl.example.com","allowInsecure":%t},"xhttpSettings":{"path":"/down"}}`, insecure)
+	if in != "" {
+		leg = fmt.Sprintf(`%q:{%s}`, in, leg)
+	}
+	return `"streamSettings":{"network":"xhttp","security":"tls","tlsSettings":{"serverName":"example.com"},` +
+		`"xhttpSettings":{"path":"/up",` + leg + `}}`
+}
+
 const (
 	tlsInsecure = `"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"serverName":"example.com","allowInsecure":true}}`
 	tlsSecure   = `"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"serverName":"example.com","allowInsecure":false}}`
@@ -267,6 +281,36 @@ func TestCheck(t *testing.T) {
 		// tlsSettings it cannot read.
 		{name: "allowInsecure is a string", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","tlsSettings":{"allowInsecure":"true"}}`)},
 		{name: "tlsSettings is a string", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","tlsSettings":"x"}`)},
+		// tlsSettings deeper in the stream, such as those of xhttp's download
+		// leg, which xray builds as a stream of its own: 26.10.21 refuses
+		// allowInsecure there too, and 26.1.18 skips the certificate check of
+		// that leg with it.
+		{name: "xhttp download leg with allowInsecure", outbound: vlessNested("1.2.3.4", "none", xhttpDownload("extra", true)), reason: "allowInsecure"},
+		{name: "xhttp download leg with allowInsecure false", outbound: vlessNested("1.2.3.4", "none", xhttpDownload("extra", false))},
+		{name: "xhttp download leg outside extra with allowInsecure", outbound: vlessNested("1.2.3.4", "none", xhttpDownload("", true)), reason: "allowInsecure"},
+		{name: "xhttp download leg outside extra with allowInsecure false", outbound: vlessNested("1.2.3.4", "none", xhttpDownload("", false))},
+		{
+			name:     "xhttp download leg with allowInsecure, keys in other cases",
+			outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","XHTTPSettings":{"Extra":{"DownloadSettings":{"Security":"tls","TlsSettings":{"ALLOWINSECURE":true}}}}}`),
+			reason:   "allowInsecure",
+		},
+		{name: "allowInsecure in a tlsSettings in a list", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","x":[1,{"tlsSettings":{"allowInsecure":true}}]}`), reason: "allowInsecure"},
+		{
+			// Two keys that xray reads as one: refuse if either asks.
+			name:     "allowInsecure twice, the second true",
+			outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","tlsSettings":{"allowInsecure":false,"AllowInsecure":true}}`),
+			reason:   "allowInsecure",
+		},
+		{
+			name:     "tlsSettings twice, the second insecure",
+			outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","tlsSettings":{},"TLSSettings":{"allowInsecure":true}}`),
+			reason:   "allowInsecure",
+		},
+		// xray reads allowInsecure in tlsSettings alone, and tlsSettings in
+		// streamSettings alone.
+		{name: "allowInsecure outside tlsSettings", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","allowInsecure":true,"realitySettings":{"allowInsecure":true}}`)},
+		{name: "tlsSettings outside streamSettings", outbound: `{"protocol":"vless","settings":{"vnext":[{"address":"1.2.3.4","port":443,"users":[{"id":"` + testID + `","encryption":"none","tlsSettings":{"allowInsecure":true}}]}]},` + tls + `}`},
+		{name: "xhttp download leg with allowInsecure a string", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","xhttpSettings":{"downloadSettings":{"tlsSettings":{"allowInsecure":"true"}}}}`)},
 
 		// Shadowsocks methods.
 		{name: "ss method none", outbound: ssNested("none", "pw-for-none-method"), reason: "Shadowsocks", secrets: []string{"pw-for-none-method"}},
