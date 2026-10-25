@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -148,6 +149,14 @@ type fakeRunner struct {
 	// value when a trial starts to wait at it.
 	gate    chan struct{}
 	waiting chan struct{}
+	// tests are the configs that POST /v1/test got, in order. That route
+	// accepts a config unless testReject is set, the xray output it then
+	// answers with (ok false), or testNoCore makes it answer no_core, or
+	// testBroken makes it fail with a 500.
+	tests      [][]byte
+	testReject string
+	testNoCore bool
+	testBroken bool
 }
 
 func newFakeRunner(t *testing.T, run string) *fakeRunner {
@@ -176,6 +185,28 @@ func (f *fakeRunner) setDown(down bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.down = down
+}
+
+// setTestReject makes the runner's test of a config fail with output.
+func (f *fakeRunner) setTestReject(output string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.testReject = output
+}
+
+// failTest makes the runner's test of a config fail as if no xray ran
+// (noCore) or as if the runner broke (a 500).
+func (f *fakeRunner) failTest(noCore, broken bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.testNoCore, f.testBroken = noCore, broken
+}
+
+// gotTests returns the configs the runner was asked to test.
+func (f *fakeRunner) gotTests() [][]byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.tests)
 }
 
 func (f *fakeRunner) setReject(output string) {
@@ -265,8 +296,33 @@ func (f *fakeRunner) RoundTrip(req *http.Request) (*http.Response, error) {
 		return f.end(runnerapi.OutcomeCommitted), nil
 	case "POST abort":
 		return f.end(runnerapi.OutcomeAborted), nil
+	case "POST test":
+		if err := req.Context().Err(); err != nil {
+			return nil, err
+		}
+		return f.test(req), nil
 	}
 	return reply(http.StatusNotFound, map[string]string{"error": "bad_request"}), nil
+}
+
+// test answers POST /v1/test.
+func (f *fakeRunner) test(req *http.Request) *http.Response {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		f.t.Errorf("test: reading the body: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tests = append(f.tests, body)
+	switch {
+	case f.testNoCore:
+		return reply(http.StatusConflict, map[string]string{"error": "no_core"})
+	case f.testBroken:
+		return reply(http.StatusInternalServerError, map[string]string{"error": "internal", "detail": "the trial ended while the config was tested"})
+	case f.testReject != "":
+		return reply(http.StatusOK, runnerapi.TestResult{Output: f.testReject})
+	}
+	return reply(http.StatusOK, runnerapi.TestResult{OK: true, Output: "Configuration OK."})
 }
 
 func (f *fakeRunner) trial(ctx context.Context) *http.Response {
