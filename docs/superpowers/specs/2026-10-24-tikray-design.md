@@ -120,7 +120,11 @@ The runner does only what is needed to carry traffic safely:
   1. tikray writes `/data/run/candidate.json` (core version, geo version, config
      file, deadline) and calls `trial`.
   2. The runner runs `xray run -test` with the candidate. On failure it rejects
-     the candidate without switching.
+     the candidate without switching. It tests a copy of the candidate's config
+     whose TUN devices are renamed (`xray-test<n>`): xray releases before 26.10
+     open their TUN during `-test`, and the running xray already holds `xray0`
+     ("device or resource busy", M1 lab). A config it can't rewrite (such as
+     JSON with comments) is tested unchanged.
   3. Otherwise it stops the active xray and starts the candidate. If the candidate
      exits within 10 s, the runner reverts to `active.json`.
   4. If tikray does not call `commit` before the deadline (default 120 s), the
@@ -187,6 +191,9 @@ them with `mountlists=`; `mode=ro` is enforced (M0).
 
 - One bridge `tikray`, default subnet `172.31.255.0/29` (configurable at install
   time to avoid clashing with the LAN): router `.1`, `tikray` `.2`, runner `.3`.
+- The bridge is created with `protocol-mode=none`. With RouterOS's default RSTP
+  a freshly started container's veth spends the forward delay blocked, so a
+  just-started container couldn't reach the runner (M1 lab, 2/2 A/B each way).
 - NAT masquerade for the container subnet out to the WAN.
 - Every container sets `dns=` explicitly (the router's bridge address): RouterOS
   refuses to start a container without DNS ("no default dns servers") even when
@@ -226,7 +233,9 @@ Each source is tried in order until one returns a file that passes verification:
   profiles (v2fly, Loyalsoldier, Iran-focused lists, custom URL).
 - **tikray images:** cosign signature check before installation.
 - **Manual uploads** with no known hash show an "unverified" warning and need an
-  explicit confirmation.
+  explicit confirmation. A core installed that way needs it again on every
+  later update to it; once its hash becomes known, the installed zip must match
+  it.
 
 ### 4.4 Slots and retention
 
@@ -238,8 +247,13 @@ configurable). Older slots are removed automatically after a successful commit.
 1. Fetch and verify the selected version into `/data/cores/<ver>/`.
 2. Render the config for that version (§4.9).
 3. Runner trial (§3.3).
-4. Health check: real traffic through the proxy (SOCKS probe to a configurable
-   URL), plus gRPC responding.
+4. Health check: the running core reports the requested version
+   (`xray version` says `Xray <ver> `, so a slot holding another release is
+   never committed under its name); the runner's data-path signals hold
+   (`routes_ok`: its routes into `xray0` are in place; `gateway_up`: it answers
+   ping); real traffic through the proxy (SOCKS probe to a configurable URL);
+   and gRPC responding. The probes alone pass without `xray0`, while a runner
+   that doesn't answer ping sends fail-open devices direct.
 5. Commit, or let the runner revert. The UI shows the result and keeps history.
 
 A manual **Roll back** button switches to the previous slot through the same trial flow.
@@ -438,7 +452,8 @@ file through Winbox/WebFig when GitHub is blocked.
    - Enough free disk (~150 MB) and RAM.
    - Router DNS accepts LAN requests (`allow-remote-requests=yes`), needed for
      the DNS fallback (§5.4).
-2. **Network:** bridge, veths, IPs, NAT, firewall rules (§3.6).
+2. **Network:** bridge (`protocol-mode=none`), veths, IPs, NAT, firewall rules
+   (§3.6).
 3. **Containers:** container config (tmp dir, registry), both containers with
    mount lists, env lists, explicit `dns=`, start-on-boot, and memory limits
    (`memory-high`/`memory-max` exist on 7.25).
