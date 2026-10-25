@@ -927,3 +927,31 @@ func TestRestartAndReload(t *testing.T) {
 		t.Errorf("PID %d after reloading no active.json", pid)
 	}
 }
+
+// A core slot pruned and installed again under the same name holds another
+// binary, and Status must report that binary's version: the control plane
+// refuses a candidate that does not report the core it was installed as, and
+// would otherwise refuse a right one or pass a wrong one until the runner
+// restarted.
+func TestVersionFollowsReinstalledCore(t *testing.T) {
+	g := newRig(t, nil)
+	g.active(t, "ok")
+	g.boot(t)
+	cand := g.candidate(t, "ok", 5*time.Second)
+	g.trial(t)
+	if got, want := g.r.Status().XrayVersion, "Xray 99.0.0 (fake ok)"; got != want {
+		t.Fatalf("xray_version of the first %s = %q, want %q", newCore, got, want)
+	}
+	if err := g.r.Abort(); err != nil {
+		t.Fatal(err)
+	}
+
+	reinstallFake(t, g.d, newCore, "exit15s")
+	cand.Deadline = g.now().Add(5 * time.Second)
+	writeCandidate(t, g.d, cand)
+	g.trial(t)
+	g.wantState(t, runnerapi.StateTrial, newCore)
+	if got, want := g.r.Status().XrayVersion, "Xray 99.0.0 (fake exit15s)"; got != want {
+		t.Errorf("xray_version of the reinstalled %s = %q, want %q", newCore, got, want)
+	}
+}

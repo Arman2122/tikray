@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -62,12 +63,20 @@ type Runner struct {
 	deadline *time.Timer // of the open trial
 	restart  *time.Timer // the backoff before a restart
 	backoff  time.Duration
-	versions map[string]string // xray version by core
+	versions map[string]coreVersion // xray version by core
 	closeErr error
 
 	mu                  sync.Mutex // guards what Status reads
 	pub                 view
 	routesOK, gatewayUp bool
+}
+
+// coreVersion is the output of "xray version" for the binary that had this
+// size and modification time.
+type coreVersion struct {
+	size  int64
+	mtime time.Time
+	text  string
 }
 
 // view is the part of the loop's state that Status shows.
@@ -110,7 +119,7 @@ func New(c Config) *Runner {
 		quit:     make(chan struct{}),
 		done:     make(chan struct{}),
 		v:        view{state: runnerapi.StateEmpty},
-		versions: map[string]string{},
+		versions: map[string]coreVersion{},
 	}
 	r.publish()
 	go r.loop()
@@ -476,16 +485,28 @@ func (r *Runner) start(sel runnerapi.Selection) error {
 	return nil
 }
 
+// versionOf is the xray version of the selection's core. An answer is kept
+// with the size and modification time of the slot binary, which are what
+// Supervisor.Stage tells one binary from another by, and is used only while
+// the slot still has them: a slot pruned and installed again under the same
+// name holds a binary that must report its own version, not its
+// predecessor's. The slot is read before the version is asked, so a slot
+// replaced in between is asked again next time.
 func (r *Runner) versionOf(sel runnerapi.Selection) string {
-	if v, ok := r.versions[sel.Core]; ok {
-		return v
+	fi, err := os.Stat(r.cfg.Supervisor.Dirs.CoreBinary(sel.Core))
+	if err != nil {
+		log.Printf("runner: version of core %s: %v", sel.Core, err)
+		return ""
+	}
+	if c, ok := r.versions[sel.Core]; ok && c.size == fi.Size() && c.mtime.Equal(fi.ModTime()) {
+		return c.text
 	}
 	v, err := r.sup.Version(sel)
 	if err != nil {
 		log.Printf("runner: %v", err)
 		return ""
 	}
-	r.versions[sel.Core] = v
+	r.versions[sel.Core] = coreVersion{size: fi.Size(), mtime: fi.ModTime(), text: v}
 	return v
 }
 

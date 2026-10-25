@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeModes are the behaviours of testdata/fakexray the tests use.
@@ -74,6 +75,26 @@ func installFake(t *testing.T, d Dirs, ver, mode string) {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(dst, 0o644); err != nil { // not at the mercy of the umask
+		t.Fatal(err)
+	}
+}
+
+// reinstallFake replaces core slot ver with the fake xray of a mode the way
+// InstallCore replaces a pruned slot: the old directory goes and a new file
+// comes, with a modification time later than the old one's, whatever the
+// resolution of the file system clock.
+func reinstallFake(t *testing.T, d Dirs, ver, mode string) {
+	t.Helper()
+	old, err := os.Stat(d.CoreBinary(ver))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Dir(d.CoreBinary(ver))); err != nil {
+		t.Fatal(err)
+	}
+	installFake(t, d, ver, mode)
+	later := old.ModTime().Add(time.Hour)
+	if err := os.Chtimes(d.CoreBinary(ver), later, later); err != nil {
 		t.Fatal(err)
 	}
 }
