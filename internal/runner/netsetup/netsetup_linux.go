@@ -91,12 +91,12 @@ func isDefaultDst(dst *net.IPNet) bool {
 // Keep keeps the runner's routes in place until ctx ends, checking once a
 // second. It holds the "unreachable" default in table TunTable, so packets that
 // arrive while xray0 is gone are rejected instead of being sent back to the
-// router (which would route them here again). While xray0 exists it also holds
-// "default dev xray0 table TunTable" and "iif <ingress> lookup TunTable",
-// putting them back after every xray restart. After each check it sets the
-// ping answer (see GatewaySysctl) and calls report with whether the routes are
-// in place and whether the runner now answers ping. When ctx ends the runner
-// stops answering ping.
+// router (which would route them here again). It also holds "iif <ingress>
+// lookup TunTable" from the start, and while xray0 exists "default dev xray0
+// table TunTable", putting it back after every xray restart. After each check
+// it sets the ping answer (see GatewaySysctl) and calls report with whether
+// the routes are in place and whether the runner now answers ping. When ctx
+// ends the runner stops answering ping.
 func Keep(ctx context.Context, ingress netlink.Link, healthy func() bool, report func(routesOK, gatewayUp bool)) {
 	k := &keeper{ingress: ingress.Attrs().Name, logged: map[string]string{}}
 	defer k.setGateway(GatewaySysctl(false, false))
@@ -148,9 +148,13 @@ func (k *keeper) ensureUnreachable() {
 
 var defaultDst = &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)}
 
-// ensureRoutes keeps "default dev xray0 table TunTable" and "iif <ingress>
-// lookup TunTable" in place. It reports whether they are.
+// ensureRoutes keeps "iif <ingress> lookup TunTable" and, while xray0 exists,
+// "default dev xray0 table TunTable" in place. It reports whether both are.
+// The rule does not wait for xray0: until xray creates it, on an empty runner
+// and at boot, TunTable's unreachable default must reject what arrives on the
+// ingress link, or the main table would send it back to the router.
 func (k *keeper) ensureRoutes() bool {
+	ruleOK := k.ensureRule()
 	tun, err := netlink.LinkByName(TunName)
 	if err != nil { // xray has not created it yet, or has stopped
 		k.note("routes", TunName+" is missing")
@@ -171,24 +175,35 @@ func (k *keeper) ensureRoutes() bool {
 		k.note("routes", fmt.Sprintf("default dev %s table %d: %v", TunName, TunTable, err))
 		return false
 	}
+	if !ruleOK {
+		k.note("routes", "")
+		return false
+	}
+	k.note("routes", "routes in place")
+	return true
+}
+
+// ensureRule keeps "iif <ingress> lookup TunTable" in place. It reports
+// whether it is.
+func (k *keeper) ensureRule() bool {
 	rules, err := netlink.RuleList(netlink.FAMILY_V4)
 	if err != nil {
-		k.note("routes", fmt.Sprintf("list rules: %v", err))
+		k.note("rule", fmt.Sprintf("list rules: %v", err))
 		return false
 	}
 	for _, r := range rules {
 		if r.Priority == rulePriority && r.Table == TunTable && r.IifName == k.ingress {
-			k.note("routes", "routes in place")
+			k.note("rule", "")
 			return true
 		}
 	}
 	rule := netlink.NewRule()
 	rule.Priority, rule.Table, rule.IifName = rulePriority, TunTable, k.ingress
 	if err := netlink.RuleAdd(rule); err != nil {
-		k.note("routes", fmt.Sprintf("rule iif %s lookup %d: %v", k.ingress, TunTable, err))
+		k.note("rule", fmt.Sprintf("rule iif %s lookup %d: %v", k.ingress, TunTable, err))
 		return false
 	}
-	k.note("routes", "routes in place")
+	k.note("rule", "")
 	return true
 }
 
