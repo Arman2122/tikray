@@ -1,0 +1,27 @@
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [
+    {
+      "tag": "vless-in",
+      "listen": "203.0.113.10",
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [{"id": "b831381d-6324-4d53-ad4f-8cda48b30811"}],
+        "decryption": "none"
+      },
+      "streamSettings": {"network": "tcp", "security": "none"}
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "out",
+      "protocol": "freedom",
+      "sendThrough": "203.0.113.10",
+      "settings": {
+        "comment": "xray >= 26.10 blocks private and reserved targets on server inbounds by default; the lab internet is TEST-NET-3",
+        "finalRules": [{"action": "allow", "ip": ["203.0.113.0/24"]}]
+      }
+    }
+  ]
+}

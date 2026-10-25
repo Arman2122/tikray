@@ -1,0 +1,134 @@
+[
+  {
+    "id": "xray_version",
+    "pass": true,
+    "detail": "runner reports \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/amd64)\", deployed 26.10.21",
+    "seconds": 0
+  },
+  {
+    "id": "sysctl_in_container",
+    "pass": true,
+    "detail": "sysctl=map[net.ipv4.conf.all.rp_filter:ok net.ipv4.conf.default.rp_filter:ok net.ipv4.ip_forward:ok]",
+    "seconds": 0
+  },
+  {
+    "id": "exec_from_mount",
+    "pass": true,
+    "detail": "exec_from_mount=\"fork/exec /data/cores/26.10.21/xray: permission denied\" xray_pid=15 (staged copy used when not ok)",
+    "seconds": 0
+  },
+  {
+    "id": "proxied_ip",
+    "pass": true,
+    "detail": "whoami=\"203.0.113.10\"",
+    "seconds": 0.1
+  },
+  {
+    "id": "domestic_ip_direct",
+    "pass": true,
+    "detail": "whoami=\"198.51.100.2\" in_access_log=false",
+    "seconds": 0
+  },
+  {
+    "id": "sniffed_domain_direct",
+    "pass": true,
+    "detail": "whoami=\"198.51.100.2\"",
+    "seconds": 0.1
+  },
+  {
+    "id": "sniffed_domain_proxied",
+    "pass": true,
+    "detail": "whoami=\"203.0.113.10\"",
+    "seconds": 0
+  },
+  {
+    "id": "no_src_nat",
+    "pass": true,
+    "detail": "access log has client source: true",
+    "seconds": 0
+  },
+  {
+    "id": "dns_proxied",
+    "pass": true,
+    "detail": "answer=\"203.0.113.30\"",
+    "seconds": 0.1
+  },
+  {
+    "id": "dns_domestic_direct",
+    "pass": true,
+    "detail": "answer=\"10.10.34.34\"",
+    "seconds": 0.1
+  },
+  {
+    "id": "udp_proxied",
+    "pass": true,
+    "detail": "reply=\"203.0.113.10\"",
+    "seconds": 2.2
+  },
+  {
+    "id": "large_transfer",
+    "pass": true,
+    "detail": "direct 2 MiB 18.3s sha_ok=true; proxied 2 MiB 24.4s sha_ok=true",
+    "seconds": 42.7
+  },
+  {
+    "id": "no_fasttrack_marked",
+    "pass": true,
+    "detail": "marked=2 fasttracked=0 err=\u003cnil\u003e",
+    "seconds": 28.6
+  },
+  {
+    "id": "fallback_open",
+    "pass": true,
+    "detail": "direct after 30.1s ok=true; dns with runner stopped: \"10.10.34.34\"",
+    "seconds": 30.3
+  },
+  {
+    "id": "fallback_recovery",
+    "pass": true,
+    "detail": "proxied again 0.1s after routes_ok, ok=true",
+    "seconds": 6.2
+  },
+  {
+    "id": "fallback_closed",
+    "pass": true,
+    "detail": "closed policy proxied while runner up: true; answer with runner stopped: \"\"",
+    "seconds": 66.6
+  },
+  {
+    "id": "xray_dead_fallback",
+    "pass": true,
+    "detail": "direct 29.2s after xray stopped ok=true; dns \"10.10.34.34\"; proxied again 129.7s later ok=true",
+    "seconds": 162.1
+  },
+  {
+    "id": "policy_switch_existing_conn",
+    "pass": true,
+    "detail": "download across the policy switch sha_ok=true err=\u003cnil\u003e",
+    "seconds": 29
+  },
+  {
+    "id": "shared_mount",
+    "pass": true,
+    "detail": "ctl write run: 204 \"\" \u003cnil\u003e; runner read \"hello-m0\"; ctl write cores (rw): 204 \"\"; runner read \"cores-m0\"; runner write to its ro cores mount: 500 \"open /data/cores/runner-probe: read-only file system\"",
+    "seconds": 0
+  },
+  {
+    "id": "api_listen_restricted",
+    "pass": true,
+    "detail": "api-probe: 200 \"{\\\".id\\\":\\\"*A\\\",\\\"address\\\":\\\"192.0.2.1\\\",\\\"comment\\\":\\\"lab:probe\\\",\\\"creation-time\\\":\\\"2026-10-24 22:20:03\\\",\\\"disabled\\\":\\\"false\\\",\\\"dynamic\\\":\\\"false\\\",\\\"list\\\":\\\"tikray-probe\\\"}\" \u003cnil\u003e; ssh as tikray: ssh: handshake failed: ssh: unable to authenticate, attempted methods [none password], no supported methods remain",
+    "seconds": 6
+  },
+  {
+    "id": "memory",
+    "pass": true,
+    "detail": "xray_rss_kb=29200 runner_memory_current=46153728 ctl_memory_current=1875968",
+    "seconds": 0.1
+  },
+  {
+    "id": "reboot_persistence",
+    "pass": true,
+    "detail": "routes_ok 4s after SSH; whoami=\"203.0.113.10\"",
+    "seconds": 300.2
+  }
+]

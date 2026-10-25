@@ -1,0 +1,3 @@
+FROM scratch
+COPY ctlproto /ctlproto
+ENTRYPOINT ["/ctlproto"]

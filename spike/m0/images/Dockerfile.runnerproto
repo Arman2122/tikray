@@ -1,0 +1,3 @@
+FROM scratch
+COPY runnerproto /runnerproto
+ENTRYPOINT ["/runnerproto"]
