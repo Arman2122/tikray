@@ -54,9 +54,16 @@ func checkServer(t *testing.T, s Server) {
 	if _, ok := out["settings"].(map[string]any); !ok {
 		t.Errorf("Outbound has no settings object: %s", s.Outbound)
 	}
-	// Shadowsocks has no transport; every other protocol has one.
-	if _, has := out["streamSettings"]; has == (protocol == "shadowsocks") {
-		t.Errorf("Outbound with protocol %q has streamSettings = %v: %s", protocol, has, s.Outbound)
+	// Every protocol but Shadowsocks has streamSettings. A Shadowsocks outbound
+	// has them only when its link asked for more than plain tcp.
+	st, has := out["streamSettings"].(map[string]any)
+	switch {
+	case protocol != "shadowsocks" && !has:
+		t.Errorf("Outbound with protocol %q has no streamSettings: %s", protocol, s.Outbound)
+	case protocol == "shadowsocks" && has && len(st) == 1 && st["network"] == "tcp":
+		t.Errorf("Shadowsocks outbound has streamSettings for plain tcp: %s", s.Outbound)
+	case protocol == "shadowsocks" && !has && out["streamSettings"] != nil:
+		t.Errorf("Shadowsocks outbound has streamSettings that is not an object: %s", s.Outbound)
 	}
 	// Current xray refuses a config that has the key, wherever it is.
 	if hasKey(out, "allowInsecure") {
@@ -98,9 +105,9 @@ func checkError(t *testing.T, link string, err error) {
 	if !strings.HasPrefix(msg, "sharelink: ") {
 		t.Errorf("error %q lacks the \"sharelink: \" prefix", msg)
 	}
-	// The scheme is named in an error on purpose, and so is a query parameter
-	// that is wrong, like an unknown network. What is left is the userinfo, the
-	// host and port, or the base64 body: the part with the secrets.
+	// The scheme is named in an error on purpose, and so is the name of a query
+	// parameter that is malformed. What is checked is the rest before the query
+	// and the name: the userinfo, the host and port, or the base64 body.
 	_, body, _ := strings.Cut(strings.TrimSpace(link), "://")
 	body, _, _ = strings.Cut(body, "#")
 	body, _, _ = strings.Cut(body, "?")

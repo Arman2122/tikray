@@ -6,11 +6,26 @@ import (
 	"testing"
 )
 
-// ssOut is the expected Shadowsocks outbound. A Shadowsocks outbound has no
-// streamSettings. The password is JSON text, already escaped.
+// ssOut is the expected Shadowsocks outbound for a link that asks for plain
+// tcp, which has no streamSettings. The password is JSON text, already escaped.
 func ssOut(addr, port, method, password string) string {
-	return `{"protocol":"shadowsocks","settings":{"servers":[{"address":"` + addr + `","port":` + port + `,"method":"` + method + `","password":"` + password + `"}]}}`
+	return ssServers(addr, port, method, password) + `}`
 }
+
+// ssOutStream is the expected Shadowsocks outbound for a link that asks for
+// more than plain tcp, with the given streamSettings JSON.
+func ssOutStream(addr, port, method, password, stream string) string {
+	return ssServers(addr, port, method, password) + `,"streamSettings":` + stream + `}`
+}
+
+// ssServers is the start of a Shadowsocks outbound, up to and including its
+// settings.
+func ssServers(addr, port, method, password string) string {
+	return `{"protocol":"shadowsocks","settings":{"servers":[{"address":"` + addr + `","port":` + port + `,"method":"` + method + `","password":"` + password + `"}]}`
+}
+
+// ssBase is a SIP002 link for the password "pass", with no query.
+const ssBase = "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388"
 
 // ssUser is the base64url, unpadded form of method:password that SIP002 uses.
 func ssUser(userinfo string) string { return base64.RawURLEncoding.EncodeToString([]byte(userinfo)) }
@@ -71,7 +86,7 @@ var ssCases = []parseCase{
 	},
 	{
 		name:     "sip002 with a slash and other parameters",
-		link:     "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388/?udp-over-tcp=1&type=%zz#a",
+		link:     "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388/?udp-over-tcp=1&foo=%zz#a",
 		wantName: "a",
 		wantJSON: ssOut("1.2.3.4", "8388", "aes-256-gcm", "pass"),
 	},
@@ -119,7 +134,7 @@ var ssCases = []parseCase{
 	},
 	{
 		name:     "unread parameters with bad escapes are ignored",
-		link:     "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388?foo=%zz&bar&path=%zz&type=ws;x",
+		link:     "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388?foo=%zz&bar&remark=a;b&%zz=1",
 		wantName: "1.2.3.4:8388",
 		wantJSON: ssOut("1.2.3.4", "8388", "aes-256-gcm", "pass"),
 	},
@@ -128,6 +143,80 @@ var ssCases = []parseCase{
 		link:     "SS://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388",
 		wantName: "1.2.3.4:8388",
 		wantJSON: ssOut("1.2.3.4", "8388", "aes-256-gcm", "pass"),
+	},
+
+	// transport and security, the same parameters as a VLESS link
+	{
+		name:     "websocket over tls: the host is the server name",
+		link:     ssBase + "?type=ws&security=tls&path=%2Fws&host=cdn.example.com#a",
+		wantName: "a",
+		wantJSON: ssOutStream("1.2.3.4", "8388", "aes-256-gcm", "pass",
+			`{"network":"ws","security":"tls","tlsSettings":{"serverName":"cdn.example.com"},"wsSettings":{"host":"cdn.example.com","path":"/ws"}}`),
+	},
+	{
+		name:     "websocket over tls with an sni, a fingerprint and alpn, after a slash",
+		link:     "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388/?type=ws&security=tls&sni=front.example.com&host=cdn.example.com&fp=chrome&alpn=h2,http/1.1",
+		wantName: "1.2.3.4:8388",
+		wantJSON: ssOutStream("1.2.3.4", "8388", "aes-256-gcm", "pass",
+			`{"network":"ws","security":"tls","tlsSettings":{"alpn":["h2","http/1.1"],"fingerprint":"chrome","serverName":"front.example.com"},"wsSettings":{"host":"cdn.example.com","path":"/"}}`),
+	},
+	{
+		name:     "grpc",
+		link:     ssBase + "?type=grpc&serviceName=x",
+		wantName: "1.2.3.4:8388",
+		wantJSON: ssOutStream("1.2.3.4", "8388", "aes-256-gcm", "pass", `{"network":"grpc","grpcSettings":{"multiMode":false,"serviceName":"x"}}`),
+	},
+	{
+		name:     "tls over tcp",
+		link:     ssBase + "?security=tls&sni=h.example",
+		wantName: "1.2.3.4:8388",
+		wantJSON: ssOutStream("1.2.3.4", "8388", "aes-256-gcm", "pass", `{"network":"tcp","security":"tls","tlsSettings":{"serverName":"h.example"}}`),
+	},
+	{
+		name:     "reality",
+		link:     ssBase + "?security=reality&pbk=" + vlessPBK + "&sni=www.example.com",
+		wantName: "1.2.3.4:8388",
+		wantJSON: ssOutStream("1.2.3.4", "8388", "aes-256-gcm", "pass",
+			`{"network":"tcp","realitySettings":{"fingerprint":"chrome","publicKey":"`+vlessPBK+`","serverName":"www.example.com"},"security":"reality"}`),
+	},
+	{
+		name:     "tcp with an http header",
+		link:     ssBase + "?type=tcp&headerType=http&host=a.example.com&path=/p",
+		wantName: "1.2.3.4:8388",
+		wantJSON: ssOutStream("1.2.3.4", "8388", "aes-256-gcm", "pass",
+			`{"network":"tcp","tcpSettings":{"header":{"request":{"headers":{"Host":["a.example.com"]},"path":["/p"]},"type":"http"}}}`),
+	},
+	{
+		name:         "allowInsecure over tls keeps verification on and warns",
+		link:         ssBase + "?security=tls&sni=h.example&allowInsecure=1",
+		wantName:     "1.2.3.4:8388",
+		wantWarnings: []string{warnInsecureRemoved},
+		wantJSON:     ssOutStream("1.2.3.4", "8388", "aes-256-gcm", "pass", `{"network":"tcp","security":"tls","tlsSettings":{"serverName":"h.example"}}`),
+	},
+	{
+		name:     "allowInsecure over tls with a pinned certificate has no warning",
+		link:     ssBase + "?security=tls&sni=h.example&insecure=1&pcs=" + pinA,
+		wantName: "1.2.3.4:8388",
+		wantJSON: ssOutStream("1.2.3.4", "8388", "aes-256-gcm", "pass",
+			`{"network":"tcp","security":"tls","tlsSettings":{"pinnedPeerCertSha256":"`+pinA+`","serverName":"h.example"}}`),
+	},
+	{name: "tcp and no security is plain", link: ssBase + "?type=tcp&security=none", wantName: "1.2.3.4:8388", wantJSON: ssOut("1.2.3.4", "8388", "aes-256-gcm", "pass")},
+	{name: "raw is plain", link: ssBase + "?type=raw", wantName: "1.2.3.4:8388", wantJSON: ssOut("1.2.3.4", "8388", "aes-256-gcm", "pass")},
+	{name: "an empty security is plain", link: ssBase + "?security=&type=", wantName: "1.2.3.4:8388", wantJSON: ssOut("1.2.3.4", "8388", "aes-256-gcm", "pass")},
+	{name: "a tcp header of none is plain", link: ssBase + "?type=tcp&headerType=none&host=ignored.example.com", wantName: "1.2.3.4:8388", wantJSON: ssOut("1.2.3.4", "8388", "aes-256-gcm", "pass")},
+	{name: "allowInsecure without tls is plain and has no warning", link: ssBase + "?allowInsecure=1", wantName: "1.2.3.4:8388", wantJSON: ssOut("1.2.3.4", "8388", "aes-256-gcm", "pass")},
+	{
+		name:     "a legacy link with a transport",
+		link:     ssLegacy("aes-128-gcm:p@ss@host.example:8388") + "?type=ws&security=tls&sni=cdn.example.com&path=/ws#n",
+		wantName: "n",
+		wantJSON: ssOutStream("host.example", "8388", "aes-128-gcm", "p@ss",
+			`{"network":"ws","security":"tls","tlsSettings":{"serverName":"cdn.example.com"},"wsSettings":{"path":"/ws"}}`),
+	},
+	{
+		name:     "a legacy link with only unread parameters is plain",
+		link:     ssLegacy("aes-128-gcm:p@ss@host.example:8388") + "?udp-over-tcp=1&foo=%zz",
+		wantName: "host.example:8388",
+		wantJSON: ssOut("host.example", "8388", "aes-128-gcm", "p@ss"),
 	},
 
 	// legacy
@@ -199,6 +288,17 @@ var ssCases = []parseCase{
 	{name: "plugin with a bad escape", link: "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388?plugin=%zz", wantErr: kindUnsupported, secret: "pass"},
 	{name: "plugin with an escaped name", link: "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388?%70lugin=x", wantErr: kindUnsupported, secret: "pass"},
 	{name: "plugin on a legacy link", link: "ss://YWVzLTEyOC1nY206cEBzc0Bob3N0LmV4YW1wbGU6ODM4OA==?plugin=obfs-local#c", wantErr: kindUnsupported, secret: "p@ss"},
+	{name: "plugin beside a transport", link: ssBase + "?type=ws&security=tls&plugin=v2ray-plugin", wantErr: kindUnsupported, secret: "pass"},
+	{name: "kcp", link: ssBase + "?type=kcp", wantErr: kindUnsupported, secret: "pass"},
+	{name: "reality without a public key", link: ssBase + "?security=reality&sni=www.example.com", wantErr: kindInvalid, errContains: "reality", secret: "pass"},
+	{name: "reality over websocket", link: ssBase + "?security=reality&type=ws&pbk=" + vlessPBK, wantErr: kindInvalid, secret: "pass"},
+	{name: "unknown security", link: ssBase + "?security=foo", wantErr: kindInvalid, secret: "pass"},
+	{name: "unknown network", link: ssBase + "?type=carrier-pigeon", wantErr: kindInvalid, secret: "pass"},
+	{name: "read parameter with a bad escape", link: ssBase + "?type=ws&path=%zz", wantErr: kindInvalid, errContains: `"path"`, secret: "pass"},
+	{name: "read parameter with a bad escape in the type", link: ssBase + "/?type=%zz", wantErr: kindInvalid, errContains: `"type"`, secret: "pass"},
+	{name: "read parameter with a semicolon", link: ssBase + "?security=tls&alpn=h2;http/1.1", wantErr: kindInvalid, errContains: `"alpn"`, secret: "pass"},
+	{name: "read parameter on a legacy link with a bad escape", link: ssLegacy("aes-128-gcm:pass@host.example:8388") + "?type=%zz", wantErr: kindInvalid, errContains: `"type"`, secret: "pass"},
+	{name: "read parameter on a legacy link with a semicolon", link: ssLegacy("aes-128-gcm:pass@host.example:8388") + "?alpn=a;b#n", wantErr: kindInvalid, errContains: `"alpn"`, secret: "pass"},
 	{name: "rc4-md5", link: "ss://" + ssUser("rc4-md5:pass") + "@1.2.3.4:8388", wantErr: kindUnsupported, errContains: "method", secret: "pass"},
 	{name: "rc4-md5 in plain text", link: "ss://rc4-md5:pass@1.2.3.4:8388", wantErr: kindUnsupported, secret: "pass"},
 	{name: "rc4-md5 on a legacy link", link: ssLegacy("rc4-md5:pass@1.2.3.4:8388"), wantErr: kindUnsupported, secret: "pass"},

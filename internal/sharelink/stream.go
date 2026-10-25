@@ -16,7 +16,8 @@ type stream struct {
 	Network string
 	// Security is none, tls or reality.
 	Security string
-	// SNI is the TLS server name.
+	// SNI is the TLS server name. When a tls link leaves it empty, settings
+	// uses the first name in Host instead.
 	SNI string
 	// Fingerprint is the uTLS client fingerprint.
 	Fingerprint string
@@ -105,9 +106,12 @@ func (s stream) warnings() []string {
 }
 
 // settings builds the xray streamSettings object. Network, Security and
-// HeaderType are matched without regard to case. It returns an error that
+// HeaderType are matched without regard to case. The tls server name is SNI,
+// or the first name in Host when SNI is empty. It returns an error that
 // wraps ErrUnsupported for a transport tikray cannot run, and any other
-// error for settings that xray would refuse.
+// error for settings that xray would refuse. An error for a value it does not
+// know does not repeat the value, since a parameter can hold anything, even
+// the secret of the link.
 func (s stream) settings() (map[string]any, error) {
 	network := strings.ToLower(strings.TrimSpace(s.Network))
 	out := map[string]any{}
@@ -130,7 +134,7 @@ func (s stream) settings() (map[string]any, error) {
 				},
 			}}
 		default:
-			return nil, fmt.Errorf("sharelink: unknown tcp header type %q", s.HeaderType)
+			return nil, errors.New("sharelink: unknown tcp header type, want none or http")
 		}
 	case "ws":
 		out["wsSettings"] = compact(map[string]string{"path": orDefault(s.Path, "/"), "host": s.Host})
@@ -146,7 +150,7 @@ func (s stream) settings() (map[string]any, error) {
 	case "kcp", "mkcp", "quic", "h2", "http":
 		return nil, fmt.Errorf("%w network %q", ErrUnsupported, network)
 	default:
-		return nil, fmt.Errorf("sharelink: unknown network %q", s.Network)
+		return nil, errors.New("sharelink: unknown network, want tcp, ws, grpc, httpupgrade or xhttp")
 	}
 	out["network"] = network
 
@@ -154,8 +158,15 @@ func (s stream) settings() (map[string]any, error) {
 	case "", "none":
 	case "tls":
 		// AllowInsecure is not written: current xray refuses a config that has it.
+		// A CDN-fronted link has a clean address and a host, and often no sni; a
+		// handshake that names the address would fail, so the host is the name,
+		// as v2rayN does it. Reality does not do this.
+		serverName := s.SNI
+		if strings.TrimSpace(serverName) == "" {
+			serverName = firstHost(s.Host)
+		}
 		t := compact(map[string]string{
-			"serverName":           s.SNI,
+			"serverName":           serverName,
 			"fingerprint":          s.Fingerprint,
 			"pinnedPeerCertSha256": strings.TrimSpace(s.PinnedCertSHA256),
 			"verifyPeerCertByName": strings.TrimSpace(s.VerifyCertByName),
@@ -181,9 +192,16 @@ func (s stream) settings() (map[string]any, error) {
 			"spiderX":     s.SpiderX,
 		})
 	default:
-		return nil, fmt.Errorf("sharelink: unknown security %q", s.Security)
+		return nil, errors.New("sharelink: unknown security, want none, tls or reality")
 	}
 	return out, nil
+}
+
+// firstHost is the first of the comma separated names in a host parameter,
+// trimmed. It is empty when the first name is.
+func firstHost(h string) string {
+	first, _, _ := strings.Cut(h, ",")
+	return strings.TrimSpace(first)
 }
 
 // orDefault returns v, or def when v is empty.

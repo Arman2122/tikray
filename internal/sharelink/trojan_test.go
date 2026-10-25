@@ -45,6 +45,20 @@ var trojanCases = []parseCase{
 			`{"network":"ws","security":"tls","tlsSettings":{"alpn":["http/1.1"],"fingerprint":"chrome","serverName":"cdn.example.com"},"wsSettings":{"host":"cdn.example.com","path":"/ws"}}`),
 	},
 	{
+		name:     "tls by default without sni takes the first host",
+		link:     "trojan://pw@203.0.113.10:443?type=ws&host=cdn.example.com&path=/ws",
+		wantName: "203.0.113.10:443",
+		wantJSON: trojanOut("203.0.113.10", "443", "pw",
+			`{"network":"ws","security":"tls","tlsSettings":{"serverName":"cdn.example.com"},"wsSettings":{"host":"cdn.example.com","path":"/ws"}}`),
+	},
+	{
+		name:     "an sni wins over the host",
+		link:     "trojan://pw@203.0.113.10:443?type=ws&host=cdn.example.com&sni=front.example.com",
+		wantName: "203.0.113.10:443",
+		wantJSON: trojanOut("203.0.113.10", "443", "pw",
+			`{"network":"ws","security":"tls","tlsSettings":{"serverName":"front.example.com"},"wsSettings":{"host":"cdn.example.com","path":"/"}}`),
+	},
+	{
 		// Trojan's default security is tls, so the flag is as live here as in a vless link.
 		name:         "an insecure trojan link keeps verification on and warns",
 		link:         "trojan://pw@example.com:443?allowInsecure=1&sni=example.com",

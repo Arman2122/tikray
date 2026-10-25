@@ -279,7 +279,7 @@ func name(fragment, host string, port int) string {
 
 // buildOutbound marshals an outbound of the given protocol from its settings
 // and streamSettings. The outbound has no tag; render adds one. A nil
-// streamSettings leaves the key out, for a protocol with no transport.
+// streamSettings leaves the key out, for a Shadowsocks link of plain tcp.
 func buildOutbound(protocol string, settings, streamSettings map[string]any) (json.RawMessage, error) {
 	outbound := map[string]any{
 		"protocol": protocol,

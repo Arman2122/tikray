@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -168,6 +169,57 @@ func TestStreamSettings(t *testing.T) {
 				"realitySettings": map[string]any{"fingerprint": "chrome", "publicKey": "k"},
 			},
 		},
+		{
+			// A clean IP address with a host and no sni is how CDN-fronted links
+			// are written: the handshake needs the host, not the address.
+			"tls without sni takes the first host", stream{Network: "ws", Security: "tls", Host: "a.example, b.example"},
+			map[string]any{
+				"network":     "ws",
+				"security":    "tls",
+				"tlsSettings": map[string]any{"serverName": "a.example"},
+				"wsSettings":  map[string]any{"path": "/", "host": "a.example, b.example"},
+			},
+		},
+		{
+			"tls with a blank sni takes the first host", stream{Security: "tls", SNI: "  ", Host: " a.example ,b.example"},
+			map[string]any{"network": "tcp", "security": "tls", "tlsSettings": map[string]any{"serverName": "a.example"}},
+		},
+		{
+			"tls with one host", stream{Security: "tls", Host: "a.example"},
+			map[string]any{"network": "tcp", "security": "tls", "tlsSettings": map[string]any{"serverName": "a.example"}},
+		},
+		{
+			"an sni wins over the host", stream{Security: "tls", SNI: "s.example", Host: "a.example,b.example"},
+			map[string]any{"network": "tcp", "security": "tls", "tlsSettings": map[string]any{"serverName": "s.example"}},
+		},
+		{
+			"a host of only separators gives no server name", stream{Security: "tls", Host: " , "},
+			map[string]any{"network": "tcp", "security": "tls", "tlsSettings": map[string]any{}},
+		},
+		{
+			"an empty first host gives no server name", stream{Security: "tls", Host: ",b.example"},
+			map[string]any{"network": "tcp", "security": "tls", "tlsSettings": map[string]any{}},
+		},
+		{
+			"no tls, no server name from the host", stream{Security: "none", Host: "a.example"},
+			map[string]any{"network": "tcp"},
+		},
+		{
+			"reality keeps sni only", stream{Security: "reality", PublicKey: "k", Host: "a.example"},
+			map[string]any{
+				"network":         "tcp",
+				"security":        "reality",
+				"realitySettings": map[string]any{"fingerprint": "chrome", "publicKey": "k"},
+			},
+		},
+		{
+			"reality with an sni", stream{Security: "reality", PublicKey: "k", SNI: "s.example", Host: "a.example"},
+			map[string]any{
+				"network":         "tcp",
+				"security":        "reality",
+				"realitySettings": map[string]any{"fingerprint": "chrome", "publicKey": "k", "serverName": "s.example"},
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -208,6 +260,25 @@ func TestStreamSettingsErrors(t *testing.T) {
 				t.Errorf("errors.Is(%q, ErrUnsupported) = %v, want %v", err, is, tc.unsupported)
 			}
 		})
+	}
+}
+
+// TestStreamErrorsKeepValues checks that an error for an unknown value does not
+// repeat it: a parameter can hold anything, even the id of the link.
+func TestStreamErrorsKeepValues(t *testing.T) {
+	const value = "SeCrEt-0123456789"
+	for _, s := range []stream{
+		{Network: value},
+		{Security: value},
+		{HeaderType: value},
+		{Network: value, Security: value, HeaderType: value},
+	} {
+		_, err := s.settings()
+		if err == nil {
+			t.Errorf("settings(%+v) succeeded, want an error", s)
+		} else if strings.Contains(err.Error(), value) {
+			t.Errorf("settings(%+v) error %q repeats the value", s, err)
+		}
 	}
 }
 

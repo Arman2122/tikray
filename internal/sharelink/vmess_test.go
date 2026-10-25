@@ -146,6 +146,67 @@ var vmessCases = slices.Concat([]parseCase{
 		wantName: "bücher.example:443",
 		wantJSON: vmessOut("bücher.example", "443", "auto", `{"network":"tcp"}`),
 	},
+	// The name after the #: used when ps says nothing, never over a ps.
+	{
+		name:     "a name after the body, when there is no ps",
+		link:     stdLink(vmessJSON("")) + "#name",
+		wantName: "name",
+		wantJSON: vmessOut("example.com", "443", "auto", `{"network":"tcp"}`),
+	},
+	{
+		name:     "a name after the body, when ps is empty",
+		link:     stdLink(vmessJSON(`"ps":""`)) + "#name",
+		wantName: "name",
+		wantJSON: vmessOut("example.com", "443", "auto", `{"network":"tcp"}`),
+	},
+	{
+		name:     "a name after the body, when ps is blank",
+		link:     stdLink(vmessJSON(`"ps":"  "`)) + "#name",
+		wantName: "name",
+		wantJSON: vmessOut("example.com", "443", "auto", `{"network":"tcp"}`),
+	},
+	{
+		name:     "ps wins over the name after the body",
+		link:     stdLink(vmessJSON(`"ps":"from ps"`)) + "#from fragment",
+		wantName: "from ps",
+		wantJSON: vmessOut("example.com", "443", "auto", `{"network":"tcp"}`),
+	},
+	{
+		name:     "a percent-encoded name after the body",
+		link:     stdLink(vmessJSON("")) + "#lab%20%F0%9F%9A%80",
+		wantName: "lab 🚀",
+		wantJSON: vmessOut("example.com", "443", "auto", `{"network":"tcp"}`),
+	},
+	{
+		name:     "a name after the body with a bad escape stays raw",
+		link:     stdLink(vmessJSON("")) + "#50%",
+		wantName: "50%",
+		wantJSON: vmessOut("example.com", "443", "auto", `{"network":"tcp"}`),
+	},
+	{
+		name:     "an empty name after the body",
+		link:     stdLink(vmessJSON("")) + "#",
+		wantName: "example.com:443",
+		wantJSON: vmessOut("example.com", "443", "auto", `{"network":"tcp"}`),
+	},
+	{
+		name:     "a name after the body that has a question mark and a second hash",
+		link:     stdLink(vmessJSON("")) + "#why?#not",
+		wantName: "why?#not",
+		wantJSON: vmessOut("example.com", "443", "auto", `{"network":"tcp"}`),
+	},
+	{
+		name:     "a name after an unpadded url-alphabet body is cut off before decoding, and ps still wins",
+		link:     vmessLink(base64.RawURLEncoding, vmessAlphabetJSON) + "#late",
+		wantName: "سرور",
+		wantJSON: vmessOut("example.com", "443", "auto", vmessAlphabetOut),
+	},
+	{
+		name:     "a name with an at sign after the body is not the url form",
+		link:     stdLink(vmessJSON("")) + "#user@host",
+		wantName: "user@host",
+		wantJSON: vmessOut("example.com", "443", "auto", `{"network":"tcp"}`),
+	},
 	{
 		name:     "a long name is cut to 128 runes",
 		link:     stdLink(vmessJSON(`"ps":"` + strings.Repeat("é", 200) + `"`)),
@@ -201,7 +262,7 @@ var vmessCases = slices.Concat([]parseCase{
 		link:     stdLink(vmessJSON(`"net":"grpc","path":"gun","host":"front.example.com","type":"multi","tls":"tls"`)),
 		wantName: "example.com:443",
 		wantJSON: vmessOut("example.com", "443", "auto",
-			`{"network":"grpc","grpcSettings":{"authority":"front.example.com","multiMode":true,"serviceName":"gun"},"security":"tls","tlsSettings":{}}`),
+			`{"network":"grpc","grpcSettings":{"authority":"front.example.com","multiMode":true,"serviceName":"gun"},"security":"tls","tlsSettings":{"serverName":"front.example.com"}}`),
 	},
 	{
 		name:     "grpc gun is a single stream",
@@ -243,6 +304,20 @@ var vmessCases = slices.Concat([]parseCase{
 	},
 
 	// tls
+	{
+		name:     "tls without sni takes the first host",
+		link:     stdLink(`{"add":"203.0.113.10","port":443,"id":"` + vmessID + `","net":"ws","host":"a.example.com, b.example.com","path":"/ws","tls":"tls"}`),
+		wantName: "203.0.113.10:443",
+		wantJSON: vmessOut("203.0.113.10", "443", "auto",
+			`{"network":"ws","security":"tls","tlsSettings":{"serverName":"a.example.com"},"wsSettings":{"host":"a.example.com, b.example.com","path":"/ws"}}`),
+	},
+	{
+		name:     "an sni wins over the host",
+		link:     stdLink(`{"add":"203.0.113.10","port":443,"id":"` + vmessID + `","net":"ws","host":"a.example.com","path":"/ws","tls":"tls","sni":"front.example.com"}`),
+		wantName: "203.0.113.10:443",
+		wantJSON: vmessOut("203.0.113.10", "443", "auto",
+			`{"network":"ws","security":"tls","tlsSettings":{"serverName":"front.example.com"},"wsSettings":{"host":"a.example.com","path":"/ws"}}`),
+	},
 	{name: "tls none", link: stdLink(vmessJSON(`"tls":"none","sni":"example.com"`)), wantName: "example.com:443", wantJSON: vmessOut("example.com", "443", "auto", `{"network":"tcp"}`)},
 	{name: "tls empty", link: stdLink(vmessJSON(`"tls":"","sni":"example.com"`)), wantName: "example.com:443", wantJSON: vmessOut("example.com", "443", "auto", `{"network":"tcp"}`)},
 	{name: "tls in upper case", link: stdLink(vmessJSON(`"tls":"TLS"`)), wantName: "example.com:443", wantJSON: vmessOut("example.com", "443", "auto", `{"network":"tcp","security":"tls","tlsSettings":{}}`)},
@@ -325,8 +400,11 @@ var vmessCases = slices.Concat([]parseCase{
 	{name: "not base64", link: "vmess://!!not base64!!", wantErr: kindInvalid, secret: "!!not"},
 	{name: "base64 with both alphabets", link: "vmess://ab+c_dAA", wantErr: kindInvalid, secret: "ab+c_dAA"},
 	{name: "base64 with a bad length", link: "vmess://eyJhIjoxfQ=x", wantErr: kindInvalid},
-	{name: "a name after the body", link: stdLink(vmessJSON("")) + "#name", wantErr: kindInvalid},
-	{name: "a query after the body", link: stdLink(vmessJSON("")) + "?remarks=x", wantErr: kindInvalid},
+	{name: "a query after the body", link: stdLink(vmessJSON("")) + "?remarks=x", wantErr: kindInvalid, errContains: "after the base64 body"},
+	{name: "a query and a name after the body", link: stdLink(vmessJSON("")) + "?remarks=x&obfs=none#name", wantErr: kindInvalid, errContains: "after the base64 body"},
+	{name: "a bare question mark after the body", link: stdLink(vmessJSON("")) + "?", wantErr: kindInvalid, errContains: "after the base64 body"},
+	{name: "a name with text that is not base64 before it", link: "vmess://!!!#name", wantErr: kindInvalid, errContains: "not base64"},
+	{name: "a name with no body", link: "vmess://#name", wantErr: kindInvalid},
 
 	// the URL form of the VMess link is not read
 	{name: "url form", link: "vmess://" + vmessID + "@example.com:443?type=ws&security=tls#name", wantErr: kindUnsupported, errContains: "URL form", secret: vmessID},

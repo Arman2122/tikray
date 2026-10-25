@@ -1,0 +1,2 @@
+go test fuzz v1
+string("vless://1d-6324-4d53-ad4f-8cda48b30811@e:1?headerType=1d-6324-4d53-ad4f-8cda48b30811@e")

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"unicode/utf8"
 )
@@ -34,7 +35,11 @@ var ssMethods = map[string]string{
 // The base64 is in either alphabet, with or without padding.
 //
 // A plugin parameter, whatever its value, is not supported, as tikray runs no
-// plugins. The other parameters are ignored. The outbound has no streamSettings.
+// plugins. The transport and security are read from the same parameters as in
+// a VLESS link (type, security, sni, host, path and the rest), with security
+// none unless the link says otherwise. The outbound has streamSettings only
+// when they ask for more than plain tcp: a network other than tcp, a security
+// other than none, or a tcp header. Any other parameter is ignored.
 //
 // The errors it returns do not repeat any of the link, not even the method.
 func parseSS(link string) (Server, error) {
@@ -48,14 +53,15 @@ func parseSS(link string) (Server, error) {
 	var (
 		userinfo, host, fragment string
 		port                     int
+		q                        url.Values
 	)
 	if strings.Contains(body, "@") {
 		// Base64 has no @, so this is SIP002.
-		t, err := parseTargetReading(link, "ss", nil)
+		t, err := parseTarget(link, "ss")
 		if err != nil {
 			return Server{}, err
 		}
-		userinfo, host, port, fragment = t.secret, t.host, t.port, t.fragment
+		userinfo, host, port, fragment, q = t.secret, t.host, t.port, t.fragment, t.query
 		if !strings.Contains(userinfo, ":") {
 			raw, ok := decodeBase64(userinfo)
 			if !ok {
@@ -84,6 +90,10 @@ func parseSS(link string) (Server, error) {
 			return Server{}, errors.New("sharelink: shadowsocks link has an invalid port, want 1 to 65535")
 		}
 		userinfo, fragment = text[:at], unescapeFragment(rawFragment)
+		var bad string
+		if q, bad = parseQuery(query, streamKeys); bad != "" {
+			return Server{}, fmt.Errorf("sharelink: ss link has a malformed %q parameter", bad)
+		}
 	}
 
 	method, password, ok := strings.Cut(userinfo, ":")
@@ -102,6 +112,15 @@ func parseSS(link string) (Server, error) {
 	if !utf8.ValidString(password) {
 		return Server{}, errors.New("sharelink: shadowsocks password is not valid UTF-8")
 	}
+	strm := streamFromQuery(q, "none")
+	st, err := strm.settings()
+	if err != nil {
+		return Server{}, err
+	}
+	// Plain tcp is what Shadowsocks does with no streamSettings at all.
+	if st["network"] == "tcp" && len(st) == 1 {
+		st = nil
+	}
 	out, err := buildOutbound("shadowsocks", map[string]any{
 		"servers": []any{map[string]any{
 			"address":  host,
@@ -109,9 +128,9 @@ func parseSS(link string) (Server, error) {
 			"method":   method,
 			"password": password,
 		}},
-	}, nil)
+	}, st)
 	if err != nil {
 		return Server{}, err
 	}
-	return Server{Name: name(fragment, host, port), Outbound: out}, nil
+	return Server{Name: name(fragment, host, port), Outbound: out, Warnings: strm.warnings()}, nil
 }

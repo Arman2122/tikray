@@ -40,6 +40,36 @@ var vlessCases = []parseCase{
 			`{"network":"ws","security":"tls","tlsSettings":{"alpn":["h2","http/1.1"],"serverName":"cdn.example.com"},"wsSettings":{"host":"cdn.example.com","path":"/ws?ed=2048"}}`),
 	},
 	{
+		// A CDN-fronted link: a clean address, a host and no sni. The handshake
+		// must name the first host, not the address.
+		name:     "tls without sni takes the first host",
+		link:     "vless://" + vlessID + "@203.0.113.10:443?type=ws&security=tls&host=a.example.com,b.example.com&path=/ws",
+		wantName: "203.0.113.10:443",
+		wantJSON: vlessOut("203.0.113.10", "443", plainUser,
+			`{"network":"ws","security":"tls","tlsSettings":{"serverName":"a.example.com"},"wsSettings":{"host":"a.example.com,b.example.com","path":"/ws"}}`),
+	},
+	{
+		name:     "an sni wins over the host",
+		link:     "vless://" + vlessID + "@203.0.113.10:443?type=ws&security=tls&sni=front.example.com&host=a.example.com&path=/ws",
+		wantName: "203.0.113.10:443",
+		wantJSON: vlessOut("203.0.113.10", "443", plainUser,
+			`{"network":"ws","security":"tls","tlsSettings":{"serverName":"front.example.com"},"wsSettings":{"host":"a.example.com","path":"/ws"}}`),
+	},
+	{
+		name:     "reality does not take the host for a server name",
+		link:     "vless://" + vlessID + "@203.0.113.10:443?security=reality&pbk=" + vlessPBK + "&host=a.example.com",
+		wantName: "203.0.113.10:443",
+		wantJSON: vlessOut("203.0.113.10", "443", plainUser,
+			`{"network":"tcp","realitySettings":{"fingerprint":"chrome","publicKey":"`+vlessPBK+`"},"security":"reality"}`),
+	},
+	{
+		name:     "no tls does not take the host for a server name",
+		link:     "vless://" + vlessID + "@203.0.113.10:443?type=ws&host=a.example.com",
+		wantName: "203.0.113.10:443",
+		wantJSON: vlessOut("203.0.113.10", "443", plainUser,
+			`{"network":"ws","wsSettings":{"host":"a.example.com","path":"/"}}`),
+	},
+	{
 		name:     "websocket path defaults to slash",
 		link:     vlessBase + "?type=ws#ws",
 		wantName: "ws",
@@ -385,6 +415,10 @@ var vlessCases = []parseCase{
 	{name: "malformed escape in the encryption", link: vlessBase + "?encryption=%zz", wantErr: kindInvalid, errContains: `"encryption"`, secret: vlessID},
 	{name: "malformed escape in the flow", link: vlessBase + "?flow=xtls-rprx-vision%", wantErr: kindInvalid, errContains: `"flow"`, secret: vlessID},
 	{name: "malformed escape in the id", link: "vless://secret%zz@example.com:443", wantErr: kindInvalid, secret: "secret"},
+	// A parameter can hold anything, even the id, and no error repeats it.
+	{name: "unknown tcp header that is the id", link: vlessBase + "?headerType=" + vlessID, wantErr: kindInvalid, secret: vlessID},
+	{name: "unknown network that is the id", link: vlessBase + "?type=" + vlessID, wantErr: kindInvalid, secret: vlessID},
+	{name: "unknown security that is the id", link: vlessBase + "?security=" + vlessID, wantErr: kindInvalid, secret: vlessID},
 }
 
 func TestParseVLESS(t *testing.T) { runParseCases(t, vlessCases) }

@@ -13,12 +13,15 @@ import (
 // vmessSecurities are the encryption methods xray has for a VMess user.
 var vmessSecurities = []string{"auto", "aes-128-gcm", "chacha20-poly1305", "none", "zero"}
 
-// parseVMess reads vmess://<base64 of a JSON object>, the link v2rayN writes.
+// parseVMess reads vmess://<base64 of a JSON object>[#<name>], the link
+// v2rayN writes.
 //
 // The body is base64 in the standard or the URL alphabet, with or without the
 // padding. In the JSON, port and aid may be numbers or strings, and
-// allowInsecure may be a boolean, a number or a string. The URL form
-// vmess://<id>@<host>:<port>?<query> is not read.
+// allowInsecure may be a boolean, a number or a string. The name after the #
+// is the name of the server when ps says nothing; ps wins when it is set. The
+// URL form vmess://<id>@<host>:<port>?<query> is not read, and neither is any
+// text after the body but the #name.
 //
 // A VMess link has one set of fields for every transport, so they are read as
 // the transport needs them: for gRPC, path is the service name, host is the
@@ -30,9 +33,13 @@ var vmessSecurities = []string{"auto", "aes-128-gcm", "chacha20-poly1305", "none
 // the JSON is reported by the name of the field only.
 func parseVMess(link string) (Server, error) {
 	_, body, _ := strings.Cut(link, "://")
+	body, rawFragment, _ := strings.Cut(body, "#")
 	// Base64 has no @, so one means the URL form.
 	if strings.Contains(body, "@") {
 		return Server{}, fmt.Errorf("%w vmess link in URL form, want vmess://<base64 of a JSON object>", ErrUnsupported)
+	}
+	if strings.Contains(body, "?") {
+		return Server{}, errors.New("sharelink: vmess link has unexpected text after the base64 body")
 	}
 	raw, ok := decodeBase64(body)
 	if !ok {
@@ -138,7 +145,11 @@ func parseVMess(link string) (Server, error) {
 	if err != nil {
 		return Server{}, err
 	}
-	return Server{Name: name(ps, host, port), Outbound: out, Warnings: strm.warnings()}, nil
+	label := ps
+	if strings.TrimSpace(label) == "" {
+		label = unescapeFragment(rawFragment)
+	}
+	return Server{Name: name(label, host, port), Outbound: out, Warnings: strm.warnings()}, nil
 }
 
 // vmessReader reads the members of the JSON object in a VMess link. A member of
