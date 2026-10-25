@@ -1,6 +1,6 @@
 {
   "log": {"loglevel": "warning", "access": "/data/run/access.log"},
-  "api": {"tag": "api", "listen": "127.0.0.1:10085", "services": ["StatsService"]},
+  "api": {"tag": "api", "listen": "172.31.255.3:10085", "services": ["StatsService"]},
   "stats": {},
   "dns": {
     "servers": [
