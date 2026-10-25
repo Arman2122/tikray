@@ -39,8 +39,8 @@ const (
 )
 
 // routerWAN is where requests that left CHR's WAN directly come from: CHR
-// masquerades its containers' traffic. Requests that went through the VLESS
-// proxy come from proxyEgress instead.
+// masquerades its containers' traffic. Requests that went through a VLESS
+// server come from one of proxyEgresses instead.
 const routerWAN = "198.51.100.2"
 
 const githubPrefix = "/XTLS/Xray-core/releases/"
