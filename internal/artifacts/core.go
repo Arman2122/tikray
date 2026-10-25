@@ -77,7 +77,9 @@ type UpdateOptions struct {
 	ConfigFile string
 	// AllowUnverified lets a zip whose SHA-256 nobody knows be installed. Such
 	// a zip is taken only from Fetch's Inbox sources: the consent is for a
-	// manual upload, never for an unverified download.
+	// manual upload, never for an unverified download. A core installed that
+	// way needs it again on every later update to it, while its hash is
+	// still unknown.
 	AllowUnverified bool
 }
 
@@ -247,10 +249,11 @@ func (u *CoreUpdater) active(ctx context.Context) (*runnerapi.Selection, error) 
 	return st.Active, nil
 }
 
-// slotFor returns the installed slot of v. Without one it finds the zip's
-// SHA-256, fetches a zip that has it into a temporary directory, and installs
-// it. When nobody knows the hash, consent admits only a manual upload (§4.3):
-// the zip comes from the chain's inbox sources alone and must be a core zip.
+// slotFor returns the installed slot of v (see installed). Without one it
+// finds the zip's SHA-256, fetches a zip that has it into a temporary
+// directory, and installs it. When nobody knows the hash, consent admits only
+// a manual upload (§4.3): the zip comes from the chain's inbox sources alone
+// and must be a core zip.
 func (u *CoreUpdater) slotFor(ctx context.Context, v xrayver.Version, allowUnverified bool) (Slot, error) {
 	slots, err := ListCores(u.coresDir())
 	if err != nil {
@@ -258,14 +261,14 @@ func (u *CoreUpdater) slotFor(ctx context.Context, v xrayver.Version, allowUnver
 	}
 	for _, s := range slots {
 		if s.Version == v {
-			return s, nil
+			return u.installed(ctx, s, allowUnverified)
 		}
 	}
-	file, err := xrayver.AssetName(u.arch())
+	r, err := u.request(v)
 	if err != nil {
 		return Slot{}, err
 	}
-	r := Request{Version: v, File: file, Arch: u.arch()}
+	file := r.File
 	chain := u.Fetch
 	want, err := u.Verify.Expected(ctx, r)
 	if errors.Is(err, ErrNoHash) {
@@ -310,6 +313,42 @@ func (u *CoreUpdater) slotFor(ctx context.Context, v xrayver.Version, allowUnver
 	}
 	u.logf("xray-core %s: fetched %s from %s (%s)", v, file, src, want.Method)
 	return InstallCore(u.coresDir(), v, zipPath, Meta{Source: src, ZipSHA256: sum, Verified: want.Method, InstalledAt: u.now()})
+}
+
+// installed returns s, the slot already installed for its version. A slot
+// that was installed unverified is used again only with consent, unless its
+// zip's SHA-256 has become known since: it must then match, and the slot
+// counts as verified for this update.
+func (u *CoreUpdater) installed(ctx context.Context, s Slot, allowUnverified bool) (Slot, error) {
+	if s.Meta.Verified != "unverified" {
+		return s, nil
+	}
+	r, err := u.request(s.Version)
+	if err != nil {
+		return Slot{}, err
+	}
+	want, err := u.Verify.Expected(ctx, r)
+	switch {
+	case err == nil && want.SHA256 == s.Meta.ZipSHA256:
+		s.Meta.Verified = want.Method
+		return s, nil
+	case err == nil:
+		return Slot{}, fmt.Errorf("the installed core %s does not match the published hash: it was installed unverified from a zip with SHA-256 %s, and the %s says %s", s.Version, s.Meta.ZipSHA256, want.Method, want.SHA256)
+	case errors.Is(err, ErrNoHash) && allowUnverified:
+		return s, nil
+	case errors.Is(err, ErrNoHash):
+		return Slot{}, fmt.Errorf("%w; the installed core %s was installed unverified, and running it needs explicit consent", err, s.Version)
+	}
+	return Slot{}, err
+}
+
+// request names the release zip of v for the updater's architecture.
+func (u *CoreUpdater) request(v xrayver.Version) (Request, error) {
+	file, err := xrayver.AssetName(u.arch())
+	if err != nil {
+		return Request{}, err
+	}
+	return Request{Version: v, File: file, Arch: u.arch()}, nil
 }
 
 // inboxOnly returns c with only its Inbox sources.
@@ -374,6 +413,9 @@ func (u *CoreUpdater) drive(ctx context.Context, cand runnerapi.Candidate) (stri
 			return o, d, nil
 		}
 		return runnerapi.OutcomeExited, "the candidate is no longer on trial, and the runner recorded no outcome for it", nil
+	}
+	if err := runsCore(st, cand.Core); err != nil {
+		return u.abort(ctx, cand, OutcomeUnhealthy, err)
 	}
 
 	if err := u.healthy(ctx, cand); err != nil {
@@ -540,6 +582,20 @@ func refuse(res *Result, err error) error {
 // onTrial reports whether the runner has cand on trial.
 func onTrial(st runnerapi.Status, cand runnerapi.Candidate) bool {
 	return st.State == runnerapi.StateTrial && st.Candidate != nil && sameCandidate(*st.Candidate, cand)
+}
+
+// runsCore checks that the xray the runner runs reports version core, as
+// "Xray <core> (...)" on the first line of xray version. A slot whose binary
+// is another release than its name, such as an inbox zip of another version,
+// must never be committed under that name.
+func runsCore(st runnerapi.Status, core string) error {
+	switch {
+	case strings.HasPrefix(st.XrayVersion, "Xray "+core+" "):
+		return nil
+	case st.XrayVersion == "":
+		return fmt.Errorf("the runner reports no xray version for the candidate, want xray-core %s", core)
+	}
+	return fmt.Errorf("the candidate reports %q, not xray-core %s", st.XrayVersion, core)
 }
 
 // recorded returns how the trial of cand ended, from the runner's status: the

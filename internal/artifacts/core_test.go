@@ -846,6 +846,114 @@ func TestUpdateUnverified(t *testing.T) {
 	})
 }
 
+// A slot installed unverified is no consent for later updates: it is used
+// again only with consent, unless its zip's SHA-256 has become known since,
+// and then only if it matches.
+func TestUpdateReusesUnverifiedSlot(t *testing.T) {
+	// setup installs 26.10.21 unverified, from an inbox zip, and returns the
+	// zip's SHA-256. Upstream publishes nothing for it.
+	setup := func(t *testing.T) (*coreEnv, string) {
+		t.Helper()
+		e := newCoreEnv(t, "26.3.27")
+		zip := releaseBytes(t, "inbox-bin")
+		sum := shaOf(string(zip))
+		_, err := InstallCore(e.cores(), mustVer(t, "26.10.21"), writeTemp(t, zip), Meta{Source: "inbox", ZipSHA256: sum, Verified: "unverified"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e, sum
+	}
+	publishDgst := func(e *coreEnv, ver, sum string) {
+		e.rel.mu.Lock()
+		defer e.rel.mu.Unlock()
+		e.rel.files[assetPath(ver)+".dgst"] = []byte(dgstBody(sum))
+	}
+	wantSlotKept := func(t *testing.T, e *coreEnv) {
+		t.Helper()
+		if m := e.meta(t, "26.10.21"); m.Verified != "unverified" || m.Source != "inbox" {
+			t.Errorf("meta.json = %+v, want the unverified inbox slot left as it was", m)
+		}
+	}
+
+	t.Run("needs consent", func(t *testing.T) {
+		e, _ := setup(t)
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{})
+		wantOutcome(t, res, err, OutcomeRefused)
+		if !errors.Is(err, ErrNoHash) {
+			t.Errorf("err = %v, want ErrNoHash", err)
+		}
+		wantDetail(t, res, "consent")
+		wantActions(t, e.runner)
+		wantSlotKept(t, e)
+	})
+	t.Run("with consent", func(t *testing.T) {
+		e, _ := setup(t)
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{AllowUnverified: true})
+		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+		if res.Source != "inbox" || res.Verified != "unverified" {
+			t.Errorf("Result = %+v, want source inbox, verified unverified", res)
+		}
+		wantActions(t, e.runner, "trial", "commit")
+	})
+	t.Run("hash now known and matching", func(t *testing.T) {
+		e, sum := setup(t)
+		publishDgst(e, "26.10.21", sum)
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{})
+		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+		if res.Source != "inbox" || res.Verified != "dgst" {
+			t.Errorf("Result = %+v, want source inbox, verified dgst", res)
+		}
+		if hits := e.rel.hitList(); !reflect.DeepEqual(hits, []string{assetPath("26.10.21") + ".dgst"}) {
+			t.Errorf("upstream was asked for %v, want only the .dgst", hits)
+		}
+		wantActions(t, e.runner, "trial", "commit")
+	})
+	t.Run("hash now known and different", func(t *testing.T) {
+		e, sum := setup(t)
+		published := e.rel.add(t, "26.10.21") // another zip than the one installed
+		// Consent covers an unknown hash, never a wrong one.
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{AllowUnverified: true})
+		wantOutcome(t, res, err, OutcomeRefused)
+		wantDetail(t, res, "does not match")
+		wantDetail(t, res, sum)
+		wantDetail(t, res, published)
+		wantActions(t, e.runner)
+		wantSlotKept(t, e)
+	})
+}
+
+// A slot whose binary is another release than its name must not be committed
+// under that name, wherever it came from.
+func TestUpdateRefusesAnotherVersion(t *testing.T) {
+	for _, tc := range []struct{ name, reports, detail string }{
+		{"another release", fakeXrayVersion("26.10.21"), `"Xray 26.10.21 `},
+		{"a prefix of the version", fakeXrayVersion("26.12.10"), `"Xray 26.12.10 `},
+		{"no version", "", "no xray version"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newCoreEnv(t, "26.3.27")
+			e.rel.add(t, "26.12.1")
+			e.runner.script(func(f *fakeRunner) {
+				f.onTrial = func(w http.ResponseWriter, c runnerapi.Candidate) bool {
+					f.startTrial(c)
+					f.st.XrayVersion = tc.reports
+					w.WriteHeader(http.StatusNoContent)
+					return true
+				}
+			})
+
+			res, err := e.u.Update(bg, "26.12.1", UpdateOptions{})
+			wantOutcome(t, res, err, OutcomeUnhealthy)
+			wantDetail(t, res, tc.detail)
+			wantDetail(t, res, "26.12.1")
+			wantActions(t, e.runner, "trial", "abort")
+			if got := e.runner.activeCore(); got != "26.3.27" {
+				t.Errorf("runner's active core = %q, want 26.3.27", got)
+			}
+		})
+	}
+}
+
 func TestUpdateNoop(t *testing.T) {
 	t.Run("version", func(t *testing.T) {
 		e := newCoreEnv(t, "26.3.27")
