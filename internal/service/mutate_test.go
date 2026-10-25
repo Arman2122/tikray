@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Arman2122/tikray/internal/runnerapi"
+	"github.com/Arman2122/tikray/internal/sharelink"
 	"github.com/Arman2122/tikray/internal/store"
 )
 
@@ -23,6 +24,9 @@ const (
 	// vlessLink is a share link for a VLESS server with REALITY, which
 	// xray-core takes to a public address.
 	vlessLink = "vless://" + vlessID + "@203.0.113.10:443?type=tcp&security=reality&sni=www.example.com&fp=chrome&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&sid=6ba85179e30d4fc2&flow=xtls-rprx-vision#lab"
+	// warnLink is a link that asks for allowInsecure, which the parser
+	// ignores, with a warning.
+	warnLink = "vless://" + vlessID + "@example.com:443?security=tls&sni=a.example.com&fp=firefox&allowInsecure=1"
 	// plainLink is VLESS with neither TLS nor encryption to a public
 	// address, which xray-core 26.7.11 and newer refuse.
 	plainLink = "vless://" + vlessID + "@vpn.example.org:443?type=tcp#plain"
@@ -205,6 +209,110 @@ func TestAddServerByLink(t *testing.T) {
 	if got := e.eventsOf(KindUntested); len(got) != 0 {
 		t.Errorf("untested events %q for a server that was tested", got)
 	}
+}
+
+// wantWarnings fails unless the warning events are exactly want.
+func (e *env) wantWarnings(want ...string) {
+	e.t.Helper()
+	if got := e.eventsOf(KindWarning); !slices.Equal(got, want) {
+		e.t.Errorf("warning events %q, want %q", show(got), show(want))
+	}
+}
+
+// What the parser ignored in a link is told in a warning event of the server
+// saved from it, once the write has succeeded.
+func TestAddServerLinkWarningsBecomeEvents(t *testing.T) {
+	parsed, err := sharelink.Parse(warnLink)
+	if err != nil || len(parsed.Warnings) != 1 {
+		t.Fatalf("Parse(warnLink) = %d warnings, %v; want 1", len(parsed.Warnings), show(err))
+	}
+	e := newEnv(t)
+	srv, _, err := e.s.AddServer(bg, 0, NewServer{Link: warnLink})
+	if err != nil {
+		t.Fatal(show(err))
+	}
+	e.wantWarnings("server " + srv.ID + " (example.com:443): " + parsed.Warnings[0])
+	if evs := e.s.Events(0); len(evs) != 1 || evs[0].Kind != KindWarning {
+		t.Errorf("events %+v, want only the warning", evs)
+	}
+
+	// The name the server is saved with, a Name given over the link's own.
+	srv, _, err = e.s.AddServer(bg, store.AnyRevision, NewServer{Link: warnLink, Name: "mine"})
+	if err != nil {
+		t.Fatal(show(err))
+	}
+	if got := e.eventsOf(KindWarning); len(got) != 2 || got[1] != "server "+srv.ID+" (mine): "+parsed.Warnings[0] {
+		t.Errorf("warning events %q, want a second one for the server named mine", show(got))
+	}
+}
+
+func TestAddServerWithoutWarningsRecordsNone(t *testing.T) {
+	e := newEnv(t)
+	if _, _, err := e.s.AddServer(bg, 0, NewServer{Link: vlessLink}); err != nil {
+		t.Fatal(show(err))
+	}
+	if _, _, err := e.s.AddServer(bg, store.AnyRevision, NewServer{Name: "raw", Outbound: json.RawMessage(vlessOutbound)}); err != nil {
+		t.Fatal(show(err))
+	}
+	e.wantWarnings()
+}
+
+// A server that is not written has told nothing: no warning for a stale
+// revision, a refusal, or a server that xray rejected.
+func TestAddServerWarningsAreRecordedOnlyWhenSaved(t *testing.T) {
+	e := newEnv(t)
+	e.edit()
+	if _, _, err := e.s.AddServer(bg, 0, NewServer{Link: warnLink}); !errors.Is(err, store.ErrConflict) {
+		t.Errorf("error = %v, want store.ErrConflict", show(err))
+	}
+	if _, _, err := e.s.AddServer(bg, store.AnyRevision, NewServer{Link: warnLink, Name: "a\nb"}); err == nil {
+		t.Error("a name with a control character was accepted")
+	}
+	e.runner.setTestReject("infra/conf: bad user " + vlessID)
+	if _, _, err := e.s.AddServer(bg, store.AnyRevision, NewServer{Link: warnLink}); err == nil {
+		t.Error("a server that xray rejected was saved")
+	}
+	e.wantWarnings()
+	if got := e.s.Events(0); len(got) != 0 {
+		t.Errorf("events %s, want none", show(got))
+	}
+}
+
+func TestUpdateServerLinkWarningsBecomeEvents(t *testing.T) {
+	e := newEnv(t)
+	e.addServer("one", vlessOutbound)
+	srv := e.serverNamed("one")
+	_, rev := e.store.State()
+	parsed, err := sharelink.Parse(warnLink)
+	if err != nil {
+		t.Fatal(show(err))
+	}
+	link, name, plain := warnLink, "renamed", vlessLink
+
+	// Not written: a stale revision.
+	if _, _, err := e.s.UpdateServer(bg, rev-1, srv.ID, ServerPatch{Link: &link}); !errors.Is(err, store.ErrConflict) {
+		t.Errorf("error = %v, want store.ErrConflict", show(err))
+	}
+	e.wantWarnings()
+
+	// A change that brings no link has none to tell.
+	if _, _, err := e.s.UpdateServer(bg, rev, srv.ID, ServerPatch{Name: &name}); err != nil {
+		t.Fatal(show(err))
+	}
+	e.wantWarnings()
+
+	// The new link's warning is told with the name the server has now.
+	other := "other"
+	if _, _, err := e.s.UpdateServer(bg, rev+1, srv.ID, ServerPatch{Link: &link, Name: &other}); err != nil {
+		t.Fatal(show(err))
+	}
+	e.wantWarnings("server " + srv.ID + " (other): " + parsed.Warnings[0])
+
+	// A link without warnings adds none.
+	if _, _, err := e.s.UpdateServer(bg, store.AnyRevision, srv.ID, ServerPatch{Link: &plain}); err != nil {
+		t.Fatal(show(err))
+	}
+	e.wantWarnings("server " + srv.ID + " (other): " + parsed.Warnings[0])
 }
 
 func TestAddServerNameOverridesTheLinksName(t *testing.T) {

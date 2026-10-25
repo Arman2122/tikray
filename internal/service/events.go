@@ -19,6 +19,9 @@ const (
 	KindUntested = "untested"
 	// KindCleanup: a pin cleared or a rule dropped because its server went.
 	KindCleanup = "cleanup"
+	// KindWarning: something the share-link parser changed or ignored in a
+	// server that was saved from the link, such as an allowInsecure.
+	KindWarning = "warning"
 	// KindError: a failure outside any of the above, such as a state that
 	// does not render.
 	KindError = "error"

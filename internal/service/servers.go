@@ -27,6 +27,19 @@ type source struct {
 	// link is the share link, trimmed, empty for raw JSON.
 	link     string
 	outbound json.RawMessage
+	// warnings are what the parser changed or ignored in the link, for the
+	// warning events of the server saved from it.
+	warnings []string
+}
+
+// warningNotes are the warning events for srv, saved from a link whose parser
+// gave warnings: one each.
+func warningNotes(srv store.Server, warnings []string) []note {
+	notes := make([]note, len(warnings))
+	for i, w := range warnings {
+		notes[i] = note{KindWarning, fmt.Sprintf("server %s (%s): %s", srv.ID, srv.Name, w)}
+	}
+	return notes
 }
 
 // parseSource reads the share link or the raw outbound that a request
@@ -46,7 +59,7 @@ func (s *Service) parseSource(link *string, raw json.RawMessage) (source, error)
 			st.Servers = append(st.Servers, store.Server{Link: l})
 			return source{}, refuse(st, err.Error())
 		}
-		return source{name: sv.Name, link: l, outbound: sv.Outbound}, nil
+		return source{name: sv.Name, link: l, outbound: sv.Outbound, warnings: sv.Warnings}, nil
 	case len(raw) > 0:
 		return source{outbound: withoutTag(raw)}, nil
 	}
@@ -142,7 +155,9 @@ type NewServer struct {
 // The server's outbound is tested first, by the runner's xray in a config of
 // its own: one that xray rejects is refused, with xray's words, redacted. When
 // no xray is there to test (the runner can't be reached, or no core runs), the
-// server is saved all the same, with an untested event.
+// server is saved all the same, with an untested event. What the parser
+// ignored in a link (its warnings) is recorded as one warning event each,
+// once the server is saved.
 func (s *Service) AddServer(ctx context.Context, rev uint64, n NewServer) (store.Server, uint64, error) {
 	var link *string
 	if strings.TrimSpace(n.Link) != "" {
@@ -155,7 +170,7 @@ func (s *Service) AddServer(ctx context.Context, rev uint64, n NewServer) (store
 	srv := store.Server{ID: store.NewID(), Name: cmp.Or(n.Name, src.name), Link: src.link, Outbound: src.outbound}
 	add := func(st *store.State) ([]note, error) {
 		st.Servers = append(st.Servers, srv)
-		return nil, nil
+		return warningNotes(srv, src.warnings), nil
 	}
 	untested, err := s.testServer(ctx, rev, srv.ID, add)
 	if err != nil {
@@ -183,7 +198,8 @@ type ServerPatch struct {
 
 // UpdateServer changes server id as p says and returns it and the new
 // revision; ErrNotFound if there is no such server. The runner tests a new
-// link or outbound as AddServer's does, and no other change.
+// link or outbound as AddServer's does, and no other change; a new link's
+// warnings are recorded as AddServer's are.
 func (s *Service) UpdateServer(ctx context.Context, rev uint64, id string, p ServerPatch) (store.Server, uint64, error) {
 	var src source
 	replace := p.Link != nil || len(p.Outbound) > 0
@@ -208,7 +224,7 @@ func (s *Service) UpdateServer(ctx context.Context, rev uint64, id string, p Ser
 		if replace {
 			srv.Link, srv.Outbound, srv.Invalid = src.link, src.outbound, ""
 		}
-		return nil, nil
+		return warningNotes(*srv, src.warnings), nil
 	}
 	var untested []note
 	if replace {
