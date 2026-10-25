@@ -108,12 +108,38 @@ func TestSetSub(t *testing.T) {
 		t.Errorf("the subscriptions directory holds %v, want [a b.txt]", names)
 	}
 
-	for _, bad := range []string{"", ".", "..", ".hidden", "a/b", "../x", "/etc/passwd", "x/"} {
-		if err := l.setSub(bad, "x"); err == nil {
+	// A name labinet would answer 404 is refused here, with the rule it
+	// breaks, and not found out when the service's fetch fails.
+	for _, bad := range []string{"", ".", "..", ".hidden", "a/b", "../x", "/etc/passwd", "x/", "a b", "-x", "a?b", "é", strings.Repeat("a", 129)} {
+		err := l.setSub(bad, "x")
+		if err == nil {
 			t.Errorf("setSub(%q) succeeded, want an error", bad)
+		} else if !strings.Contains(err.Error(), "A-Za-z0-9") {
+			t.Errorf("setSub(%q) = %q, want the rule for a name in it", bad, err)
 		}
 	}
 	if err := (&Lab{}).setSub("a", "x"); err == nil {
 		t.Error("setSub on a lab without a subscriptions directory succeeded, want an error")
+	}
+}
+
+func TestSetSubCleansUp(t *testing.T) {
+	l := &Lab{Subs: t.TempDir()}
+	// A directory with something in it cannot be replaced by a file, so the
+	// rename fails; the file under construction must not stay behind.
+	if err := os.MkdirAll(filepath.Join(l.Subs, "a", "inner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.setSub("a", "x"); err == nil {
+		t.Fatal("setSub over a non-empty directory succeeded, want an error")
+	}
+	entries, err := os.ReadDir(l.Subs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "a" {
+			t.Errorf("setSub left %q behind after a failed rename", e.Name())
+		}
 	}
 }

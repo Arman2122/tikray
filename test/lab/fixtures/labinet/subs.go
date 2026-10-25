@@ -1,12 +1,22 @@
 package labinet
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 )
 
 // subPrefix is where HTTPHandler serves subscriptions.
 const subPrefix = "/sub/"
+
+// CheckSubName returns an error, naming the rule, when name is not one that
+// /sub/<name> serves: a subscription written under such a name would be a 404.
+func CheckSubName(name string) error {
+	if !nameRE.MatchString(name) {
+		return fmt.Errorf("labinet serves only subscription names that match %s (a letter, digit or underscore, then up to 127 letters, digits, dots, underscores, pluses or hyphens), not %q", nameRE, name)
+	}
+	return nil
+}
 
 // serveSub answers GET /sub/<name> with the file <name> of dir, as text/plain,
 // the way a subscription provider answers with its list of share links. The

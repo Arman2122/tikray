@@ -426,10 +426,10 @@ func runnerStatus(ctx context.Context) (runnerapi.Status, error) {
 }
 
 // runTikray runs the tikray CLI once: it sets the tikray container's cmd to
-// args (the image's ENTRYPOINT is /tikray), starts it, waits for it to stop,
-// and returns the result it saved in state/last-result.json. The CLI removes
-// that file before it does anything else and writes it last, so a missing
-// file after the container stopped means the run did not finish.
+// args (the image's ENTRYPOINT is /usr/local/bin/tikray), starts it, waits for
+// it to stop, and returns the result it saved in state/last-result.json. The
+// CLI removes that file before it does anything else and writes it last, so a
+// missing file after the container stopped means the run did not finish.
 func runTikray(ctx context.Context, c *lab.CHR, args string) (artifacts.Result, error) {
 	var res artifacts.Result
 	d := 5 * time.Minute
@@ -687,11 +687,12 @@ func (l *Lab) setFlag(name string, on bool) error {
 }
 
 // setSub makes http://203.0.113.30/sub/<name> answer with body from now on,
-// as a subscription provider changing its list. name is a plain file name. The
-// file is replaced in one step, so that a fetch never sees half of it.
+// as a subscription provider changing its list. name has to be one labinet
+// serves (labinet.CheckSubName), and not one it would answer 404. The file is
+// replaced in one step, so that a fetch never sees half of it.
 func (l *Lab) setSub(name, body string) error {
-	if name == "" || strings.HasPrefix(name, ".") || filepath.Base(name) != name {
-		return fmt.Errorf("subscription name %q: want a plain file name without a leading dot", name)
+	if err := labinet.CheckSubName(name); err != nil {
+		return fmt.Errorf("setSub: %w", err)
 	}
 	if l.Subs == "" {
 		return errors.New("setSub: the lab has no subscriptions directory (Deploy sets Subs)")
@@ -699,9 +700,14 @@ func (l *Lab) setSub(name, body string) error {
 	// The dot keeps the file under construction out of reach of labinet.
 	tmp := filepath.Join(l.Subs, "."+name+".tmp")
 	if err := os.WriteFile(tmp, []byte(body), 0o644); err != nil {
+		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(l.Subs, name))
+	if err := os.Rename(tmp, filepath.Join(l.Subs, name)); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // api returns a client for the tikray service's API: the token the service

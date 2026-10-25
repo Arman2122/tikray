@@ -126,3 +126,30 @@ func TestSubRefusesEscapes(t *testing.T) {
 		}
 	}
 }
+
+// CheckSubName is what the e2e lab asks before it writes a subscription, so it
+// has to agree with what serveSub serves.
+func TestCheckSubName(t *testing.T) {
+	dir := t.TempDir()
+	h := HTTPHandler(dir)
+	for _, name := range []string{"x", "a.txt", "sub_1", "A-b+c", "_x", "9", strings.Repeat("a", 128)} {
+		if err := CheckSubName(name); err != nil {
+			t.Errorf("CheckSubName(%q) = %v, want nil", name, err)
+		}
+		write(t, dir, name, "body")
+		if w := get(h, direct, "/sub/"+name); w.Code != 200 {
+			t.Errorf("GET /sub/%s = %d, want 200 for a name CheckSubName accepts", name, w.Code)
+		}
+	}
+	for _, name := range []string{"", ".", "..", ".hidden", "-x", "+x", "a b", "a/b", `a\b`, "a?b", "a%b", "é", "a\x00b", strings.Repeat("a", 129)} {
+		err := CheckSubName(name)
+		if err == nil {
+			t.Errorf("CheckSubName(%q) = nil, want an error", name)
+			continue
+		}
+		// The error names the rule, so that a test author sees what to change.
+		if !strings.Contains(err.Error(), nameRE.String()) {
+			t.Errorf("CheckSubName(%q) = %q, want the rule %s in it", name, err, nameRE)
+		}
+	}
+}
