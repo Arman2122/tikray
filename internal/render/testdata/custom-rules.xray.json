@@ -1,0 +1,294 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "api": {
+    "tag": "api",
+    "services": [
+      "HandlerService",
+      "RoutingService",
+      "StatsService",
+      "ObservatoryService"
+    ]
+  },
+  "stats": {},
+  "policy": {
+    "system": {
+      "statsOutboundUplink": true,
+      "statsOutboundDownlink": true
+    }
+  },
+  "dns": {
+    "tag": "dns-internal",
+    "queryStrategy": "UseIPv4",
+    "servers": [
+      "https://1.1.1.1/dns-query"
+    ]
+  },
+  "inbounds": [
+    {
+      "tag": "tun-in",
+      "protocol": "tun",
+      "settings": {
+        "name": "xray0",
+        "mtu": 1500
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ],
+        "routeOnly": true
+      }
+    },
+    {
+      "tag": "dns-in",
+      "protocol": "dokodemo-door",
+      "listen": "172.31.255.3",
+      "port": 53,
+      "settings": {
+        "address": "1.1.1.1",
+        "port": 53,
+        "network": "tcp,udp"
+      }
+    },
+    {
+      "tag": "socks-in",
+      "protocol": "socks",
+      "listen": "172.31.255.3",
+      "port": 1080,
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "api-in",
+      "protocol": "dokodemo-door",
+      "listen": "172.31.255.3",
+      "port": 10085,
+      "settings": {
+        "address": "127.0.0.1"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "dns-out",
+      "protocol": "dns",
+      "settings": {
+        "nonIPQuery": "reject"
+      }
+    },
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "203.0.113.10",
+            "port": 443,
+            "users": [
+              {
+                "encryption": "none",
+                "flow": "xtls-rprx-vision",
+                "id": "b831381d-6324-4d53-ad4f-8cda48b30811"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc",
+          "serverName": "www.example.com",
+          "shortId": "6ba85179e30d4fc2"
+        },
+        "security": "reality"
+      },
+      "tag": "srv-a1b2c3d4"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "inboundTag": [
+          "api-in"
+        ],
+        "source": [
+          "172.31.255.2/32",
+          "172.31.255.3/32"
+        ],
+        "outboundTag": "api"
+      },
+      {
+        "inboundTag": [
+          "api-in"
+        ],
+        "outboundTag": "block"
+      },
+      {
+        "inboundTag": [
+          "dns-in"
+        ],
+        "outboundTag": "dns-out"
+      },
+      {
+        "inboundTag": [
+          "socks-in"
+        ],
+        "source": [
+          "172.31.255.2/32"
+        ],
+        "balancerTag": "proxy-closed"
+      },
+      {
+        "inboundTag": [
+          "socks-in"
+        ],
+        "outboundTag": "block"
+      },
+      {
+        "inboundTag": [
+          "dns-internal"
+        ],
+        "balancerTag": "proxy-open"
+      },
+      {
+        "inboundTag": [
+          "tun-in"
+        ],
+        "domain": [
+          "domain:bank.example"
+        ],
+        "outboundTag": "direct"
+      },
+      {
+        "inboundTag": [
+          "tun-in"
+        ],
+        "ip": [
+          "198.18.0.0/15"
+        ],
+        "outboundTag": "direct"
+      },
+      {
+        "inboundTag": [
+          "tun-in"
+        ],
+        "domain": [
+          "keyword:tracker"
+        ],
+        "outboundTag": "block"
+      },
+      {
+        "inboundTag": [
+          "tun-in"
+        ],
+        "source": [
+          "192.168.88.40/32"
+        ],
+        "domain": [
+          "domain:video.example"
+        ],
+        "balancerTag": "proxy-closed"
+      },
+      {
+        "inboundTag": [
+          "tun-in"
+        ],
+        "domain": [
+          "domain:video.example"
+        ],
+        "balancerTag": "proxy-open"
+      },
+      {
+        "inboundTag": [
+          "tun-in"
+        ],
+        "source": [
+          "192.168.88.40/32"
+        ],
+        "ip": [
+          "198.51.100.0/24"
+        ],
+        "balancerTag": "proxy-closed"
+      },
+      {
+        "inboundTag": [
+          "tun-in"
+        ],
+        "ip": [
+          "198.51.100.0/24"
+        ],
+        "balancerTag": "proxy-open"
+      },
+      {
+        "inboundTag": [
+          "tun-in"
+        ],
+        "domain": [
+          "full:api.example.com"
+        ],
+        "outboundTag": "srv-a1b2c3d4"
+      },
+      {
+        "inboundTag": [
+          "tun-in"
+        ],
+        "source": [
+          "192.168.88.40/32"
+        ],
+        "balancerTag": "proxy-closed"
+      },
+      {
+        "inboundTag": [
+          "tun-in"
+        ],
+        "network": "tcp,udp",
+        "balancerTag": "proxy-open"
+      }
+    ],
+    "balancers": [
+      {
+        "tag": "proxy-open",
+        "selector": [
+          "srv-"
+        ],
+        "strategy": {
+          "type": "leastPing"
+        },
+        "fallbackTag": "direct"
+      },
+      {
+        "tag": "proxy-closed",
+        "selector": [
+          "srv-"
+        ],
+        "strategy": {
+          "type": "leastPing"
+        },
+        "fallbackTag": "block"
+      }
+    ]
+  },
+  "observatory": {
+    "subjectSelector": [
+      "srv-"
+    ],
+    "probeURL": "https://www.gstatic.com/generate_204",
+    "probeInterval": "10s",
+    "enableConcurrency": true
+  }
+}

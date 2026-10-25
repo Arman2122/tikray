@@ -1,0 +1,63 @@
+{
+  "core": "26.10.21",
+  "geo": null,
+  "state": {
+    "servers": [
+      {
+        "id": "a1b2c3d4",
+        "name": "vless reality",
+        "link": "vless://b831381d-6324-4d53-ad4f-8cda48b30811@203.0.113.10:443?type=tcp&security=reality&sni=www.example.com&fp=chrome&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&sid=6ba85179e30d4fc2&flow=xtls-rprx-vision#lab%20%F0%9F%9A%80",
+        "outbound": {
+          "protocol": "vless",
+          "settings": {
+            "vnext": [
+              {
+                "address": "203.0.113.10",
+                "port": 443,
+                "users": [
+                  {
+                    "encryption": "none",
+                    "flow": "xtls-rprx-vision",
+                    "id": "b831381d-6324-4d53-ad4f-8cda48b30811"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "tcp",
+            "realitySettings": {
+              "fingerprint": "chrome",
+              "publicKey": "SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc",
+              "serverName": "www.example.com",
+              "shortId": "6ba85179e30d4fc2"
+            },
+            "security": "reality"
+          }
+        }
+      }
+    ],
+    "subscriptions": [],
+    "devices": [],
+    "default_policy": {
+      "mode": "smart"
+    },
+    "routing": {
+      "domestic": {
+        "domains": [
+          "domain:ir"
+        ]
+      }
+    },
+    "dns": {
+      "domestic": "203.0.113.54",
+      "remote": "203.0.113.53"
+    },
+    "network": {
+      "subnet": "172.31.255.0/29"
+    },
+    "health": {
+      "probe_url": "https://www.gstatic.com/generate_204"
+    }
+  }
+}

@@ -1,0 +1,147 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "api": {
+    "tag": "api",
+    "services": [
+      "HandlerService",
+      "RoutingService",
+      "StatsService"
+    ]
+  },
+  "stats": {},
+  "policy": {
+    "system": {
+      "statsOutboundUplink": true,
+      "statsOutboundDownlink": true
+    }
+  },
+  "dns": {
+    "tag": "dns-internal",
+    "queryStrategy": "UseIPv4",
+    "servers": [
+      "https://1.1.1.1/dns-query"
+    ]
+  },
+  "inbounds": [
+    {
+      "tag": "tun-in",
+      "protocol": "tun",
+      "settings": {
+        "name": "xray0",
+        "mtu": 1500
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ],
+        "routeOnly": true
+      }
+    },
+    {
+      "tag": "dns-in",
+      "protocol": "dokodemo-door",
+      "listen": "172.31.255.3",
+      "port": 53,
+      "settings": {
+        "address": "1.1.1.1",
+        "port": 53,
+        "network": "tcp,udp"
+      }
+    },
+    {
+      "tag": "socks-in",
+      "protocol": "socks",
+      "listen": "172.31.255.3",
+      "port": 1080,
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "api-in",
+      "protocol": "dokodemo-door",
+      "listen": "172.31.255.3",
+      "port": 10085,
+      "settings": {
+        "address": "127.0.0.1"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "dns-out",
+      "protocol": "dns",
+      "settings": {
+        "nonIPQuery": "reject"
+      }
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "inboundTag": [
+          "api-in"
+        ],
+        "source": [
+          "172.31.255.2/32",
+          "172.31.255.3/32"
+        ],
+        "outboundTag": "api"
+      },
+      {
+        "inboundTag": [
+          "api-in"
+        ],
+        "outboundTag": "block"
+      },
+      {
+        "inboundTag": [
+          "dns-in"
+        ],
+        "outboundTag": "dns-out"
+      },
+      {
+        "inboundTag": [
+          "socks-in"
+        ],
+        "source": [
+          "172.31.255.2/32"
+        ],
+        "outboundTag": "block"
+      },
+      {
+        "inboundTag": [
+          "socks-in"
+        ],
+        "outboundTag": "block"
+      },
+      {
+        "inboundTag": [
+          "dns-internal"
+        ],
+        "outboundTag": "direct"
+      },
+      {
+        "inboundTag": [
+          "tun-in"
+        ],
+        "network": "tcp,udp",
+        "outboundTag": "direct"
+      }
+    ]
+  }
+}

@@ -1,6 +1,9 @@
 package lab
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestXrayCoreVersion(t *testing.T) {
 	for in, want := range map[string]string{
@@ -33,7 +36,9 @@ func TestLabXrayVersion(t *testing.T) {
 	}
 }
 
-func TestLatestReleaseTag(t *testing.T) {
+func TestReleaseTags(t *testing.T) {
+	// Release tags out of order, a module version, a pre-release and a
+	// branch, as `git ls-remote --tags` prints them.
 	refs := []string{
 		"abc\trefs/tags/v1.260327.0",
 		"abc\trefs/tags/v26.9.30",
@@ -44,10 +49,11 @@ func TestLatestReleaseTag(t *testing.T) {
 		"abc\trefs/tags/v26.11.1-beta",
 		"abc\trefs/heads/main",
 	}
-	if got := latestReleaseTag(refs); got != "v26.10.21" {
-		t.Errorf("latestReleaseTag = %q, want v26.10.21", got)
+	want := []string{"v26.10.21", "v26.10.3", "v26.9.30", "v26.2.6", "v25.12.8"}
+	if got := releaseTags(refs); !slices.Equal(got, want) {
+		t.Errorf("releaseTags = %q, want %q", got, want)
 	}
-	if got := latestReleaseTag(nil); got != "" {
-		t.Errorf("latestReleaseTag(nil) = %q, want empty", got)
+	if got := releaseTags(nil); len(got) != 0 {
+		t.Errorf("releaseTags(nil) = %q, want none", got)
 	}
 }

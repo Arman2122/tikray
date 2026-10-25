@@ -14,6 +14,26 @@ jobs:
           go-version-file: go.mod
       - run: make test
 
+  # Every golden config must pass xray run -test on the oldest supported and
+  # the newest two xray-core releases (spec §8.2). The test builds them into
+  # ~/.cache/tikray-lab/xray, and needs root: releases before 26.10 open the
+  # config's TUN device during the test.
+  compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/tikray-lab/xray
+          key: xray-${{ hashFiles('test/lab/xray.go') }}
+      - name: Test the golden configs on xray-core releases
+        env:
+          TIKRAY_COMPAT_REQUIRED: "1"
+        run: sudo --preserve-env=PATH,HOME,GOPATH,GOMODCACHE,GOCACHE,TIKRAY_COMPAT_REQUIRED go test -tags compat -count=1 -timeout 60m ./test/compat/...
+
   # RouterOS cannot import archives that Docker's containerd image store
   # writes, so the job switches Docker to the classic store first.
   images:

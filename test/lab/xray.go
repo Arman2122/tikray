@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,13 +41,9 @@ func ResolveXrayVersion(ctx context.Context, v string) (string, error) {
 		return v, nil
 	}
 	latestOnce.Do(func() {
-		out, err := exec.CommandContext(ctx, "git", "ls-remote", "--tags", "--refs", xrayRepo).Output()
-		if err != nil {
-			latestErr = fmt.Errorf("list xray-core tags: %w", err)
-			return
-		}
-		if latest = latestReleaseTag(strings.Split(string(out), "\n")); latest == "" {
-			latestErr = fmt.Errorf("no xray-core release tag found")
+		var tags []string
+		if tags, latestErr = ReleaseTags(ctx); latestErr == nil {
+			latest = tags[0]
 		}
 	})
 	return latest, latestErr
@@ -58,10 +55,31 @@ var (
 	latestErr  error
 )
 
-// latestReleaseTag picks the highest vYY.M.D tag from `git ls-remote --tags`
-// lines; pre-release and module (v1.*) tags are skipped.
-func latestReleaseTag(refs []string) string {
-	best, bestKey := "", [3]int{}
+// ReleaseTags returns the XTLS xray-core release tags (vYY.M.D), newest
+// first, as `git ls-remote --tags` of the xray-core repository lists them.
+// Pre-release and module (v1.*) tags are skipped. It is an error if no tag
+// is left.
+func ReleaseTags(ctx context.Context) ([]string, error) {
+	out, err := exec.CommandContext(ctx, "git", "ls-remote", "--tags", "--refs", xrayRepo).Output()
+	if err != nil {
+		return nil, fmt.Errorf("list xray-core tags: %w", err)
+	}
+	tags := releaseTags(strings.Split(string(out), "\n"))
+	if len(tags) == 0 {
+		return nil, fmt.Errorf("no xray-core release tag found")
+	}
+	return tags, nil
+}
+
+// releaseTags returns the vYY.M.D tags from `git ls-remote --tags` lines,
+// highest first, comparing each number in turn; pre-release and module
+// (v1.*) tags are skipped.
+func releaseTags(refs []string) []string {
+	type release struct {
+		tag string
+		key [3]int
+	}
+	var rs []release
 	for _, line := range refs {
 		_, ref, ok := strings.Cut(line, "\t")
 		if !ok {
@@ -72,15 +90,18 @@ func latestReleaseTag(refs []string) string {
 		if m == nil {
 			continue
 		}
-		var key [3]int
-		for i := range key {
-			key[i], _ = strconv.Atoi(m[i+1])
+		r := release{tag: tag}
+		for i := range r.key {
+			r.key[i], _ = strconv.Atoi(m[i+1])
 		}
-		if best == "" || key[0] > bestKey[0] || key[0] == bestKey[0] && (key[1] > bestKey[1] || key[1] == bestKey[1] && key[2] > bestKey[2]) {
-			best, bestKey = tag, key
-		}
+		rs = append(rs, r)
 	}
-	return best
+	slices.SortStableFunc(rs, func(a, b release) int { return slices.Compare(b.key[:], a.key[:]) })
+	tags := make([]string, len(rs))
+	for i, r := range rs {
+		tags[i] = r.tag
+	}
+	return tags
 }
 
 // XrayCoreVersion is the xray release number for a lab version, as used in
