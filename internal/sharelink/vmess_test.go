@@ -209,7 +209,7 @@ var vmessCases = slices.Concat([]parseCase{
 	},
 	{
 		name:     "control characters in ps are dropped",
-		link:     stdLink(vmessJSON(`"ps":"\u001b[2J\nlab‮-a"`)),
+		link:     stdLink(vmessJSON(`"ps":"\u001b[2J\nlab\u202e-a"`)),
 		wantName: "[2Jlab-a",
 		wantJSON: vmessOut("example.com", "443", "auto", `{"network":"tcp"}`),
 	},

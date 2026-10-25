@@ -29,7 +29,7 @@ const MaxNameRunes = 128
 // a page, the first kind could rewrite what is around it and the second could
 // reverse it. A share link's name drops them (sharelink).
 func ForbiddenInName(r rune) bool {
-	return unicode.IsControl(r) || r >= '‪' && r <= '‮' || r >= '⁦' && r <= '⁩'
+	return unicode.IsControl(r) || r >= '\u202a' && r <= '\u202e' || r >= '\u2066' && r <= '\u2069'
 }
 
 const (
@@ -51,7 +51,7 @@ var idRE = regexp.MustCompile(`^[0-9a-f]{8}$`)
 // to one of the four, in each supported release (26.1.18, 26.3.27 and
 // 26.10.21 alike): "direct" is freedom and "block" is blackhole there. The
 // loader looks a name up after strings.ToLower, as outbound does here, so
-// "Direct" or "blocK" (a Kelvin sign) is the same name. A release that
+// "Direct" or "bloc\u212a" (a Kelvin sign) is the same name. A release that
 // adds a name for one of them must add it here.
 var notProxies = map[string]bool{
 	"freedom": true, "direct": true,
