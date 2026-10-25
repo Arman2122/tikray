@@ -384,7 +384,7 @@ func (r *Runner) trial(ctx context.Context) error {
 }
 
 func (r *Runner) commit() error {
-	if r.v.state != runnerapi.StateTrial {
+	if r.v.state != runnerapi.StateTrial || r.v.cand == nil {
 		return runnerapi.ErrNoTrial
 	}
 	cand := *r.v.cand
@@ -407,10 +407,12 @@ func (r *Runner) commit() error {
 
 // revert ends the open trial: it stops the candidate, removes candidate.json,
 // starts active.json (or goes empty without one) and records the outcome.
+// The trial is over whatever fails: a candidate that cannot be stopped leaves
+// the runner restarting, and the restart tries again.
 func (r *Runner) revert(outcome, detail string) {
-	cand := *r.v.cand
+	cand := r.v.cand
 	stopTimer(&r.deadline)
-	r.v.cand, r.v.running = nil, nil
+	r.v.state, r.v.cand, r.v.running = runnerapi.StateRestarting, nil, nil
 	if err := r.sup.Stop(); err != nil {
 		log.Printf("runner: %v", err)
 	}
@@ -419,8 +421,14 @@ func (r *Runner) revert(outcome, detail string) {
 	}
 	if err := r.startActive(); err != nil {
 		log.Printf("runner: %v", err)
+		// startActive retries by itself only when nothing runs.
+		if r.restart == nil && r.v.active != nil {
+			r.scheduleRestart(0)
+		}
 	}
-	r.record(cand, outcome, detail)
+	if cand != nil {
+		r.record(*cand, outcome, detail)
+	}
 	r.cleanStage()
 }
 

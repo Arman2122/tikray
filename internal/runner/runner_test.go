@@ -390,6 +390,43 @@ func TestAbort(t *testing.T) {
 	}
 }
 
+// A revert whose candidate cannot be stopped still ends the trial: no later
+// request may find a trial without a candidate, which would bring down the
+// runner (PID 1) on a nil candidate. The runner is left restarting, and the
+// restart tries again.
+func TestRevertWhenStopFails(t *testing.T) {
+	g := newRig(t, nil)
+	var fails atomic.Int32 // how many stop signals fail from now on
+	g.r.sup.signal = func(p *os.Process, sig os.Signal) error {
+		if fails.Add(-1) >= 0 {
+			return errors.New("operation not permitted")
+		}
+		return p.Signal(sig)
+	}
+	g.active(t, "ok")
+	g.boot(t)
+	cand := g.candidate(t, "ok", 5*time.Second)
+	g.trial(t)
+	candPID := g.r.Status().XrayPID
+
+	fails.Store(2) // the revert's stop, and the one before the active core starts
+	if err := g.r.Abort(); err != nil {
+		t.Fatalf("Abort: %v", err)
+	}
+	if err := g.r.Commit(); !errors.Is(err, runnerapi.ErrNoTrial) {
+		t.Errorf("Commit after the failed revert = %v, want ErrNoTrial", err)
+	}
+	if st := g.r.Status(); st.State == runnerapi.StateTrial || st.Candidate != nil {
+		t.Errorf("status after the failed revert = %+v; want the trial over", st)
+	}
+	g.wantLastTrial(t, runnerapi.OutcomeAborted, cand)
+	g.wantNoCandidate(t)
+
+	// The restart stops the candidate this time and starts the active core.
+	g.waitState(t, 5*time.Second, runnerapi.StateRunning, oldCore)
+	waitFor(t, 5*time.Second, "the candidate to be gone", func() bool { return gone(candPID) })
+}
+
 // The staging directory keeps only the cores that run or are active: after a
 // boot, a revert, a rejection and a commit the others go, and so does what an
 // interrupted staging or test left there.

@@ -63,6 +63,9 @@ type Supervisor struct {
 	// gone, so two xrays never overlap. PID does not take it.
 	mu  sync.Mutex
 	cur atomic.Pointer[process]
+
+	// signal sends a stop signal; a test replaces it to make a stop fail.
+	signal func(p *os.Process, sig os.Signal) error
 }
 
 // process is one xray run.
@@ -82,7 +85,7 @@ func NewSupervisor(c SupervisorConfig) *Supervisor {
 	if c.StopGrace <= 0 {
 		c.StopGrace = defaultStopGrace
 	}
-	return &Supervisor{cfg: c, exits: make(chan Exit, exitsBuffer)}
+	return &Supervisor{cfg: c, exits: make(chan Exit, exitsBuffer), signal: (*os.Process).Signal}
 }
 
 // Stage copies the selection's core to <StageDir>/<core>/xray with mode 0755
@@ -330,7 +333,7 @@ func (s *Supervisor) stopLocked() error {
 	select {
 	case <-p.done: // it died on its own; nothing to stop
 	default:
-		if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		if err := s.signal(p.cmd.Process, syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			return fmt.Errorf("runner: stop xray: %w", err)
 		}
 		timer := time.NewTimer(s.cfg.StopGrace)
