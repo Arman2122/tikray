@@ -187,7 +187,9 @@ func (c *CHR) waitSSHDown(ctx context.Context) error {
 }
 
 // Push copies a local file to dstPath on the router: the host serves it over
-// HTTP on the WAN bridge and RouterOS fetches it.
+// HTTP on the WAN bridge and RouterOS fetches it (see fetchFile). When the
+// fetch had to be retried, Push says so in harness.log and through
+// BootOptions.Notef, so that a run that passes still shows it.
 func (c *CHR) Push(ctx context.Context, localPath, dstPath string) error {
 	st, err := os.Stat(localPath)
 	if err != nil {
@@ -204,38 +206,71 @@ func (c *CHR) Push(ctx context.Context, localPath, dstPath string) error {
 	defer srv.Close()
 
 	url := "http://" + ln.Addr().String() + "/" + filepath.Base(localPath)
-	want := strconv.FormatInt(st.Size(), 10)
-	// Right after a boot, a fetch that reported no failure once left no file
-	// behind (M2a lab, 7.25 x86_64, the first push after SSH came up). Such a
-	// fetch is tried once more, after a short wait in case the file only shows
-	// up late.
-	var size, out string
-	for attempt := 1; ; attempt++ {
-		if out, err = c.Run(ctx, fmt.Sprintf(`/tool/fetch url="%s" dst-path="%s"`, url, dstPath)); err != nil {
-			return err
+	retry, err := fetchFile(ctx, c.Run, c.Get, url, dstPath, st.Size(), time.Second)
+	if retry != "" {
+		c.logf("push %s: %s", localPath, retry)
+		if c.opts.Notef != nil {
+			c.opts.Notef("lab: push %s: %s", localPath, retry)
 		}
-		for range 5 {
-			if size, err = c.Get(ctx, fmt.Sprintf(`/file/get [find name="%s"] size`, dstPath)); err == nil {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Second):
-			}
-		}
-		if err == nil || attempt == 2 {
-			break
-		}
-		c.logf("push %s: no file at %s after the fetch, which said %q; fetching again", localPath, dstPath, strings.TrimSpace(out))
 	}
 	if err != nil {
-		return fmt.Errorf("push %s: %w (the fetch said %q)", localPath, err, strings.TrimSpace(out))
-	}
-	if size != want {
-		return fmt.Errorf("push %s: router has %s bytes at %s, want %s", localPath, size, dstPath, want)
+		return fmt.Errorf("push %s: %w", localPath, err)
 	}
 	return nil
+}
+
+// fetchReads is how many times fetchFile looks for the file after a fetch,
+// a wait apart, before it counts the fetch as having left none.
+const fetchReads = 5
+
+// fetchFile has the router fetch url into dstPath (with run), then reads the
+// size of the file there (with get) and checks that it is size.
+//
+// Once, right after a boot (M2a lab, CHR 7.25 x86_64, the first push after
+// SSH came up), a fetch printed no failure and left no file. Why is not
+// known: RouterOS may list the file late, or the fetch may not have written
+// it. So fetchFile looks for the file fetchReads times, wait apart, and if it
+// is still missing fetches once more, and never more than that. retry, when
+// not empty, says what that took, for the caller to show even when the file
+// came. When no fetch left a file, err says what each one printed.
+func fetchFile(ctx context.Context, run, get func(context.Context, string) (string, error), url, dstPath string, size int64, wait time.Duration) (retry string, err error) {
+	var said []string
+	for fetch := 1; fetch <= 2; fetch++ {
+		var out, got string
+		if out, err = run(ctx, fmt.Sprintf(`/tool/fetch url="%s" dst-path="%s"`, url, dstPath)); err != nil {
+			return retry, err
+		}
+		said = append(said, strings.TrimSpace(out))
+		for read := 1; read <= fetchReads; read++ {
+			if got, err = get(ctx, fmt.Sprintf(`/file/get [find name="%s"] size`, dstPath)); err == nil {
+				if read > 1 {
+					late := fmt.Sprintf("the file at %s showed up on read %d after fetch %d", dstPath, read, fetch)
+					if retry != "" {
+						late = retry + "; " + late
+					}
+					retry = late
+				}
+				break
+			}
+			if read < fetchReads {
+				select {
+				case <-ctx.Done():
+					return retry, ctx.Err()
+				case <-time.After(wait):
+				}
+			}
+		}
+		if err == nil {
+			if want := strconv.FormatInt(size, 10); got != want {
+				return retry, fmt.Errorf("router has %s bytes at %s, want %s", got, dstPath, want)
+			}
+			return retry, nil
+		}
+		if fetch == 1 {
+			retry = fmt.Sprintf("no file at %s after the fetch, which said %q; fetched again", dstPath, said[0])
+		}
+	}
+	return retry, fmt.Errorf("no file at %s after 2 fetches, which said %q and %q: %w", dstPath, said[0], said[1], err)
 }
 
 // Import runs a RouterOS script file on the router.

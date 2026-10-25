@@ -180,6 +180,9 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 
 	if l.CHR, err = lab.BootReadyCHR(ctx, l.Net, lab.BootOptions{
 		Version: l.Version, Arch: l.Arch, Artifacts: art, WorkDir: filepath.Join(wd, "vm"), Password: "tikray-lab",
+		// What the harness worked around, such as a push it had to retry,
+		// shows in a run that passes too.
+		Notef: t.Logf,
 	}); err != nil {
 		t.Fatal(err)
 	}

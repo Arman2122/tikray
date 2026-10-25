@@ -31,6 +31,10 @@ type BootOptions struct {
 	Password   string
 	MemoryMB   int
 	DataDiskMB int
+	// Notef, if set, receives what the harness worked around and a run that
+	// passes should still show, such as a push that needed its retry
+	// (fetchFile). harness.log has it either way. A test passes t.Logf.
+	Notef func(format string, args ...any)
 }
 
 // CHR is a running RouterOS CHR VM attached to the lab network: ether1 on the
