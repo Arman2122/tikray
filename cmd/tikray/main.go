@@ -27,7 +27,10 @@
 // core. update and rollback run the core they switch to with the config
 // rendered from the state, unless update is given a --config file; updating to
 // the core that is active therefore trials the new render if the state has
-// changed.
+// changed. Until a state file is saved the state is the default one, whose
+// render sends all traffic direct: they then refuse to put that render in
+// place of another config the runner runs, such as one an update ran with
+// --config. A runner with no core yet starts from it.
 //
 // The state is <data>/state. A command reads it once and never writes it; the
 // daemon owns it. A state that cannot be read fails the command, except
@@ -296,8 +299,9 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, fromState b
 		return c.refused(cfg, base, fmt.Errorf("removing the previous result: %w", err))
 	}
 	var st store.State
+	var rev uint64
 	if fromState {
-		if st, _, err = readState(cfg.Data); err != nil {
+		if st, rev, err = readState(cfg.Data); err != nil {
 			return c.refused(cfg, base, err)
 		}
 	} else {
@@ -323,6 +327,9 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, fromState b
 	if err != nil {
 		return c.refused(cfg, base, err)
 	}
+	// Revision 0 is no state file: the render is the default state's, which
+	// must not replace a config the runner already runs.
+	u.NoState = fromState && rev == 0
 	if c.tune != nil {
 		c.tune(u)
 	}

@@ -1444,6 +1444,81 @@ var unreadableStates = map[string]func(t *testing.T, data string) string{
 	},
 }
 
+// With no state file the state is the default one, which renders a config
+// that sends all traffic direct. A plain update, rollback or apply must not put
+// that in place of a config the runner runs, such as M1's --config one; a
+// fresh install still bootstraps from it.
+func TestNoStateFileKeepsAWorkingConfig(t *testing.T) {
+	// setup leaves the runner on 26.3.27 with a config of the user's, as an
+	// update from 26.10.21 with --config would have, and both cores
+	// installed.
+	setup := func(t *testing.T) (vars map[string]string, data string, runner *trialRunner, active runnerapi.Selection) {
+		t.Helper()
+		active = runnerapi.Selection{Core: "26.3.27", Config: testConfigRel}
+		vars, data, runner = trialEnv(t, &active)
+		installSlot(t, data, "26.3.27")
+		installSlot(t, data, "26.10.21")
+		b, err := json.Marshal(artifacts.Result{From: "26.10.21", To: "26.3.27", Outcome: runnerapi.OutcomeCommitted, At: time.Now().Add(-time.Hour)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(data, "state"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(data, "state", "core-history.jsonl"), append(b, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return vars, data, runner, active
+	}
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		advice string
+	}{
+		{"core update", []string{"core", "update", "26.10.21"}, "core update --config FILE"},
+		{"core update to the active core", []string{"core", "update", "26.3.27"}, "core update --config FILE"},
+		{"core rollback", []string{"core", "rollback"}, "create a state first"},
+		{"apply", []string{"apply"}, "create a state first"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vars, data, runner, active := setup(t)
+			trials := len(runner.candidates())
+			code, stdout, stderr := runFast(t, vars, tc.args...)
+			res := decodeResult(t, stdout)
+			if code != 1 || res.Outcome != artifacts.OutcomeRefused || !strings.Contains(res.Detail, "no state has been saved") || !strings.Contains(res.Detail, tc.advice) {
+				t.Errorf("exit %d, result %+v; want 1 and a refusal advising %q", code, res, tc.advice)
+			}
+			if !strings.Contains(stderr, "no state has been saved") {
+				t.Errorf("stderr %q does not say why", stderr)
+			}
+			if n := len(runner.candidates()); n != trials {
+				t.Errorf("%d trials after the refusal, want %d", n, trials)
+			}
+			if got := runner.active(); got != active {
+				t.Errorf("the runner is on %+v, want %+v as before", got, active)
+			}
+			// Once there is a state, its render goes on trial.
+			writeState(t, data, func(*store.State) {})
+			if code, stdout, stderr := runFast(t, vars, tc.args...); code != 0 {
+				t.Errorf("with a state: exit %d; stdout %q, stderr %q", code, stdout, stderr)
+			}
+		})
+	}
+
+	t.Run("a fresh install bootstraps from the default state", func(t *testing.T) {
+		vars, _, runner := trialEnv(t, nil)
+		installSlot(t, vars["TIKRAY_DATA"], "26.10.21")
+		code, stdout, stderr := runFast(t, vars, "core", "update", "26.10.21")
+		if code != 0 {
+			t.Fatalf("exit %d; stdout %q, stderr %q", code, stdout, stderr)
+		}
+		want := runnerapi.Selection{Core: "26.10.21", Config: configName(t, store.Default(), "26.10.21")}
+		if got := runner.active(); got != want {
+			t.Errorf("the runner is on %+v, want %+v", got, want)
+		}
+	})
+}
+
 // core status needs the state for nothing but the runner's address, so an
 // unreadable one costs a warning and the default address, as it does for
 // update --config.

@@ -450,6 +450,99 @@ func TestRollbackRendersForTarget(t *testing.T) {
 	})
 }
 
+// With NoState the render is that of a state nobody saved, which sends all
+// traffic direct: it must not take the place of another config the runner
+// runs, such as one an update ran with --config. A runner with no active
+// selection takes it, as a fresh install does.
+func TestNoStateKeepsTheActiveConfig(t *testing.T) {
+	refused := func(t *testing.T, e *coreEnv, res Result, err error, hint string) {
+		t.Helper()
+		wantOutcome(t, res, err, OutcomeRefused)
+		wantDetail(t, res, "no state has been saved, and the runner's active config is not the default state's render")
+		wantDetail(t, res, hint)
+		wantActions(t, e.runner)
+		wantNoCandidateFile(t, e)
+		if got := configFiles(t, e); !reflect.DeepEqual(got, []string{filepath.Base(e.activeSel.Config)}) {
+			t.Errorf("run/config holds %v, want the active config alone", got)
+		}
+		if h := e.history(t); len(h) != 1 || h[0].Outcome != OutcomeRefused {
+			t.Errorf("history = %+v, want the refusal", h)
+		}
+	}
+	setup := func(t *testing.T) (*coreEnv, *fakeRender) {
+		e, r := newRenderEnv(t, "26.10.21")
+		e.u.NoState = true
+		return e, r
+	}
+
+	t.Run("apply", func(t *testing.T) {
+		e, _ := setup(t)
+		res, err := e.u.Apply(bg)
+		refused(t, e, res, err, "create a state")
+		if res.Kind != KindConfig {
+			t.Errorf("Kind = %q, want config", res.Kind)
+		}
+	})
+	t.Run("update", func(t *testing.T) {
+		e, _ := setup(t)
+		e.rel.add(t, "26.3.27")
+		res, err := e.u.Update(bg, "26.3.27", UpdateOptions{})
+		refused(t, e, res, err, "--config FILE")
+		if hits := e.rel.hitList(); len(hits) != 0 {
+			t.Errorf("upstream was asked for %v; a refused update fetches nothing", hits)
+		}
+	})
+	t.Run("update to the active core", func(t *testing.T) {
+		e, _ := setup(t)
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{})
+		refused(t, e, res, err, "--config FILE")
+	})
+	t.Run("rollback", func(t *testing.T) {
+		e, _ := setup(t)
+		install(t, e.cores(), "26.3.27")
+		e.writeHistory(t, committedResult("26.3.27", ""), committedResult("26.10.21", "26.3.27"))
+		res, err := e.u.Rollback(bg)
+		wantOutcome(t, res, err, OutcomeRefused)
+		wantDetail(t, res, "no state has been saved")
+		wantDetail(t, res, "create a state")
+		wantActions(t, e.runner)
+		wantNoCandidateFile(t, e)
+	})
+
+	t.Run("update with a config file", func(t *testing.T) {
+		e, r := setup(t)
+		body := `{"log":{}}`
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{ConfigFile: writeConfigFile(t, body)})
+		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+		wantRenders(t, r)
+		if got := e.runner.activeSelection().Config; got != configRel(body) {
+			t.Errorf("active config %s, want the file's %s", got, configRel(body))
+		}
+	})
+	t.Run("the active config is the render", func(t *testing.T) {
+		e, r := setup(t)
+		r.body = activeConfigBody
+		res, err := e.u.Apply(bg)
+		wantOutcome(t, res, err, OutcomeNoop)
+		e.rel.add(t, "26.3.27")
+		res, err = e.u.Update(bg, "26.3.27", UpdateOptions{})
+		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+		if got := e.runner.activeSelection(); got.Core != "26.3.27" || got.Config != e.activeSel.Config {
+			t.Errorf("the runner is on %+v, want 26.3.27 with the config it had", got)
+		}
+	})
+	t.Run("a fresh install", func(t *testing.T) {
+		e, _ := newRenderEnv(t, "")
+		e.u.NoState = true
+		e.rel.add(t, "26.10.21")
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{})
+		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+		if got := e.runner.activeSelection().Config; got != configRel(renderedBody) {
+			t.Errorf("active config %s, want the render %s", got, configRel(renderedBody))
+		}
+	})
+}
+
 // seedConfigs makes run/config hold n configs older than any a test commits:
 // the runner's active one, an hour old, and others, each an hour older than
 // the one before. It returns their names, newest first. Other files in

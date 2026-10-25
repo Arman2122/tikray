@@ -85,6 +85,13 @@ type CoreUpdater struct {
 	// one Apply puts on trial. Nil keeps the active config for a core change,
 	// unless the update names a config file, and refuses Apply.
 	Render Renderer
+	// NoState says that the state Render renders was never saved: it is the
+	// default state of a fresh install, which sends all traffic direct. An
+	// update, rollback or Apply whose config is rendered then refuses to put
+	// it in place of an active config that is another one, such as one an
+	// update ran with --config, which would lose a working config. A runner
+	// with no active selection takes the render, as a fresh install does.
+	NoState bool
 	// Health must pass, through the candidate, before a commit. So must the
 	// runner's data path: its status must show the candidate's routes in
 	// place and its gateway up.
@@ -221,6 +228,11 @@ func (u *CoreUpdater) update(ctx context.Context, version string, o UpdateOption
 		return refuse(res, err)
 	}
 	if cfg != nil {
+		if o.ConfigFile == "" {
+			if err := u.unsaved(active, cfg, "create a state first, or name the config to run with core update --config FILE"); err != nil {
+				return refuse(res, err)
+			}
+		}
 		sel.Config = cfg.rel
 	}
 	switch {
@@ -277,6 +289,9 @@ func (u *CoreUpdater) rollback(ctx context.Context, res *Result) error {
 		if u.Render != nil {
 			cfg, err := u.render(s.Version, active.Geo)
 			if err == nil {
+				err = u.unsaved(active, cfg, "create a state first")
+			}
+			if err == nil {
 				err = cfg.write(u.runDir())
 			}
 			if err != nil {
@@ -316,10 +331,25 @@ func (u *CoreUpdater) apply(ctx context.Context, res *Result) error {
 		res.Outcome, res.Detail = OutcomeNoop, "already active"
 		return nil
 	}
+	if err := u.unsaved(active, cfg, "create a state first"); err != nil {
+		return refuse(res, err)
+	}
 	if err := cfg.write(u.runDir()); err != nil {
 		return refuse(res, err)
 	}
 	return u.trial(ctx, runnerapi.Selection{Core: active.Core, Geo: active.Geo, Config: cfg.rel}, res)
+}
+
+// unsaved refuses to put the render cfg in place of the active config, which
+// differs from it, while no state was ever saved (NoState): the render then
+// sends all traffic direct. A runner with no active selection takes the
+// render. advice says what to do instead.
+func (u *CoreUpdater) unsaved(active *runnerapi.Selection, cfg *config, advice string) error {
+	if !u.NoState || active == nil || cfg.rel == active.Config {
+		return nil
+	}
+	return errors.New("no state has been saved, and the runner's active config is not the default state's render: " +
+		"putting that render in its place would send all traffic direct; " + advice)
 }
 
 // configFor returns the config an update to v puts on trial, nil for the
