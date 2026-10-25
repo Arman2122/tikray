@@ -184,12 +184,11 @@ func TestConfigApply(t *testing.T) {
 		}
 		note("pushed the state: %s", what)
 	}
-	// apply runs tikray apply, which must end in outcome, and returns the
-	// runner's status after it. next is the state pushed for it, which
-	// becomes applied if it commits.
-	apply := func(t *testing.T, note func(string, ...any), next store.State, outcome string) runnerapi.Status {
+	// appliedAs checks the result of a tikray apply, which must be outcome,
+	// and returns the runner's status after it. next is the state pushed for
+	// it, which becomes applied if it commits.
+	appliedAs := func(t *testing.T, note func(string, ...any), res artifacts.Result, next store.State, outcome string) runnerapi.Status {
 		t.Helper()
-		res := l.tikray(ctx, t, note, "apply")
 		wantResult(t, res, artifacts.Result{Outcome: outcome, From: l.Newest, To: l.Newest})
 		if res.Kind != artifacts.KindConfig {
 			t.Errorf("result kind %q, want %q", res.Kind, artifacts.KindConfig)
@@ -198,6 +197,12 @@ func TestConfigApply(t *testing.T) {
 			applied = next
 		}
 		return checkCore(ctx, t, note, l.Newest)
+	}
+	// apply runs tikray apply, which must end in outcome, and returns the
+	// runner's status after it (see appliedAs).
+	apply := func(t *testing.T, note func(string, ...any), next store.State, outcome string) runnerapi.Status {
+		t.Helper()
+		return appliedAs(t, note, l.tikray(ctx, t, note, "apply"), next, outcome)
 	}
 	// setServer takes a VLESS server of the fake internet down or up.
 	setServer := func(t *testing.T, note func(string, ...any), name string, up bool) {
@@ -297,15 +302,18 @@ func TestConfigApply(t *testing.T) {
 		}
 
 		// The router sends the LAN client's DNS to the runner, where the
-		// domestic name goes to the domestic resolver direct and every other
-		// name to the remote one through the proxy.
+		// domestic name should go to the domestic resolver direct and every
+		// other name to the remote one through the proxy. Both of labinet's
+		// resolvers give the same answers, which depend on the path alone, so
+		// these show that domestic.test was not resolved through the proxy and
+		// foreign.test was, not which resolver answered.
 		domDNS, foreignDNS := l.dig(ctx, "domestic.test"), l.dig(ctx, "foreign.test")
 		note("DNS: domestic.test %q, foreign.test %q", domDNS, foreignDNS)
 		if domDNS != answerDirect {
-			t.Errorf("domestic.test resolves to %q, want %s (the domestic resolver, asked direct)", domDNS, answerDirect)
+			t.Errorf("domestic.test resolves to %q, want %s (asked direct, not through the proxy)", domDNS, answerDirect)
 		}
 		if foreignDNS != answerProxied {
-			t.Errorf("foreign.test resolves to %q, want %s (the remote resolver, asked through the proxy)", foreignDNS, answerProxied)
+			t.Errorf("foreign.test resolves to %q, want %s (asked through the proxy)", foreignDNS, answerProxied)
 		}
 	})
 
@@ -360,20 +368,26 @@ func TestConfigApply(t *testing.T) {
 			t.Fatalf("proxied through server %q before the outage, want a", server)
 		}
 		setServer(t, note, "a", false) // b is still down
+		// While the requests fail, the runner must run xray and answer ping:
+		// RouterOS then keeps routing to xray, and the block is proxy-closed's
+		// fallback, not the router's.
 		var requests int
-		var answers []string
+		var answers, offAir []string
 		for start := time.Now(); time.Since(start) < 30*time.Second && ctx.Err() == nil; requests++ {
 			if got := l.whoami(ctx); got != "" {
 				answers = append(answers, got)
 			}
+			if rs, err := runnerStatus(ctx); err != nil || rs.State != runnerapi.StateRunning || !rs.GatewayUp {
+				offAir = append(offAir, fmt.Sprintf("%s gateway_up=%v (%v)", rs.State, rs.GatewayUp, err))
+			}
 			sleep(ctx, time.Second)
 		}
-		// The runner still answers ping, so RouterOS keeps routing to xray,
-		// and the blocking is proxy-closed's fallback.
-		rs, err := runnerStatus(ctx)
-		note("%d requests in 30 s with both servers down, answers %q; runner %s, gateway_up %v (%v)", requests, answers, rs.State, rs.GatewayUp, err)
+		note("%d requests in 30 s with both servers down, answers %q; runner not running with gateway_up at %d of them %q", requests, answers, len(offAir), offAir)
 		if len(answers) > 0 {
 			t.Errorf("with both servers down and the kill switch on, whoami answered %q, want every request blocked", answers)
+		}
+		if requests == 0 || len(offAir) > 0 {
+			t.Errorf("the runner was not running with gateway_up throughout the outage (%d of %d samples: %q), so the block need not be xray's", len(offAir), requests, offAir)
 		}
 		setServer(t, note, "a", true)
 		took, ok := poll(ctx, 30*time.Second, time.Second, func() bool {
@@ -398,7 +412,51 @@ func TestConfigApply(t *testing.T) {
 		next := applied.Clone()
 		next.Servers = append(next.Servers, bad)
 		push(t, note, next, "the applied state and a raw-JSON server whose VLESS id is 40 characters, not a UUID")
-		st := apply(t, note, next, runnerapi.OutcomeRejected)
+		// xray run -test refuses the config before the runner stops anything,
+		// so traffic must stay proxied through all of it: sample whoami while
+		// the apply runs and for 5 s after.
+		type outcome struct {
+			res artifacts.Result
+			err error
+		}
+		done := make(chan outcome, 1)
+		start := time.Now()
+		go func() {
+			res, err := runTikray(ctx, c, "apply")
+			done <- outcome{res, err}
+		}()
+		var o outcome
+		var samples, misses []string
+		var ended time.Time
+		for ctx.Err() == nil {
+			if ended.IsZero() {
+				select {
+				case o = <-done:
+					ended = time.Now()
+				default:
+				}
+			} else if time.Since(ended) >= 5*time.Second {
+				break
+			}
+			got := l.whoami(ctx)
+			samples = append(samples, got)
+			if got != serverEgress["a"] {
+				misses = append(misses, fmt.Sprintf("%q at %.0fs", got, time.Since(start).Seconds()))
+			}
+			sleep(ctx, time.Second)
+		}
+		if ended.IsZero() {
+			t.Fatalf("tikray apply did not end: %v", ctx.Err())
+		}
+		note("tikray apply: %s (%.0fs)", describe(o.res), ended.Sub(start).Seconds())
+		note("%d whoami samples during the apply and 5 s after, %d not through server a: %q", len(samples), len(misses), misses)
+		if o.err != nil {
+			t.Fatalf("tikray apply: %v", o.err)
+		}
+		if len(misses) > 0 {
+			t.Errorf("traffic left server a during the rejected apply: %d of %d samples %q", len(misses), len(samples), misses)
+		}
+		st := appliedAs(t, note, o.res, next, runnerapi.OutcomeRejected)
 		// xray run -test refused the config for that server's outbound.
 		if lt := st.LastTrial; lt == nil {
 			t.Error("no last_trial after the apply")
@@ -412,26 +470,62 @@ func TestConfigApply(t *testing.T) {
 			t.Errorf("active selection %+v after the rejected apply, want %+v as before", st.Active, *before.Active)
 		}
 		wantConfig(t, note, st, applied, l.Newest)
-		l.lanProxied(ctx, t, note)
 	})
 
 	check("older_core_renders", func(t *testing.T, note func(string, ...any)) {
-		// The server xray refuses goes again: core updates render from the
-		// state as well.
-		push(t, note, applied, "the applied state again")
+		// Core updates and rollbacks render from the state as well. Each one
+		// gets a state that differs from the one the runner runs (the server
+		// xray refuses goes again, and a domestic name is added), so that the
+		// active config must change to that state's render, never stay the
+		// config the runner already had.
+		withDomain := func(name string) store.State {
+			st := applied.Clone()
+			st.Routing.Domestic.Domains = append(st.Routing.Domestic.Domains, name)
+			return st
+		}
+		// changed returns the runner's active config, which must differ from
+		// before.
+		changed := func(t *testing.T, st runnerapi.Status, before string) string {
+			t.Helper()
+			if st.Active == nil {
+				t.Fatal("no active selection")
+			}
+			if st.Active.Config == before {
+				t.Errorf("active config %s unchanged, want the render of the new state", before)
+			}
+			return st.Active.Config
+		}
+		before, err := runnerStatus(ctx)
+		if err != nil || before.Active == nil {
+			t.Fatalf("runner status %+v (%v), want an active selection", before, err)
+		}
+
+		forUpdate := withDomain("domain:update.test")
+		push(t, note, forUpdate, "the applied state with domain:update.test added")
 		res := l.tikray(ctx, t, note, "core update "+previousXray)
 		wantResult(t, res, artifacts.Result{Outcome: runnerapi.OutcomeCommitted, From: l.Newest, To: previousXray, Source: "direct", Verified: "dgst"})
 		st := checkCore(ctx, t, note, previousXray)
-		wantConfig(t, note, st, applied, previousXray)
-		older, errOld := renderedName(applied, previousXray)
-		newest, errNew := renderedName(applied, l.Newest)
+		wantConfig(t, note, st, forUpdate, previousXray)
+		afterUpdate := changed(t, st, before.Active.Config)
+		older, errOld := renderedName(forUpdate, previousXray)
+		newest, errNew := renderedName(forUpdate, l.Newest)
 		note("the render for %s is the render for %s: %v (%v, %v)", previousXray, l.Newest, older == newest, errOld, errNew)
-		l.lanProxied(ctx, t, note)
+		if server := l.lanProxied(ctx, t, note); server != "a" {
+			t.Errorf("proxied through server %q after the update, want a", server)
+		}
 
+		forRollback := withDomain("domain:rollback.test")
+		push(t, note, forRollback, "the applied state with domain:rollback.test added")
 		res = l.tikray(ctx, t, note, "core rollback")
 		wantResult(t, res, artifacts.Result{Outcome: runnerapi.OutcomeCommitted, From: previousXray, To: l.Newest})
 		st = checkCore(ctx, t, note, l.Newest)
-		wantConfig(t, note, st, applied, l.Newest)
-		l.lanProxied(ctx, t, note)
+		wantConfig(t, note, st, forRollback, l.Newest)
+		changed(t, st, afterUpdate)
+		if res.Outcome == runnerapi.OutcomeCommitted {
+			applied = forRollback
+		}
+		if server := l.lanProxied(ctx, t, note); server != "a" {
+			t.Errorf("proxied through server %q after the rollback, want a", server)
+		}
 	})
 }

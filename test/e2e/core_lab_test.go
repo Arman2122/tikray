@@ -46,9 +46,12 @@ func TestCoreLifecycle(t *testing.T) {
 	check := l.recordChecks(t, "m1")
 
 	proxiedWithin := l.proxiedWithin()
+	// The fixture and the state both proxy through server a alone.
 	lanProxied := func(t *testing.T, note func(string, ...any)) {
 		t.Helper()
-		l.lanProxied(ctx, t, note)
+		if server := l.lanProxied(ctx, t, note); server != "" && server != "a" {
+			t.Errorf("proxied through server %s (%s), want a (%s), the only server", server, serverEgress[server], serverEgress["a"])
+		}
 	}
 	tikray := func(t *testing.T, note func(string, ...any), args string) artifacts.Result {
 		t.Helper()

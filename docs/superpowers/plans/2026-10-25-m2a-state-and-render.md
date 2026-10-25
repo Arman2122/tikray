@@ -831,7 +831,7 @@
 
 - [ ] **Step 3: Run it on long-term x86_64 and stable arm64**
 
-  Run: the same with `TIKRAY_LAB_ROS=long-term`, and with `TIKRAY_LAB_ARCH=arm64`. Expected: 8/8 each.
+  Run: the same with `TIKRAY_LAB_ROS=long-term`, and with `TIKRAY_LAB_ARCH=arm64`. Expected: 8/8 each. (changed: as in Step 2, the variable is `TIKRAY_LAB_CHANNEL=long-term`.)
 
 - [ ] **Step 4: Re-run M1's suite**
 
