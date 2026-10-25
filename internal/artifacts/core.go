@@ -1,6 +1,7 @@
 package artifacts
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,7 +12,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -43,9 +46,25 @@ const (
 // ErrLocked means another update or rollback holds the artifacts lock.
 var ErrLocked = errors.New("artifacts: another core update or rollback is running")
 
+// KindConfig is the Kind of the Result of Apply.
+const KindConfig = "config"
+
+// keepConfigs is how many configs, besides the committed one, a commit keeps
+// in run/config/.
+const keepConfigs = 4
+
+// configFileRE matches the name of a config file in run/config/, the one
+// runnerapi.Selection.Validate asks of a Config.
+var configFileRE = regexp.MustCompile(`^[0-9a-f]{64}\.json$`)
+
+// Renderer renders the xray config for core and the geo slot geo (empty for
+// none) from the desired state.
+type Renderer func(core xrayver.Version, geo string) ([]byte, error)
+
 // CoreUpdater switches the runner to another xray-core: fetch, verify,
-// install into a slot, runner trial, health check, then commit or let the
-// trial revert (§4.5). Zero durations and Keep take the defaults.
+// install into a slot, render its config, runner trial, health check, then
+// commit or let the trial revert (§4.5). Zero durations and Keep take the
+// defaults.
 type CoreUpdater struct {
 	// Data is the data root: cores/, run/ and state/ are in it. state/tmp is
 	// for the temporary files of updates alone, and an update empties it
@@ -62,6 +81,10 @@ type CoreUpdater struct {
 	// whose HTTP timeout covers TrialDeadline plus a margin, since the
 	// runner answers it only after xray run -test.
 	Runner *runnerapi.Client
+	// Render makes the config an update or rollback runs the core with, and the
+	// one Apply puts on trial. Nil keeps the active config for a core change,
+	// unless the update names a config file, and refuses Apply.
+	Render Renderer
 	// Health must pass, through the candidate, before a commit. So must the
 	// runner's data path: its status must show the candidate's routes in
 	// place and its gateway up.
@@ -76,8 +99,9 @@ type CoreUpdater struct {
 
 // UpdateOptions are the choices of one Update.
 type UpdateOptions struct {
-	// ConfigFile is an xray config to run the core with; empty keeps the
-	// active one.
+	// ConfigFile is an xray config to run the core with; empty takes the
+	// render for the core if there is a Renderer, and keeps the active config
+	// if not.
 	ConfigFile string
 	// AllowUnverified lets a zip whose SHA-256 nobody knows be installed. Such
 	// a zip is taken only from Fetch's Inbox sources: the consent is for a
@@ -87,12 +111,13 @@ type UpdateOptions struct {
 	AllowUnverified bool
 }
 
-// Result is what an update or rollback did; it is also the line it adds to
-// state/core-history.jsonl.
+// Result is what an update, rollback or Apply did; it is also the line it
+// adds to state/core-history.jsonl.
 type Result struct {
 	From     string    `json:"from,omitempty"`
 	To       string    `json:"to"`
 	Outcome  string    `json:"outcome"`
+	Kind     string    `json:"kind,omitempty"` // KindConfig for an Apply, empty for an update or rollback
 	Source   string    `json:"source,omitempty"`
 	Verified string    `json:"verified,omitempty"`
 	Detail   string    `json:"detail,omitempty"`
@@ -114,6 +139,17 @@ func (u *CoreUpdater) Update(ctx context.Context, version string, o UpdateOption
 func (u *CoreUpdater) Rollback(ctx context.Context) (Result, error) {
 	var res Result
 	return u.locked(&res, func() error { return u.rollback(ctx, &res) })
+}
+
+// Apply renders the config for the active core and geo and puts it on trial
+// through the same trial as an update. It does not fetch or verify the core,
+// since that is the one running. It holds the artifacts lock throughout,
+// records the Result (of Kind KindConfig) in the history, and returns an error
+// with every outcome but committed and noop. With no Render, or no active
+// core, it refuses.
+func (u *CoreUpdater) Apply(ctx context.Context) (Result, error) {
+	res := Result{Kind: KindConfig}
+	return u.locked(&res, func() error { return u.apply(ctx, &res) })
 }
 
 // locked runs fn, which fills in res, under the artifacts lock, then records res.
@@ -175,14 +211,14 @@ func (u *CoreUpdater) update(ctx context.Context, version string, o UpdateOption
 	if err != nil {
 		return refuse(res, err)
 	}
-	cfg, err := readConfig(o.ConfigFile)
-	if err != nil {
-		return refuse(res, err)
-	}
 	sel := runnerapi.Selection{Core: v.String()}
 	if active != nil {
 		res.From = active.Core
 		sel.Geo, sel.Config = active.Geo, active.Config
+	}
+	cfg, err := u.configFor(o.ConfigFile, v, sel.Geo)
+	if err != nil {
+		return refuse(res, err)
 	}
 	if cfg != nil {
 		sel.Config = cfg.rel
@@ -237,9 +273,76 @@ func (u *CoreUpdater) rollback(ctx context.Context, res *Result) error {
 			continue
 		}
 		res.To, res.Source, res.Verified = v, s.Meta.Source, s.Meta.Verified
-		return u.trial(ctx, runnerapi.Selection{Core: v, Geo: active.Geo, Config: active.Config}, res)
+		sel := runnerapi.Selection{Core: v, Geo: active.Geo, Config: active.Config}
+		if u.Render != nil {
+			cfg, err := u.render(s.Version, active.Geo)
+			if err == nil {
+				err = cfg.write(u.runDir())
+			}
+			if err != nil {
+				return refuse(res, err)
+			}
+			sel.Config = cfg.rel
+		}
+		return u.trial(ctx, sel, res)
 	}
 	return refuse(res, fmt.Errorf("nothing to roll back to: the history has no committed core other than %s that is still installed", active.Core))
+}
+
+func (u *CoreUpdater) apply(ctx context.Context, res *Result) error {
+	if err := u.ready(); err != nil {
+		return refuse(res, err)
+	}
+	if u.Render == nil {
+		return refuse(res, errors.New("artifacts: CoreUpdater.Render is not set"))
+	}
+	active, err := u.active(ctx)
+	if err != nil {
+		return refuse(res, err)
+	}
+	if active == nil {
+		return refuse(res, errors.New("no active core: install one with tikray core update"))
+	}
+	res.From, res.To = active.Core, active.Core
+	v, err := xrayver.Parse(active.Core)
+	if err != nil {
+		return refuse(res, err)
+	}
+	cfg, err := u.render(v, active.Geo)
+	if err != nil {
+		return refuse(res, err)
+	}
+	if cfg.rel == active.Config {
+		res.Outcome, res.Detail = OutcomeNoop, "already active"
+		return nil
+	}
+	if err := cfg.write(u.runDir()); err != nil {
+		return refuse(res, err)
+	}
+	return u.trial(ctx, runnerapi.Selection{Core: active.Core, Geo: active.Geo, Config: cfg.rel}, res)
+}
+
+// configFor returns the config an update to v puts on trial, nil for the
+// active one: the file the caller named, else the render for v and geo if
+// there is a Renderer.
+func (u *CoreUpdater) configFor(file string, v xrayver.Version, geo string) (*config, error) {
+	switch {
+	case file != "":
+		return readConfig(file)
+	case u.Render != nil:
+		return u.render(v, geo)
+	}
+	return nil, nil
+}
+
+// render renders the config for core v and geo, named by its content like a
+// config file with the same bytes.
+func (u *CoreUpdater) render(v xrayver.Version, geo string) (*config, error) {
+	data, err := u.Render(v, geo)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: rendering the config for xray-core %s: %w", v, err)
+	}
+	return newConfig(data), nil
 }
 
 // ready refuses an updater that lacks what every update needs.
@@ -385,7 +488,8 @@ func inboxOnly(c Chain) Chain {
 	return c
 }
 
-// trial puts sel on trial and drives it to its end. A commit prunes the slots.
+// trial puts sel on trial and drives it to its end. A commit prunes the slots
+// and the configs.
 func (u *CoreUpdater) trial(ctx context.Context, sel runnerapi.Selection, res *Result) error {
 	if err := sel.Validate(); err != nil {
 		return refuse(res, err)
@@ -402,6 +506,7 @@ func (u *CoreUpdater) trial(ctx context.Context, sel runnerapi.Selection, res *R
 	res.Outcome, res.Detail, err = u.drive(ctx, cand)
 	if res.Outcome == runnerapi.OutcomeCommitted {
 		u.prune(res)
+		u.pruneConfigs(ctx, sel, res)
 	}
 	return err
 }
@@ -556,7 +661,7 @@ func (u *CoreUpdater) dataPath(ctx context.Context, cand runnerapi.Candidate) er
 func (u *CoreUpdater) prune(res *Result) {
 	h, err := readHistory(u.historyPath())
 	if err != nil {
-		res.Detail = "old cores were not pruned: " + err.Error()
+		note(res, "old cores were not pruned: "+err.Error())
 		return
 	}
 	keep := committedVersions(append(h, *res))
@@ -566,8 +671,79 @@ func (u *CoreUpdater) prune(res *Result) {
 		u.logf("xray-core %s: removed the cores %s", res.To, strings.Join(removed, ", "))
 	}
 	if err != nil {
-		res.Detail = "pruning old cores: " + err.Error()
+		note(res, "pruning old cores: "+err.Error())
 	}
+}
+
+// pruneConfigs removes from run/config/ all but the committed config, sel's,
+// and the keepConfigs most recently modified others. Never one the runner's
+// active selection or an open candidate names, as its status shows. Only files
+// named like a config count: anything else is left alone. A failure is noted
+// in res without undoing the commit.
+func (u *CoreUpdater) pruneConfigs(ctx context.Context, sel runnerapi.Selection, res *Result) {
+	st, err := u.Runner.Status(ctx)
+	if err != nil {
+		note(res, "old configs were not pruned: "+err.Error())
+		return
+	}
+	inUse := map[string]bool{sel.Config: true}
+	if st.Active != nil {
+		inUse[st.Active.Config] = true
+	}
+	if st.Candidate != nil {
+		inUse[st.Candidate.Config] = true
+	}
+	dir := filepath.Join(u.runDir(), "config")
+	ents, err := os.ReadDir(dir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		note(res, "old configs were not pruned: "+err.Error())
+		return
+	}
+	type file struct {
+		name string
+		mod  time.Time
+	}
+	var others []file
+	var errs []error
+	for _, e := range ents {
+		if !e.Type().IsRegular() || !configFileRE.MatchString(e.Name()) || "config/"+e.Name() == sel.Config {
+			continue
+		}
+		fi, err := e.Info()
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		others = append(others, file{e.Name(), fi.ModTime()})
+	}
+	slices.SortFunc(others, func(a, b file) int {
+		return cmp.Or(b.mod.Compare(a.mod), cmp.Compare(a.name, b.name))
+	})
+	removed := 0
+	for _, f := range others[min(len(others), keepConfigs):] {
+		if inUse["config/"+f.name] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, f.name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		u.logf("xray-core %s: removed %d old configs", res.To, removed)
+	}
+	if err := errors.Join(errs...); err != nil {
+		note(res, "pruning old configs: "+err.Error())
+	}
+}
+
+// note adds msg to res.Detail, after what it holds.
+func note(res *Result, msg string) {
+	if res.Detail != "" {
+		res.Detail += "; "
+	}
+	res.Detail += msg
 }
 
 // record stamps res, appends it to the history and gives a failed outcome
@@ -646,6 +822,13 @@ type config struct {
 	rel  string // config/<sha256>.json
 }
 
+// newConfig names data by its SHA-256, so that a file and a render with the
+// same bytes are the same config.
+func newConfig(data []byte) *config {
+	sum := sha256.Sum256(data)
+	return &config{data: data, rel: "config/" + hex.EncodeToString(sum[:]) + ".json"}
+}
+
 // readConfig reads the config file at path; an empty path gives nil.
 func readConfig(path string) (*config, error) {
 	if path == "" {
@@ -655,8 +838,7 @@ func readConfig(path string) (*config, error) {
 	if err != nil {
 		return nil, err
 	}
-	sum := sha256.Sum256(data)
-	return &config{data: data, rel: "config/" + hex.EncodeToString(sum[:]) + ".json"}, nil
+	return newConfig(data), nil
 }
 
 func (c *config) write(runDir string) error {

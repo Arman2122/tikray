@@ -112,7 +112,9 @@ func readHistory(path string) ([]Result, error) {
 // committedVersions returns the cores the history shows committed, newest
 // first and each once. A committed result's From counts as well, just after
 // its To: it was the active core, so it had been committed, perhaps before
-// the history began (the core the installer put in place).
+// the history began (the core the installer put in place). The committed
+// result of an Apply counts like any other, with the active core as both To
+// and From.
 func committedVersions(h []Result) []string {
 	var out []string
 	seen := map[string]bool{}

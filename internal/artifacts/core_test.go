@@ -239,6 +239,15 @@ func (f *fakeRunner) activeCore() string {
 	return f.st.Active.Core
 }
 
+func (f *fakeRunner) activeSelection() runnerapi.Selection {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.st.Active == nil {
+		return runnerapi.Selection{}
+	}
+	return *f.st.Active
+}
+
 func fakeError(w http.ResponseWriter, code int, errCode, detail string) {
 	writeJSONReply(w, code, map[string]string{"error": errCode, "detail": detail})
 }
@@ -590,6 +599,10 @@ func TestUpdateCommits(t *testing.T) {
 		t.Fatalf("history has %d lines, want 1", len(h))
 	}
 	wantResult(t, h[0], want)
+	// Only Apply's results have a kind.
+	if raw, err := os.ReadFile(filepath.Join(e.data, "state", "core-history.jsonl")); err != nil || strings.Contains(string(raw), `"kind"`) {
+		t.Errorf("history file = %q, %v; want no kind in an update's line", raw, err)
+	}
 	if fi, err := os.Stat(filepath.Join(e.data, "state")); err != nil || fi.Mode().Perm() != 0o700 {
 		t.Errorf("state/ = %v, %v; want mode 0700", fi, err)
 	}
