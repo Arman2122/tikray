@@ -54,7 +54,7 @@ func newFakeRunner(t *testing.T, run string, active *runnerapi.Selection) *fakeR
 	f.st = runnerapi.Status{State: runnerapi.StateEmpty}
 	if active != nil {
 		a := *active
-		f.st = runnerapi.Status{State: runnerapi.StateRunning, Active: &a, XrayPID: 42, RoutesOK: true, GatewayUp: true}
+		f.st = runnerapi.Status{State: runnerapi.StateRunning, Active: &a, XrayPID: 42, XrayVersion: fakeXrayVersion(a.Core), RoutesOK: true, GatewayUp: true}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", f.handleStatus)
@@ -131,8 +131,21 @@ func (f *fakeRunner) handleTrial(w http.ResponseWriter, r *http.Request) {
 		fakeError(w, http.StatusConflict, "busy", "")
 		return
 	}
-	f.st.State, f.st.Candidate = runnerapi.StateTrial, &c
+	f.startTrial(c)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// startTrial puts c on trial as the runner does once the candidate runs: its
+// xray reports c's version, and its routes and gateway are up. mu must be held.
+func (f *fakeRunner) startTrial(c runnerapi.Candidate) {
+	f.st.State, f.st.Candidate = runnerapi.StateTrial, &c
+	f.st.XrayPID, f.st.XrayVersion = 43, fakeXrayVersion(c.Core)
+	f.st.RoutesOK, f.st.GatewayUp = true, true
+}
+
+// fakeXrayVersion is the first line of "xray version" for a core.
+func fakeXrayVersion(core string) string {
+	return "Xray " + core + " (Xray, Penetrates Everything.) fake (go1.24.7 linux/amd64)"
 }
 
 func (f *fakeRunner) handleCommit(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +198,9 @@ func (f *fakeRunner) end(outcome, detail string) {
 		f.st.Active = &sel
 	}
 	f.st.State, f.st.Candidate = runnerapi.StateRunning, nil
+	if f.st.Active != nil {
+		f.st.XrayVersion = fakeXrayVersion(f.st.Active.Core)
+	}
 	f.st.LastTrial = &runnerapi.TrialResult{Candidate: c, Outcome: outcome, Detail: detail, At: t0}
 	os.Remove(filepath.Join(f.run, "candidate.json"))
 }
@@ -643,6 +659,67 @@ func TestUpdateUnhealthy(t *testing.T) {
 	if got := e.runner.activeCore(); got != "26.3.27" {
 		t.Errorf("runner's active core = %q, want 26.3.27", got)
 	}
+}
+
+// The probes pass without xray0, so the health check also needs the runner's
+// data path: a candidate whose routes are missing, or whose gateway does not
+// answer ping, sends fail-open devices direct and blackholes the rest.
+func TestUpdateNeedsTheDataPath(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		routesOK, gatewayUp bool
+		detail              string
+	}{
+		{"routes missing", false, true, "routes"},
+		{"gateway down", true, false, "gateway"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newCoreEnv(t, "26.3.27")
+			e.rel.add(t, "26.10.21")
+			e.runner.script(func(f *fakeRunner) {
+				f.onTrial = func(w http.ResponseWriter, c runnerapi.Candidate) bool {
+					f.startTrial(c)
+					f.st.RoutesOK, f.st.GatewayUp = tc.routesOK, tc.gatewayUp
+					w.WriteHeader(http.StatusNoContent)
+					return true
+				}
+			})
+
+			res, err := e.u.Update(bg, "26.10.21", UpdateOptions{})
+			wantOutcome(t, res, err, OutcomeUnhealthy)
+			wantDetail(t, res, tc.detail)
+			wantActions(t, e.runner, "trial", "abort")
+			if got := e.runner.activeCore(); got != "26.3.27" {
+				t.Errorf("runner's active core = %q, want 26.3.27", got)
+			}
+		})
+	}
+	t.Run("up within the window", func(t *testing.T) {
+		e := newCoreEnv(t, "26.3.27")
+		e.rel.add(t, "26.10.21")
+		// xray0 takes a moment to appear; the routes and gateway follow.
+		var statuses int
+		e.runner.script(func(f *fakeRunner) {
+			f.onTrial = func(w http.ResponseWriter, c runnerapi.Candidate) bool {
+				f.startTrial(c)
+				f.st.RoutesOK, f.st.GatewayUp = false, false
+				w.WriteHeader(http.StatusNoContent)
+				return true
+			}
+			f.onStatus = func() {
+				if f.st.State != runnerapi.StateTrial {
+					return
+				}
+				if statuses++; statuses == 3 {
+					f.st.RoutesOK, f.st.GatewayUp = true, true
+				}
+			}
+		})
+
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{})
+		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+		wantActions(t, e.runner, "trial", "commit")
+	})
 }
 
 func TestUpdateRefusesOld(t *testing.T) {

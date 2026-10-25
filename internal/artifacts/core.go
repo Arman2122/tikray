@@ -58,7 +58,9 @@ type CoreUpdater struct {
 	// whose HTTP timeout covers TrialDeadline plus a margin, since the
 	// runner answers it only after xray run -test.
 	Runner *runnerapi.Client
-	// Health must pass, through the candidate, before a commit.
+	// Health must pass, through the candidate, before a commit. So must the
+	// runner's data path: its status must show the candidate's routes in
+	// place and its gateway up.
 	Health        HealthChecker
 	Keep          int           // committed versions whose slots a commit keeps (2)
 	TrialDeadline time.Duration // how long the runner waits for the commit (120 s)
@@ -374,7 +376,7 @@ func (u *CoreUpdater) drive(ctx context.Context, cand runnerapi.Candidate) (stri
 		return runnerapi.OutcomeExited, "the candidate is no longer on trial, and the runner recorded no outcome for it", nil
 	}
 
-	if err := u.healthy(ctx); err != nil {
+	if err := u.healthy(ctx, cand); err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return u.abort(ctx, cand, runnerapi.OutcomeAborted, fmt.Errorf("%w during the health check", cerr))
 		}
@@ -443,15 +445,19 @@ func (u *CoreUpdater) abort(ctx context.Context, cand runnerapi.Candidate, outco
 	return outcome, fmt.Sprintf("%v; the abort failed, so the runner reverts at the deadline: %v", why, err), why
 }
 
-// healthy retries the health check until it passes or HealthWindow ends, and
-// returns the last failure.
-func (u *CoreUpdater) healthy(ctx context.Context) error {
+// healthy retries the health check of cand until it passes or HealthWindow
+// ends, and returns the last failure. The check is the runner's data path
+// (see dataPath), then Health.
+func (u *CoreUpdater) healthy(ctx context.Context, cand runnerapi.Candidate) error {
 	window := u.healthWindow()
 	hctx, cancel := context.WithTimeout(ctx, window)
 	defer cancel()
 	retry := min(time.Second, window/10)
 	for {
-		err := u.Health.Check(hctx)
+		err := u.dataPath(hctx, cand)
+		if err == nil {
+			err = u.Health.Check(hctx)
+		}
 		if err == nil {
 			return nil
 		}
@@ -459,6 +465,25 @@ func (u *CoreUpdater) healthy(ctx context.Context) error {
 			return fmt.Errorf("health check failing for %s: %w", window, err)
 		}
 	}
+}
+
+// dataPath checks, from the runner's status, that cand is on trial with its
+// routes into xray0 in place and its gateway up (it answers ping). Health's
+// probes pass without xray0, but a runner whose gateway is down sends
+// fail-open devices direct and blackholes the kill-switch ones.
+func (u *CoreUpdater) dataPath(ctx context.Context, cand runnerapi.Candidate) error {
+	st, err := u.Runner.Status(ctx)
+	switch {
+	case err != nil:
+		return err
+	case !onTrial(st, cand):
+		return errors.New("the candidate is no longer on trial")
+	case !st.RoutesOK:
+		return errors.New("the runner's routes into xray0 are not in place")
+	case !st.GatewayUp:
+		return errors.New("the runner's gateway is down: it does not answer ping")
+	}
+	return nil
 }
 
 // prune removes the slots of all but the Keep most recently committed cores.
