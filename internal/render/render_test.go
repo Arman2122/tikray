@@ -52,6 +52,7 @@ type output struct {
 	API         json.RawMessage   `json:"api"`
 	Stats       json.RawMessage   `json:"stats"`
 	Policy      json.RawMessage   `json:"policy"`
+	DNS         json.RawMessage   `json:"dns"`
 	Inbounds    []json.RawMessage `json:"inbounds"`
 	Outbounds   []json.RawMessage `json:"outbounds"`
 	Observatory json.RawMessage   `json:"observatory"`
@@ -64,7 +65,13 @@ type output struct {
 // mustRender renders st for testCore with no geo and decodes the result.
 func mustRender(t *testing.T, st store.State) (output, []byte) {
 	t.Helper()
-	b, err := Render(Input{State: st, Core: testCore})
+	return mustRenderInput(t, Input{State: st, Core: testCore})
+}
+
+// mustRenderInput renders in and decodes the result.
+func mustRenderInput(t *testing.T, in Input) (output, []byte) {
+	t.Helper()
+	b, err := Render(in)
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}

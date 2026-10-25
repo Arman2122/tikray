@@ -11,6 +11,7 @@ type config struct {
 	API      apiConfig    `json:"api"`
 	Stats    struct{}     `json:"stats"`
 	Policy   policyConfig `json:"policy"`
+	DNS      dnsConfig    `json:"dns"`
 	Inbounds []inbound    `json:"inbounds"`
 	// Outbounds holds outbound values for render's own outbounds and, for
 	// each server, its tagged json.RawMessage.
@@ -37,6 +38,25 @@ type policyConfig struct {
 type systemPolicy struct {
 	StatsOutboundUplink   bool `json:"statsOutboundUplink"`
 	StatsOutboundDownlink bool `json:"statsOutboundDownlink"`
+}
+
+// dnsConfig is xray's DNS, which dns-out answers the devices' queries with.
+// Tag is the inbound tag the routing rules see on the queries it sends
+// itself.
+type dnsConfig struct {
+	Tag           string `json:"tag"`
+	QueryStrategy string `json:"queryStrategy"`
+	// Servers holds a dnsServer for the domestic resolver, when there is
+	// one, and last the remote resolver's address as a string.
+	Servers []any `json:"servers"`
+}
+
+// dnsServer is a resolver that answers for Domains alone: SkipFallback keeps
+// xray from asking it about any other name.
+type dnsServer struct {
+	Address      string   `json:"address"`
+	Domains      []string `json:"domains"`
+	SkipFallback bool     `json:"skipFallback"`
 }
 
 // inbound is one of xray's inbounds. The TUN inbound has no listen address
@@ -96,11 +116,21 @@ type routing struct {
 // rule is one routing rule. It matches when every condition it sets
 // matches, and sends the traffic to OutboundTag or to BalancerTag: exactly
 // one is set.
+//
+// A list left empty is left out of the JSON, and xray reads a rule without
+// it as matching every inbound, source, domain or address. Rules are made
+// by ruleList.add, which never makes one with an empty list, and Render
+// refuses any that has one (checkMatchers).
 type rule struct {
-	InboundTag  []string `json:"inboundTag,omitempty"`
-	Source      []string `json:"source,omitempty"`
-	OutboundTag string   `json:"outboundTag,omitempty"`
-	BalancerTag string   `json:"balancerTag,omitempty"`
+	InboundTag []string `json:"inboundTag,omitempty"`
+	Source     []string `json:"source,omitempty"`
+	Domain     []string `json:"domain,omitempty"`
+	IP         []string `json:"ip,omitempty"`
+	// Network is set on the catch-all rule alone, to "tcp,udp": all the
+	// traffic the TUN inbound carries.
+	Network     string `json:"network,omitempty"`
+	OutboundTag string `json:"outboundTag,omitempty"`
+	BalancerTag string `json:"balancerTag,omitempty"`
 }
 
 // balancer picks one of the outbounds whose tags start with a selector.

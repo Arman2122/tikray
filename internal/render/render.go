@@ -1,6 +1,7 @@
 // Package render turns tikray's desired state into the xray-core config the
 // runner runs: the inbounds, the outbounds of the enabled servers, the
-// balancers that choose among them, and the routing rules (spec §5.3).
+// balancers that choose among them, the routing rules that carry out the
+// devices' policies (spec §5.3), and xray's DNS (spec §5.4).
 package render
 
 import (
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 
 	"github.com/Arman2122/tikray/internal/store"
 	"github.com/Arman2122/tikray/internal/xrayver"
@@ -107,18 +109,37 @@ func ProxyAvailable(st store.State) bool {
 
 // Render returns the xray-core config for in, as two-space indented JSON
 // with a trailing newline. The same input always gives the same bytes. It
-// fails if in.Core is too old for the config (see Check) or in.State is not
-// valid.
+// fails if in.Core is too old for the config (see Check), if in.State is not
+// valid, or if in.State uses a geosite: or geoip: matcher while in.Geo is
+// nil.
 func Render(in Input) ([]byte, error) {
+	c, err := build(in)
+	if err != nil {
+		return nil, err
+	}
+	return encode(c)
+}
+
+// build returns the config for in, before Render checks and encodes it.
+func build(in Input) (*config, error) {
 	if err := Check(in.Core); err != nil {
 		return nil, err
 	}
 	if err := in.State.Validate(); err != nil {
 		return nil, fmt.Errorf("render: invalid state: %w", err)
 	}
+	if err := checkGeo(in.State, in.Geo); err != nil {
+		return nil, err
+	}
 	r := &renderer{st: in.State, proxy: ProxyAvailable(in.State)}
-	c, err := r.config()
-	if err != nil {
+	r.domesticDomains, r.domesticIPs = domestic(in.State.Routing.Domestic, in.Geo)
+	return r.config()
+}
+
+// encode returns c as Render's JSON, unless one of its rules has an empty
+// matcher list (checkMatchers).
+func encode(c *config) ([]byte, error) {
+	if err := checkMatchers(c.Routing.Rules); err != nil {
 		return nil, err
 	}
 	b, err := json.MarshalIndent(c, "", "  ")
@@ -128,11 +149,34 @@ func Render(in Input) ([]byte, error) {
 	return append(b, '\n'), nil
 }
 
+// checkMatchers returns an internal error if a rule has a matcher list that
+// is set but empty. The JSON would leave the list out, and xray reads a rule
+// without it as matching everything: a rule meant for a few sources would
+// take every source's traffic, kill-switch traffic sent direct among it.
+// ruleList.add never makes such a rule; this check makes a mistake there
+// fail the render instead of reaching xray.
+func checkMatchers(rules []rule) error {
+	for i, r := range rules {
+		for _, m := range []struct {
+			key  string
+			list []string
+		}{{"inboundTag", r.InboundTag}, {"source", r.Source}, {"domain", r.Domain}, {"ip", r.IP}} {
+			if m.list != nil && len(m.list) == 0 {
+				return fmt.Errorf("render: internal: routing.rules[%d] has an empty %s list", i, m.key)
+			}
+		}
+	}
+	return nil
+}
+
 // renderer builds one config.
 type renderer struct {
 	st store.State
 	// proxy is whether the balancers have a member (ProxyAvailable).
 	proxy bool
+	// domesticDomains and domesticIPs are the domestic matchers, the geo
+	// data's and then the state's (domestic).
+	domesticDomains, domesticIPs []string
 }
 
 // via returns a rule that sends its traffic to the balancer, or, while the
@@ -157,6 +201,7 @@ func (r *renderer) config() (*config, error) {
 	if err != nil {
 		return nil, err
 	}
+	dns, dnsRules := r.dns()
 	c := &config{
 		Log: logConfig{LogLevel: "warning"},
 		API: apiConfig{
@@ -164,9 +209,12 @@ func (r *renderer) config() (*config, error) {
 			Services: []string{"HandlerService", "RoutingService", "StatsService"},
 		},
 		Policy:    policyConfig{System: systemPolicy{StatsOutboundUplink: true, StatsOutboundDownlink: true}},
+		DNS:       dns,
 		Inbounds:  r.inbounds(),
 		Outbounds: outbounds,
-		Routing:   routing{Rules: r.serviceRules()},
+		// The service rules, then the rules for xray DNS's own queries, then
+		// the devices' traffic.
+		Routing: routing{Rules: slices.Concat(r.serviceRules(), dnsRules, r.trafficRules())},
 	}
 	// The observatory and the balancers are there only while the balancers
 	// have a member. ObservatoryService is offered only with the observatory:
