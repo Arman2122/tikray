@@ -123,8 +123,8 @@ const (
 // Rule routes the traffic that matches any of its Domains or IPs.
 type Rule struct {
 	// Domains are xray domain matchers: "domain:example.com", "full:a.b",
-	// "keyword:x", "regexp:...", "geosite:ir", "ext:file:tag" or a bare
-	// substring.
+	// "keyword:x", "regexp:...", "geosite:ir" or a bare substring. xray's
+	// "ext:file:tag" is refused: tikray installs no such file.
 	Domains []string `json:"domains,omitempty"`
 	// IPs are addresses, CIDR prefixes or "geoip:<code>".
 	IPs    []string `json:"ips,omitempty"`

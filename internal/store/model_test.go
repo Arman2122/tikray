@@ -405,6 +405,14 @@ func TestValidateRejects(t *testing.T) {
 		{"block list regexp does not compile", func(s *State) { s.Routing.BlockList = []string{"regexp:("} }, "routing.block_list[0]"},
 		{"block list unknown prefix", func(s *State) { s.Routing.BlockList = []string{"domian:example.com"} }, "routing.block_list[0]"},
 		{"block list prefix without value", func(s *State) { s.Routing.BlockList = []string{"domain:"} }, "routing.block_list[0]"},
+		// ext: reads a .dat file of the user's, and tikray installs none, so
+		// xray would refuse the config.
+		{"block list ext", func(s *State) { s.Routing.BlockList = []string{"ext:geo.dat:ads"} }, "routing.block_list[0]"},
+		{"block list ext without a value", func(s *State) { s.Routing.BlockList = []string{"ext:"} }, "routing.block_list[0]"},
+		{"domestic domain ext", func(s *State) { s.Routing.Domestic.Domains = []string{"domain:ir", "ext:iran.dat:ir"} }, "routing.domestic.domains[1]"},
+		{"rule domain ext", withRule(Rule{Domains: []string{"ext:custom.dat:x"}, Action: ActionProxy}), "routing.rules[0].domains[0]"},
+		{"rule domain ext-domain", withRule(Rule{Domains: []string{"ext-domain:custom.dat:x"}, Action: ActionProxy}), "routing.rules[0].domains[0]"},
+		{"rule ip ext", withRule(Rule{IPs: []string{"ext:geoip.dat:ir"}, Action: ActionDirect}), "routing.rules[0].ips[0]"},
 		{"domestic domain with whitespace", func(s *State) { s.Routing.Domestic.Domains = []string{"a b"} }, "routing.domestic.domains[0]"},
 		{"domestic domain regexp does not compile", func(s *State) { s.Routing.Domestic.Domains = []string{"regexp:["} }, "routing.domestic.domains[0]"},
 		{"domestic ip out of range", func(s *State) { s.Routing.Domestic.IPs = []string{"300.1.1.1"} }, "routing.domestic.ips[0]"},
@@ -569,7 +577,7 @@ func TestValidateAccepts(t *testing.T) {
 	}
 	for _, m := range []string{
 		"domain:example.com", "full:a.b", "keyword:x", `regexp:^a\.b$`, "geosite:category-ir", "example",
-		"ext:geo.dat:ads", "geosite:google@cn",
+		"geosite:google@cn",
 	} {
 		t.Run("matcher "+m, func(t *testing.T) {
 			s := valid()

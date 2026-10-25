@@ -60,9 +60,11 @@ var notProxies = map[string]bool{
 	"loopback": true,
 }
 
-// domainPrefixes are the matcher prefixes xray's router reads. A matcher
-// without a prefix is a substring match.
-var domainPrefixes = []string{"domain", "full", "keyword", "regexp", "geosite", "ext"}
+// domainPrefixes are the matcher prefixes of xray's router that a state may
+// use. A matcher without a prefix is a substring match. xray also reads
+// ext:<file>:<code>, from a .dat file in its asset directory, but tikray
+// installs no such file, so xray would refuse the config (checkDomain).
+var domainPrefixes = []string{"domain", "full", "keyword", "regexp", "geosite"}
 
 // problems collects what is wrong with a state.
 type problems []error
@@ -344,8 +346,11 @@ func checkDomain(m string) string {
 	if !prefixed {
 		return ""
 	}
+	if prefix == "ext" {
+		return "uses ext:, which reads a .dat file that tikray does not install, so xray would refuse the config: use geosite: or a domain matcher"
+	}
 	if !slices.Contains(domainPrefixes, prefix) {
-		return fmt.Sprintf("has unknown prefix %q: want one of domain:, full:, keyword:, regexp:, geosite:, ext: or none", prefix+":")
+		return fmt.Sprintf("has unknown prefix %q: want one of domain:, full:, keyword:, regexp:, geosite: or none", prefix+":")
 	}
 	if value == "" {
 		return fmt.Sprintf("needs a value after %s:", prefix)
