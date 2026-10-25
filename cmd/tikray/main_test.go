@@ -1403,10 +1403,6 @@ func configFile(t *testing.T, body string) (path, rel string) {
 	return path, "config/" + hex.EncodeToString(sum[:]) + ".json"
 }
 
-// With --config the state only supplies the runner's addresses, so an
-// unreadable one (M1's recovery path: the user has a config to run) costs a
-// warning and the default addresses, not the command. Without --config the
-// config comes from the state, which then must be readable.
 // writeBad writes body as the file name in data's state directory and returns
 // name.
 func writeBad(t *testing.T, data, name string, body []byte) string {
@@ -1571,6 +1567,10 @@ func TestConfigRenderNeedsAReadableState(t *testing.T) {
 	}
 }
 
+// With --config the state only supplies the runner's addresses, so an
+// unreadable one (M1's recovery path: the user has a config to run) costs a
+// warning and the default addresses, not the command. Without --config the
+// config comes from the state, which then must be readable.
 func TestUpdateConfigFileSurvivesAnUnreadableState(t *testing.T) {
 	for name, breakState := range unreadableStates {
 		t.Run(name, func(t *testing.T) {
