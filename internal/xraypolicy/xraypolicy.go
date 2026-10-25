@@ -7,7 +7,8 @@
 // v26.10.21: infra/conf/xray.go (validateOutboundTransportSecurity, since
 // 26.7.11), infra/conf/shadowsocks.go, proxy/shadowsocks_2022 and, for
 // allowInsecure (since 26.3.27, once past 2026-06-01),
-// infra/conf/transport_internet.go.
+// infra/conf/transport_security.go and, for the TLS that finalmask's masks
+// carry, infra/conf/transport_finalmask.go.
 //
 // Errors here never repeat a user id, a password or a key: they end up in
 // logs, in the answers of the API and in the list of lines a subscription
@@ -154,14 +155,15 @@ func alphaNum(c byte) bool {
 // Check returns nil if xray accepts the outbound, or a *Refusal that wraps
 // ErrRefused if it refuses it, which are:
 //
-//   - an outbound of any protocol with allowInsecure true in a tlsSettings
-//     anywhere under streamSettings, whatever its security says: in the
-//     stream's own tlsSettings or in those of a stream nested in it, such as
-//     xhttp's download leg (xhttpSettings.extra.downloadSettings). xray
-//     26.3.27 and later refuse it once past 2026-06-01 (with security tls,
-//     the only one xray reads tlsSettings for), 26.1.18 skips the check of
-//     the server's certificate with it, and tikray never lets a server ask
-//     for that;
+//   - an outbound of any protocol with allowInsecure true in a tlsSettings or
+//     a tlsConfig anywhere under streamSettings, whatever its security says:
+//     in the stream's own tlsSettings, in those of a stream nested in it, such
+//     as xhttp's download leg (xhttpSettings.extra.downloadSettings), or in
+//     the tlsConfig of a finalmask mask (xdns, realm). xray 26.3.27 and later
+//     refuse it once past 2026-06-01 (in tlsSettings with security tls, the
+//     only one xray reads them for; in a mask's tlsConfig whatever the
+//     security), 26.1.18 skips the check of the server's certificate with it,
+//     and tikray never lets a server ask for that;
 //   - VLESS with no encryption (empty or "none") over a stream with no
 //     security, to a server that is not PrivateAddress;
 //   - Trojan over a stream with no security, to a server that is not
@@ -203,14 +205,19 @@ func Check(outbound json.RawMessage) error {
 	return nil
 }
 
-// insecureTLS reports whether streamSettings holds, at any depth, a
-// tlsSettings object whose allowInsecure is true: the stream's own, or that of
-// a stream nested in it, such as xhttp's download leg
-// (xhttpSettings.extra.downloadSettings), which xray builds like any other.
-// Keys are read without regard to case, like xray, and a key that is there
-// twice in different cases counts if either says true. A value that is not
-// true, or tlsSettings that are not an object, are not Check's to refuse:
-// xray cannot read them either.
+// insecureTLS reports whether streamSettings holds, at any depth, a TLS
+// object whose allowInsecure is true. A TLS object is a tlsSettings: the
+// stream's own, or that of a stream nested in it, such as xhttp's download leg
+// (xhttpSettings.extra.downloadSettings), which xray builds like any other. It
+// is also a tlsConfig, the key under which the masks of finalmask carry a TLS
+// object of their own: an xdns mask in each of its resolvers and a realm mask
+// in its settings (finalmask.udp[].settings, XDNSResolver.TlsConfig at
+// infra/conf/transport_finalmask.go:844 and Realm.TlsConfig at :1032 of
+// v26.10.21). Both are the same TLSConfig of infra/conf/transport_security.go,
+// whose Build refuses allowInsecure (:362). Keys are read without regard to
+// case, like xray, and a key that is there twice in different cases counts if
+// either says true. A value that is not true, or a TLS object that is not an
+// object, are not Check's to refuse: xray cannot read them either.
 func insecureTLS(streamSettings json.RawMessage) bool {
 	var ss any
 	if len(streamSettings) == 0 || json.Unmarshal(streamSettings, &ss) != nil {
@@ -219,13 +226,13 @@ func insecureTLS(streamSettings json.RawMessage) bool {
 	return holdsInsecureTLS(ss)
 }
 
-// holdsInsecureTLS reports whether v, decoded JSON, has a tlsSettings object
-// with allowInsecure true in it, at any depth.
+// holdsInsecureTLS reports whether v, decoded JSON, has a tlsSettings or a
+// tlsConfig object with allowInsecure true in it, at any depth.
 func holdsInsecureTLS(v any) bool {
 	switch v := v.(type) {
 	case map[string]any:
 		for key, child := range v {
-			if tls, ok := child.(map[string]any); ok && strings.EqualFold(key, "tlsSettings") {
+			if tls, ok := child.(map[string]any); ok && (strings.EqualFold(key, "tlsSettings") || strings.EqualFold(key, "tlsConfig")) {
 				for k, insecure := range tls {
 					if strings.EqualFold(k, "allowInsecure") && insecure == true {
 						return true

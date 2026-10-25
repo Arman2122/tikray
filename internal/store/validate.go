@@ -24,12 +24,14 @@ const MaxNameRunes = 128
 
 // ForbiddenInName reports whether r may not be in a server's or a
 // subscription's name: a C0 or C1 control character or DEL
-// (unicode.IsControl), or a bidi embedding, override or isolate (U+202A to
-// U+202E, U+2066 to U+2069). Wherever a name is shown, in a terminal, a log or
-// a page, the first kind could rewrite what is around it and the second could
+// (unicode.IsControl), a line or paragraph separator (U+2028, U+2029), or a
+// bidi embedding, override or isolate (U+202A to U+202E, U+2066 to U+2069).
+// Wherever a name is shown, in a terminal, a log or a page, the first kind
+// could rewrite what is around it, the second could split it over two lines
+// (a viewer or a script that breaks lines on them) and the third could
 // reverse it. A share link's name drops them (sharelink).
 func ForbiddenInName(r rune) bool {
-	return unicode.IsControl(r) || r >= '\u202a' && r <= '\u202e' || r >= '\u2066' && r <= '\u2069'
+	return unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || r >= '\u202a' && r <= '\u202e' || r >= '\u2066' && r <= '\u2069'
 }
 
 const (

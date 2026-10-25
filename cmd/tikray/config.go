@@ -19,8 +19,9 @@ type Config struct {
 	Data string // the data root (TIKRAY_DATA)
 	Arch string // GOARCH of the cores to fetch (TIKRAY_ARCH)
 	// RunnerURL, Socks and XrayAPI default to the runner's address on the
-	// private subnet, which the state holds. configFromEnv leaves them empty
-	// where their variable is unset, and withState fills them in.
+	// private subnet, which the state holds, and ProbeURL to the state's
+	// Health.ProbeURL. configFromEnv leaves them empty where their variable is
+	// unset, and withState fills them in.
 	RunnerURL string // the runner's control API (TIKRAY_RUNNER_URL)
 	Socks     string // the runner's SOCKS5 listener, host:port (TIKRAY_SOCKS)
 	// XrayAPI is where xray's gRPC API listens, host:port (TIKRAY_XRAY_API).
@@ -37,13 +38,15 @@ type Config struct {
 	// (TIKRAY_INDEX_PUBKEY_FILE).
 	IndexURLs       []string
 	IndexPubKeyFile string
-	ProbeURL        string // fetched through the proxy as the health check (TIKRAY_PROBE_URL)
+	// ProbeURL is fetched through the proxy as the health check
+	// (TIKRAY_PROBE_URL). It is the URL xray's observatory probes, so the two
+	// agree on whether the proxy works.
+	ProbeURL string
 }
 
 const (
 	defaultData     = "/data"
 	defaultUpstream = "https://github.com/XTLS/Xray-core"
-	defaultProbeURL = "https://www.gstatic.com/generate_204"
 	// runnerPort is the port of the runner's control API, which
 	// cmd/tikray-runner serves on its address of the private subnet.
 	runnerPort = 8080
@@ -66,7 +69,9 @@ func readState(data string) (store.State, uint64, error) {
 }
 
 // withState returns c with the runner's address, RunnerURL, Socks and XrayAPI,
-// taken from st's private subnet where the environment left them unset.
+// taken from st's private subnet where the environment left them unset, and
+// with ProbeURL taken from st's Health.ProbeURL likewise: tikray's SOCKS probe
+// and xray's observatory then fetch the same URL.
 func (c Config) withState(st store.State) Config {
 	runner := st.Network.Runner().String()
 	if c.RunnerURL == "" {
@@ -77,6 +82,9 @@ func (c Config) withState(st store.State) Config {
 	}
 	if c.XrayAPI == "" {
 		c.XrayAPI = net.JoinHostPort(runner, strconv.Itoa(render.APIPort))
+	}
+	if c.ProbeURL == "" {
+		c.ProbeURL = st.Health.ProbeURL
 	}
 	return c
 }
@@ -100,7 +108,8 @@ func loadConfig(getenv func(string) string) (Config, store.State, error) {
 // configFromEnv reads the configuration from getenv. An unset or empty
 // variable takes its default; the two lists are empty by default. The
 // addresses of the runner (TIKRAY_RUNNER_URL, TIKRAY_SOCKS, TIKRAY_XRAY_API)
-// stay empty when unset: their default is the state's (withState).
+// and the probe URL (TIKRAY_PROBE_URL) stay empty when unset: their default is
+// the state's (withState).
 func configFromEnv(getenv func(string) string) (Config, error) {
 	str := func(key, def string) string {
 		if v := getenv(key); v != "" {
@@ -118,7 +127,7 @@ func configFromEnv(getenv func(string) string) (Config, error) {
 		Mirrors:         splitList(getenv("TIKRAY_MIRRORS")),
 		IndexURLs:       splitList(getenv("TIKRAY_INDEX_URLS")),
 		IndexPubKeyFile: getenv("TIKRAY_INDEX_PUBKEY_FILE"),
-		ProbeURL:        str("TIKRAY_PROBE_URL", defaultProbeURL),
+		ProbeURL:        getenv("TIKRAY_PROBE_URL"),
 	}
 	for _, m := range cfg.Mirrors {
 		if err := checkMirror(m); err != nil {

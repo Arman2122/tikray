@@ -18,13 +18,12 @@ func envOf(vars map[string]string) func(string) string {
 }
 
 func TestConfigFromEnv(t *testing.T) {
-	// The runner's three addresses default to the state's (TestDefaultsFromState),
-	// so the environment leaves them empty.
+	// The runner's three addresses and the probe URL default to the state's
+	// (TestDefaultsFromState), so the environment leaves them empty.
 	defaults := Config{
 		Data:     "/data",
 		Arch:     runtime.GOARCH,
 		Upstream: "https://github.com/XTLS/Xray-core",
-		ProbeURL: "https://www.gstatic.com/generate_204",
 	}
 
 	t.Run("defaults", func(t *testing.T) {
@@ -107,7 +106,10 @@ func TestConfigFromEnv(t *testing.T) {
 
 func TestDefaultsFromState(t *testing.T) {
 	data := t.TempDir()
-	writeState(t, data, func(st *store.State) { st.Network.Subnet = netip.MustParsePrefix("10.9.8.0/29") })
+	writeState(t, data, func(st *store.State) {
+		st.Network.Subnet = netip.MustParsePrefix("10.9.8.0/29")
+		st.Health.ProbeURL = "https://probe.state.example/204"
+	})
 
 	t.Run("no variables", func(t *testing.T) {
 		cfg, st, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": data}))
@@ -116,6 +118,10 @@ func TestDefaultsFromState(t *testing.T) {
 		}
 		if cfg.RunnerURL != "http://10.9.8.3:8080" || cfg.Socks != "10.9.8.3:1080" || cfg.XrayAPI != "10.9.8.3:10085" {
 			t.Errorf("runner URL %q, SOCKS %q, xray API %q; want the runner's .3 on 10.9.8.0/29", cfg.RunnerURL, cfg.Socks, cfg.XrayAPI)
+		}
+		// One probe URL for tikray's SOCKS probe and xray's observatory.
+		if cfg.ProbeURL != "https://probe.state.example/204" || cfg.ProbeURL != st.Health.ProbeURL {
+			t.Errorf("probe URL %q, want the state's %q", cfg.ProbeURL, st.Health.ProbeURL)
 		}
 		if st.Network.Subnet != netip.MustParsePrefix("10.9.8.0/29") {
 			t.Errorf("the state it was derived from has subnet %v", st.Network.Subnet)
@@ -128,22 +134,23 @@ func TestDefaultsFromState(t *testing.T) {
 			"TIKRAY_RUNNER_URL": "http://10.0.0.2:9090",
 			"TIKRAY_SOCKS":      "10.0.0.2:1081",
 			"TIKRAY_XRAY_API":   "10.0.0.2:10086",
+			"TIKRAY_PROBE_URL":  "https://probe.env.example/204",
 		}
 		cfg, _, err := loadConfig(envOf(all))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if cfg.RunnerURL != all["TIKRAY_RUNNER_URL"] || cfg.Socks != all["TIKRAY_SOCKS"] || cfg.XrayAPI != all["TIKRAY_XRAY_API"] {
-			t.Errorf("runner URL %q, SOCKS %q, xray API %q; want the variables", cfg.RunnerURL, cfg.Socks, cfg.XrayAPI)
+		if cfg.RunnerURL != all["TIKRAY_RUNNER_URL"] || cfg.Socks != all["TIKRAY_SOCKS"] || cfg.XrayAPI != all["TIKRAY_XRAY_API"] || cfg.ProbeURL != all["TIKRAY_PROBE_URL"] {
+			t.Errorf("runner URL %q, SOCKS %q, xray API %q, probe URL %q; want the variables", cfg.RunnerURL, cfg.Socks, cfg.XrayAPI, cfg.ProbeURL)
 		}
-		// Each one on its own leaves the other two to the state.
-		for _, key := range []string{"TIKRAY_RUNNER_URL", "TIKRAY_SOCKS", "TIKRAY_XRAY_API"} {
+		// Each one on its own leaves the others to the state.
+		for _, key := range []string{"TIKRAY_RUNNER_URL", "TIKRAY_SOCKS", "TIKRAY_XRAY_API", "TIKRAY_PROBE_URL"} {
 			cfg, _, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": data, key: all[key]}))
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := map[string]string{"TIKRAY_RUNNER_URL": cfg.RunnerURL, "TIKRAY_SOCKS": cfg.Socks, "TIKRAY_XRAY_API": cfg.XrayAPI}
-			want := map[string]string{"TIKRAY_RUNNER_URL": "http://10.9.8.3:8080", "TIKRAY_SOCKS": "10.9.8.3:1080", "TIKRAY_XRAY_API": "10.9.8.3:10085"}
+			got := map[string]string{"TIKRAY_RUNNER_URL": cfg.RunnerURL, "TIKRAY_SOCKS": cfg.Socks, "TIKRAY_XRAY_API": cfg.XrayAPI, "TIKRAY_PROBE_URL": cfg.ProbeURL}
+			want := map[string]string{"TIKRAY_RUNNER_URL": "http://10.9.8.3:8080", "TIKRAY_SOCKS": "10.9.8.3:1080", "TIKRAY_XRAY_API": "10.9.8.3:10085", "TIKRAY_PROBE_URL": "https://probe.state.example/204"}
 			want[key] = all[key]
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("only %s set: got %v, want %v", key, got, want)
@@ -159,6 +166,10 @@ func TestDefaultsFromState(t *testing.T) {
 		}
 		if cfg.RunnerURL != "http://172.31.255.3:8080" || cfg.Socks != "172.31.255.3:1080" || cfg.XrayAPI != "172.31.255.3:10085" {
 			t.Errorf("runner URL %q, SOCKS %q, xray API %q", cfg.RunnerURL, cfg.Socks, cfg.XrayAPI)
+		}
+		// The default state's probe URL, which is what M1 probed.
+		if cfg.ProbeURL != "https://www.gstatic.com/generate_204" {
+			t.Errorf("probe URL %q, want the default state's", cfg.ProbeURL)
 		}
 	})
 

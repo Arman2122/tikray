@@ -42,7 +42,8 @@
 // Environment (see Config): TIKRAY_DATA, TIKRAY_ARCH, TIKRAY_RUNNER_URL,
 // TIKRAY_SOCKS, TIKRAY_XRAY_API, TIKRAY_UPSTREAM, TIKRAY_MIRRORS,
 // TIKRAY_INDEX_URLS, TIKRAY_INDEX_PUBKEY_FILE, TIKRAY_PROBE_URL. The runner's
-// three addresses default to its address on the state's private subnet.
+// three addresses default to its address on the state's private subnet, and
+// the probe URL to the state's health.probe_url.
 package main
 
 import (
@@ -97,7 +98,7 @@ Configuration comes from the environment: TIKRAY_DATA, TIKRAY_ARCH,
 TIKRAY_RUNNER_URL, TIKRAY_SOCKS, TIKRAY_XRAY_API, TIKRAY_UPSTREAM,
 TIKRAY_MIRRORS, TIKRAY_INDEX_URLS, TIKRAY_INDEX_PUBKEY_FILE and
 TIKRAY_PROBE_URL. The runner's addresses default to the one the state's
-private subnet gives it.
+private subnet gives it, and the probe URL to the state's.
 `
 
 func main() {

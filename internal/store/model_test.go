@@ -324,6 +324,8 @@ func TestValidateRejects(t *testing.T) {
 		{"server name with an escape", func(s *State) { s.Servers[0].Name = "Frank\x1b[2Jfurt" }, "servers[0].name"},
 		{"server name with a newline", func(s *State) { s.Servers[0].Name = "Frank\nfurt" }, "servers[0].name"},
 		{"server name with a right-to-left override", func(s *State) { s.Servers[0].Name = "Frank\u202efurt" }, "servers[0].name"},
+		{"server name with a line separator", func(s *State) { s.Servers[0].Name = "Frank furt" }, "servers[0].name"},
+		{"server name with a paragraph separator", func(s *State) { s.Servers[0].Name = "Frank furt" }, "servers[0].name"},
 		{"server name with DEL", func(s *State) { s.Servers[0].Name = "Frank\x7ffurt" }, "servers[0].name"},
 		{"server name with a C1 control", func(s *State) { s.Servers[0].Name = "Frank\u009bfurt" }, "servers[0].name"},
 		{"server name with a bidi isolate", func(s *State) { s.Servers[0].Name = "Frank\u2066furt\u2069" }, "servers[0].name"},
@@ -377,6 +379,7 @@ func TestValidateRejects(t *testing.T) {
 		{"subscription name with an escape", func(s *State) { s.Subscriptions[0].Name = "Main\x1b]0;owned\x07" }, "subscriptions[0].name"},
 		{"subscription name with a newline", func(s *State) { s.Subscriptions[0].Name = "Main\r\nSecond" }, "subscriptions[0].name"},
 		{"subscription name with a right-to-left override", func(s *State) { s.Subscriptions[0].Name = "Main\u202e" }, "subscriptions[0].name"},
+		{"subscription name with a line separator", func(s *State) { s.Subscriptions[0].Name = "Main\u2028" }, "subscriptions[0].name"},
 		{"subscription url ftp", func(s *State) { s.Subscriptions[0].URL = "ftp://x" }, "subscriptions[0].url"},
 		{"subscription url relative", func(s *State) { s.Subscriptions[0].URL = "/sub/token" }, "subscriptions[0].url"},
 		{"subscription url without scheme", func(s *State) { s.Subscriptions[0].URL = "sub.example.com/token" }, "subscriptions[0].url"},

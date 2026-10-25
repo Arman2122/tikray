@@ -166,6 +166,29 @@ func xhttpDownload(in string, insecure bool) string {
 		`"xhttpSettings":{"path":"/up",` + leg + `}}`
 }
 
+// finalmaskStream is the stream JSON (a `"streamSettings":{...}` member) of
+// xhttp over TLS with one finalmask udp mask of the given type and settings.
+// xray builds the TLS object a mask carries under tlsConfig, and refuses
+// allowInsecure there as it does in tlsSettings.
+func finalmaskStream(maskType, settings string) string {
+	return fmt.Sprintf(`"streamSettings":{"network":"xhttp","security":"tls","tlsSettings":{"serverName":"example.com"},`+
+		`"finalmask":{"udp":[{"type":%q,"settings":%s}]}}`, maskType, settings)
+}
+
+// xdnsMask is the settings of an xdns mask whose one resolver has tlsConfig,
+// the key as the caller spells it: the resolvers[].tlsConfig of
+// XDNSResolver (infra/conf/transport_finalmask.go).
+func xdnsMask(tlsKey, tlsConfig string) string {
+	return fmt.Sprintf(`{"domains":[{"names":["t.example.com"]}],"resolvers":[{"addrs":["https://doh.example/dns-query"],%q:%s}]}`,
+		tlsKey, tlsConfig)
+}
+
+// realmMask is the settings of a realm mask with tlsConfig, directly in its
+// settings (Realm, infra/conf/transport_finalmask.go).
+func realmMask(tlsConfig string) string {
+	return `{"url":"realm://tok@realm.example:443/room","stunServers":["stun.example:3478"],"tlsConfig":` + tlsConfig + `}`
+}
+
 const (
 	tlsInsecure = `"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"serverName":"example.com","allowInsecure":true}}`
 	tlsSecure   = `"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"serverName":"example.com","allowInsecure":false}}`
@@ -311,6 +334,23 @@ func TestCheck(t *testing.T) {
 		{name: "allowInsecure outside tlsSettings", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","allowInsecure":true,"realitySettings":{"allowInsecure":true}}`)},
 		{name: "tlsSettings outside streamSettings", outbound: `{"protocol":"vless","settings":{"vnext":[{"address":"1.2.3.4","port":443,"users":[{"id":"` + testID + `","encryption":"none","tlsSettings":{"allowInsecure":true}}]}]},` + tls + `}`},
 		{name: "xhttp download leg with allowInsecure a string", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","xhttpSettings":{"downloadSettings":{"tlsSettings":{"allowInsecure":"true"}}}}`)},
+
+		// The masks of finalmask carry a TLS object of their own under
+		// tlsConfig (xdns in each resolver, realm in its settings), which
+		// xray builds like tlsSettings and refuses allowInsecure in too.
+		{name: "xdns mask with allowInsecure", outbound: vlessNested("1.2.3.4", "none", finalmaskStream("xdns", xdnsMask("tlsConfig", `{"serverName":"doh.example","allowInsecure":true}`))), reason: "allowInsecure"},
+		{name: "xdns mask with allowInsecure false", outbound: vlessNested("1.2.3.4", "none", finalmaskStream("xdns", xdnsMask("tlsConfig", `{"serverName":"doh.example","allowInsecure":false}`)))},
+		{name: "xdns mask with allowInsecure beside a pinned certificate", outbound: vlessNested("1.2.3.4", "none", finalmaskStream("xdns", xdnsMask("tlsConfig", `{"allowInsecure":true,"pinnedPeerCertSha256":"`+strings.Repeat("ab", 32)+`"}`))), reason: "allowInsecure"},
+		{name: "xdns mask with keys in other cases", outbound: vlessNested("1.2.3.4", "none", finalmaskStream("xdns", xdnsMask("TLSConfig", `{"AllowInsecure":true}`))), reason: "allowInsecure"},
+		{name: "xdns mask without tlsConfig", outbound: vlessNested("1.2.3.4", "none", finalmaskStream("xdns", `{"domains":[{"names":["t.example.com"]}],"resolvers":[{"addrs":["1.1.1.1"]}]}`))},
+		{name: "realm mask with allowInsecure", outbound: vlessNested("1.2.3.4", "none", finalmaskStream("realm", realmMask(`{"allowInsecure":true}`))), reason: "allowInsecure"},
+		{name: "realm mask with allowInsecure false", outbound: vlessNested("1.2.3.4", "none", finalmaskStream("realm", realmMask(`{"allowInsecure":false}`)))},
+		{name: "mask with allowInsecure in a stream without security", outbound: vlessNested("203.0.113.10", "none", `"streamSettings":{"network":"kcp","finalmask":{"udp":[{"type":"realm","settings":`+realmMask(`{"allowInsecure":true}`)+`}]}}`), reason: "allowInsecure"},
+		{name: "tlsConfig with allowInsecure under another key of a mask", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","finalmask":{"udp":[{"type":"x","settings":{"y":[{"tlsConfig":{"allowInsecure":true}}]}}]}}`), reason: "allowInsecure"},
+		{name: "mask whose tlsConfig is a string", outbound: vlessNested("1.2.3.4", "none", finalmaskStream("realm", realmMask(`"allowInsecure"`)))},
+		{name: "mask whose allowInsecure is a string", outbound: vlessNested("1.2.3.4", "none", finalmaskStream("realm", realmMask(`{"allowInsecure":"true"}`)))},
+		// xray reads tlsConfig in streamSettings alone, as it does tlsSettings.
+		{name: "tlsConfig outside streamSettings", outbound: `{"protocol":"vless","settings":{"vnext":[{"address":"1.2.3.4","port":443,"users":[{"id":"` + testID + `","encryption":"none","tlsConfig":{"allowInsecure":true}}]}]},` + tls + `}`},
 
 		// Shadowsocks methods.
 		{name: "ss method none", outbound: ssNested("none", "pw-for-none-method"), reason: "Shadowsocks", secrets: []string{"pw-for-none-method"}},
