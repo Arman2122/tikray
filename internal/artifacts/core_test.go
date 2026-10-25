@@ -276,14 +276,17 @@ func (f *fakeReleases) add(t *testing.T, ver string) string {
 	return shaOf(string(zip))
 }
 
-// addZipOnly publishes a release of ver without a .dgst and returns the zip's SHA-256.
-func (f *fakeReleases) addZipOnly(t *testing.T, ver string) string {
+// countingServer answers every request with body and counts the requests for a zip.
+func countingServer(t *testing.T, body []byte) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
-	zip := releaseBytes(t, "bin-"+ver)
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.files[assetPath(ver)] = zip
-	return shaOf(string(zip))
+	zips := new(atomic.Int32)
+	srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".zip") {
+			zips.Add(1)
+		}
+		w.Write(body)
+	})
+	return srv, zips
 }
 
 // take removes a file from the server and returns it.
@@ -667,37 +670,103 @@ func TestUpdateRefusesOld(t *testing.T) {
 }
 
 func TestUpdateUnverified(t *testing.T) {
-	e := newCoreEnv(t, "26.3.27")
-	sum := e.rel.addZipOnly(t, "26.10.21")
-
-	res, err := e.u.Update(bg, "26.10.21", UpdateOptions{})
-	wantOutcome(t, res, err, OutcomeRefused)
-	if !errors.Is(err, ErrNoHash) {
-		t.Errorf("err = %v, want ErrNoHash", err)
-	}
-	wantDetail(t, res, "consent")
-	wantActions(t, e.runner)
-	for _, h := range e.rel.hitList() {
-		if h == assetPath("26.10.21") {
-			t.Error("the zip was downloaded without a hash or consent")
+	good := releaseBytes(t, "bin-26.10.21")
+	// setup makes direct answer every request, the .dgst included, with a 200
+	// block page, and configures no hash index, so nobody knows the hash. The
+	// chain is direct, then the mirror if there is one, then an inbox holding
+	// inboxFile (nothing when it is nil). directZips counts direct's zip requests.
+	setup := func(t *testing.T, inboxFile []byte, mirror *httptest.Server) (e *coreEnv, directZips *atomic.Int32) {
+		t.Helper()
+		e = newCoreEnv(t, "26.3.27")
+		var junk *httptest.Server
+		junk, directZips = countingServer(t, []byte(htmlPage))
+		direct := Direct(junk.URL, junk.Client())
+		e.u.Verify = Verifier{Upstream: Chain{Sources: []Source{direct}}}
+		sources := []Source{direct}
+		if mirror != nil {
+			sources = append(sources, Mirror(mirror.URL+"/m/{version}/{file}", mirror.Client()))
 		}
+		inbox := t.TempDir()
+		if inboxFile != nil {
+			if err := os.WriteFile(filepath.Join(inbox, testAsset), inboxFile, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		e.u.Fetch = Chain{Sources: append(sources, Inbox(inbox))}
+		return e, directZips
 	}
-	if got := e.slots(t); !reflect.DeepEqual(got, []string{"26.3.27"}) {
-		t.Errorf("slots = %v", got)
+	wantNoInstall := func(t *testing.T, e *coreEnv) {
+		t.Helper()
+		if got := e.slots(t); !reflect.DeepEqual(got, []string{"26.3.27"}) {
+			t.Errorf("slots = %v", got)
+		}
+		wantActions(t, e.runner)
+		e.wantClean(t)
 	}
 
-	res, err = e.u.Update(bg, "26.10.21", UpdateOptions{AllowUnverified: true})
-	wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
-	if res.Verified != "unverified" || res.Source != "direct" {
-		t.Errorf("Result = %+v, want verified unverified from direct", res)
-	}
-	if m := e.meta(t, "26.10.21"); m.Verified != "unverified" || m.ZipSHA256 != sum {
-		t.Errorf("meta.json = %+v, want verified unverified, zip %s", m, sum)
-	}
-	if h := e.history(t); len(h) != 2 || h[0].Outcome != OutcomeRefused || h[1].Outcome != runnerapi.OutcomeCommitted {
-		t.Errorf("history = %+v", h)
-	}
-	e.wantClean(t)
+	t.Run("needs consent", func(t *testing.T) {
+		e, directZips := setup(t, good, nil)
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{})
+		wantOutcome(t, res, err, OutcomeRefused)
+		if !errors.Is(err, ErrNoHash) {
+			t.Errorf("err = %v, want ErrNoHash", err)
+		}
+		wantDetail(t, res, "consent")
+		if n := directZips.Load(); n != 0 {
+			t.Errorf("the zip was downloaded %d times without a hash or consent", n)
+		}
+		wantNoInstall(t, e)
+		if h := e.history(t); len(h) != 1 || h[0].Outcome != OutcomeRefused {
+			t.Errorf("history = %+v", h)
+		}
+	})
+	t.Run("from the inbox", func(t *testing.T) {
+		e, directZips := setup(t, good, nil)
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{AllowUnverified: true})
+		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+		if res.Source != "inbox" || res.Verified != "unverified" {
+			t.Errorf("Result = %+v, want source inbox, verified unverified", res)
+		}
+		if m := e.meta(t, "26.10.21"); m.Source != "inbox" || m.Verified != "unverified" || m.ZipSHA256 != shaOf(string(good)) {
+			t.Errorf("meta.json = %+v, want source inbox, verified unverified, the inbox zip's hash", m)
+		}
+		if n := directZips.Load(); n != 0 {
+			t.Errorf("direct was asked for the zip %d times; an unverified core comes only from the inbox", n)
+		}
+		e.wantClean(t)
+	})
+	t.Run("never from the network", func(t *testing.T) {
+		mirror, mirrorZips := countingServer(t, good) // a real core zip, but nobody knows its hash
+		e, directZips := setup(t, nil, mirror)
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{AllowUnverified: true})
+		wantOutcome(t, res, err, OutcomeRefused)
+		wantDetail(t, res, "inbox")
+		if n := mirrorZips.Load() + directZips.Load(); n != 0 {
+			t.Errorf("the network was asked for the zip %d times", n)
+		}
+		wantNoInstall(t, e)
+	})
+	t.Run("inbox holds junk", func(t *testing.T) {
+		e, _ := setup(t, []byte(htmlPage), nil)
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{AllowUnverified: true})
+		wantOutcome(t, res, err, OutcomeRefused)
+		wantDetail(t, res, "inbox: core zip")
+		wantNoInstall(t, e)
+	})
+	t.Run("no inbox source", func(t *testing.T) {
+		e, directZips := setup(t, good, nil)
+		e.u.Fetch.Sources = e.u.Fetch.Sources[:1] // direct only
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{AllowUnverified: true})
+		wantOutcome(t, res, err, OutcomeRefused)
+		if !errors.Is(err, ErrNoHash) {
+			t.Errorf("err = %v, want ErrNoHash", err)
+		}
+		wantDetail(t, res, "only installed from the inbox")
+		if n := directZips.Load(); n != 0 {
+			t.Errorf("direct was asked for the zip %d times", n)
+		}
+		wantNoInstall(t, e)
+	})
 }
 
 func TestUpdateNoop(t *testing.T) {

@@ -73,7 +73,9 @@ type UpdateOptions struct {
 	// ConfigFile is an xray config to run the core with; empty keeps the
 	// active one.
 	ConfigFile string
-	// AllowUnverified lets a zip whose SHA-256 nobody knows be installed.
+	// AllowUnverified lets a zip whose SHA-256 nobody knows be installed. Such
+	// a zip is taken only from Fetch's Inbox sources: the consent is for a
+	// manual upload, never for an unverified download.
 	AllowUnverified bool
 }
 
@@ -244,8 +246,9 @@ func (u *CoreUpdater) active(ctx context.Context) (*runnerapi.Selection, error) 
 }
 
 // slotFor returns the installed slot of v. Without one it finds the zip's
-// SHA-256, fetches a zip that has it (any zip when unverified with consent)
-// into a temporary directory, and installs it.
+// SHA-256, fetches a zip that has it into a temporary directory, and installs
+// it. When nobody knows the hash, consent admits only a manual upload (§4.3):
+// the zip comes from the chain's inbox sources alone and must be a core zip.
 func (u *CoreUpdater) slotFor(ctx context.Context, v xrayver.Version, allowUnverified bool) (Slot, error) {
 	slots, err := ListCores(u.coresDir())
 	if err != nil {
@@ -261,10 +264,15 @@ func (u *CoreUpdater) slotFor(ctx context.Context, v xrayver.Version, allowUnver
 		return Slot{}, err
 	}
 	r := Request{Version: v, File: file, Arch: u.arch()}
+	chain := u.Fetch
 	want, err := u.Verify.Expected(ctx, r)
 	if errors.Is(err, ErrNoHash) {
 		if !allowUnverified {
 			return Slot{}, fmt.Errorf("%w; installing it unverified needs explicit consent", err)
+		}
+		chain = inboxOnly(u.Fetch)
+		if len(chain.Sources) == 0 {
+			return Slot{}, fmt.Errorf("%w; an unverified core is only installed from the inbox (a manual upload), and no inbox source is configured", err)
 		}
 		want, err = Verified{Method: "unverified"}, nil
 	}
@@ -278,12 +286,18 @@ func (u *CoreUpdater) slotFor(ctx context.Context, v xrayver.Version, allowUnver
 	defer os.RemoveAll(dir)
 	zipPath := filepath.Join(dir, file)
 	var sum string
-	src, err := u.Fetch.Fetch(ctx, r, zipPath, func(path string) error {
+	src, err := chain.Fetch(ctx, r, zipPath, func(path string) error {
 		got, err := FileSHA256(path)
 		if err != nil {
 			return err
 		}
-		if want.SHA256 != "" && got != want.SHA256 {
+		switch {
+		case want.SHA256 == "":
+			// Unverified: a file that cannot be installed must not end the chain.
+			if err := checkCoreZip(path); err != nil {
+				return err
+			}
+		case got != want.SHA256:
 			return fmt.Errorf("SHA-256 is %s, the %s says %s", got, want.Method, want.SHA256)
 		}
 		sum = got
@@ -294,6 +308,18 @@ func (u *CoreUpdater) slotFor(ctx context.Context, v xrayver.Version, allowUnver
 	}
 	u.logf("xray-core %s: fetched %s from %s (%s)", v, file, src, want.Method)
 	return InstallCore(u.coresDir(), v, zipPath, Meta{Source: src, ZipSHA256: sum, Verified: want.Method, InstalledAt: u.now()})
+}
+
+// inboxOnly returns c with only its Inbox sources.
+func inboxOnly(c Chain) Chain {
+	var keep []Source
+	for _, s := range c.Sources {
+		if _, ok := s.(inbox); ok {
+			keep = append(keep, s)
+		}
+	}
+	c.Sources = keep
+	return c
 }
 
 // trial puts sel on trial and drives it to its end. A commit prunes the slots.

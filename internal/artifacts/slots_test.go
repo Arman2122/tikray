@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -276,7 +277,24 @@ func TestInstallRejects(t *testing.T) {
 			if slots, err := ListCores(cores); err != nil || len(slots) != 0 {
 				t.Errorf("ListCores = %v, %v", slots, err)
 			}
+			if err := checkCoreZip(tc.zip); err == nil {
+				t.Error("checkCoreZip accepts what InstallCore rejects")
+			}
 		})
+	}
+}
+
+func TestCheckCoreZip(t *testing.T) {
+	if err := checkCoreZip(releaseZip(t, "bin-26.10.21")); err != nil {
+		t.Errorf("a release zip: %v", err)
+	}
+	at := forgeSize(t, zipOf(t, zentry{name: "xray", body: "bin"}), maxCoreBytes)
+	if err := checkCoreZip(at); err != nil {
+		t.Errorf("xray of exactly 200 MiB by its header: %v", err)
+	}
+	over := forgeSize(t, zipOf(t, zentry{name: "xray", body: "bin"}), maxCoreBytes+1)
+	if err := checkCoreZip(over); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Errorf("xray over 200 MiB by its header: err = %v, want the limit", err)
 	}
 }
 

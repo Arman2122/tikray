@@ -124,32 +124,14 @@ func installCore(coresDir string, v xrayver.Version, zipPath string, m Meta, lim
 // extractCore writes the zip's root "xray" entry to dst at mode 0755 and
 // returns the lowercase hex SHA-256 of what it wrote.
 func extractCore(zipPath, dst string, limit int64) (string, error) {
-	zr, err := zip.OpenReader(zipPath)
-	// A name like ../x only matters to a program that extracts every entry.
-	if err != nil && !errors.Is(err, zip.ErrInsecurePath) {
-		return "", fmt.Errorf("core zip: %w", err)
+	zr, err := openCoreZip(zipPath)
+	if err != nil {
+		return "", err
 	}
 	defer zr.Close()
-
-	var entry *zip.File
-	for _, f := range zr.File {
-		if f.Name != coreFile {
-			continue
-		}
-		if entry != nil {
-			return "", fmt.Errorf("core zip: more than one %q entry", coreFile)
-		}
-		entry = f
-	}
-	switch {
-	case entry == nil:
-		return "", fmt.Errorf("core zip: no %q entry at the root", coreFile)
-	case !entry.Mode().IsRegular():
-		return "", fmt.Errorf("core zip: %q is not a regular file (mode %v)", coreFile, entry.Mode())
-	case entry.UncompressedSize64 == 0:
-		return "", fmt.Errorf("core zip: %q is empty", coreFile)
-	case entry.UncompressedSize64 > uint64(limit):
-		return "", fmt.Errorf("core zip: %q is %d bytes, over the %d limit", coreFile, entry.UncompressedSize64, limit)
+	entry, err := coreEntry(zr.File, limit)
+	if err != nil {
+		return "", err
 	}
 	rc, err := entry.Open()
 	if err != nil {
@@ -173,6 +155,55 @@ func extractCore(zipPath, dst string, limit int64) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// checkCoreZip tells, from the zip's directory alone, whether InstallCore can
+// take the file at zipPath: a zip whose only root "xray" entry is a non-empty
+// regular file of at most 200 MiB. InstallCore still checks what it extracts.
+func checkCoreZip(zipPath string) error {
+	zr, err := openCoreZip(zipPath)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	_, err = coreEntry(zr.File, maxCoreBytes)
+	return err
+}
+
+func openCoreZip(zipPath string) (*zip.ReadCloser, error) {
+	zr, err := zip.OpenReader(zipPath)
+	// A name like ../x only matters to a program that extracts every entry.
+	if err != nil && !errors.Is(err, zip.ErrInsecurePath) {
+		return nil, fmt.Errorf("core zip: %w", err)
+	}
+	return zr, nil
+}
+
+// coreEntry returns the root "xray" entry among files. It must be the only
+// one, and its header must say it is a non-empty regular file of at most
+// limit bytes.
+func coreEntry(files []*zip.File, limit int64) (*zip.File, error) {
+	var entry *zip.File
+	for _, f := range files {
+		if f.Name != coreFile {
+			continue
+		}
+		if entry != nil {
+			return nil, fmt.Errorf("core zip: more than one %q entry", coreFile)
+		}
+		entry = f
+	}
+	switch {
+	case entry == nil:
+		return nil, fmt.Errorf("core zip: no %q entry at the root", coreFile)
+	case !entry.Mode().IsRegular():
+		return nil, fmt.Errorf("core zip: %q is not a regular file (mode %v)", coreFile, entry.Mode())
+	case entry.UncompressedSize64 == 0:
+		return nil, fmt.Errorf("core zip: %q is empty", coreFile)
+	case entry.UncompressedSize64 > uint64(limit):
+		return nil, fmt.Errorf("core zip: %q is %d bytes, over the %d limit", coreFile, entry.UncompressedSize64, limit)
+	}
+	return entry, nil
 }
 
 // writeSynced creates path, which must not exist, fills it, sets its mode
