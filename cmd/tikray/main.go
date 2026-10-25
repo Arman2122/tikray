@@ -580,24 +580,25 @@ func proxyHealthy(runner *runnerapi.Client) func(context.Context) bool {
 	}
 }
 
-// healthChecks are the probes an update must pass: the proxy carries traffic
-// (when socks is set) and xray's API answers. The SOCKS probe is left out
-// while the config sends socks-in to block, which it does when it has no
-// server to proxy through.
-func healthChecks(cfg Config, runner *runnerapi.Client, socks bool) []artifacts.HealthChecker {
-	var checks []artifacts.HealthChecker
-	if socks {
-		checks = append(checks, artifacts.SOCKSProbe{Addr: cfg.Socks, URL: cfg.ProbeURL, Timeout: probeTimeout})
-	}
-	return append(checks, artifacts.XrayAPIProbe{Runner: runner, Server: cfg.XrayAPI})
+// healthChecks are the probes of an update: health is what every trial needs,
+// xray's API answering, and proxy is the end-to-end probe, traffic through the
+// SOCKS proxy. The updater asks a core update or rollback for both, and a
+// config change for proxy only if it passes on the active config (see
+// artifacts.CoreUpdater.ProxyHealth). It is the caller that leaves proxy out,
+// as nil, while the config sends socks-in to block, which it does when it has
+// no server to proxy through (see newUpdater).
+func healthChecks(cfg Config, runner *runnerapi.Client) (health, proxy artifacts.HealthChecker) {
+	health = artifacts.XrayAPIProbe{Runner: runner, Server: cfg.XrayAPI}
+	proxy = artifacts.SOCKSProbe{Addr: cfg.Socks, URL: cfg.ProbeURL, Timeout: probeTimeout}
+	return health, proxy
 }
 
 // newUpdater wires the CoreUpdater of §4: the fetch chain in the order of
 // §4.2 (direct, the proxy, the mirrors, the inbox), a verifier whose .dgst
 // only ever comes from upstream (§4.3), and a health check that needs the
-// proxy to carry traffic (if socks) and xray's API to answer. rend renders the
-// config of an update, rollback or apply; nil leaves an update to its --config
-// file.
+// proxy to carry traffic (ProxyHealth, if socks) and xray's API to answer
+// (Health). rend renders the config of an update, rollback or apply; nil leaves
+// an update to its --config file.
 func newUpdater(cfg Config, runner *runnerapi.Client, log io.Writer, rend artifacts.Renderer, socks bool) (*artifacts.CoreUpdater, error) {
 	var pub []byte
 	if cfg.IndexPubKeyFile != "" {
@@ -615,15 +616,20 @@ func newUpdater(cfg Config, runner *runnerapi.Client, log io.Writer, rend artifa
 		fetch = append(fetch, artifacts.Mirror(m, nil))
 	}
 	fetch = append(fetch, artifacts.Inbox(filepath.Join(cfg.Data, "inbox")))
+	health, proxy := healthChecks(cfg, runner)
+	if !socks {
+		proxy = nil
+	}
 	return &artifacts.CoreUpdater{
-		Data:   cfg.Data,
-		Arch:   cfg.Arch,
-		Fetch:  artifacts.Chain{Sources: fetch},
-		Verify: artifacts.Verifier{Upstream: artifacts.Chain{Sources: upstream}, IndexURLs: cfg.IndexURLs, IndexPub: pub},
-		Runner: runner,
-		Render: rend,
-		Health: artifacts.AllOf(healthChecks(cfg, runner, socks)...),
-		Log:    log,
+		Data:        cfg.Data,
+		Arch:        cfg.Arch,
+		Fetch:       artifacts.Chain{Sources: fetch},
+		Verify:      artifacts.Verifier{Upstream: artifacts.Chain{Sources: upstream}, IndexURLs: cfg.IndexURLs, IndexPub: pub},
+		Runner:      runner,
+		Render:      rend,
+		Health:      health,
+		ProxyHealth: proxy,
+		Log:         log,
 	}, nil
 }
 

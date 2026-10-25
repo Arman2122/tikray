@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -671,6 +672,88 @@ func TestUpdateUnhealthy(t *testing.T) {
 	}
 	if got := e.runner.activeCore(); got != "26.3.27" {
 		t.Errorf("runner's active core = %q, want 26.3.27", got)
+	}
+}
+
+// A core update has no baseline: the proxy probe must pass on the new core
+// whatever it says on the active one, since a core that cannot carry traffic is
+// no outage to carry on through. Rollbacks, which are core changes too, are the
+// same.
+func TestUpdateRequiresProxyRegardless(t *testing.T) {
+	type op struct {
+		name string
+		do   func(e *coreEnv) (Result, error)
+	}
+	setup := func(t *testing.T) *coreEnv {
+		e := newCoreEnv(t, "26.10.21")
+		e.rel.add(t, "26.12.1")
+		install(t, e.cores(), "26.3.27")
+		e.writeHistory(t, committedResult("26.3.27", ""), committedResult("26.10.21", "26.3.27"))
+		return e
+	}
+	for _, o := range []op{
+		{"update", func(e *coreEnv) (Result, error) { return e.u.Update(bg, "26.12.1", UpdateOptions{}) }},
+		{"rollback", func(e *coreEnv) (Result, error) { return e.u.Rollback(bg) }},
+	} {
+		t.Run(o.name+" fails", func(t *testing.T) {
+			e := setup(t)
+			p := newProxyProbe(e, failingProxy)
+
+			res, err := o.do(e)
+			wantOutcome(t, res, err, OutcomeUnhealthy)
+			wantDetail(t, res, "socks probe: connection refused")
+			if strings.Contains(res.Detail, baselineNote) {
+				t.Errorf("Detail = %q, want no baseline note", res.Detail)
+			}
+			wantActions(t, e.runner, "trial", "abort")
+			if len(p.calls()) < 2 {
+				t.Errorf("the proxy probe ran %d times, want retries", len(p.calls()))
+			}
+			p.wantNoBaseline(t)
+			if got := e.runner.activeCore(); got != "26.10.21" {
+				t.Errorf("runner's active core = %q, want 26.10.21", got)
+			}
+		})
+		t.Run(o.name+" passes", func(t *testing.T) {
+			e := setup(t)
+			p := newProxyProbe(e, func(int) error { return nil })
+
+			res, err := o.do(e)
+			wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+			if len(p.calls()) == 0 {
+				t.Error("the proxy probe never ran")
+			}
+			p.wantNoBaseline(t)
+			if e.health.n.Load() == 0 {
+				t.Error("the health check never ran")
+			}
+		})
+	}
+}
+
+// redactedError says the redacted text and keeps the error behind it.
+func TestRedactedError(t *testing.T) {
+	sentinel := errors.New("sentinel s3cret-id")
+	var tf *runnerapi.TestFailedError
+	inner := fmt.Errorf("rejected: %w", errors.Join(sentinel, &runnerapi.TestFailedError{Output: "out"}))
+
+	u := &CoreUpdater{Redact: func(s string) string { return strings.ReplaceAll(s, "s3cret-id", "‹redacted›") }}
+	err := u.redactError(inner)
+	if got, want := err.Error(), "rejected: sentinel ‹redacted›\nrunnerapi: xray run -test failed: out"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	if !errors.Is(err, sentinel) || !errors.As(err, &tf) {
+		t.Errorf("errors.Is, As through %v: %v, %v; want both to see the wrapped errors", err, errors.Is(err, sentinel), errors.As(err, &tf))
+	}
+	if got := errors.Unwrap(err); got != inner {
+		t.Errorf("Unwrap() = %v, want the original error", got)
+	}
+
+	if got := (&CoreUpdater{}).redactError(inner); got != inner {
+		t.Errorf("without Redact: %v, want the error itself", got)
+	}
+	if got := u.redactError(nil); got != nil {
+		t.Errorf("redactError(nil) = %v", got)
 	}
 }
 

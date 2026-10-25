@@ -1265,13 +1265,31 @@ func TestHealthFollowsServers(t *testing.T) {
 	wantAPI := artifacts.XrayAPIProbe{Runner: runner, Server: "10.9.8.3:10085"}
 	wantSOCKS := artifacts.SOCKSProbe{Addr: "10.9.8.3:1080", URL: "https://probe.example/204", Timeout: probeTimeout}
 
-	// With no server, socks-in goes to block and its probe could only fail.
-	if got := healthChecks(cfg, runner, false); !reflect.DeepEqual(got, []artifacts.HealthChecker{wantAPI}) {
-		t.Errorf("without the SOCKS probe: %#v, want the xray API probe alone", got)
+	// The pair: the checks every trial needs, and the end-to-end proxy probe.
+	health, proxy := healthChecks(cfg, runner)
+	if !reflect.DeepEqual(health, wantAPI) {
+		t.Errorf("health: %#v, want the xray API probe alone", health)
 	}
-	// M1's order: the proxy first, then xray's API.
-	if got := healthChecks(cfg, runner, true); !reflect.DeepEqual(got, []artifacts.HealthChecker{wantSOCKS, wantAPI}) {
-		t.Errorf("with the SOCKS probe: %#v, want both", got)
+	if !reflect.DeepEqual(proxy, wantSOCKS) {
+		t.Errorf("proxy: %#v, want the SOCKS probe", proxy)
+	}
+
+	// With no server, socks-in goes to block and its probe could only fail:
+	// the updater has no proxy probe.
+	u, err := newUpdater(cfg, runner, io.Discard, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(u.Health, wantAPI) || u.ProxyHealth != nil {
+		t.Errorf("without the SOCKS probe: Health %#v, ProxyHealth %#v; want the xray API probe alone", u.Health, u.ProxyHealth)
+	}
+	// With a server both are set, and Health no longer holds the SOCKS probe.
+	u, err = newUpdater(cfg, runner, io.Discard, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(u.Health, wantAPI) || !reflect.DeepEqual(u.ProxyHealth, wantSOCKS) {
+		t.Errorf("with the SOCKS probe: Health %#v, ProxyHealth %#v; want the xray API probe and the SOCKS probe", u.Health, u.ProxyHealth)
 	}
 }
 
@@ -1294,15 +1312,19 @@ func TestHealthProbesOfACommand(t *testing.T) {
 
 	t.Run("no server, no SOCKS probe", func(t *testing.T) {
 		code, res, _ := run(t, noServer, "apply")
-		if code != 0 || res.Outcome != runnerapi.OutcomeCommitted {
-			t.Errorf("exit %d, result %+v; want a commit without the SOCKS probe", code, res)
+		if code != 0 || res.Outcome != runnerapi.OutcomeCommitted || res.Detail != "" {
+			t.Errorf("exit %d, result %+v; want a commit without the SOCKS probe, and nothing to note", code, res)
 		}
 	})
 
-	t.Run("a server, the SOCKS probe", func(t *testing.T) {
+	// The SOCKS probe is there, and nothing listens: it fails on the active
+	// config as well, so an apply, such as a kill switch, goes through all the
+	// same. (That an apply is unhealthy where the probe passes on the active
+	// config and fails on the candidate is artifacts' test.)
+	t.Run("a server, an outage", func(t *testing.T) {
 		code, res, _ := run(t, withServer, "apply")
-		if code != 1 || res.Outcome != artifacts.OutcomeUnhealthy || !strings.Contains(res.Detail, "socks probe") {
-			t.Errorf("exit %d, result %+v; want unhealthy through the SOCKS probe", code, res)
+		if code != 0 || res.Outcome != runnerapi.OutcomeCommitted || !strings.Contains(res.Detail, "the proxy probe fails on the active config too") {
+			t.Errorf("exit %d, result %+v; want a commit that notes the failed baseline", code, res)
 		}
 	})
 
