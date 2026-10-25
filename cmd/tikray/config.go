@@ -52,16 +52,17 @@ const (
 // stateDir is where the CLI keeps the state, under the data root.
 func stateDir(data string) string { return filepath.Join(data, "state") }
 
-// readState reads the state in <data>/state. It never writes the state: a
-// directory without one gives the default state, and the store is not changed.
-// Opening the store makes the directory (0700) if it is missing.
-func readState(data string) (store.State, error) {
+// readState reads the state in <data>/state and its revision. It never writes
+// the state: a directory without one gives the default state at revision 0,
+// and the store is not changed. Opening the store makes the directory (0700)
+// if it is missing.
+func readState(data string) (store.State, uint64, error) {
 	s, err := store.Open(stateDir(data))
 	if err != nil {
-		return store.State{}, err
+		return store.State{}, 0, err
 	}
-	st, _ := s.State()
-	return st, nil
+	st, rev := s.State()
+	return st, rev, nil
 }
 
 // withState returns c with the runner's address, RunnerURL, Socks and XrayAPI,
@@ -82,15 +83,16 @@ func (c Config) withState(st store.State) Config {
 
 // loadConfig reads the environment and the state, once, and returns the
 // configuration they give together with the state it was derived from. The
-// environment is checked first: a bad one never opens the state.
+// environment is checked first: a bad one never opens the state. A state
+// that cannot be read gives an error that starts "the state can't be read: ".
 func loadConfig(getenv func(string) string) (Config, store.State, error) {
 	cfg, err := configFromEnv(getenv)
 	if err != nil {
 		return Config{}, store.State{}, err
 	}
-	st, err := readState(cfg.Data)
+	st, _, err := readState(cfg.Data)
 	if err != nil {
-		return Config{}, store.State{}, err
+		return Config{}, store.State{}, fmt.Errorf("the state can't be read: %w", err)
 	}
 	return cfg.withState(st), st, nil
 }

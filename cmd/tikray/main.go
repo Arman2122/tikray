@@ -31,9 +31,10 @@
 //
 // The state is <data>/state. A command reads it once and never writes it; the
 // daemon owns it. A state that cannot be read fails the command, except
-// update --config, which only takes the runner's addresses from it: that goes
-// on with a warning, using the addresses of a fresh install where no variable
-// names them.
+// update --config and core status, which only take the runner's addresses
+// from it: they go on with a warning, using the addresses of a fresh install
+// where no variable names them. config render, which has nothing to render
+// then, says that the state can't be read before it asks the runner anything.
 //
 // Environment (see Config): TIKRAY_DATA, TIKRAY_ARCH, TIKRAY_RUNNER_URL,
 // TIKRAY_SOCKS, TIKRAY_XRAY_API, TIKRAY_UPSTREAM, TIKRAY_MIRRORS,
@@ -294,18 +295,16 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, fromState b
 	if err := removeFileDurably(filepath.Join(stateDir(cfg.Data), lastResultName)); err != nil {
 		return c.refused(cfg, base, fmt.Errorf("removing the previous result: %w", err))
 	}
-	st, err := readState(cfg.Data)
-	if err != nil {
-		if fromState {
+	var st store.State
+	if fromState {
+		if st, _, err = readState(cfg.Data); err != nil {
 			return c.refused(cfg, base, err)
 		}
+	} else {
 		// With a config file of its own the update needs the state for
 		// nothing but the runner's default addresses. A state that cannot be
-		// read must not stand in the way of M1's recovery path, so the
-		// defaults of a fresh install do, and the variables still win.
-		fmt.Fprintf(c.stderr, "tikray: warning: %s; taking the runner's default addresses from the default state\n",
-			strings.ReplaceAll(err.Error(), "\n", "; "))
-		st = store.Default()
+		// read must not stand in the way of M1's recovery path.
+		st = c.addressState(cfg.Data)
 	}
 	cfg = cfg.withState(st)
 	runner, err := newRunner(cfg)
@@ -329,6 +328,21 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, fromState b
 	}
 	res, err := do(ctx, u)
 	return c.report(cfg, res, err)
+}
+
+// addressState is the state of a command that needs it for nothing but the
+// runner's addresses: the state in data, or, when that cannot be read, the
+// default state, after one warning on stderr that names the problem. The
+// command then goes on with the addresses of a fresh install where no
+// variable names them.
+func (c *cli) addressState(data string) store.State {
+	st, _, err := readState(data)
+	if err != nil {
+		fmt.Fprintf(c.stderr, "tikray: warning: %s; taking the runner's default addresses from the default state\n",
+			strings.ReplaceAll(err.Error(), "\n", "; "))
+		return store.Default()
+	}
+	return st
 }
 
 // refused reports a refusal that no CoreUpdater made, because the command
@@ -493,11 +507,11 @@ func (c *cli) status(ctx context.Context, args []string) int {
 	if _, code, ok := c.parse(fs, args, 0); !ok {
 		return code
 	}
-	cfg, _, err := loadConfig(c.getenv)
+	cfg, err := configFromEnv(c.getenv)
 	if err != nil {
 		return c.fail(err)
 	}
-	runner, err := newRunner(cfg)
+	runner, err := newRunner(cfg.withState(c.addressState(cfg.Data)))
 	if err != nil {
 		return c.fail(err)
 	}

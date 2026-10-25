@@ -1407,41 +1407,97 @@ func configFile(t *testing.T, body string) (path, rel string) {
 // unreadable one (M1's recovery path: the user has a config to run) costs a
 // warning and the default addresses, not the command. Without --config the
 // config comes from the state, which then must be readable.
+// writeBad writes body as the file name in data's state directory and returns
+// name.
+func writeBad(t *testing.T, data, name string, body []byte) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(data, "state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "state", name), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return name
+}
+
+// unreadableStates each make the state in data unreadable and return the name
+// of the file the error blames.
+var unreadableStates = map[string]func(t *testing.T, data string) string{
+	"corrupt": func(t *testing.T, data string) string {
+		return writeBad(t, data, "state.v1.json", []byte("{not json"))
+	},
+	"invalid": func(t *testing.T, data string) string {
+		// A state the store refuses to load: take a saved one and spoil a policy.
+		writeState(t, data, func(*store.State) {})
+		file := filepath.Join(data, "state", "state.v1.json")
+		b, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(b, []byte(`"direct"`)) {
+			t.Fatalf("the saved state has no policy to spoil:\n%s", b)
+		}
+		return writeBad(t, data, "state.v1.json", bytes.Replace(b, []byte(`"direct"`), []byte(`"bogus"`), 1))
+	},
+	"only newer files": func(t *testing.T, data string) string {
+		return writeBad(t, data, "state.v99.json", []byte(`{"version":99,"revision":1,"state":{}}`))
+	},
+}
+
+// core status needs the state for nothing but the runner's address, so an
+// unreadable one costs a warning and the default address, as it does for
+// update --config.
+func TestCoreStatusSurvivesAnUnreadableState(t *testing.T) {
+	want := runnerapi.Status{State: runnerapi.StateRunning, Active: &runnerapi.Selection{Core: "26.10.21", Config: testConfigRel}, GatewayUp: true}
+	for name, breakState := range unreadableStates {
+		t.Run(name, func(t *testing.T) {
+			vars, data := testEnv(t, want)
+			bad := breakState(t, data)
+			code, stdout, stderr := runCLI(t, vars, "core", "status")
+			if code != 0 {
+				t.Fatalf("exit %d, stderr %q; want 0", code, stderr)
+			}
+			var got runnerapi.Status
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil || !reflect.DeepEqual(got, want) {
+				t.Errorf("stdout %q (%v), want the runner's status %+v", stdout, err, want)
+			}
+			if n := strings.Count(stderr, "\n"); n != 1 || !strings.HasPrefix(stderr, "tikray: warning: ") || !strings.Contains(stderr, bad) {
+				t.Errorf("stderr %q; want one warning line naming %s", stderr, bad)
+			}
+		})
+	}
+}
+
+// config render renders the state, so an unreadable one ends it, before the
+// runner is asked anything.
+func TestConfigRenderNeedsAReadableState(t *testing.T) {
+	for name, breakState := range unreadableStates {
+		for core, args := range map[string][]string{
+			"--core":      {"config", "render", "--core", "26.10.21"},
+			"active core": {"config", "render"},
+		} {
+			t.Run(name+", "+core, func(t *testing.T) {
+				vars, data := testEnv(t, runnerapi.Status{})
+				runner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					t.Errorf("the runner was asked %s %s", r.Method, r.URL.Path)
+				}))
+				t.Cleanup(runner.Close)
+				vars["TIKRAY_RUNNER_URL"] = runner.URL
+				bad := breakState(t, data)
+				code, stdout, stderr := runCLI(t, vars, args...)
+				if code != 1 || stdout != "" {
+					t.Errorf("exit %d, stdout %q; want 1 and nothing", code, stdout)
+				}
+				if !strings.HasPrefix(stderr, "tikray: the state can't be read: ") || !strings.Contains(stderr, bad) || strings.Contains(stderr, "warning") {
+					t.Errorf("stderr %q; want \"the state can't be read\", naming %s, and no warning", stderr, bad)
+				}
+			})
+		}
+	}
+}
+
 func TestUpdateConfigFileSurvivesAnUnreadableState(t *testing.T) {
-	writeBad := func(t *testing.T, data, name string, body []byte) string {
-		t.Helper()
-		if err := os.MkdirAll(filepath.Join(data, "state"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(data, "state", name), body, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		return name
-	}
-	// Each makes the state unreadable and returns the name of the file the
-	// error blames.
-	unreadable := map[string]func(t *testing.T, data string) string{
-		"corrupt": func(t *testing.T, data string) string {
-			return writeBad(t, data, "state.v1.json", []byte("{not json"))
-		},
-		"invalid": func(t *testing.T, data string) string {
-			// A state the store refuses to load: take a saved one and spoil a policy.
-			writeState(t, data, func(*store.State) {})
-			file := filepath.Join(data, "state", "state.v1.json")
-			b, err := os.ReadFile(file)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Contains(b, []byte(`"direct"`)) {
-				t.Fatalf("the saved state has no policy to spoil:\n%s", b)
-			}
-			return writeBad(t, data, "state.v1.json", bytes.Replace(b, []byte(`"direct"`), []byte(`"bogus"`), 1))
-		},
-		"only newer files": func(t *testing.T, data string) string {
-			return writeBad(t, data, "state.v99.json", []byte(`{"version":99,"revision":1,"state":{}}`))
-		},
-	}
-	for name, breakState := range unreadable {
+	for name, breakState := range unreadableStates {
 		t.Run(name, func(t *testing.T) {
 			active, activeRel := configFile(t, `{"inbounds":[]}`+"\n")
 			other, _ := configFile(t, `{"inbounds":[{"protocol":"tun"}]}`+"\n")
