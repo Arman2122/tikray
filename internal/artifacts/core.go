@@ -46,7 +46,10 @@ var ErrLocked = errors.New("artifacts: another core update or rollback is runnin
 // install into a slot, runner trial, health check, then commit or let the
 // trial revert (§4.5). Zero durations and Keep take the defaults.
 type CoreUpdater struct {
-	Data string // the data root: cores/, run/ and state/ are in it
+	// Data is the data root: cores/, run/ and state/ are in it. state/tmp is
+	// for the temporary files of updates alone, and an update empties it
+	// once it holds the artifacts lock.
+	Data string
 	Arch string // GOARCH of the cores to fetch; empty means runtime.GOARCH
 	// Fetch is where release zips come from.
 	Fetch Chain
@@ -126,9 +129,27 @@ func (u *CoreUpdater) locked(res *Result, fn func() error) (Result, error) {
 		err = refuse(res, err)
 	} else {
 		defer unlock() // after record, so the history line is written under the lock
+		u.sweepTemp()
 		err = fn()
 	}
 	return u.record(*res, err)
+}
+
+// sweepTemp empties state/tmp, where updates make their temporary files (the
+// tikray CLI points TMPDIR at it). It runs under the lock, when no other
+// update can be using it, so whatever is there was left by a run that was
+// killed.
+func (u *CoreUpdater) sweepTemp() {
+	dir := filepath.Join(u.stateDir(), "tmp")
+	ents, err := os.ReadDir(dir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		u.logf("artifacts: %v", err)
+	}
+	for _, e := range ents {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			u.logf("artifacts: %v", err)
+		}
+	}
 }
 
 func (u *CoreUpdater) update(ctx context.Context, version string, o UpdateOptions, res *Result) error {

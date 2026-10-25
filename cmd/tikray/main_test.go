@@ -446,6 +446,29 @@ func TestRunUpdateNoop(t *testing.T) {
 	}
 }
 
+// A run that is killed leaves its temporary files in state/tmp, TMPDIR; the
+// next update removes them once it holds the artifacts lock.
+func TestRunUpdateSweepsStateTmp(t *testing.T) {
+	vars, data := testEnv(t, runnerapi.Status{
+		State:  runnerapi.StateRunning,
+		Active: &runnerapi.Selection{Core: "26.10.21", Config: testConfigRel},
+	})
+	tmp := filepath.Join(data, "state", "tmp")
+	left := filepath.Join(tmp, "tikray-core-123", "Xray-linux-arm64-v8a.zip.part")
+	if err := os.MkdirAll(filepath.Dir(left), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(left, []byte("half a zip"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, stdout, stderr := runCLI(t, vars, "core", "update", "26.10.21"); code != 0 {
+		t.Fatalf("exit %d; stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if ents, err := os.ReadDir(tmp); err != nil || len(ents) != 0 {
+		t.Errorf("state/tmp holds %v (%v) after the update, want it empty", ents, err)
+	}
+}
+
 func TestRunUpdateFlagsComeBeforeOrAfterTheVersion(t *testing.T) {
 	vars, _ := testEnv(t, runnerapi.Status{
 		State:  runnerapi.StateRunning,

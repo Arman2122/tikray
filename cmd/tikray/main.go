@@ -347,7 +347,9 @@ func (c *cli) printJSON(v any) int {
 // (0700, it holds secrets), state/tmp and inbox/. It points TMPDIR at
 // state/tmp, because the image is FROM scratch and has no /tmp, and the
 // verification of a download makes temporary files. Call it before any
-// artifacts work.
+// artifacts work. What a killed run leaves in state/tmp is removed by the
+// next update or rollback, once it holds the artifacts lock (never before, so
+// a concurrent update's files are not touched).
 func prepareDirs(data string) error {
 	tmp := filepath.Join(data, "state", "tmp")
 	if err := os.MkdirAll(tmp, 0o700); err != nil { // and state/

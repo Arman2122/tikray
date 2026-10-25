@@ -1059,6 +1059,47 @@ func TestUpdateLocked(t *testing.T) {
 	}
 }
 
+// state/tmp is where updates make their temporary files (the tikray CLI
+// points TMPDIR at it). Once an update holds the lock, nothing else can be
+// using it, so what is there was left by a run that was killed, and it goes.
+// Without the lock it is another update's, and it stays.
+func TestUpdateSweepsStateTmp(t *testing.T) {
+	e := newCoreEnv(t, "26.3.27")
+	tmp := filepath.Join(e.data, "state", "tmp")
+	for _, p := range []string{"tikray-core-123/Xray-linux-64.zip.part", "tikray-dgst-456/file.dgst", "stray"} {
+		writeTestFile(t, filepath.Join(tmp, p), "left behind")
+	}
+
+	release, ok := tryLock(t, e.data)
+	if !ok {
+		t.Fatal("could not take the lock")
+	}
+	res, err := e.u.Update(bg, "26.3.27", UpdateOptions{})
+	if !errors.Is(err, ErrLocked) {
+		t.Fatalf("Update = %+v, %v; want ErrLocked", res, err)
+	}
+	if got := dirNames(t, tmp); len(got) != 3 {
+		t.Errorf("state/tmp holds %v without the lock, want the other update's files left alone", got)
+	}
+	release()
+
+	res, err = e.u.Update(bg, "26.3.27", UpdateOptions{})
+	wantOutcome(t, res, err, OutcomeNoop)
+	if got := dirNames(t, tmp); len(got) != 0 {
+		t.Errorf("state/tmp holds %v after an update, want it empty", got)
+	}
+}
+
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRollback(t *testing.T) {
 	setup := func(t *testing.T, slots ...string) *coreEnv {
 		e := newCoreEnv(t, "26.10.21")
