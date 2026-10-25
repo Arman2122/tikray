@@ -120,8 +120,8 @@ func TestApplyCommits(t *testing.T) {
 	if b, err := os.ReadFile(p); err != nil || string(b) != renderedBody {
 		t.Errorf("%s = %q, %v; want the render", rel, b, err)
 	}
-	if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o644 {
-		t.Errorf("%s: %v, %v; want mode 0644", rel, fi, err)
+	if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("%s: %v, %v; want mode 0600", rel, fi, err)
 	}
 	if e.health.n.Load() == 0 {
 		t.Error("the health check never ran")
@@ -140,6 +140,50 @@ func TestApplyCommits(t *testing.T) {
 		t.Errorf("slots = %v", got)
 	}
 	e.wantClean(t)
+}
+
+// A config holds every server's credentials, so run/config/ and the configs
+// in it are root's alone; both images run as root. A run/config/ that an
+// older tikray made open to all is closed.
+func TestConfigsAreRootsAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+	}{
+		{"run/config made", func(t *testing.T, dir string) {
+			if err := os.RemoveAll(dir); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"run/config open to all", func(t *testing.T, dir string) {
+			if err := os.Chmod(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _ := newRenderEnv(t, "")
+			e.rel.add(t, "26.10.21")
+			dir := filepath.Join(e.data, "run", "config")
+			tc.setup(t, dir)
+
+			res, err := e.u.Update(bg, "26.10.21", UpdateOptions{})
+			wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+			for rel, want := range map[string]os.FileMode{
+				"config":                0o700,
+				configRel(renderedBody): 0o600,
+				// The runner's own directory stays as it was.
+				".": 0o755,
+			} {
+				fi, err := os.Stat(filepath.Join(e.data, "run", rel))
+				if err != nil {
+					t.Errorf("run/%s: %v", rel, err)
+				} else if got := fi.Mode().Perm(); got != want {
+					t.Errorf("run/%s has mode %v, want %v", rel, got, want)
+				}
+			}
+		})
+	}
 }
 
 // An Apply is a committed trial of the active core, so a rollback after it

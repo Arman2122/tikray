@@ -1001,8 +1001,8 @@ func TestUpdateNoop(t *testing.T) {
 		if b, err := os.ReadFile(p); err != nil || string(b) != body {
 			t.Errorf("%s = %q, %v; want the config file", rel, b, err)
 		}
-		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o644 {
-			t.Errorf("%s: %v, %v; want mode 0644", rel, fi, err)
+		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("%s: %v, %v; want mode 0600", rel, fi, err)
 		}
 		if hits := e.rel.hitList(); len(hits) != 0 {
 			t.Errorf("upstream was asked for %v; the slot is installed", hits)

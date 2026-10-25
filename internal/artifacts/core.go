@@ -841,11 +841,19 @@ func readConfig(path string) (*config, error) {
 	return newConfig(data), nil
 }
 
+// write stores the config under runDir. A config holds every server's
+// credentials, so the file is 0600 and run/config/ is 0700: both images run as
+// root, and the runner reads it as root. A run/config/ that is there already,
+// as an older tikray made it, is closed to 0700 too.
 func (c *config) write(runDir string) error {
-	if err := os.MkdirAll(filepath.Join(runDir, "config"), 0o755); err != nil {
+	dir := filepath.Join(runDir, "config")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return atomicfile.WriteFile(filepath.Join(runDir, c.rel), c.data, 0o644)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	return atomicfile.WriteFile(filepath.Join(runDir, c.rel), c.data, 0o600)
 }
 
 // writeJSONAtomic writes v as indented JSON, mode 0644, with

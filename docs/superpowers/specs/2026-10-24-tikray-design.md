@@ -597,7 +597,9 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
 - **Authentication:** argon2id password hashing, secure cookies, CSRF protection,
   login rate limiting.
 - **Secrets:** server credentials and the RouterOS password are kept in the
-  `0600` state directory. Backup exports are encrypted with a user passphrase.
+  `0600` state directory. The rendered xray configs hold the servers'
+  credentials too, so they are `0600` in a `0700` `run/config/`; both images
+  run as root. Backup exports are encrypted with a user passphrase.
 - **Runner:** control API requires a token; SOCKS, DNS and control listen only on
   the bridge.
 - **RouterOS access:** least-privilege user restricted to the container IP.
