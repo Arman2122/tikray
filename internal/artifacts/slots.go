@@ -31,6 +31,9 @@ const (
 // ErrSlotExists means a core slot for the version is already installed.
 var ErrSlotExists = errors.New("core slot already exists")
 
+// removeAll removes an old slot's directory; a test makes it stop midway.
+var removeAll = os.RemoveAll
+
 // Meta describes an installed core. It is stored as meta.json in the slot.
 type Meta struct {
 	Version      string    `json:"version"`
@@ -57,7 +60,9 @@ type Slot struct {
 // The slot is built in a temporary directory of coresDir and renamed into
 // place, so a reader never sees a half-written slot, and a failed install
 // leaves neither a slot nor a temporary directory. A slot that already exists
-// is not touched and gives ErrSlotExists.
+// is not touched and gives ErrSlotExists, and so does anything else at its
+// path but a directory without a valid meta.json: that is no slot, and it is
+// moved aside and removed.
 func InstallCore(coresDir string, v xrayver.Version, zipPath string, m Meta) (Slot, error) {
 	return installCore(coresDir, v, zipPath, m, maxCoreBytes)
 }
@@ -65,8 +70,15 @@ func InstallCore(coresDir string, v xrayver.Version, zipPath string, m Meta) (Sl
 func installCore(coresDir string, v xrayver.Version, zipPath string, m Meta, limit int64) (Slot, error) {
 	final := filepath.Join(coresDir, v.String())
 	exists := fmt.Errorf("%w: %s", ErrSlotExists, v)
-	if _, err := os.Lstat(final); err == nil {
-		return Slot{}, exists
+	if fi, err := os.Lstat(final); err == nil {
+		if _, ok := readMeta(final, v.String()); ok || !fi.IsDir() {
+			return Slot{}, exists
+		}
+		tmp, err := moveAside(coresDir, v.String())
+		if err != nil {
+			return Slot{}, err
+		}
+		removeAll(tmp) // what is left goes with the next CleanTemp or Prune
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return Slot{}, err
 	}
@@ -255,12 +267,8 @@ func ListCores(coresDir string) ([]Slot, error) {
 			continue
 		}
 		dir := filepath.Join(coresDir, e.Name())
-		raw, err := os.ReadFile(filepath.Join(dir, metaFile))
-		if err != nil {
-			continue
-		}
-		var m Meta
-		if json.Unmarshal(raw, &m) != nil || m.Version != e.Name() {
+		m, ok := readMeta(dir, e.Name())
+		if !ok {
 			continue
 		}
 		slots = append(slots, Slot{Version: v, Dir: dir, Meta: m})
@@ -269,8 +277,34 @@ func ListCores(coresDir string) ([]Slot, error) {
 	return slots, nil
 }
 
-// CleanTemp removes the temporary directories that interrupted installs left
-// in coresDir.
+// readMeta reads the meta.json of the slot directory dir, whose name is
+// version. ok is false unless it is readable, valid and for that version.
+func readMeta(dir, version string) (m Meta, ok bool) {
+	raw, err := os.ReadFile(filepath.Join(dir, metaFile))
+	if err != nil || json.Unmarshal(raw, &m) != nil || m.Version != version {
+		return Meta{}, false
+	}
+	return m, true
+}
+
+// moveAside moves the directory coresDir/name into a new temporary directory
+// of coresDir and returns the temporary directory. Whatever then happens to
+// it, a reader never takes it for a slot, and CleanTemp or Prune remove what
+// is left of it.
+func moveAside(coresDir, name string) (string, error) {
+	tmp, err := os.MkdirTemp(coresDir, tempPrefix+"rm-"+name+"-")
+	if err != nil {
+		return "", err
+	}
+	if err := os.Rename(filepath.Join(coresDir, name), filepath.Join(tmp, name)); err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	return tmp, nil
+}
+
+// CleanTemp removes the temporary directories that interrupted installs and
+// removals left in coresDir.
 func CleanTemp(coresDir string) error {
 	ents, err := readCores(coresDir)
 	if err != nil {
@@ -283,7 +317,8 @@ func CleanTemp(coresDir string) error {
 // install directory. It returns the versions it removed, newest first. Only
 // directories named like a version count as slots, so anything else in
 // coresDir, and any symlink, is left alone. A version in keep that is not
-// installed is fine.
+// installed is fine. A slot is moved aside before it is removed, so that a
+// removal cut short leaves a temporary directory, never part of a slot.
 func Prune(coresDir string, keep []string) ([]string, error) {
 	kept := make(map[string]bool, 2*len(keep))
 	for _, k := range keep {
@@ -303,11 +338,13 @@ func Prune(coresDir string, keep []string) ([]string, error) {
 		if !ok || kept[e.Name()] {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(coresDir, e.Name())); err != nil {
+		tmp, err := moveAside(coresDir, e.Name())
+		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
 		removed = append(removed, v)
+		errs = append(errs, removeAll(tmp))
 	}
 	sort.Slice(removed, func(i, j int) bool { return removed[j].Less(removed[i]) })
 	names := make([]string, len(removed))

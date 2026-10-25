@@ -365,12 +365,12 @@ func TestInstallSlotExists(t *testing.T) {
 		t.Errorf("cores holds %v, want only the first slot", got)
 	}
 
-	// Anything at the slot's path counts, including an empty directory
-	// (which a bare rename would replace) and a dangling symlink.
+	// Anything at the slot's path that is not a directory counts too, a
+	// dangling symlink included (a directory without a valid meta.json is
+	// no slot: see TestInstallReplacesBrokenSlotDir).
 	for name, mk := range map[string]func(string) error{
-		"empty dir": func(p string) error { return os.Mkdir(p, 0o755) },
-		"symlink":   func(p string) error { return os.Symlink(filepath.Join(p, "nowhere"), p) },
-		"file":      func(p string) error { return os.WriteFile(p, []byte("x"), 0o644) },
+		"symlink": func(p string) error { return os.Symlink(filepath.Join(p, "nowhere"), p) },
+		"file":    func(p string) error { return os.WriteFile(p, []byte("x"), 0o644) },
 	} {
 		cores := t.TempDir()
 		slot := filepath.Join(cores, "26.3.27")
@@ -384,6 +384,82 @@ func TestInstallSlotExists(t *testing.T) {
 		if got := dirNames(t, cores); !reflect.DeepEqual(got, []string{"26.3.27"}) {
 			t.Errorf("%s: cores holds %v", name, got)
 		}
+	}
+}
+
+// A version directory without a valid meta.json is no slot, whether an
+// install or a removal was cut short or something else made it. It must not
+// block the install of that version for good: it is moved aside and removed.
+func TestInstallReplacesBrokenSlotDir(t *testing.T) {
+	for name, meta := range map[string]string{
+		"empty":           "",
+		"no meta.json":    "-",
+		"invalid meta":    "{not json",
+		"another version": `{"version":"26.3.28"}`,
+	} {
+		cores := t.TempDir()
+		dir := filepath.Join(cores, "26.3.27")
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if meta != "" {
+			if err := os.WriteFile(filepath.Join(dir, "xray"), []byte("half"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if meta != "" && meta != "-" {
+			if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		s, err := InstallCore(cores, mustVer(t, "26.3.27"), releaseZip(t, "bin"), Meta{Source: "test"})
+		if err != nil {
+			t.Errorf("%s: install over the directory: %v", name, err)
+			continue
+		}
+		if b, err := os.ReadFile(filepath.Join(s.Dir, "xray")); err != nil || string(b) != "bin" {
+			t.Errorf("%s: installed xray is %q, %v", name, b, err)
+		}
+		if got, err := ListCores(cores); err != nil || !reflect.DeepEqual(versions(got), []string{"26.3.27"}) {
+			t.Errorf("%s: ListCores = %v, %v", name, versions(got), err)
+		}
+		if got := dirNames(t, cores); !reflect.DeepEqual(got, []string{"26.3.27"}) {
+			t.Errorf("%s: cores holds %v, want only the new slot", name, got)
+		}
+	}
+}
+
+// A removal cut short never leaves part of a slot under the version's name,
+// where it would pass for an installed core: Prune moves the slot aside
+// first, and what is left is a temporary directory that CleanTemp removes.
+func TestPruneInterrupted(t *testing.T) {
+	cores := t.TempDir()
+	install(t, cores, "26.1.18")
+	install(t, cores, "26.3.27")
+	removeAll = func(path string) error {
+		os.Remove(filepath.Join(path, "xray")) // the binary goes, then the removal stops
+		return errors.New("interrupted")
+	}
+	t.Cleanup(func() { removeAll = os.RemoveAll })
+
+	removed, err := Prune(cores, []string{"26.3.27"})
+	if err == nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Errorf("Prune error %v, want the interrupted removal", err)
+	}
+	if want := []string{"26.1.18"}; !reflect.DeepEqual(removed, want) {
+		t.Errorf("removed %v, want %v", removed, want)
+	}
+	if got, err := ListCores(cores); err != nil || !reflect.DeepEqual(versions(got), []string{"26.3.27"}) {
+		t.Errorf("ListCores = %v, %v; want only 26.3.27", versions(got), err)
+	}
+
+	removeAll = os.RemoveAll
+	if err := CleanTemp(cores); err != nil {
+		t.Fatal(err)
+	}
+	if got := dirNames(t, cores); !reflect.DeepEqual(got, []string{"26.3.27"}) {
+		t.Errorf("cores holds %v after CleanTemp, want only 26.3.27", got)
 	}
 }
 
