@@ -20,11 +20,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/Arman2122/tikray/internal/store"
 	"github.com/Arman2122/tikray/internal/xraypolicy"
 )
-
-// maxNameRunes is the longest name a link can give a server.
-const maxNameRunes = 128
 
 // Server is one outbound that a share link describes.
 type Server struct {
@@ -296,15 +294,16 @@ func decodeBase64(s string) ([]byte, bool) {
 }
 
 // name gives the name of a server: the link's fragment, trimmed, or host:port
-// when the fragment is empty, either one made valid UTF-8 and cut to 128 runes.
+// when the fragment is empty, either one made valid UTF-8 and cut to
+// store.MaxNameRunes runes.
 // An IPv6 host is bracketed.
 func name(fragment, host string, port int) string {
 	n := strings.TrimSpace(strings.ToValidUTF8(fragment, string(utf8.RuneError)))
 	if n == "" {
 		n = strings.ToValidUTF8(net.JoinHostPort(host, strconv.Itoa(port)), string(utf8.RuneError))
 	}
-	if r := []rune(n); len(r) > maxNameRunes {
-		n = string(r[:maxNameRunes])
+	if r := []rune(n); len(r) > store.MaxNameRunes {
+		n = string(r[:store.MaxNameRunes])
 	}
 	return n
 }

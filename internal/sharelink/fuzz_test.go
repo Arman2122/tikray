@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/Arman2122/tikray/internal/store"
 )
 
 // seedCases is every table of links in this package's tests, so that the fuzzer
@@ -73,8 +75,8 @@ func checkServer(t *testing.T, s Server) {
 	if s.Name == "" {
 		t.Errorf("Name is empty")
 	}
-	if n := utf8.RuneCountInString(s.Name); n > maxNameRunes {
-		t.Errorf("Name has %d runes, want at most %d: %q", n, maxNameRunes, s.Name)
+	if n := utf8.RuneCountInString(s.Name); n > store.MaxNameRunes {
+		t.Errorf("Name has %d runes, want at most %d: %q", n, store.MaxNameRunes, s.Name)
 	}
 	if !utf8.ValidString(s.Name) {
 		t.Errorf("Name is not valid UTF-8: %q", s.Name)

@@ -52,8 +52,13 @@ type Server struct {
 	Outbound json.RawMessage `json:"outbound"`
 }
 
-// Tag is the tag the server's outbound carries in the generated xray config.
-func (s Server) Tag() string { return "srv-" + s.ID }
+// ServerTagPrefix starts the tag of every server's outbound in the generated
+// xray config (see Tag).
+const ServerTagPrefix = "srv-"
+
+// Tag is the tag the server's outbound carries in the generated xray config:
+// ServerTagPrefix and the ID.
+func (s Server) Tag() string { return ServerTagPrefix + s.ID }
 
 // Duration is a time.Duration that marshals as text such as "24h0m0s".
 type Duration time.Duration

@@ -18,9 +18,11 @@ import (
 	"github.com/Arman2122/tikray/internal/xraypolicy"
 )
 
+// MaxNameRunes bounds a server's or a subscription's name. A share link's name
+// is cut to it (sharelink).
+const MaxNameRunes = 128
+
 const (
-	// maxNameRunes bounds a server's or a subscription's name.
-	maxNameRunes = 128
 	// minInterval is the shortest time between two fetches of a subscription.
 	minInterval = time.Hour
 	// maxSubnetBits is the longest prefix that still holds .1 to .3 and a
@@ -104,8 +106,8 @@ func (p *problems) name(path, name string) {
 	switch {
 	case strings.TrimSpace(name) == "":
 		p.add(path, "must not be empty")
-	case utf8.RuneCountInString(name) > maxNameRunes:
-		p.add(path, "must be at most %d characters", maxNameRunes)
+	case utf8.RuneCountInString(name) > MaxNameRunes:
+		p.add(path, "must be at most %d characters", MaxNameRunes)
 	}
 }
 

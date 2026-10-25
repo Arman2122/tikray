@@ -40,8 +40,6 @@ const (
 	TagAPI = "api"
 	// TagDNS is the tag of the queries xray's DNS makes itself.
 	TagDNS = "dns-internal"
-	// ServerPrefix starts the tag of every server's outbound: srv-<id>.
-	ServerPrefix = "srv-"
 )
 
 // Balancer tags. Both choose among the same servers.
@@ -248,9 +246,9 @@ func (r *renderer) config() (*config, error) {
 // is the prefix of no other server's.
 func (r *renderer) selector() string {
 	if p := r.st.Routing.Pinned; p != "" {
-		return ServerPrefix + p
+		return store.Server{ID: p}.Tag()
 	}
-	return ServerPrefix
+	return store.ServerTagPrefix
 }
 
 func (r *renderer) inbounds() []inbound {
