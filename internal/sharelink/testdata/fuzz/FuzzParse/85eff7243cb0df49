@@ -1,0 +1,2 @@
+go test fuzz v1
+string("ss://22-blake3-chacha:@0:1")

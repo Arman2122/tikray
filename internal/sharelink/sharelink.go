@@ -1,19 +1,23 @@
-// Package sharelink turns the share links people paste (vless://, trojan://)
-// into xray outbound objects.
+// Package sharelink turns the share links people paste (vless://, trojan://,
+// vmess:// and ss://) into xray outbound objects.
 //
 // A link is a credential, so no error message repeats the secret parts of
-// one: the VLESS id or the Trojan password.
+// one: the VLESS or VMess id, the Trojan or Shadowsocks password, or the
+// decoded body of a VMess or Shadowsocks link.
 package sharelink
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -56,6 +60,10 @@ func Parse(link string) (Server, error) {
 		return parseVLESS(link)
 	case "trojan":
 		return parseTrojan(link)
+	case "vmess":
+		return parseVMess(link)
+	case "ss":
+		return parseSS(link)
 	}
 	return Server{}, fmt.Errorf("%w scheme %q", ErrUnsupported, scheme)
 }
@@ -101,16 +109,20 @@ type target struct {
 // The errors it returns do not repeat any of the link: the text of a net/url
 // error would.
 func parseTarget(link, scheme string, extraKeys ...string) (target, error) {
+	return parseTargetReading(link, scheme, append(slices.Clone(streamKeys), extraKeys...))
+}
+
+// parseTargetReading is parseTarget for a scheme that reads the query
+// parameters in read and no others: a malformed parameter that is not in read
+// is ignored.
+func parseTargetReading(link, scheme string, read []string) (target, error) {
 	// url.Parse refuses the whole link when the fragment has a bad escape.
 	link, rawFragment, _ := strings.Cut(link, "#")
 	u, err := url.Parse(link)
 	if err != nil {
 		return target{}, fmt.Errorf("sharelink: malformed %s link", scheme)
 	}
-	fragment, err := url.PathUnescape(rawFragment)
-	if err != nil {
-		fragment = rawFragment
-	}
+	fragment := unescapeFragment(rawFragment)
 	host := u.Hostname()
 	if host == "" {
 		return target{}, fmt.Errorf("sharelink: %s link has no host", scheme)
@@ -118,11 +130,11 @@ func parseTarget(link, scheme string, extraKeys ...string) (target, error) {
 	if u.Port() == "" {
 		return target{}, fmt.Errorf("sharelink: %s link has no port", scheme)
 	}
-	port, err := strconv.Atoi(u.Port())
-	if err != nil || port < 1 || port > 65535 {
+	port, ok := parsePort(u.Port())
+	if !ok {
 		return target{}, fmt.Errorf("sharelink: %s link has an invalid port, want 1 to 65535", scheme)
 	}
-	q, bad := parseQuery(u.RawQuery, append(slices.Clone(streamKeys), extraKeys...))
+	q, bad := parseQuery(u.RawQuery, read)
 	if bad != "" {
 		return target{}, fmt.Errorf("sharelink: %s link has a malformed %q parameter", scheme, bad)
 	}
@@ -169,12 +181,95 @@ func parseQuery(raw string, read []string) (q url.Values, bad string) {
 	return q, ""
 }
 
-// name gives the name of a server: the link's fragment, trimmed and cut to 128
-// runes, or host:port when the fragment is empty. An IPv6 host is bracketed.
+// unescapeFragment decodes the name after the #. A bad escape is not an
+// error, because the name is only a label: the raw text is the name then.
+func unescapeFragment(raw string) string {
+	f, err := url.PathUnescape(raw)
+	if err != nil {
+		return raw
+	}
+	return f
+}
+
+// queryHasKey reports whether a raw query has a parameter called key, whatever
+// its value is, even a malformed one. A pair whose name has a bad escape does
+// not count.
+func queryHasKey(raw, key string) bool {
+	for raw != "" {
+		var pair string
+		pair, raw, _ = strings.Cut(raw, "&")
+		k, _, _ := strings.Cut(pair, "=")
+		if unescaped, err := url.QueryUnescape(k); err == nil && unescaped == key {
+			return true
+		}
+	}
+	return false
+}
+
+// parsePort reads a port: decimal numerals only, from 1 to 65535.
+func parsePort(s string) (int, bool) {
+	if s == "" || strings.Trim(s, "0123456789") != "" {
+		return 0, false
+	}
+	p, err := strconv.Atoi(s)
+	if err != nil || p < 1 || p > 65535 {
+		return 0, false
+	}
+	return p, true
+}
+
+// cleanHost trims h and takes the brackets off an IPv6 address, and reports
+// whether the result can be a server's address: an IP address or a DNS name.
+// A name has letters (of any script), numerals, '-', '_' and '.', and nothing
+// else, so it cannot hold a port, a path or a space. A zone on an IPv6
+// address is refused too.
+func cleanHost(h string) (string, bool) {
+	h = strings.TrimSpace(h)
+	if inner, ok := strings.CutPrefix(h, "["); ok {
+		inner, ok = strings.CutSuffix(inner, "]")
+		if !ok || !strings.Contains(inner, ":") {
+			return "", false
+		}
+		h = inner
+	}
+	if h == "" {
+		return "", false
+	}
+	if strings.Contains(h, ":") {
+		a, err := netip.ParseAddr(h)
+		if err != nil || a.Zone() != "" {
+			return "", false
+		}
+		return h, true
+	}
+	for _, r := range h {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-' && r != '_' && r != '.' {
+			return "", false
+		}
+	}
+	return h, true
+}
+
+// decodeBase64 decodes base64 in the standard or the URL alphabet, with or
+// without the padding. It reports false for text that is neither.
+func decodeBase64(s string) ([]byte, bool) {
+	s = strings.TrimRight(s, "=")
+	if b, err := base64.RawStdEncoding.DecodeString(s); err == nil {
+		return b, true
+	}
+	if b, err := base64.RawURLEncoding.DecodeString(s); err == nil {
+		return b, true
+	}
+	return nil, false
+}
+
+// name gives the name of a server: the link's fragment, trimmed, or host:port
+// when the fragment is empty, either one made valid UTF-8 and cut to 128 runes.
+// An IPv6 host is bracketed.
 func name(fragment, host string, port int) string {
 	n := strings.TrimSpace(strings.ToValidUTF8(fragment, string(utf8.RuneError)))
 	if n == "" {
-		return net.JoinHostPort(host, strconv.Itoa(port))
+		n = strings.ToValidUTF8(net.JoinHostPort(host, strconv.Itoa(port)), string(utf8.RuneError))
 	}
 	if r := []rune(n); len(r) > maxNameRunes {
 		n = string(r[:maxNameRunes])
@@ -183,13 +278,17 @@ func name(fragment, host string, port int) string {
 }
 
 // buildOutbound marshals an outbound of the given protocol from its settings
-// and streamSettings. The outbound has no tag; render adds one.
+// and streamSettings. The outbound has no tag; render adds one. A nil
+// streamSettings leaves the key out, for a protocol with no transport.
 func buildOutbound(protocol string, settings, streamSettings map[string]any) (json.RawMessage, error) {
-	b, err := json.Marshal(map[string]any{
-		"protocol":       protocol,
-		"settings":       settings,
-		"streamSettings": streamSettings,
-	})
+	outbound := map[string]any{
+		"protocol": protocol,
+		"settings": settings,
+	}
+	if streamSettings != nil {
+		outbound["streamSettings"] = streamSettings
+	}
+	b, err := json.Marshal(outbound)
 	if err != nil {
 		return nil, fmt.Errorf("sharelink: marshal %s outbound: %w", protocol, err)
 	}
