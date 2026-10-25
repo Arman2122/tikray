@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -477,6 +478,95 @@ func runTikray(ctx context.Context, c *lab.CHR, args string) (artifacts.Result, 
 			return res, fmt.Errorf("tikray %s: %w; container log:\n%s", args, err, containerLog(c, 30))
 		}
 	}
+}
+
+// serveWithin is how long the tikray container may take to start or to stop:
+// RouterOS starts it in seconds, and tikray serve stops in 10 s at most (the
+// API's graceful stop), but under emulation both are slower.
+func serveWithin() time.Duration {
+	if labArch() == lab.ArchARM64 {
+		return 5 * time.Minute
+	}
+	return 2 * time.Minute
+}
+
+// startServe starts the tikray container running tikray serve, the image's
+// default command. RouterOS does not take an image's CMD: a container whose
+// cmd is empty runs the ENTRYPOINT with no arguments (7.25 x86_64, the first
+// TestService run: tikray printed its usage and exited 2). So the container's
+// cmd is set to serve, as a one-shot run of the CLI (runTikray) sets it to its
+// arguments. It waits for the container to be stopped first (an image being
+// extracted, or a CLI run, is not over yet), and then until it runs.
+func (l *Lab) startServe(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, serveWithin())
+	defer cancel()
+	c := l.CHR
+	if err := waitContainer(ctx, c, "tikray", "stopped"); err != nil {
+		return err
+	}
+	if _, err := c.Run(ctx, `/container/set [find name=tikray] cmd="serve"`); err != nil {
+		return err
+	}
+	if _, err := c.Run(ctx, "/container/start [find name=tikray]"); err != nil {
+		return err
+	}
+	if err := waitContainer(ctx, c, "tikray", "running"); err != nil {
+		return fmt.Errorf("tikray serve: %w; container log:\n%s", err, containerLog(c, 30))
+	}
+	return nil
+}
+
+// stopServe stops the tikray container, and tikray serve in it, and waits
+// until it has stopped.
+func (l *Lab) stopServe(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, serveWithin())
+	defer cancel()
+	if _, err := l.CHR.Run(ctx, "/container/stop [find name=tikray]"); err != nil {
+		return err
+	}
+	return waitContainer(ctx, l.CHR, "tikray", "stopped")
+}
+
+// serveFingerprintRE finds the fingerprint in the line tikray serve prints on
+// stderr when it starts ("tikray: serving on <addr>, certificate sha256
+// <fingerprint>"), which RouterOS logs under the container topic.
+var serveFingerprintRE = regexp.MustCompile(`certificate sha256 ([0-9a-f]{64})`)
+
+// serveFingerprints are the certificate fingerprints that tikray serve
+// printed in the container log, oldest first: one for each start that the log
+// still holds.
+func serveFingerprints(c *lab.CHR) []string {
+	var fps []string
+	for _, m := range serveFingerprintRE.FindAllStringSubmatch(containerLog(c, 1000), -1) {
+		fps = append(fps, m[1])
+	}
+	return fps
+}
+
+// cmdParamRE finds a cmd parameter in the console's syntax of a command.
+var cmdParamRE = regexp.MustCompile(`\bcmd\b`)
+
+// shellCLI runs `tikray status` in the tikray container through
+// /container/shell, which runs it with the container's own PATH, and returns
+// what it printed, or why it could not run it. RouterOS passes the shell a
+// command only in versions whose /container/shell takes cmd=, which the
+// console's syntax tells; without one the shell is interactive only, which an
+// SSH exec can't drive.
+func (l *Lab) shellCLI(ctx context.Context) (out string, ran bool) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	syntax, err := l.CHR.Run(ctx, "/console/inspect request=child path=container,shell")
+	if err != nil {
+		return fmt.Sprintf("reading the syntax of /container/shell: %v", err), false
+	}
+	if !cmdParamRE.MatchString(syntax) {
+		return "/container/shell takes no command (its parameters: " + strings.Join(strings.Fields(syntax), " ") + ")", false
+	}
+	out, err = l.CHR.Run(ctx, `/container/shell [find name=tikray] cmd="tikray status"`)
+	if err != nil {
+		return fmt.Sprintf("/container/shell cmd=\"tikray status\": %v", err), false
+	}
+	return out, true
 }
 
 // tikray runs the tikray CLI with args (see runTikray), notes its result and
