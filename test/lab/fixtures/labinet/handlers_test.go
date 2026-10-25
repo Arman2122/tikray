@@ -14,6 +14,7 @@ import (
 
 func TestDNSAnswer(t *testing.T) {
 	proxy := netip.MustParseAddr("203.0.113.10")
+	proxyB := netip.MustParseAddr("203.0.113.11")
 	direct := netip.MustParseAddr("198.51.100.2")
 	cases := []struct {
 		qname  string
@@ -25,7 +26,10 @@ func TestDNSAnswer(t *testing.T) {
 		{"foreign.test.", direct, "10.10.34.34", true},
 		{"domestic.test.", direct, "10.10.34.34", true},
 		{"domestic.test.", proxy, "203.0.113.30", true},
+		{"foreign.test.", proxyB, "203.0.113.30", true},
+		{"domestic.test.", proxyB, "203.0.113.30", true},
 		{"example.com.", proxy, "", false},
+		{"example.com.", proxyB, "", false},
 	}
 	for _, c := range cases {
 		got, ok := DNSAnswer(c.qname, c.src)

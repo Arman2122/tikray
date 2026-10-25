@@ -1,0 +1,690 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "api": {
+    "tag": "api",
+    "services": [
+      "HandlerService",
+      "RoutingService",
+      "StatsService",
+      "ObservatoryService"
+    ]
+  },
+  "stats": {},
+  "policy": {
+    "system": {
+      "statsOutboundUplink": true,
+      "statsOutboundDownlink": true
+    }
+  },
+  "dns": {
+    "tag": "dns-internal",
+    "queryStrategy": "UseIPv4",
+    "servers": [
+      "https://1.1.1.1/dns-query"
+    ]
+  },
+  "inbounds": [
+    {
+      "tag": "tun-in",
+      "protocol": "tun",
+      "settings": {
+        "name": "xray0",
+        "mtu": 1500
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ],
+        "routeOnly": true
+      }
+    },
+    {
+      "tag": "dns-in",
+      "protocol": "dokodemo-door",
+      "listen": "172.31.255.3",
+      "port": 53,
+      "settings": {
+        "address": "1.1.1.1",
+        "port": 53,
+        "network": "tcp,udp"
+      }
+    },
+    {
+      "tag": "socks-in",
+      "protocol": "socks",
+      "listen": "172.31.255.3",
+      "port": 1080,
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    },
+    {
+      "tag": "api-in",
+      "protocol": "dokodemo-door",
+      "listen": "172.31.255.3",
+      "port": 10085,
+      "settings": {
+        "address": "127.0.0.1"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "dns-out",
+      "protocol": "dns",
+      "settings": {
+        "nonIPQuery": "reject"
+      }
+    },
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "203.0.113.10",
+            "port": 443,
+            "users": [
+              {
+                "encryption": "none",
+                "flow": "xtls-rprx-vision",
+                "id": "b831381d-6324-4d53-ad4f-8cda48b30811"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc",
+          "serverName": "www.example.com",
+          "shortId": "6ba85179e30d4fc2"
+        },
+        "security": "reality"
+      },
+      "tag": "srv-00000001"
+    },
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "2001:db8::1",
+            "port": 8443,
+            "users": [
+              {
+                "encryption": "none",
+                "id": "b831381d-6324-4d53-ad4f-8cda48b30811"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "alpn": [
+            "h2",
+            "http/1.1"
+          ],
+          "serverName": "cdn.example.com"
+        },
+        "wsSettings": {
+          "host": "cdn.example.com",
+          "path": "/ws?ed=2048"
+        }
+      },
+      "tag": "srv-00000002"
+    },
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "example.com",
+            "port": 443,
+            "users": [
+              {
+                "encryption": "none",
+                "id": "b831381d-6324-4d53-ad4f-8cda48b30811"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "grpcSettings": {
+          "multiMode": true,
+          "serviceName": "gun"
+        },
+        "network": "grpc",
+        "security": "tls",
+        "tlsSettings": {}
+      },
+      "tag": "srv-00000003"
+    },
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "example.com",
+            "port": 443,
+            "users": [
+              {
+                "encryption": "none",
+                "id": "b831381d-6324-4d53-ad4f-8cda48b30811"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "grpcSettings": {
+          "multiMode": false,
+          "serviceName": "gun"
+        },
+        "network": "grpc",
+        "realitySettings": {
+          "fingerprint": "safari",
+          "publicKey": "SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc",
+          "shortId": "ab"
+        },
+        "security": "reality"
+      },
+      "tag": "srv-00000004"
+    },
+    {
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "example.com",
+            "port": 443,
+            "users": [
+              {
+                "encryption": "none",
+                "id": "b831381d-6324-4d53-ad4f-8cda48b30811"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc"
+        },
+        "security": "reality",
+        "xhttpSettings": {
+          "mode": "auto",
+          "path": "/r"
+        }
+      },
+      "tag": "srv-00000005"
+    },
+    {
+      "protocol": "trojan",
+      "settings": {
+        "servers": [
+          {
+            "address": "example.com",
+            "password": "pw",
+            "port": 443
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "pinnedPeerCertSha256": "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+          "serverName": "example.com",
+          "verifyPeerCertByName": "example.com"
+        }
+      },
+      "tag": "srv-00000006"
+    },
+    {
+      "protocol": "trojan",
+      "settings": {
+        "servers": [
+          {
+            "address": "example.com",
+            "password": "pw",
+            "port": 443
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc",
+          "serverName": "www.example.com"
+        },
+        "security": "reality"
+      },
+      "tag": "srv-00000007"
+    },
+    {
+      "protocol": "trojan",
+      "settings": {
+        "servers": [
+          {
+            "address": "2001:db8::2",
+            "password": "pw",
+            "port": 443
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "alpn": [
+            "http/1.1"
+          ],
+          "fingerprint": "chrome",
+          "serverName": "cdn.example.com"
+        },
+        "wsSettings": {
+          "host": "cdn.example.com",
+          "path": "/ws"
+        }
+      },
+      "tag": "srv-00000008"
+    },
+    {
+      "protocol": "trojan",
+      "settings": {
+        "servers": [
+          {
+            "address": "example.com",
+            "password": "pw",
+            "port": 443
+          }
+        ]
+      },
+      "streamSettings": {
+        "grpcSettings": {
+          "multiMode": true,
+          "serviceName": "gun"
+        },
+        "network": "grpc",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "example.com"
+        }
+      },
+      "tag": "srv-00000009"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "example.com",
+            "port": 443,
+            "users": [
+              {
+                "id": "5783a3e7-e373-51cd-8642-c83782b807c5",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "tcpSettings": {
+          "header": {
+            "request": {
+              "headers": {
+                "Host": [
+                  "a.example.com"
+                ]
+              },
+              "path": [
+                "/p"
+              ]
+            },
+            "type": "http"
+          }
+        }
+      },
+      "tag": "srv-00000010"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "example.com",
+            "port": 443,
+            "users": [
+              {
+                "id": "5783a3e7-e373-51cd-8642-c83782b807c5",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "alpn": [
+            "h2",
+            "http/1.1"
+          ],
+          "fingerprint": "chrome",
+          "serverName": "cdn.example.com"
+        },
+        "wsSettings": {
+          "host": "cdn.example.com",
+          "path": "/ws"
+        }
+      },
+      "tag": "srv-00000011"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "example.com",
+            "port": 443,
+            "users": [
+              {
+                "id": "5783a3e7-e373-51cd-8642-c83782b807c5",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "grpcSettings": {
+          "authority": "front.example.com",
+          "multiMode": true,
+          "serviceName": "gun"
+        },
+        "network": "grpc",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "front.example.com"
+        }
+      },
+      "tag": "srv-00000012"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "example.com",
+            "port": 443,
+            "users": [
+              {
+                "id": "5783a3e7-e373-51cd-8642-c83782b807c5",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "httpupgradeSettings": {
+          "host": "cdn.example.com",
+          "path": "/hu"
+        },
+        "network": "httpupgrade"
+      },
+      "tag": "srv-00000013"
+    },
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "example.com",
+            "port": 443,
+            "users": [
+              {
+                "id": "5783a3e7-e373-51cd-8642-c83782b807c5",
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "host": "cdn.example.com",
+          "mode": "packet-up",
+          "path": "/x"
+        }
+      },
+      "tag": "srv-00000014"
+    },
+    {
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "h.example",
+            "method": "2022-blake3-aes-128-gcm",
+            "password": "YWJjZGVmZ2hpamtsbW5vcA==",
+            "port": 443
+          }
+        ]
+      },
+      "tag": "srv-00000015"
+    },
+    {
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "1.2.3.4",
+            "method": "aes-256-gcm",
+            "password": "pass",
+            "port": 8388
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "tcpSettings": {
+          "header": {
+            "request": {
+              "headers": {
+                "Host": [
+                  "a.example.com"
+                ]
+              },
+              "path": [
+                "/p"
+              ]
+            },
+            "type": "http"
+          }
+        }
+      },
+      "tag": "srv-00000016"
+    },
+    {
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "1.2.3.4",
+            "method": "aes-256-gcm",
+            "password": "pass",
+            "port": 8388
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "realitySettings": {
+          "fingerprint": "chrome",
+          "publicKey": "SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc",
+          "serverName": "www.example.com"
+        },
+        "security": "reality"
+      },
+      "tag": "srv-00000017"
+    },
+    {
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "1.2.3.4",
+            "method": "aes-256-gcm",
+            "password": "pass",
+            "port": 8388
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "cdn.example.com"
+        },
+        "wsSettings": {
+          "host": "cdn.example.com",
+          "path": "/ws"
+        }
+      },
+      "tag": "srv-00000018"
+    },
+    {
+      "protocol": "shadowsocks",
+      "settings": {
+        "servers": [
+          {
+            "address": "1.2.3.4",
+            "method": "aes-256-gcm",
+            "password": "pass",
+            "port": 8388
+          }
+        ]
+      },
+      "streamSettings": {
+        "grpcSettings": {
+          "multiMode": false,
+          "serviceName": "x"
+        },
+        "network": "grpc"
+      },
+      "tag": "srv-00000019"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "inboundTag": [
+          "api-in"
+        ],
+        "source": [
+          "172.31.255.2/32",
+          "172.31.255.3/32"
+        ],
+        "outboundTag": "api"
+      },
+      {
+        "inboundTag": [
+          "api-in"
+        ],
+        "outboundTag": "block"
+      },
+      {
+        "inboundTag": [
+          "dns-in"
+        ],
+        "outboundTag": "dns-out"
+      },
+      {
+        "inboundTag": [
+          "socks-in"
+        ],
+        "source": [
+          "172.31.255.2/32"
+        ],
+        "balancerTag": "proxy-closed"
+      },
+      {
+        "inboundTag": [
+          "socks-in"
+        ],
+        "outboundTag": "block"
+      },
+      {
+        "inboundTag": [
+          "dns-internal"
+        ],
+        "balancerTag": "proxy-open"
+      },
+      {
+        "inboundTag": [
+          "tun-in"
+        ],
+        "network": "tcp,udp",
+        "balancerTag": "proxy-open"
+      }
+    ],
+    "balancers": [
+      {
+        "tag": "proxy-open",
+        "selector": [
+          "srv-"
+        ],
+        "strategy": {
+          "type": "leastPing"
+        },
+        "fallbackTag": "direct"
+      },
+      {
+        "tag": "proxy-closed",
+        "selector": [
+          "srv-"
+        ],
+        "strategy": {
+          "type": "leastPing"
+        },
+        "fallbackTag": "block"
+      }
+    ]
+  },
+  "observatory": {
+    "subjectSelector": [
+      "srv-"
+    ],
+    "probeURL": "https://www.gstatic.com/generate_204",
+    "probeInterval": "10s",
+    "enableConcurrency": true
+  }
+}

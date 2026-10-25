@@ -2,19 +2,33 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/url"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+
+	"github.com/Arman2122/tikray/internal/render"
+	"github.com/Arman2122/tikray/internal/store"
 )
 
-// Config is what the CLI runs with. M1 reads it from the environment; M2
-// replaces that with the state store.
+// Config is what the CLI runs with: the environment, and the state for the
+// runner's address (see withState).
 type Config struct {
-	Data      string // the data root (TIKRAY_DATA)
-	Arch      string // GOARCH of the cores to fetch (TIKRAY_ARCH)
+	Data string // the data root (TIKRAY_DATA)
+	Arch string // GOARCH of the cores to fetch (TIKRAY_ARCH)
+	// RunnerURL, Socks and XrayAPI default to the runner's address on the
+	// private subnet, which the state holds. configFromEnv leaves them empty
+	// where their variable is unset, and withState fills them in.
 	RunnerURL string // the runner's control API (TIKRAY_RUNNER_URL)
 	Socks     string // the runner's SOCKS5 listener, host:port (TIKRAY_SOCKS)
-	Upstream  string // the XTLS release server (TIKRAY_UPSTREAM)
+	// XrayAPI is where xray's gRPC API listens, host:port (TIKRAY_XRAY_API).
+	// The health check runs "xray api statssys --server=<XrayAPI>" in the
+	// runner, so it must be an address the runner can reach and the config's
+	// api rule lets the runner use.
+	XrayAPI  string
+	Upstream string // the XTLS release server (TIKRAY_UPSTREAM)
 	// Mirrors are download URL templates with {version}, {arch} and {file}
 	// (TIKRAY_MIRRORS, comma-separated).
 	Mirrors []string
@@ -27,15 +41,66 @@ type Config struct {
 }
 
 const (
-	defaultData      = "/data"
-	defaultRunnerURL = "http://172.31.255.3:8080"
-	defaultSocks     = "172.31.255.3:1080"
-	defaultUpstream  = "https://github.com/XTLS/Xray-core"
-	defaultProbeURL  = "https://www.gstatic.com/generate_204"
+	defaultData     = "/data"
+	defaultUpstream = "https://github.com/XTLS/Xray-core"
+	defaultProbeURL = "https://www.gstatic.com/generate_204"
+	// runnerPort is the port of the runner's control API, which
+	// cmd/tikray-runner serves on its address of the private subnet.
+	runnerPort = 8080
 )
 
+// stateDir is where the CLI keeps the state, under the data root.
+func stateDir(data string) string { return filepath.Join(data, "state") }
+
+// readState reads the state in <data>/state and its revision. It never writes
+// the state: a directory without one gives the default state at revision 0,
+// and the store is not changed. Opening the store makes the directory (0700)
+// if it is missing.
+func readState(data string) (store.State, uint64, error) {
+	s, err := store.Open(stateDir(data))
+	if err != nil {
+		return store.State{}, 0, err
+	}
+	st, rev := s.State()
+	return st, rev, nil
+}
+
+// withState returns c with the runner's address, RunnerURL, Socks and XrayAPI,
+// taken from st's private subnet where the environment left them unset.
+func (c Config) withState(st store.State) Config {
+	runner := st.Network.Runner().String()
+	if c.RunnerURL == "" {
+		c.RunnerURL = "http://" + net.JoinHostPort(runner, strconv.Itoa(runnerPort))
+	}
+	if c.Socks == "" {
+		c.Socks = net.JoinHostPort(runner, strconv.Itoa(render.SOCKSPort))
+	}
+	if c.XrayAPI == "" {
+		c.XrayAPI = net.JoinHostPort(runner, strconv.Itoa(render.APIPort))
+	}
+	return c
+}
+
+// loadConfig reads the environment and the state, once, and returns the
+// configuration they give together with the state it was derived from. The
+// environment is checked first: a bad one never opens the state. A state
+// that cannot be read gives an error that starts "the state can't be read: ".
+func loadConfig(getenv func(string) string) (Config, store.State, error) {
+	cfg, err := configFromEnv(getenv)
+	if err != nil {
+		return Config{}, store.State{}, err
+	}
+	st, _, err := readState(cfg.Data)
+	if err != nil {
+		return Config{}, store.State{}, fmt.Errorf("the state can't be read: %w", err)
+	}
+	return cfg.withState(st), st, nil
+}
+
 // configFromEnv reads the configuration from getenv. An unset or empty
-// variable takes its default; the two lists are empty by default.
+// variable takes its default; the two lists are empty by default. The
+// addresses of the runner (TIKRAY_RUNNER_URL, TIKRAY_SOCKS, TIKRAY_XRAY_API)
+// stay empty when unset: their default is the state's (withState).
 func configFromEnv(getenv func(string) string) (Config, error) {
 	str := func(key, def string) string {
 		if v := getenv(key); v != "" {
@@ -46,8 +111,9 @@ func configFromEnv(getenv func(string) string) (Config, error) {
 	cfg := Config{
 		Data:            str("TIKRAY_DATA", defaultData),
 		Arch:            str("TIKRAY_ARCH", runtime.GOARCH),
-		RunnerURL:       str("TIKRAY_RUNNER_URL", defaultRunnerURL),
-		Socks:           str("TIKRAY_SOCKS", defaultSocks),
+		RunnerURL:       getenv("TIKRAY_RUNNER_URL"),
+		Socks:           getenv("TIKRAY_SOCKS"),
+		XrayAPI:         getenv("TIKRAY_XRAY_API"),
 		Upstream:        str("TIKRAY_UPSTREAM", defaultUpstream),
 		Mirrors:         splitList(getenv("TIKRAY_MIRRORS")),
 		IndexURLs:       splitList(getenv("TIKRAY_INDEX_URLS")),

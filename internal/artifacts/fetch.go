@@ -115,21 +115,61 @@ func Proxy(socksAddr, repo string, healthy func(context.Context) bool) Source {
 		healthy = func(context.Context) bool { return false }
 	}
 	u := &upstream{name: "proxy", repo: repoOrDefault(repo), gate: healthy}
+	tr, err := socksTransport(socksAddr)
+	if err != nil {
+		u.err = err
+		return u
+	}
+	u.hc = &http.Client{Transport: tr}
+	return u
+}
+
+// socksTransport is the transport of every client that goes through the SOCKS5
+// proxy at socksAddr: newTransport's bounds over a SOCKS5 dialer, which hands
+// the proxy the names to resolve. The environment's proxy settings never apply
+// to it, and it keeps no connection idle.
+func socksTransport(socksAddr string) (*http.Transport, error) {
 	d, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
 	if err != nil {
-		u.err = fmt.Errorf("socks5 proxy %s: %w", socksAddr, err)
-		return u
+		return nil, fmt.Errorf("socks5 proxy %s: %w", socksAddr, err)
 	}
 	cd, ok := d.(proxy.ContextDialer)
 	if !ok {
-		u.err = fmt.Errorf("socks5 proxy %s: dialer cannot take a context", socksAddr)
-		return u
+		return nil, fmt.Errorf("socks5 proxy %s: dialer cannot take a context", socksAddr)
 	}
 	// No Proxy func: the environment's proxy settings never apply here.
 	tr := newTransport(cd.DialContext, nil)
 	tr.DisableKeepAlives = true
-	u.hc = &http.Client{Transport: tr}
-	return u
+	return tr, nil
+}
+
+// HTTPClient returns an HTTP client for fetching small resources, such as a
+// subscription. It has the bounds of newTransport (dial, TLS handshake and
+// response headers), and timeout limits a whole request, body included; 0
+// sets none. An empty socksAddr means a direct client, which honours the
+// environment's proxy settings as Direct does. Otherwise the client goes
+// through the SOCKS5 proxy at socksAddr, which resolves the names, as Proxy
+// does. If that proxy cannot be set up, every request of the client fails
+// with the reason.
+func HTTPClient(socksAddr string, timeout time.Duration) *http.Client {
+	if socksAddr == "" {
+		return &http.Client{Transport: newTransport(nil, http.ProxyFromEnvironment), Timeout: timeout}
+	}
+	tr, err := socksTransport(socksAddr)
+	if err != nil {
+		return &http.Client{Transport: failing{err}, Timeout: timeout}
+	}
+	return &http.Client{Transport: tr, Timeout: timeout}
+}
+
+// failing is a transport that fails every request with err.
+type failing struct{ err error }
+
+func (f failing) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		req.Body.Close()
+	}
+	return nil, f.err
 }
 
 func repoOrDefault(repo string) string {

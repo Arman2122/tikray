@@ -31,6 +31,12 @@ type BootOptions struct {
 	Password   string
 	MemoryMB   int
 	DataDiskMB int
+	// Notef, if set, receives what the harness worked around and a run that
+	// passes should still show, such as a push that needed its retry
+	// (fetchFile). A test passes t.Logf, and that line (shown with go test -v)
+	// is what survives a run that passes: harness.log has the note too, but
+	// it is in the work dir, which the e2e suite removes when the test passes.
+	Notef func(format string, args ...any)
 }
 
 // CHR is a running RouterOS CHR VM attached to the lab network: ether1 on the

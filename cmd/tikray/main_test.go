@@ -3,20 +3,28 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/render"
 	"github.com/Arman2122/tikray/internal/runnerapi"
+	"github.com/Arman2122/tikray/internal/store"
+	"github.com/Arman2122/tikray/internal/xrayver"
 )
 
 const testToken = "tok"
@@ -172,33 +180,6 @@ func TestReportExitCodeFollowsTheOutcome(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"outcome": "noop"`) || !strings.Contains(errb.String(), "saving the result") {
 		t.Errorf("stdout %q, stderr %q", out.String(), errb.String())
-	}
-}
-
-func TestWriteFileAtomic(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "last-result.json")
-	for _, content := range []string{"first\n", "second\n"} {
-		if err := writeFileAtomic(path, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		got, err := os.ReadFile(path)
-		if err != nil || string(got) != content {
-			t.Fatalf("read %q, %v; want %q", got, err, content)
-		}
-		if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
-			t.Fatalf("mode %v, %v; want 0600", fi.Mode(), err)
-		}
-	}
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ents) != 1 {
-		t.Errorf("the directory holds %d entries, want only the file: %v", len(ents), ents)
-	}
-	if err := writeFileAtomic(filepath.Join(dir, "missing", "f"), nil, 0o600); err == nil {
-		t.Error("writing into a missing directory gave no error")
 	}
 }
 
@@ -422,9 +403,11 @@ func TestRemoveFileDurably(t *testing.T) {
 }
 
 func TestRunUpdateNoop(t *testing.T) {
+	// The runner is on the config the empty state renders for the core: an
+	// update renders the config, and finds it already active.
 	vars, data := testEnv(t, runnerapi.Status{
 		State:  runnerapi.StateRunning,
-		Active: &runnerapi.Selection{Core: "26.10.21", Config: testConfigRel},
+		Active: &runnerapi.Selection{Core: "26.10.21", Config: configName(t, store.Default(), "26.10.21")},
 	})
 	code, stdout, stderr := runCLI(t, vars, "core", "update", "26.10.21", "--allow-unverified")
 	if code != 0 {
@@ -451,7 +434,7 @@ func TestRunUpdateNoop(t *testing.T) {
 func TestRunUpdateSweepsStateTmp(t *testing.T) {
 	vars, data := testEnv(t, runnerapi.Status{
 		State:  runnerapi.StateRunning,
-		Active: &runnerapi.Selection{Core: "26.10.21", Config: testConfigRel},
+		Active: &runnerapi.Selection{Core: "26.10.21", Config: configName(t, store.Default(), "26.10.21")},
 	})
 	tmp := filepath.Join(data, "state", "tmp")
 	left := filepath.Join(tmp, "tikray-core-123", "Xray-linux-arm64-v8a.zip.part")
@@ -642,7 +625,7 @@ func TestNewUpdater(t *testing.T) {
 		ProbeURL:        "https://probe.example/204",
 	}
 	runner := &runnerapi.Client{BaseURL: cfg.RunnerURL, Token: testToken}
-	u, err := newUpdater(cfg, runner, io.Discard)
+	u, err := newUpdater(cfg, runner, io.Discard, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -665,13 +648,995 @@ func TestNewUpdater(t *testing.T) {
 
 	// With no key file the index stays unused.
 	cfg.IndexURLs, cfg.IndexPubKeyFile = nil, ""
-	u, err = newUpdater(cfg, runner, io.Discard)
+	u, err = newUpdater(cfg, runner, io.Discard, nil, true)
 	if err != nil || len(u.Verify.IndexPub) != 0 {
 		t.Errorf("without a key: %v, %q", err, u.Verify.IndexPub)
 	}
 
 	cfg.IndexPubKeyFile = filepath.Join(data, "no-such-key")
-	if _, err := newUpdater(cfg, runner, io.Discard); err == nil || !strings.Contains(err.Error(), "no-such-key") {
+	if _, err := newUpdater(cfg, runner, io.Discard, nil, true); err == nil || !strings.Contains(err.Error(), "no-such-key") {
 		t.Errorf("missing key file: %v", err)
 	}
+}
+
+func TestNewUpdaterRenderer(t *testing.T) {
+	cfg := Config{Data: t.TempDir(), Arch: "amd64", RunnerURL: "http://127.0.0.1:1", Socks: "127.0.0.1:1", XrayAPI: "127.0.0.1:2"}
+	runner := &runnerapi.Client{BaseURL: cfg.RunnerURL, Token: testToken}
+
+	u, err := newUpdater(cfg, runner, io.Discard, nil, true)
+	if err != nil || u.Render != nil {
+		t.Errorf("without a renderer: %v, Render %v; want none, so that --config is all there is", err, u.Render != nil)
+	}
+
+	st := store.Default()
+	st.DNS.Remote = "9.9.9.9"
+	u, err = newUpdater(cfg, runner, io.Discard, stateRenderer(st), false)
+	if err != nil || u.Render == nil {
+		t.Fatalf("with a renderer: %v, Render %v", err, u.Render != nil)
+	}
+	got, err := u.Render(xrayver.Version{Major: 26, Minor: 10, Patch: 21}, "")
+	if err != nil || !bytes.Equal(got, mustRender(t, st, "26.10.21")) {
+		t.Errorf("the updater's renderer gave %q (%v), want the state's render", got, err)
+	}
+}
+
+// serverOutbound is a VLESS Reality outbound, as sharelink builds one.
+const serverOutbound = `{"protocol":"vless","settings":{"vnext":[{"address":"203.0.113.10","port":443,"users":[{"encryption":"none","flow":"xtls-rprx-vision","id":"b831381d-6324-4d53-ad4f-8cda48b30811"}]}]},"streamSettings":{"network":"tcp","realitySettings":{"fingerprint":"chrome","publicKey":"SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc","serverName":"www.example.com","shortId":"6ba85179e30d4fc2"},"security":"reality"}}`
+
+// writeState saves into data the state that change makes of the default one,
+// as the daemon would, and returns it.
+func writeState(t *testing.T, data string, change func(*store.State)) store.State {
+	t.Helper()
+	s, err := store.Open(filepath.Join(data, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := s.Update(0, func(st *store.State) error {
+		change(st)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// withServer gives a state a server and a smart default policy.
+func withServer(st *store.State) {
+	st.DefaultPolicy = store.Policy{Mode: store.ModeSmart}
+	st.Servers = []store.Server{{ID: "a1b2c3d4", Name: "lab-a", Outbound: json.RawMessage(serverOutbound)}}
+}
+
+// dnsRemote returns a change that sets the state's remote resolver: the
+// smallest change that alters the rendered config.
+func dnsRemote(addr string) func(*store.State) {
+	return func(st *store.State) { st.DNS.Remote = addr }
+}
+
+// mustRender is what render.Render makes of st for the core, with no geo.
+func mustRender(t *testing.T, st store.State, core string) []byte {
+	t.Helper()
+	v, err := xrayver.Parse(core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := render.Render(render.Input{State: st, Core: v})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// configName is the name under run/ of the config that st renders to for the
+// core: config/<SHA-256>.json.
+func configName(t *testing.T, st store.State, core string) string {
+	t.Helper()
+	sum := sha256.Sum256(mustRender(t, st, core))
+	return "config/" + hex.EncodeToString(sum[:]) + ".json"
+}
+
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := []string{}
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+func decodeResult(t *testing.T, stdout string) artifacts.Result {
+	t.Helper()
+	var res artifacts.Result
+	if err := json.Unmarshal([]byte(stdout), &res); err != nil {
+		t.Fatalf("stdout is not a Result: %v\n%s", err, stdout)
+	}
+	return res
+}
+
+// installSlot leaves an installed core in data, as a past update would have.
+func installSlot(t *testing.T, data, version string) {
+	t.Helper()
+	dir := filepath.Join(data, "cores", version)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(artifacts.Meta{Version: version, Source: "direct", Verified: "dgst"})
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// closedAddr is a loopback address that nothing listens on.
+func closedAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
+// trialRunner is a fake runner that takes a trial as far as an update, a
+// rollback or an apply needs: status, trial, commit, abort, and an xray API
+// that always answers. A trial reads candidate.json from run, where the
+// CoreUpdater put it, and records it.
+type trialRunner struct {
+	t   *testing.T
+	run string // <data>/run
+	srv *httptest.Server
+
+	mu       sync.Mutex
+	st       runnerapi.Status
+	reject   bool                  // trial answers 422, as it does for a config xray run -test refuses
+	cands    []runnerapi.Candidate // as each trial found candidate.json
+	apiCalls [][]string            // the arguments of each call to the xray API
+}
+
+func xrayVersionLine(core string) string {
+	return "Xray " + core + " (Xray, Penetrates Everything.) fake (go1.24.7 linux/amd64)"
+}
+
+func newTrialRunner(t *testing.T, run string, active *runnerapi.Selection) *trialRunner {
+	t.Helper()
+	r := &trialRunner{t: t, run: run, st: runnerapi.Status{State: runnerapi.StateEmpty}}
+	if active != nil {
+		a := *active
+		r.st = runnerapi.Status{State: runnerapi.StateRunning, Active: &a, XrayPID: 42, XrayVersion: xrayVersionLine(a.Core), RoutesOK: true, GatewayUp: true}
+	}
+	r.srv = httptest.NewServer(http.HandlerFunc(r.serve))
+	t.Cleanup(r.srv.Close)
+	return r
+}
+
+// trialEnv is testEnv with a trialRunner, which starts on active.
+func trialEnv(t *testing.T, active *runnerapi.Selection) (vars map[string]string, data string, r *trialRunner) {
+	t.Helper()
+	vars, data = testEnv(t, runnerapi.Status{})
+	r = newTrialRunner(t, filepath.Join(data, "run"), active)
+	vars["TIKRAY_RUNNER_URL"] = r.srv.URL
+	return vars, data, r
+}
+
+func (r *trialRunner) serve(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	if req.Header.Get("Authorization") != "Bearer "+testToken {
+		w.WriteHeader(http.StatusUnauthorized)
+		io.WriteString(w, `{"error":"unauthorized"}`)
+		return
+	}
+	switch req.Method + " " + req.URL.Path {
+	case "GET /v1/status":
+		json.NewEncoder(w).Encode(r.st)
+	case "POST /v1/trial":
+		r.trial(w)
+	case "POST /v1/commit":
+		r.end(w, runnerapi.OutcomeCommitted)
+	case "POST /v1/abort":
+		r.end(w, runnerapi.OutcomeAborted)
+	case "POST /v1/xray-api":
+		var in runnerapi.XrayAPIRequest
+		if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+			r.t.Errorf("xray-api: %v", err)
+		}
+		r.apiCalls = append(r.apiCalls, in.Args)
+		json.NewEncoder(w).Encode(runnerapi.XrayAPIResponse{})
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func (r *trialRunner) trial(w http.ResponseWriter) {
+	var c runnerapi.Candidate
+	raw, err := os.ReadFile(filepath.Join(r.run, "candidate.json"))
+	if err == nil {
+		err = json.Unmarshal(raw, &c)
+	}
+	if err == nil {
+		err = c.Validate()
+	}
+	if err != nil {
+		r.t.Errorf("trial: candidate.json: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	r.cands = append(r.cands, c)
+	switch {
+	case r.reject:
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		io.WriteString(w, `{"error":"test_failed","detail":"xray says no"}`)
+	case r.st.State == runnerapi.StateTrial:
+		w.WriteHeader(http.StatusConflict)
+		io.WriteString(w, `{"error":"busy"}`)
+	default:
+		r.st.State, r.st.Candidate = runnerapi.StateTrial, &c
+		r.st.XrayPID, r.st.XrayVersion = 43, xrayVersionLine(c.Core)
+		r.st.RoutesOK, r.st.GatewayUp = true, true
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// end closes the open trial: a commit makes the candidate active, an abort
+// reverts to the active selection.
+func (r *trialRunner) end(w http.ResponseWriter, outcome string) {
+	if r.st.State != runnerapi.StateTrial {
+		w.WriteHeader(http.StatusConflict)
+		io.WriteString(w, `{"error":"no_trial"}`)
+		return
+	}
+	c := *r.st.Candidate
+	if outcome == runnerapi.OutcomeCommitted {
+		sel := c.Selection
+		r.st.Active = &sel
+	}
+	r.st.State, r.st.Candidate = runnerapi.StateRunning, nil
+	if r.st.Active != nil {
+		r.st.XrayVersion = xrayVersionLine(r.st.Active.Core)
+	}
+	r.st.LastTrial = &runnerapi.TrialResult{Candidate: c, Outcome: outcome, At: time.Now()}
+	os.Remove(filepath.Join(r.run, "candidate.json"))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// active is the runner's active selection.
+func (r *trialRunner) active() runnerapi.Selection {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.st.Active == nil {
+		return runnerapi.Selection{}
+	}
+	return *r.st.Active
+}
+
+func (r *trialRunner) candidates() []runnerapi.Candidate {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]runnerapi.Candidate(nil), r.cands...)
+}
+
+// xrayAPICalls are the arguments of the calls to the xray API so far.
+func (r *trialRunner) xrayAPICalls() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([][]string(nil), r.apiCalls...)
+}
+
+// runFast is runCLI for a command that drives a trial: the updater waits 1 ms,
+// not 10 s, before it looks at the candidate, and gives up on its health check
+// after 300 ms, not 30 s.
+func runFast(t *testing.T, vars map[string]string, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
+	var out, errb bytes.Buffer
+	c := &cli{getenv: envOf(vars), stdout: &out, stderr: &errb, tune: func(u *artifacts.CoreUpdater) {
+		u.EarlyExit = time.Millisecond
+		u.HealthWindow = 300 * time.Millisecond
+	}}
+	code = c.run(context.Background(), args)
+	return code, out.String(), errb.String()
+}
+
+func TestConfigRender(t *testing.T) {
+	t.Run("--core", func(t *testing.T) {
+		vars, data := testEnv(t, runnerapi.Status{})
+		st := writeState(t, data, withServer)
+		stateFile := filepath.Join(data, "state", "state.v1.json")
+		before, err := os.ReadFile(stateFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		code, stdout, stderr := runCLI(t, vars, "config", "render", "--core", "26.10.21")
+		if code != 0 || stderr != "" {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+		if want := mustRender(t, st, "26.10.21"); stdout != string(want) {
+			t.Errorf("stdout is\n%s\nwant render.Render's\n%s", stdout, want)
+		}
+		if !strings.Contains(stdout, "srv-a1b2c3d4") {
+			t.Errorf("the config lacks the state's server:\n%s", stdout)
+		}
+
+		// A read: nothing is written to the data root.
+		if after, err := os.ReadFile(stateFile); err != nil || !bytes.Equal(after, before) {
+			t.Errorf("the state file changed (%v)", err)
+		}
+		if names := dirNames(t, filepath.Join(data, "state")); !reflect.DeepEqual(names, []string{"state.v1.json"}) {
+			t.Errorf("state/ holds %v, want the state file alone", names)
+		}
+		if _, err := os.Stat(filepath.Join(data, "inbox")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("config render made the inbox: %v", err)
+		}
+	})
+
+	t.Run("--core needs no runner", func(t *testing.T) {
+		vars, data := testEnv(t, runnerapi.Status{})
+		st := writeState(t, data, withServer)
+		noToken(vars, data)
+		vars["TIKRAY_RUNNER_URL"] = "http://" + closedAddr(t)
+		code, stdout, stderr := runCLI(t, vars, "config", "render", "--core", "v26.10.21")
+		if code != 0 || stderr != "" || stdout != string(mustRender(t, st, "26.10.21")) {
+			t.Errorf("exit %d, stderr %q, stdout\n%s", code, stderr, stdout)
+		}
+	})
+
+	t.Run("no state yet", func(t *testing.T) {
+		data := t.TempDir()
+		code, stdout, stderr := runCLI(t, map[string]string{"TIKRAY_DATA": data}, "config", "render", "--core", "26.10.21")
+		if code != 0 || stderr != "" || stdout != string(mustRender(t, store.Default(), "26.10.21")) {
+			t.Fatalf("exit %d, stderr %q, stdout\n%s", code, stderr, stdout)
+		}
+		// Opening the store may make state/, and nothing else.
+		for _, name := range dirNames(t, data) {
+			fi, err := os.Stat(filepath.Join(data, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name != "state" || fi.Mode().Perm() != 0o700 || len(dirNames(t, filepath.Join(data, name))) != 0 {
+				t.Errorf("config render left %s (%v)", name, fi.Mode())
+			}
+		}
+	})
+
+	t.Run("the runner's active core", func(t *testing.T) {
+		vars, data := testEnv(t, runnerapi.Status{
+			State:  runnerapi.StateRunning,
+			Active: &runnerapi.Selection{Core: "26.3.27", Config: testConfigRel},
+		})
+		st := writeState(t, data, withServer)
+		code, stdout, stderr := runCLI(t, vars, "config", "render")
+		if code != 0 || stderr != "" {
+			t.Fatalf("exit %d, stderr %q", code, stderr)
+		}
+		if want := mustRender(t, st, "26.3.27"); stdout != string(want) {
+			t.Errorf("stdout is\n%s\nwant the render for 26.3.27\n%s", stdout, want)
+		}
+	})
+
+	t.Run("it is the runner's core that renders", func(t *testing.T) {
+		// 26.1.17 has no TUN inbound: the render refuses it, which only
+		// happens if the runner's active core was taken.
+		vars, _ := testEnv(t, runnerapi.Status{
+			State:  runnerapi.StateRunning,
+			Active: &runnerapi.Selection{Core: "26.1.17", Config: testConfigRel},
+		})
+		code, stdout, stderr := runCLI(t, vars, "config", "render")
+		if code != 1 || stdout != "" || !strings.Contains(stderr, "26.1.17") {
+			t.Errorf("exit %d, stdout %q, stderr %q; want 1 and the old core named", code, stdout, stderr)
+		}
+	})
+
+	t.Run("no active core", func(t *testing.T) {
+		vars, _ := testEnv(t, runnerapi.Status{State: runnerapi.StateEmpty})
+		code, stdout, stderr := runCLI(t, vars, "config", "render")
+		if code != 1 || stdout != "" || !strings.Contains(stderr, "--core") {
+			t.Errorf("exit %d, stdout %q, stderr %q; want 1 and --core named", code, stdout, stderr)
+		}
+	})
+
+	t.Run("no runner", func(t *testing.T) {
+		vars, data := testEnv(t, runnerapi.Status{})
+		noToken(vars, data)
+		code, stdout, stderr := runCLI(t, vars, "config", "render")
+		if code != 1 || stdout != "" || !strings.Contains(stderr, "--core") || !strings.Contains(stderr, "runner.token") {
+			t.Errorf("exit %d, stdout %q, stderr %q; want 1, --core and the token named", code, stdout, stderr)
+		}
+	})
+
+	t.Run("unreadable state", func(t *testing.T) {
+		data := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(data, "state"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(data, "state", "state.v1.json"), []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		code, stdout, stderr := runCLI(t, map[string]string{"TIKRAY_DATA": data}, "config", "render", "--core", "26.10.21")
+		if code != 1 || stdout != "" || !strings.Contains(stderr, "state.v1.json") {
+			t.Errorf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+		}
+	})
+}
+
+func TestApplyCommand(t *testing.T) {
+	vars, data, runner := trialEnv(t, &runnerapi.Selection{Core: "26.10.21", Config: testConfigRel})
+	st := writeState(t, data, func(*store.State) {})
+	stateFile := filepath.Join(data, "state", "state.v1.json")
+	before, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The runner is on another config than the state renders to: a trial.
+	code, stdout, stderr := runFast(t, vars, "apply")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stdout %q, stderr %q", code, stdout, stderr)
+	}
+	res := decodeResult(t, stdout)
+	if res.Outcome != runnerapi.OutcomeCommitted || res.Kind != artifacts.KindConfig || res.From != "26.10.21" || res.To != "26.10.21" {
+		t.Errorf("result %+v, want a committed config for 26.10.21", res)
+	}
+	want := runnerapi.Selection{Core: "26.10.21", Config: configName(t, st, "26.10.21")}
+	if got := runner.active(); got != want {
+		t.Errorf("the runner is on %+v, want %+v", got, want)
+	}
+	if b, err := os.ReadFile(filepath.Join(data, "run", want.Config)); err != nil || !bytes.Equal(b, mustRender(t, st, "26.10.21")) {
+		t.Errorf("the config on trial is %q (%v), want the state's render", b, err)
+	}
+	if saved, err := os.ReadFile(filepath.Join(data, "state", "last-result.json")); err != nil || string(saved) != stdout {
+		t.Errorf("last-result.json is %q (%v), want the stdout %q", saved, err, stdout)
+	}
+	// The health check asked xray's API at the runner's address on the
+	// state's subnet.
+	if calls := runner.xrayAPICalls(); len(calls) == 0 || !reflect.DeepEqual(calls[0], []string{"statssys", "--server=172.31.255.3:10085"}) {
+		t.Errorf("xray API calls %q, want statssys against 172.31.255.3:10085", calls)
+	}
+
+	// A second run finds it done.
+	code, stdout, stderr = runFast(t, vars, "apply")
+	if code != 0 {
+		t.Fatalf("second run: exit %d, want 0; stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if res := decodeResult(t, stdout); res.Outcome != artifacts.OutcomeNoop || res.Kind != artifacts.KindConfig {
+		t.Errorf("second run: result %+v, want a config noop", res)
+	}
+	if n := len(runner.candidates()); n != 1 {
+		t.Errorf("%d trials after a noop, want the first alone", n)
+	}
+	if after, err := os.ReadFile(stateFile); err != nil || !bytes.Equal(after, before) {
+		t.Errorf("apply changed the state file (%v)", err)
+	}
+
+	// Once the state changes, so does the config.
+	st = writeState(t, data, dnsRemote("9.9.9.9"))
+	code, stdout, stderr = runFast(t, vars, "apply")
+	if code != 0 {
+		t.Fatalf("after a state change: exit %d, want 0; stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if res := decodeResult(t, stdout); res.Outcome != runnerapi.OutcomeCommitted || res.Kind != artifacts.KindConfig {
+		t.Errorf("after a state change: result %+v", res)
+	}
+	if got, want := runner.active().Config, configName(t, st, "26.10.21"); got != want || got == configName(t, store.Default(), "26.10.21") {
+		t.Errorf("the runner is on %s, want the new render %s", got, want)
+	}
+}
+
+func TestApplyRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		active *runnerapi.Selection
+		setup  func(vars map[string]string, data string)
+		detail string
+	}{
+		{"no active core", nil, func(map[string]string, string) {}, "no active core"},
+		{"missing runner token", &runnerapi.Selection{Core: "26.10.21", Config: testConfigRel}, noToken, "runner.token"},
+		{"a geo bundle", &runnerapi.Selection{Core: "26.10.21", Geo: "ir-2026", Config: testConfigRel}, func(map[string]string, string) {}, "geo bundles are not supported yet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vars, data, runner := trialEnv(t, tc.active)
+			saved := seedResult(t, data)
+			tc.setup(vars, data)
+
+			code, stdout, stderr := runFast(t, vars, "apply")
+			if code != 1 || !strings.Contains(stderr, tc.detail) {
+				t.Errorf("exit %d, stderr %q; want 1 and %q", code, stderr, tc.detail)
+			}
+			res := decodeResult(t, stdout)
+			if res.Outcome != artifacts.OutcomeRefused || res.Kind != artifacts.KindConfig || !strings.Contains(res.Detail, tc.detail) {
+				t.Errorf("result %+v, want a refused config result naming %q", res, tc.detail)
+			}
+			if got, err := os.ReadFile(saved); err != nil || string(got) != stdout {
+				t.Errorf("last-result.json is %q (%v), want this run's stdout", got, err)
+			}
+			if n := len(runner.candidates()); n != 0 {
+				t.Errorf("%d trials for a refused apply", n)
+			}
+		})
+	}
+}
+
+func TestCoreUpdateRenders(t *testing.T) {
+	vars, data, runner := trialEnv(t, &runnerapi.Selection{Core: "26.3.27", Config: testConfigRel})
+	installSlot(t, data, "26.10.21")
+	st := writeState(t, data, func(*store.State) {})
+
+	code, stdout, stderr := runFast(t, vars, "core", "update", "26.10.21")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stdout %q, stderr %q", code, stdout, stderr)
+	}
+	res := decodeResult(t, stdout)
+	if res.Outcome != runnerapi.OutcomeCommitted || res.From != "26.3.27" || res.To != "26.10.21" || res.Kind != "" {
+		t.Errorf("result %+v, want a committed update from 26.3.27 to 26.10.21", res)
+	}
+	want := configName(t, st, "26.10.21")
+	cands := runner.candidates()
+	if len(cands) != 1 || cands[0].Core != "26.10.21" || cands[0].Config != want {
+		t.Fatalf("candidates %+v, want one for 26.10.21 with the rendered config %s", cands, want)
+	}
+	if b, err := os.ReadFile(filepath.Join(data, "run", want)); err != nil || !bytes.Equal(b, mustRender(t, st, "26.10.21")) {
+		t.Errorf("the config in the candidate is %q (%v), want the state's render", b, err)
+	}
+
+	// The same update finds nothing to do while the state stays as it was...
+	code, stdout, stderr = runFast(t, vars, "core", "update", "26.10.21")
+	if res := decodeResult(t, stdout); code != 0 || res.Outcome != artifacts.OutcomeNoop {
+		t.Errorf("same state: exit %d, result %+v, stderr %q; want a noop", code, res, stderr)
+	}
+
+	// ...and renders and trials the new config once it changes, though the
+	// core is the active one.
+	st = writeState(t, data, dnsRemote("9.9.9.9"))
+	code, stdout, stderr = runFast(t, vars, "core", "update", "26.10.21")
+	if res := decodeResult(t, stdout); code != 0 || res.Outcome != runnerapi.OutcomeCommitted || res.From != "26.10.21" {
+		t.Fatalf("changed state: exit %d, result %+v, stderr %q; want a commit", code, res, stderr)
+	}
+	if got, want := runner.active().Config, configName(t, st, "26.10.21"); got != want {
+		t.Errorf("the runner is on %s, want the new render %s", got, want)
+	}
+}
+
+func TestCoreRollbackRenders(t *testing.T) {
+	vars, data, runner := trialEnv(t, &runnerapi.Selection{Core: "26.3.27", Config: testConfigRel})
+	installSlot(t, data, "26.3.27")
+	installSlot(t, data, "26.10.21")
+	writeState(t, data, dnsRemote("9.9.9.9"))
+	if code, stdout, stderr := runFast(t, vars, "core", "update", "26.10.21"); code != 0 {
+		t.Fatalf("update: exit %d; stdout %q, stderr %q", code, stdout, stderr)
+	}
+
+	// The state moves on before the rollback: the core it goes back to runs the
+	// config of the state as it is now, not the one it had.
+	st := writeState(t, data, dnsRemote("8.8.8.8"))
+	code, stdout, stderr := runFast(t, vars, "core", "rollback")
+	if code != 0 {
+		t.Fatalf("rollback: exit %d; stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if res := decodeResult(t, stdout); res.Outcome != runnerapi.OutcomeCommitted || res.From != "26.10.21" || res.To != "26.3.27" {
+		t.Errorf("result %+v, want a committed rollback to 26.3.27", res)
+	}
+	want := runnerapi.Selection{Core: "26.3.27", Config: configName(t, st, "26.3.27")}
+	if got := runner.active(); got != want {
+		t.Errorf("the runner is on %+v, want %+v", got, want)
+	}
+}
+
+func TestCoreUpdateRefusesAGeoBundle(t *testing.T) {
+	vars, data, runner := trialEnv(t, &runnerapi.Selection{Core: "26.3.27", Geo: "ir-2026", Config: testConfigRel})
+	installSlot(t, data, "26.10.21")
+	code, stdout, stderr := runFast(t, vars, "core", "update", "26.10.21")
+	if code != 1 || !strings.Contains(stderr, "geo bundles are not supported yet") {
+		t.Errorf("exit %d, stderr %q; want 1 and the geo refusal", code, stderr)
+	}
+	if res := decodeResult(t, stdout); res.Outcome != artifacts.OutcomeRefused {
+		t.Errorf("result %+v, want a refusal", res)
+	}
+	if n := len(runner.candidates()); n != 0 {
+		t.Errorf("%d trials for a refused update", n)
+	}
+}
+
+func TestStateRenderer(t *testing.T) {
+	st := store.Default()
+	withServer(&st)
+	rend := stateRenderer(st)
+	core := xrayver.Version{Major: 26, Minor: 10, Patch: 21}
+
+	got, err := rend(core, "")
+	if err != nil || !bytes.Equal(got, mustRender(t, st, "26.10.21")) {
+		t.Errorf("no geo: %q, %v; want render.Render's bytes", got, err)
+	}
+	if _, err := rend(core, "ir-2026"); err == nil || !strings.Contains(err.Error(), "geo bundles are not supported yet") {
+		t.Errorf("a geo bundle: %v, want the refusal", err)
+	}
+	if _, err := rend(xrayver.Version{Major: 26, Minor: 1, Patch: 17}, ""); err == nil || !strings.Contains(err.Error(), "26.1.17") {
+		t.Errorf("a core too old: %v, want render's refusal", err)
+	}
+}
+
+func TestHealthFollowsServers(t *testing.T) {
+	cfg := Config{Socks: "10.9.8.3:1080", ProbeURL: "https://probe.example/204", XrayAPI: "10.9.8.3:10085"}
+	runner := &runnerapi.Client{BaseURL: "http://127.0.0.1:1", Token: testToken}
+	wantAPI := artifacts.XrayAPIProbe{Runner: runner, Server: "10.9.8.3:10085"}
+	wantSOCKS := artifacts.SOCKSProbe{Addr: "10.9.8.3:1080", URL: "https://probe.example/204", Timeout: probeTimeout}
+
+	// With no server, socks-in goes to block and its probe could only fail.
+	if got := healthChecks(cfg, runner, false); !reflect.DeepEqual(got, []artifacts.HealthChecker{wantAPI}) {
+		t.Errorf("without the SOCKS probe: %#v, want the xray API probe alone", got)
+	}
+	// M1's order: the proxy first, then xray's API.
+	if got := healthChecks(cfg, runner, true); !reflect.DeepEqual(got, []artifacts.HealthChecker{wantSOCKS, wantAPI}) {
+		t.Errorf("with the SOCKS probe: %#v, want both", got)
+	}
+}
+
+// The probes an update runs follow the state it renders, and all of them run
+// for a config file, as in M1.
+func TestHealthProbesOfACommand(t *testing.T) {
+	active := &runnerapi.Selection{Core: "26.10.21", Config: testConfigRel}
+
+	run := func(t *testing.T, change func(*store.State), args ...string) (int, artifacts.Result, *trialRunner) {
+		t.Helper()
+		vars, data, runner := trialEnv(t, active)
+		installSlot(t, data, "26.10.21")
+		// Nothing listens on the SOCKS address: its probe can only fail.
+		vars["TIKRAY_SOCKS"] = closedAddr(t)
+		writeState(t, data, change)
+		code, stdout, _ := runFast(t, vars, args...)
+		return code, decodeResult(t, stdout), runner
+	}
+	noServer := func(*store.State) {}
+
+	t.Run("no server, no SOCKS probe", func(t *testing.T) {
+		code, res, _ := run(t, noServer, "apply")
+		if code != 0 || res.Outcome != runnerapi.OutcomeCommitted {
+			t.Errorf("exit %d, result %+v; want a commit without the SOCKS probe", code, res)
+		}
+	})
+
+	t.Run("a server, the SOCKS probe", func(t *testing.T) {
+		code, res, _ := run(t, withServer, "apply")
+		if code != 1 || res.Outcome != artifacts.OutcomeUnhealthy || !strings.Contains(res.Detail, "socks probe") {
+			t.Errorf("exit %d, result %+v; want unhealthy through the SOCKS probe", code, res)
+		}
+	})
+
+	t.Run("a config file, the SOCKS probe", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "xray.json")
+		body := []byte(`{"inbounds":[]}` + "\n")
+		if err := os.WriteFile(file, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// The state has no server, so that a rendered config would skip the probe.
+		code, res, runner := run(t, noServer, "core", "update", "26.10.21", "--config", file)
+		if code != 1 || res.Outcome != artifacts.OutcomeUnhealthy || !strings.Contains(res.Detail, "socks probe") {
+			t.Errorf("exit %d, result %+v; want unhealthy through the SOCKS probe", code, res)
+		}
+		sum := sha256.Sum256(body)
+		if cands := runner.candidates(); len(cands) != 1 || cands[0].Config != "config/"+hex.EncodeToString(sum[:])+".json" {
+			t.Errorf("candidates %+v, want the file's config and not a render", cands)
+		}
+	})
+}
+
+func TestRunUsageConfigAndApply(t *testing.T) {
+	vars := map[string]string{"TIKRAY_DATA": t.TempDir()}
+	for _, args := range [][]string{
+		{"config"},
+		{"config", "bogus"},
+		{"config", "render", "extra"},
+		{"config", "render", "--bogus"},
+		{"config", "render", "--core"},
+		{"config", "render", "--core", "latest"},
+		{"config", "render", "--core="},
+		{"apply", "extra"},
+		{"apply", "--bogus"},
+	} {
+		code, stdout, stderr := runCLI(t, vars, args...)
+		if code != 2 || stdout != "" || !strings.Contains(stderr, "usage") {
+			t.Errorf("tikray %q: exit %d, stdout %q, stderr %q; want 2 and usage on stderr only", args, code, stdout, stderr)
+		}
+	}
+	if ents, _ := os.ReadDir(vars["TIKRAY_DATA"]); len(ents) != 0 {
+		t.Errorf("a usage error created %v in the data root", ents)
+	}
+
+	for _, args := range [][]string{{"config", "help"}, {"config", "render", "-h"}, {"apply", "-h"}, {"apply", "--help"}} {
+		code, stdout, stderr := runCLI(t, vars, args...)
+		if code != 0 || !strings.Contains(stdout+stderr, "usage") {
+			t.Errorf("tikray %q: exit %d, stdout %q, stderr %q; want 0 and usage", args, code, stdout, stderr)
+		}
+	}
+}
+
+func TestUsageTextListsTheNewCommands(t *testing.T) {
+	code, stdout, _ := runCLI(t, nil, "help")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	for _, want := range []string{"config render", "--core", "apply", "TIKRAY_XRAY_API"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the usage text lacks %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// With no --config, an update runs the config the state renders to, and so
+// updating to the active version trials a changed render. Both the flag's help
+// and the usage text say so, in one sentence.
+func TestUpdateHelpSaysItRenders(t *testing.T) {
+	const sentence = "without --config the config is rendered from the state for the target core, " +
+		"so updating to the version already active re-renders and trials the config when the state changed"
+	flat := func(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
+
+	code, stdout, stderr := runCLI(t, nil, "core", "update", "-h")
+	if code != 0 {
+		t.Fatalf("core update -h: exit %d", code)
+	}
+	if got := flat(stdout + stderr); !strings.Contains(got, sentence) {
+		t.Errorf("the --config help lacks %q:\n%s", sentence, stdout+stderr)
+	}
+
+	code, stdout, _ = runCLI(t, nil, "help")
+	if code != 0 {
+		t.Fatalf("help: exit %d", code)
+	}
+	if got := flat(stdout); !strings.Contains(got, sentence) {
+		t.Errorf("the usage text lacks %q:\n%s", sentence, stdout)
+	}
+}
+
+// configFile writes an xray config with body and returns its path and its name
+// under run/ once the CoreUpdater has stored it: config/<SHA-256>.json.
+func configFile(t *testing.T, body string) (path, rel string) {
+	t.Helper()
+	path = filepath.Join(t.TempDir(), "xray.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(body))
+	return path, "config/" + hex.EncodeToString(sum[:]) + ".json"
+}
+
+// writeBad writes body as the file name in data's state directory and returns
+// name.
+func writeBad(t *testing.T, data, name string, body []byte) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(data, "state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "state", name), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return name
+}
+
+// unreadableStates each make the state in data unreadable and return the name
+// of the file the error blames.
+var unreadableStates = map[string]func(t *testing.T, data string) string{
+	"corrupt": func(t *testing.T, data string) string {
+		return writeBad(t, data, "state.v1.json", []byte("{not json"))
+	},
+	"invalid": func(t *testing.T, data string) string {
+		// A state the store refuses to load: take a saved one and spoil a policy.
+		writeState(t, data, func(*store.State) {})
+		file := filepath.Join(data, "state", "state.v1.json")
+		b, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(b, []byte(`"direct"`)) {
+			t.Fatalf("the saved state has no policy to spoil:\n%s", b)
+		}
+		return writeBad(t, data, "state.v1.json", bytes.Replace(b, []byte(`"direct"`), []byte(`"bogus"`), 1))
+	},
+	"only newer files": func(t *testing.T, data string) string {
+		return writeBad(t, data, "state.v99.json", []byte(`{"version":99,"revision":1,"state":{}}`))
+	},
+}
+
+// With no state file the state is the default one, which renders a config
+// that sends all traffic direct. A plain update, rollback or apply must not put
+// that in place of a config the runner runs, such as M1's --config one; a
+// fresh install still bootstraps from it.
+func TestNoStateFileKeepsAWorkingConfig(t *testing.T) {
+	// setup leaves the runner on 26.3.27 with a config of the user's, as an
+	// update from 26.10.21 with --config would have, and both cores
+	// installed.
+	setup := func(t *testing.T) (vars map[string]string, data string, runner *trialRunner, active runnerapi.Selection) {
+		t.Helper()
+		active = runnerapi.Selection{Core: "26.3.27", Config: testConfigRel}
+		vars, data, runner = trialEnv(t, &active)
+		installSlot(t, data, "26.3.27")
+		installSlot(t, data, "26.10.21")
+		b, err := json.Marshal(artifacts.Result{From: "26.10.21", To: "26.3.27", Outcome: runnerapi.OutcomeCommitted, At: time.Now().Add(-time.Hour)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(data, "state"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(data, "state", "core-history.jsonl"), append(b, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return vars, data, runner, active
+	}
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		advice string
+	}{
+		{"core update", []string{"core", "update", "26.10.21"}, "core update --config FILE"},
+		{"core update to the active core", []string{"core", "update", "26.3.27"}, "core update --config FILE"},
+		{"core rollback", []string{"core", "rollback"}, "create a state first"},
+		{"apply", []string{"apply"}, "create a state first"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vars, data, runner, active := setup(t)
+			trials := len(runner.candidates())
+			code, stdout, stderr := runFast(t, vars, tc.args...)
+			res := decodeResult(t, stdout)
+			if code != 1 || res.Outcome != artifacts.OutcomeRefused || !strings.Contains(res.Detail, "no state has been saved") || !strings.Contains(res.Detail, tc.advice) {
+				t.Errorf("exit %d, result %+v; want 1 and a refusal advising %q", code, res, tc.advice)
+			}
+			if !strings.Contains(stderr, "no state has been saved") {
+				t.Errorf("stderr %q does not say why", stderr)
+			}
+			if n := len(runner.candidates()); n != trials {
+				t.Errorf("%d trials after the refusal, want %d", n, trials)
+			}
+			if got := runner.active(); got != active {
+				t.Errorf("the runner is on %+v, want %+v as before", got, active)
+			}
+			// Once there is a state, its render goes on trial.
+			writeState(t, data, func(*store.State) {})
+			if code, stdout, stderr := runFast(t, vars, tc.args...); code != 0 {
+				t.Errorf("with a state: exit %d; stdout %q, stderr %q", code, stdout, stderr)
+			}
+		})
+	}
+
+	t.Run("a fresh install bootstraps from the default state", func(t *testing.T) {
+		vars, _, runner := trialEnv(t, nil)
+		installSlot(t, vars["TIKRAY_DATA"], "26.10.21")
+		code, stdout, stderr := runFast(t, vars, "core", "update", "26.10.21")
+		if code != 0 {
+			t.Fatalf("exit %d; stdout %q, stderr %q", code, stdout, stderr)
+		}
+		want := runnerapi.Selection{Core: "26.10.21", Config: configName(t, store.Default(), "26.10.21")}
+		if got := runner.active(); got != want {
+			t.Errorf("the runner is on %+v, want %+v", got, want)
+		}
+	})
+}
+
+// core status needs the state for nothing but the runner's address, so an
+// unreadable one costs a warning and the default address, as it does for
+// update --config.
+func TestCoreStatusSurvivesAnUnreadableState(t *testing.T) {
+	want := runnerapi.Status{State: runnerapi.StateRunning, Active: &runnerapi.Selection{Core: "26.10.21", Config: testConfigRel}, GatewayUp: true}
+	for name, breakState := range unreadableStates {
+		t.Run(name, func(t *testing.T) {
+			vars, data := testEnv(t, want)
+			bad := breakState(t, data)
+			code, stdout, stderr := runCLI(t, vars, "core", "status")
+			if code != 0 {
+				t.Fatalf("exit %d, stderr %q; want 0", code, stderr)
+			}
+			var got runnerapi.Status
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil || !reflect.DeepEqual(got, want) {
+				t.Errorf("stdout %q (%v), want the runner's status %+v", stdout, err, want)
+			}
+			if n := strings.Count(stderr, "\n"); n != 1 || !strings.HasPrefix(stderr, "tikray: warning: ") || !strings.Contains(stderr, bad) {
+				t.Errorf("stderr %q; want one warning line naming %s", stderr, bad)
+			}
+		})
+	}
+}
+
+// config render renders the state, so an unreadable one ends it, before the
+// runner is asked anything.
+func TestConfigRenderNeedsAReadableState(t *testing.T) {
+	for name, breakState := range unreadableStates {
+		for core, args := range map[string][]string{
+			"--core":      {"config", "render", "--core", "26.10.21"},
+			"active core": {"config", "render"},
+		} {
+			t.Run(name+", "+core, func(t *testing.T) {
+				vars, data := testEnv(t, runnerapi.Status{})
+				runner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					t.Errorf("the runner was asked %s %s", r.Method, r.URL.Path)
+				}))
+				t.Cleanup(runner.Close)
+				vars["TIKRAY_RUNNER_URL"] = runner.URL
+				bad := breakState(t, data)
+				code, stdout, stderr := runCLI(t, vars, args...)
+				if code != 1 || stdout != "" {
+					t.Errorf("exit %d, stdout %q; want 1 and nothing", code, stdout)
+				}
+				if !strings.HasPrefix(stderr, "tikray: the state can't be read: ") || !strings.Contains(stderr, bad) || strings.Contains(stderr, "warning") {
+					t.Errorf("stderr %q; want \"the state can't be read\", naming %s, and no warning", stderr, bad)
+				}
+			})
+		}
+	}
+}
+
+// With --config the state only supplies the runner's addresses, so an
+// unreadable one (M1's recovery path: the user has a config to run) costs a
+// warning and the default addresses, not the command. Without --config the
+// config comes from the state, which then must be readable.
+func TestUpdateConfigFileSurvivesAnUnreadableState(t *testing.T) {
+	for name, breakState := range unreadableStates {
+		t.Run(name, func(t *testing.T) {
+			active, activeRel := configFile(t, `{"inbounds":[]}`+"\n")
+			other, _ := configFile(t, `{"inbounds":[{"protocol":"tun"}]}`+"\n")
+			vars, data, runner := trialEnv(t, &runnerapi.Selection{Core: "26.10.21", Config: activeRel})
+			installSlot(t, data, "26.10.21")
+			bad := breakState(t, data)
+			warnings := func(stderr string) int { return strings.Count(stderr, "warning") }
+
+			// The runner is already on this config: the update is a noop, which
+			// takes the runner, and so its address, and nothing else.
+			code, stdout, stderr := runFast(t, vars, "core", "update", "26.10.21", "--config", active)
+			if res := decodeResult(t, stdout); code != 0 || res.Outcome != artifacts.OutcomeNoop {
+				t.Errorf("noop: exit %d, result %+v, stderr %q; want exit 0 and a noop", code, res, stderr)
+			}
+			if line := lineWith(stderr, "warning"); warnings(stderr) != 1 || !strings.Contains(line, bad) {
+				t.Errorf("noop: stderr %q; want one warning line naming %s", stderr, bad)
+			}
+
+			// A different config goes on trial. The runner's addresses come from
+			// the default state: the health check probes SOCKS at its .3.
+			code, stdout, stderr = runFast(t, vars, "core", "update", "26.10.21", "--config", other)
+			res := decodeResult(t, stdout)
+			if code != 1 || res.Outcome != artifacts.OutcomeUnhealthy || !strings.Contains(res.Detail, "172.31.255.3:1080") {
+				t.Errorf("trial: exit %d, result %+v; want exit 1, unhealthy through the default SOCKS address", code, res)
+			}
+			if line := lineWith(stderr, "warning"); warnings(stderr) != 1 || !strings.Contains(line, bad) {
+				t.Errorf("trial: stderr %q; want one warning line naming %s", stderr, bad)
+			}
+			if n := len(runner.candidates()); n != 1 {
+				t.Errorf("%d trials, want 1", n)
+			}
+
+			// A variable still wins over the default state.
+			vars["TIKRAY_SOCKS"] = closedAddr(t)
+			code, stdout, _ = runFast(t, vars, "core", "update", "26.10.21", "--config", other)
+			res = decodeResult(t, stdout)
+			if code != 1 || !strings.Contains(res.Detail, vars["TIKRAY_SOCKS"]) {
+				t.Errorf("TIKRAY_SOCKS set: exit %d, result %+v; want the probe at %s", code, res, vars["TIKRAY_SOCKS"])
+			}
+			delete(vars, "TIKRAY_SOCKS")
+
+			// With the config from the state, the state has to be readable.
+			trials := len(runner.candidates())
+			code, stdout, stderr = runFast(t, vars, "core", "update", "26.10.21")
+			res = decodeResult(t, stdout)
+			if code != 1 || res.Outcome != artifacts.OutcomeRefused || !strings.Contains(res.Detail, bad) || !strings.Contains(stderr, bad) {
+				t.Errorf("no --config: exit %d, result %+v, stderr %q; want a refusal naming %s", code, res, stderr, bad)
+			}
+			if warnings(stderr) != 0 {
+				t.Errorf("no --config: stderr %q carries a warning; the refusal is the error", stderr)
+			}
+			if n := len(runner.candidates()); n != trials {
+				t.Errorf("no --config: %d trials after the refusal, want %d", n, trials)
+			}
+		})
+	}
+}
+
+// lineWith returns the first line of s that holds sub.
+func lineWith(s, sub string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.Contains(line, sub) {
+			return line
+		}
+	}
+	return ""
 }

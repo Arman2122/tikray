@@ -1,10 +1,15 @@
 package main
 
 import (
+	"net/netip"
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Arman2122/tikray/internal/store"
 )
 
 // envOf is a getenv over a fixed set of variables.
@@ -13,13 +18,13 @@ func envOf(vars map[string]string) func(string) string {
 }
 
 func TestConfigFromEnv(t *testing.T) {
+	// The runner's three addresses default to the state's (TestDefaultsFromState),
+	// so the environment leaves them empty.
 	defaults := Config{
-		Data:      "/data",
-		Arch:      runtime.GOARCH,
-		RunnerURL: "http://172.31.255.3:8080",
-		Socks:     "172.31.255.3:1080",
-		Upstream:  "https://github.com/XTLS/Xray-core",
-		ProbeURL:  "https://www.gstatic.com/generate_204",
+		Data:     "/data",
+		Arch:     runtime.GOARCH,
+		Upstream: "https://github.com/XTLS/Xray-core",
+		ProbeURL: "https://www.gstatic.com/generate_204",
 	}
 
 	t.Run("defaults", func(t *testing.T) {
@@ -38,6 +43,7 @@ func TestConfigFromEnv(t *testing.T) {
 			"TIKRAY_ARCH":              "amd64",
 			"TIKRAY_RUNNER_URL":        "http://10.0.0.2:9090",
 			"TIKRAY_SOCKS":             "10.0.0.2:1081",
+			"TIKRAY_XRAY_API":          "10.0.0.2:10086",
 			"TIKRAY_UPSTREAM":          "https://git.example/Xray-core",
 			"TIKRAY_MIRRORS":           "https://m1.example/{version}/{file}, https://m2.example/{arch}/{file},",
 			"TIKRAY_INDEX_URLS":        "https://idx1.example/hashes.json, https://idx2.example/hashes.json",
@@ -52,6 +58,7 @@ func TestConfigFromEnv(t *testing.T) {
 			Arch:            "amd64",
 			RunnerURL:       "http://10.0.0.2:9090",
 			Socks:           "10.0.0.2:1081",
+			XrayAPI:         "10.0.0.2:10086",
 			Upstream:        "https://git.example/Xray-core",
 			Mirrors:         []string{"https://m1.example/{version}/{file}", "https://m2.example/{arch}/{file}"},
 			IndexURLs:       []string{"https://idx1.example/hashes.json", "https://idx2.example/hashes.json"},
@@ -96,4 +103,88 @@ func TestConfigFromEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefaultsFromState(t *testing.T) {
+	data := t.TempDir()
+	writeState(t, data, func(st *store.State) { st.Network.Subnet = netip.MustParsePrefix("10.9.8.0/29") })
+
+	t.Run("no variables", func(t *testing.T) {
+		cfg, st, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": data}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.RunnerURL != "http://10.9.8.3:8080" || cfg.Socks != "10.9.8.3:1080" || cfg.XrayAPI != "10.9.8.3:10085" {
+			t.Errorf("runner URL %q, SOCKS %q, xray API %q; want the runner's .3 on 10.9.8.0/29", cfg.RunnerURL, cfg.Socks, cfg.XrayAPI)
+		}
+		if st.Network.Subnet != netip.MustParsePrefix("10.9.8.0/29") {
+			t.Errorf("the state it was derived from has subnet %v", st.Network.Subnet)
+		}
+	})
+
+	t.Run("variables win", func(t *testing.T) {
+		all := map[string]string{
+			"TIKRAY_DATA":       data,
+			"TIKRAY_RUNNER_URL": "http://10.0.0.2:9090",
+			"TIKRAY_SOCKS":      "10.0.0.2:1081",
+			"TIKRAY_XRAY_API":   "10.0.0.2:10086",
+		}
+		cfg, _, err := loadConfig(envOf(all))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.RunnerURL != all["TIKRAY_RUNNER_URL"] || cfg.Socks != all["TIKRAY_SOCKS"] || cfg.XrayAPI != all["TIKRAY_XRAY_API"] {
+			t.Errorf("runner URL %q, SOCKS %q, xray API %q; want the variables", cfg.RunnerURL, cfg.Socks, cfg.XrayAPI)
+		}
+		// Each one on its own leaves the other two to the state.
+		for _, key := range []string{"TIKRAY_RUNNER_URL", "TIKRAY_SOCKS", "TIKRAY_XRAY_API"} {
+			cfg, _, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": data, key: all[key]}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]string{"TIKRAY_RUNNER_URL": cfg.RunnerURL, "TIKRAY_SOCKS": cfg.Socks, "TIKRAY_XRAY_API": cfg.XrayAPI}
+			want := map[string]string{"TIKRAY_RUNNER_URL": "http://10.9.8.3:8080", "TIKRAY_SOCKS": "10.9.8.3:1080", "TIKRAY_XRAY_API": "10.9.8.3:10085"}
+			want[key] = all[key]
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("only %s set: got %v, want %v", key, got, want)
+			}
+		}
+	})
+
+	t.Run("no state file", func(t *testing.T) {
+		// A fresh install: the default subnet, which is where M1 pointed.
+		cfg, _, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": t.TempDir()}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.RunnerURL != "http://172.31.255.3:8080" || cfg.Socks != "172.31.255.3:1080" || cfg.XrayAPI != "172.31.255.3:10085" {
+			t.Errorf("runner URL %q, SOCKS %q, xray API %q", cfg.RunnerURL, cfg.Socks, cfg.XrayAPI)
+		}
+	})
+
+	t.Run("bad environment comes first", func(t *testing.T) {
+		// The state is not even opened: the data root is left as it was.
+		fresh := t.TempDir()
+		_, _, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": fresh, "TIKRAY_MIRRORS": "https://m.example/nofile"}))
+		if err == nil || !strings.Contains(err.Error(), "TIKRAY_MIRRORS") {
+			t.Fatalf("error %v, want one naming TIKRAY_MIRRORS", err)
+		}
+		if ents, _ := os.ReadDir(fresh); len(ents) != 0 {
+			t.Errorf("a bad environment created %v", ents)
+		}
+	})
+
+	t.Run("unreadable state", func(t *testing.T) {
+		bad := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(bad, "state"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bad, "state", "state.v1.json"), []byte("{not json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": bad}))
+		if err == nil || !strings.Contains(err.Error(), "state.v1.json") {
+			t.Errorf("error %v, want one naming the state file", err)
+		}
+	})
 }

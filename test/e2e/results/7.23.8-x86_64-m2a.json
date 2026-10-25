@@ -1,0 +1,50 @@
+[
+  {
+    "id": "bootstrap_rendered",
+    "pass": true,
+    "detail": "tikray core update latest: outcome=committed from= to=26.10.21 source=\"direct\" verified=dgst detail=\"\" (117s); runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/amd64)\", gateway_up true; active config config/c8f2ab31dee35e4f98e4f0df90aa0f64b8f89f8b67fc956b952c3f2bbcf05ba1.json, the render for 26.10.21: true; LAN direct after 0s: true; whoami \"198.51.100.2\", xray direct downlink +129 bytes",
+    "seconds": 118
+  },
+  {
+    "id": "apply_share_link",
+    "pass": true,
+    "detail": "pushed the state: server lab-a from its share link, the LAN client smart; tikray apply: outcome=committed from=26.10.21 to=26.10.21 source=\"\" verified= detail=\"\" (13s); runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/amd64)\", gateway_up true; active config config/e3927f812d67603d96a2809ecfeea2caf046062eb9b84103c557eb68069147d8.json, the render for 26.10.21: true; LAN proxied after 0s: true (server \"a\")",
+    "seconds": 13.2
+  },
+  {
+    "id": "smart_split",
+    "pass": true,
+    "detail": "domestic.test by Host: \"198.51.100.2\", xray direct downlink +129 bytes; foreign.test: \"203.0.113.10\"; 203.0.113.20: \"198.51.100.2\" with the RouterOS list entry, \"198.51.100.2\" without it (xray direct downlink +129 bytes); DNS: domestic.test \"10.10.34.34\", foreign.test \"203.0.113.30\"",
+    "seconds": 1.3
+  },
+  {
+    "id": "failover",
+    "pass": true,
+    "detail": "pushed the state: servers lab-a and lab-b; tikray apply: outcome=committed from=26.10.21 to=26.10.21 source=\"\" verified= detail=\"\" (13s); runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/amd64)\", gateway_up true; active config config/ccc681e8cd72a3250fcf77d5f0d750a1370f863f887e37d8fc016668a22801c8.json, the render for 26.10.21: true; LAN proxied after 0s: true (server \"a\"); server a (203.0.113.10) up: false; through server b 9s after a stopped: true",
+    "seconds": 22.4
+  },
+  {
+    "id": "all_down_open",
+    "pass": true,
+    "detail": "server a (203.0.113.10) up: false; server b (203.0.113.11) up: false; direct 15s after both servers stopped: true; whoami \"198.51.100.2\", xray direct downlink +129 bytes",
+    "seconds": 15.7
+  },
+  {
+    "id": "all_down_kill_switch",
+    "pass": true,
+    "detail": "server a (203.0.113.10) up: true; pushed the state: servers lab-a and lab-b, the LAN client's kill switch on; tikray apply: outcome=committed from=26.10.21 to=26.10.21 source=\"\" verified= detail=\"\" (13s); runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/amd64)\", gateway_up true; active config config/8da8878c10d8d47bb95d0c0fac009e5cb29db4f9868c3df1f19d9c8c7d395909.json, the render for 26.10.21: true; LAN proxied after 0s: true (server \"a\"); server a (203.0.113.10) up: false; 28 requests in 30 s with both servers down, answers []; runner not running with gateway_up at 0 of them []; server a (203.0.113.10) up: true; proxied 7s after server a started: true",
+    "seconds": 59.6
+  },
+  {
+    "id": "bad_raw_server",
+    "pass": true,
+    "detail": "pushed the state: the applied state and a raw-JSON server whose VLESS id is 40 characters, not a UUID; tikray apply: outcome=rejected from=26.10.21 to=26.10.21 source=\"\" verified= detail=\"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/amd64)\\nA unified platform for anti-censorship.\\n2026/10/25 15:56:43.576832 [Info] infra/conf/serial: Reading config: \u0026{Name:/run/xray/.test-config-2808522144.json Format:json}\\n2026/10/25 15:56:43.615596 [Warning] common/errors: This...\" (3s); 8 whoami samples during the apply and 5 s after, 0 not through server a: []; runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/amd64)\", gateway_up true; last_trial: outcome rejected, detail \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/amd64)\\nA unified platform for anti-censorship.\\n2026/10/25 15:56:43.576832 [Info] infra/conf/serial: Reading config: \u0026{Name:/run/xray/.test-config-2808522144.json Format:json}\\n2026/10/25 15:56:43.615596 [Warning] common/errors: This feature \\\"nonIPQuery\\\" and \\\"blockTypes\\\" is deprecated, will be removed soon and being migrated to \\\"rules\\\". Please update your config(s) according to release note and documentation before removal.\\nFailed to start: main: failed to load config files: [/run/xray/.test-config-2808522144.json] \u003e infra/conf: failed to build outbound config with tag srv-22ccaef8 \u003e infra/conf: failed to build outbound handler for protocol vless \u003e common/uuid: invalid UUID: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n\"; active config config/8da8878c10d8d47bb95d0c0fac009e5cb29db4f9868c3df1f19d9c8c7d395909.json, the render for 26.10.21: true",
+    "seconds": 8.6
+  },
+  {
+    "id": "older_core_renders",
+    "pass": true,
+    "detail": "pushed the state: the applied state with domain:update.test added; tikray core update 26.3.27: outcome=committed from=26.10.21 to=26.3.27 source=\"direct\" verified=dgst detail=\"\" (117s); runner running, active 26.3.27, xray_version \"Xray 26.3.27 (Xray, Penetrates Everything.) Custom (go1.26.0 linux/amd64)\", gateway_up true; active config config/2bc0d9e173ccd43c4a79538e7ca8911869f7350b60b18953b506eb9dea55dafc.json, the render for 26.3.27: true; the render for 26.3.27 is the render for 26.10.21: true (\u003cnil\u003e, \u003cnil\u003e); LAN proxied after 0s: true (server \"a\"); pushed the state: the applied state with domain:rollback.test added; tikray core rollback: outcome=committed from=26.3.27 to=26.10.21 source=\"direct\" verified=dgst detail=\"\" (19s); runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/amd64)\", gateway_up true; active config config/d79d0f6e8d55a8b8beb9e67ec9107bfe2d42f5d3e36884ebcdb387bde483cb60.json, the render for 26.10.21: true; LAN proxied after 0s: true (server \"a\")",
+    "seconds": 136.7
+  }
+]

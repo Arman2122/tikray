@@ -13,8 +13,10 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"flag"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +28,8 @@ import (
 
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/runnerapi"
+	"github.com/Arman2122/tikray/internal/sharelink"
+	"github.com/Arman2122/tikray/internal/store"
 	"github.com/Arman2122/tikray/internal/xrayver"
 	"github.com/Arman2122/tikray/test/lab"
 	"github.com/Arman2122/tikray/test/lab/fixtures/labinet"
@@ -34,6 +38,12 @@ import (
 // The runner's control API, which the host reaches through the lab's host
 // route to the tikray bridge.
 const runnerURL = "http://172.31.255.3:8080"
+
+// xrayAPI is where xray's gRPC API listens, on the runner's address: the
+// "api" block of config/xray-client.json says so (JSON cannot refer to this
+// constant, so the two must agree), and so does the state-derived default of
+// tikray's health check (TIKRAY_XRAY_API).
+const xrayAPI = "172.31.255.3:10085"
 
 // Paths on the router.
 const (
@@ -46,6 +56,9 @@ const (
 	inboxDir      = dataRoot + "/inbox"
 )
 
+// statePath is the state file on the router, where tikray reads it.
+var statePath = fmt.Sprintf("%s/state/state.v%d.json", dataRoot, store.Current)
+
 // clientConfig is the xray client config as the tikray container sees it.
 const clientConfig = "/data/inbox/xray-client.json"
 
@@ -57,12 +70,25 @@ const (
 	crashingXray = "99.0.2" // a fake that exits 2 s after it starts
 )
 
+// egressDirect is the address the fake internet's web server sees as the LAN
+// client's when a request went direct: the router's WAN address, which NAT
+// gives it.
+const egressDirect = "198.51.100.2"
+
+// serverEgress is the address each VLESS server of the fake internet sends
+// from, and so the one the web server sees through it, by the name
+// lab.Inet.SetServer takes.
+var serverEgress = map[string]string{"a": "203.0.113.10", "b": "203.0.113.11"}
+
 // Lab is a CHR with tikray deployed: the tikray-runner and tikray containers
 // from the real images, the RouterOS objects of routeros/m1-setup.rsc, and
-// the fake internet with a fake GitHub (203.0.113.40) and a mirror with a
-// signed hash index (203.0.113.41) serving Releases.
+// the fake internet with its two VLESS servers, a fake GitHub (203.0.113.40)
+// and a mirror with a signed hash index (203.0.113.41) serving Releases.
 type Lab struct {
-	Net     *lab.Network
+	Net *lab.Network
+	// Inet is the fake internet, whose VLESS servers a test can stop and
+	// start.
+	Inet    *lab.Inet
 	CHR     *lab.CHR
 	Arch    lab.Arch
 	Version string // RouterOS
@@ -147,14 +173,16 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Net.Teardown() })
-	stopInet, err := lab.StartInetWith(ctx, l.Net, lab.InetOptions{ReleasesDir: l.Releases})
-	if err != nil {
+	if l.Inet, err = lab.StartInetLab(ctx, l.Net, lab.InetOptions{ReleasesDir: l.Releases}); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(stopInet)
+	t.Cleanup(l.Inet.Stop)
 
 	if l.CHR, err = lab.BootReadyCHR(ctx, l.Net, lab.BootOptions{
 		Version: l.Version, Arch: l.Arch, Artifacts: art, WorkDir: filepath.Join(wd, "vm"), Password: "tikray-lab",
+		// What the harness worked around, such as a push it had to retry,
+		// shows in a run that passes too.
+		Notef: t.Logf,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -435,6 +463,80 @@ func runTikray(ctx context.Context, c *lab.CHR, args string) (artifacts.Result, 
 	}
 }
 
+// tikray runs the tikray CLI with args (see runTikray), notes its result and
+// how long it took, and ends the check when the run gave no result.
+func (l *Lab) tikray(ctx context.Context, t *testing.T, note func(string, ...any), args string) artifacts.Result {
+	t.Helper()
+	start := time.Now()
+	res, err := runTikray(ctx, l.CHR, args)
+	note("tikray %s: %s (%.0fs)", args, describe(res), time.Since(start).Seconds())
+	if err != nil {
+		t.Fatalf("tikray %s: %v", args, err)
+	}
+	return res
+}
+
+// checkCore checks that the runner runs version, the core of active.json, and
+// returns its status.
+func checkCore(ctx context.Context, t *testing.T, note func(string, ...any), version string) runnerapi.Status {
+	t.Helper()
+	st, err := runnerStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := "<none>"
+	if st.Active != nil {
+		active = st.Active.Core
+	}
+	note("runner %s, active %s, xray_version %q, gateway_up %v", st.State, active, st.XrayVersion, st.GatewayUp)
+	if st.State != runnerapi.StateRunning || active != version || !strings.HasPrefix(st.XrayVersion, "Xray "+version+" ") {
+		t.Errorf("runner state %s, active core %s, xray_version %q: want running on %s", st.State, active, st.XrayVersion, version)
+	}
+	return st
+}
+
+// result is one check's outcome, as written to the results file of its suite.
+type result struct {
+	ID      string  `json:"id"`
+	Pass    bool    `json:"pass"`
+	Detail  string  `json:"detail"`
+	Seconds float64 `json:"seconds"`
+}
+
+// recordChecks returns check, which runs f as the subtest id of t and records
+// its outcome, with the lines f noted as its detail. When t ends the outcomes
+// are written, passed or not, to results/<routeros>-<arch>-<suite>.json; a
+// run filtered to some of the checks writes <...>-<suite>-partial.json, so
+// that it never replaces a full run's results.
+func (l *Lab) recordChecks(t *testing.T, suite string) (check func(id string, f func(t *testing.T, note func(string, ...any)))) {
+	var results []result
+	t.Cleanup(func() {
+		dir := filepath.Join(e2eDir(), "results")
+		os.MkdirAll(dir, 0o755)
+		b, _ := json.MarshalIndent(results, "", "  ")
+		name := fmt.Sprintf("%s-%s-%s", l.Version, l.Arch, suite)
+		if f := flag.Lookup("test.run"); f != nil && strings.Contains(f.Value.String(), "/") {
+			name += "-partial"
+		}
+		path := filepath.Join(dir, name+".json")
+		if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
+			t.Error(err)
+		}
+		t.Logf("results: %s", path)
+	})
+	return func(id string, f func(t *testing.T, note func(string, ...any))) {
+		t.Run(id, func(t *testing.T) {
+			var notes []string
+			note := func(format string, args ...any) { notes = append(notes, fmt.Sprintf(format, args...)) }
+			start := time.Now()
+			defer func() {
+				results = append(results, result{ID: id, Pass: !t.Failed(), Detail: strings.Join(notes, "; "), Seconds: time.Since(start).Round(100 * time.Millisecond).Seconds()})
+			}()
+			f(t, note)
+		})
+	}
+}
+
 // containerStatus is "running" or "stopped" for the named container, after
 // the flags RouterOS sets on it (R and S in /container/print), and "" for
 // any state in between, such as extracting or starting. RouterOS 7.25 has no
@@ -488,17 +590,72 @@ func rosEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, `?`, `\?`, "\n", `\n`, "\r", `\r`, "\t", `\t`).Replace(s)
 }
 
-// whoami is what the target web server sees as the LAN client's address:
-// 203.0.113.10 through the proxy, 198.51.100.2 direct.
-func (l *Lab) whoami(ctx context.Context) string {
-	b, _ := l.Net.Client(ctx, "curl", "-s", "--noproxy", "*", "--max-time", "5", "http://203.0.113.30/whoami").Output()
+// curl fetches a URL from the LAN client, with at most 5 s for the whole
+// request, and returns the body; "" when the request failed.
+func (l *Lab) curl(ctx context.Context, args ...string) string {
+	b, _ := l.Net.Client(ctx, "curl", append([]string{"-s", "--noproxy", "*", "--max-time", "5"}, args...)...).Output()
 	return strings.TrimSpace(string(b))
 }
 
+// whoami is what the target web server sees as the LAN client's address:
+// the egress address of a VLESS server through the proxy (203.0.113.10 or
+// .11), 198.51.100.2 direct, and "" when the request failed.
+func (l *Lab) whoami(ctx context.Context) string {
+	return l.curl(ctx, "http://203.0.113.30/whoami")
+}
+
+// proxiedVia names the VLESS server ("a" or "b") the LAN client's traffic
+// goes through, after whoami, and is "" when it is not proxied. got is what
+// whoami answered.
+func (l *Lab) proxiedVia(ctx context.Context) (server, got string) {
+	got = l.whoami(ctx)
+	for name, addr := range serverEgress {
+		if got == addr {
+			return name, got
+		}
+	}
+	return "", got
+}
+
 // waitProxied waits up to d for the LAN client's traffic to go through the
-// proxy and returns how long that took.
-func (l *Lab) waitProxied(ctx context.Context, d time.Duration) (time.Duration, bool) {
-	return poll(ctx, d, 2*time.Second, func() bool { return l.whoami(ctx) == "203.0.113.10" })
+// proxy, by either VLESS server, and returns how long that took and the
+// server whoami came through then.
+func (l *Lab) waitProxied(ctx context.Context, d time.Duration) (took time.Duration, server string, ok bool) {
+	took, ok = poll(ctx, d, 2*time.Second, func() bool {
+		server, _ = l.proxiedVia(ctx)
+		return server != ""
+	})
+	return took, server, ok
+}
+
+// proxiedWithin is how long the LAN client may take to be proxied once a
+// trial is over: CHR's check-gateway pings every 10 s, and a trial that
+// restarts or reverts xray takes the runner off the air for a few seconds.
+func (l *Lab) proxiedWithin() time.Duration {
+	if l.Arch == lab.ArchARM64 {
+		return 5 * time.Minute
+	}
+	return 3 * time.Minute
+}
+
+// lanProxied checks that the LAN client's traffic goes through a VLESS server
+// within proxiedWithin, and returns the server ("a" or "b").
+func (l *Lab) lanProxied(ctx context.Context, t *testing.T, note func(string, ...any)) string {
+	t.Helper()
+	d := l.proxiedWithin()
+	took, server, ok := l.waitProxied(ctx, d)
+	note("LAN proxied after %.0fs: %v (server %q)", took.Seconds(), ok, server)
+	if !ok {
+		t.Errorf("the LAN client was not proxied within %s: whoami %q, want %s or %s", d, l.whoami(ctx), serverEgress["a"], serverEgress["b"])
+	}
+	return server
+}
+
+// dig is the LAN client's A lookup of name, through the router, which sends
+// a proxied device's queries to the runner: the answer, or "" for none.
+func (l *Lab) dig(ctx context.Context, name string) string {
+	b, _ := l.Net.Client(ctx, "dig", "+short", "+time=3", "+tries=2", "@192.168.88.1", name).Output()
+	return strings.TrimSpace(string(b))
 }
 
 // setFlag creates or removes one of the releases root's flag files.
@@ -517,6 +674,86 @@ func (l *Lab) setFlag(name string, on bool) error {
 // name, as an operator's manual upload.
 func (l *Lab) toInbox(ctx context.Context, version string) error {
 	return l.CHR.Push(ctx, l.Zips[version], inboxDir+"/"+l.Asset)
+}
+
+// The share links of the fake internet's two VLESS servers. Plain VLESS
+// without TLS is refused by xray-core 26.7.11 and later for a public address,
+// but 203.0.113.0/24 is on its private list (see internal/xraypolicy).
+const (
+	linkA = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@203.0.113.10:443?type=tcp&security=none#lab-a"
+	linkB = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@203.0.113.11:443?type=tcp&security=none#lab-b"
+)
+
+// labProbeURL is the state's probe URL in the lab: the observatory fetches it
+// through each server to tell whether the server is up. The lab has no
+// internet, so the default probe URL would fail through every server and
+// make the balancers fall back (direct, or block) with both servers up. It is
+// the same target as tikray's own SOCKS probe (TIKRAY_PROBE_URL in
+// routeros/m1-setup.rsc).
+const labProbeURL = "http://203.0.113.30/whoami"
+
+// lanClient is the lab's LAN client as a device.
+var lanClient = netip.MustParsePrefix("192.168.88.10/32")
+
+// labState is the default state with what every lab state has: the M1
+// fixture's domestic names and address, its two resolvers (labinet's, on
+// 203.0.113.53 and .54), and labProbeURL. The subnet stays the default, which
+// is the lab's.
+func labState() store.State {
+	st := store.Default()
+	st.Routing.Domestic = store.Domestic{Domains: []string{"domain:domestic.test"}, IPs: []string{"203.0.113.20/32"}}
+	st.DNS = store.DNS{Remote: "203.0.113.53", Domestic: netip.MustParseAddr("203.0.113.54")}
+	st.Health.ProbeURL = labProbeURL
+	return st
+}
+
+// serverFromLink is the server a share link gives, with a new ID, as it is
+// added to the state.
+func serverFromLink(link string) (store.Server, error) {
+	srv, err := sharelink.Parse(link)
+	if err != nil {
+		return store.Server{}, err
+	}
+	return store.Server{ID: store.NewID(), Name: srv.Name, Link: link, Outbound: srv.Outbound}, nil
+}
+
+// writeStateFile saves st in dir as revision 1, in the format of the state
+// file, and returns its path. It is the store that writes it, with the checks
+// of Validate, so that what the lab pushes is what the daemon would have saved.
+func writeStateFile(dir string, st store.State) (string, error) {
+	s, err := store.Open(dir)
+	if err != nil {
+		return "", err
+	}
+	if _, _, err := s.Update(0, func(next *store.State) error {
+		*next = st
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, fmt.Sprintf("state.v%d.json", store.Current)), nil
+}
+
+// pushState puts st on the router as the state tikray reads, replacing the one
+// there. It refuses a state that does not validate.
+func (l *Lab) pushState(ctx context.Context, st store.State) error {
+	if err := st.Validate(); err != nil {
+		return fmt.Errorf("pushing the state: %w", err)
+	}
+	dir, err := os.MkdirTemp("", "tikray-state-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	local, err := writeStateFile(dir, st)
+	if err != nil {
+		return err
+	}
+	// Replace the file rather than count on the fetch overwriting it.
+	if _, err := l.CHR.Run(ctx, fmt.Sprintf(`:foreach f in=[/file/find where name="%s"] do={/file/remove $f}`, statePath)); err != nil {
+		return err
+	}
+	return l.CHR.Push(ctx, local, statePath)
 }
 
 // clearInbox removes the release zip from the inbox.

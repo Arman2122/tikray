@@ -1,0 +1,613 @@
+{
+  "core": "26.10.21",
+  "geo": null,
+  "state": {
+    "servers": [
+      {
+        "id": "00000001",
+        "name": "vless tcp reality vision",
+        "link": "vless://b831381d-6324-4d53-ad4f-8cda48b30811@203.0.113.10:443?type=tcp&security=reality&sni=www.example.com&fp=chrome&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&sid=6ba85179e30d4fc2&flow=xtls-rprx-vision#lab%20%F0%9F%9A%80",
+        "outbound": {
+          "protocol": "vless",
+          "settings": {
+            "vnext": [
+              {
+                "address": "203.0.113.10",
+                "port": 443,
+                "users": [
+                  {
+                    "encryption": "none",
+                    "flow": "xtls-rprx-vision",
+                    "id": "b831381d-6324-4d53-ad4f-8cda48b30811"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "tcp",
+            "realitySettings": {
+              "fingerprint": "chrome",
+              "publicKey": "SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc",
+              "serverName": "www.example.com",
+              "shortId": "6ba85179e30d4fc2"
+            },
+            "security": "reality"
+          }
+        }
+      },
+      {
+        "id": "00000002",
+        "name": "vless ws tls",
+        "link": "vless://b831381d-6324-4d53-ad4f-8cda48b30811@[2001:db8::1]:8443?type=ws&security=tls&sni=cdn.example.com&host=cdn.example.com&path=%2Fws%3Fed%3D2048&alpn=h2,http/1.1#",
+        "outbound": {
+          "protocol": "vless",
+          "settings": {
+            "vnext": [
+              {
+                "address": "2001:db8::1",
+                "port": 8443,
+                "users": [
+                  {
+                    "encryption": "none",
+                    "id": "b831381d-6324-4d53-ad4f-8cda48b30811"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "ws",
+            "security": "tls",
+            "tlsSettings": {
+              "alpn": [
+                "h2",
+                "http/1.1"
+              ],
+              "serverName": "cdn.example.com"
+            },
+            "wsSettings": {
+              "host": "cdn.example.com",
+              "path": "/ws?ed=2048"
+            }
+          }
+        }
+      },
+      {
+        "id": "00000003",
+        "name": "vless grpc tls",
+        "link": "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?type=grpc&serviceName=gun&mode=multi&security=tls#g",
+        "outbound": {
+          "protocol": "vless",
+          "settings": {
+            "vnext": [
+              {
+                "address": "example.com",
+                "port": 443,
+                "users": [
+                  {
+                    "encryption": "none",
+                    "id": "b831381d-6324-4d53-ad4f-8cda48b30811"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "grpcSettings": {
+              "multiMode": true,
+              "serviceName": "gun"
+            },
+            "network": "grpc",
+            "security": "tls",
+            "tlsSettings": {}
+          }
+        }
+      },
+      {
+        "id": "00000004",
+        "name": "vless grpc reality",
+        "link": "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?type=grpc&serviceName=gun&security=reality&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&fp=safari&sid=ab",
+        "outbound": {
+          "protocol": "vless",
+          "settings": {
+            "vnext": [
+              {
+                "address": "example.com",
+                "port": 443,
+                "users": [
+                  {
+                    "encryption": "none",
+                    "id": "b831381d-6324-4d53-ad4f-8cda48b30811"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "grpcSettings": {
+              "multiMode": false,
+              "serviceName": "gun"
+            },
+            "network": "grpc",
+            "realitySettings": {
+              "fingerprint": "safari",
+              "publicKey": "SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc",
+              "shortId": "ab"
+            },
+            "security": "reality"
+          }
+        }
+      },
+      {
+        "id": "00000005",
+        "name": "vless xhttp reality",
+        "link": "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443?type=xhttp&path=/r&security=reality&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc",
+        "outbound": {
+          "protocol": "vless",
+          "settings": {
+            "vnext": [
+              {
+                "address": "example.com",
+                "port": 443,
+                "users": [
+                  {
+                    "encryption": "none",
+                    "id": "b831381d-6324-4d53-ad4f-8cda48b30811"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "xhttp",
+            "realitySettings": {
+              "fingerprint": "chrome",
+              "publicKey": "SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc"
+            },
+            "security": "reality",
+            "xhttpSettings": {
+              "mode": "auto",
+              "path": "/r"
+            }
+          }
+        }
+      },
+      {
+        "id": "00000006",
+        "name": "trojan tcp tls pinned",
+        "link": "trojan://pw@example.com:443?insecure=1&sni=example.com&pcs=aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899&vcn=example.com",
+        "outbound": {
+          "protocol": "trojan",
+          "settings": {
+            "servers": [
+              {
+                "address": "example.com",
+                "password": "pw",
+                "port": 443
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "tcp",
+            "security": "tls",
+            "tlsSettings": {
+              "pinnedPeerCertSha256": "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+              "serverName": "example.com",
+              "verifyPeerCertByName": "example.com"
+            }
+          }
+        }
+      },
+      {
+        "id": "00000007",
+        "name": "trojan tcp reality",
+        "link": "trojan://pw@example.com:443?security=reality&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&sni=www.example.com",
+        "outbound": {
+          "protocol": "trojan",
+          "settings": {
+            "servers": [
+              {
+                "address": "example.com",
+                "password": "pw",
+                "port": 443
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "tcp",
+            "realitySettings": {
+              "fingerprint": "chrome",
+              "publicKey": "SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc",
+              "serverName": "www.example.com"
+            },
+            "security": "reality"
+          }
+        }
+      },
+      {
+        "id": "00000008",
+        "name": "trojan ws tls",
+        "link": "trojan://pw@[2001:db8::2]:443?type=ws&host=cdn.example.com&path=%2Fws&sni=cdn.example.com&fp=chrome&alpn=http/1.1#ws%20node",
+        "outbound": {
+          "protocol": "trojan",
+          "settings": {
+            "servers": [
+              {
+                "address": "2001:db8::2",
+                "password": "pw",
+                "port": 443
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "ws",
+            "security": "tls",
+            "tlsSettings": {
+              "alpn": [
+                "http/1.1"
+              ],
+              "fingerprint": "chrome",
+              "serverName": "cdn.example.com"
+            },
+            "wsSettings": {
+              "host": "cdn.example.com",
+              "path": "/ws"
+            }
+          }
+        }
+      },
+      {
+        "id": "00000009",
+        "name": "trojan grpc tls",
+        "link": "trojan://pw@example.com:443?type=grpc&serviceName=gun&mode=multi&sni=example.com",
+        "outbound": {
+          "protocol": "trojan",
+          "settings": {
+            "servers": [
+              {
+                "address": "example.com",
+                "password": "pw",
+                "port": 443
+              }
+            ]
+          },
+          "streamSettings": {
+            "grpcSettings": {
+              "multiMode": true,
+              "serviceName": "gun"
+            },
+            "network": "grpc",
+            "security": "tls",
+            "tlsSettings": {
+              "serverName": "example.com"
+            }
+          }
+        }
+      },
+      {
+        "id": "00000010",
+        "name": "vmess tcp http header",
+        "link": "vmess://eyJhZGQiOiJleGFtcGxlLmNvbSIsInBvcnQiOjQ0MywiaWQiOiI1NzgzYTNlNy1lMzczLTUxY2QtODY0Mi1jODM3ODJiODA3YzUiLCJuZXQiOiJ0Y3AiLCJ0eXBlIjoiaHR0cCIsImhvc3QiOiJhLmV4YW1wbGUuY29tIiwicGF0aCI6Ii9wIn0=",
+        "outbound": {
+          "protocol": "vmess",
+          "settings": {
+            "vnext": [
+              {
+                "address": "example.com",
+                "port": 443,
+                "users": [
+                  {
+                    "id": "5783a3e7-e373-51cd-8642-c83782b807c5",
+                    "security": "auto"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "tcp",
+            "tcpSettings": {
+              "header": {
+                "request": {
+                  "headers": {
+                    "Host": [
+                      "a.example.com"
+                    ]
+                  },
+                  "path": [
+                    "/p"
+                  ]
+                },
+                "type": "http"
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "00000011",
+        "name": "vmess ws tls",
+        "link": "vmess://eyJ2IjoiMiIsInBzIjoi2LPYsdmI2LEiLCJhZGQiOiJleGFtcGxlLmNvbSIsInBvcnQiOiI0NDMiLCJpZCI6IjU3ODNhM2U3LWUzNzMtNTFjZC04NjQyLWM4Mzc4MmI4MDdjNSIsImFpZCI6IjAiLCJuZXQiOiJ3cyIsInR5cGUiOiJub25lIiwiaG9zdCI6ImNkbi5leGFtcGxlLmNvbSIsInBhdGgiOiIvd3MiLCJ0bHMiOiJ0bHMiLCJzbmkiOiJjZG4uZXhhbXBsZS5jb20iLCJhbHBuIjoiaDIsaHR0cC8xLjEiLCJmcCI6ImNocm9tZSJ9",
+        "outbound": {
+          "protocol": "vmess",
+          "settings": {
+            "vnext": [
+              {
+                "address": "example.com",
+                "port": 443,
+                "users": [
+                  {
+                    "id": "5783a3e7-e373-51cd-8642-c83782b807c5",
+                    "security": "auto"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "ws",
+            "security": "tls",
+            "tlsSettings": {
+              "alpn": [
+                "h2",
+                "http/1.1"
+              ],
+              "fingerprint": "chrome",
+              "serverName": "cdn.example.com"
+            },
+            "wsSettings": {
+              "host": "cdn.example.com",
+              "path": "/ws"
+            }
+          }
+        }
+      },
+      {
+        "id": "00000012",
+        "name": "vmess grpc tls",
+        "link": "vmess://eyJhZGQiOiJleGFtcGxlLmNvbSIsInBvcnQiOjQ0MywiaWQiOiI1NzgzYTNlNy1lMzczLTUxY2QtODY0Mi1jODM3ODJiODA3YzUiLCJuZXQiOiJncnBjIiwicGF0aCI6Imd1biIsImhvc3QiOiJmcm9udC5leGFtcGxlLmNvbSIsInR5cGUiOiJtdWx0aSIsInRscyI6InRscyJ9",
+        "outbound": {
+          "protocol": "vmess",
+          "settings": {
+            "vnext": [
+              {
+                "address": "example.com",
+                "port": 443,
+                "users": [
+                  {
+                    "id": "5783a3e7-e373-51cd-8642-c83782b807c5",
+                    "security": "auto"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "grpcSettings": {
+              "authority": "front.example.com",
+              "multiMode": true,
+              "serviceName": "gun"
+            },
+            "network": "grpc",
+            "security": "tls",
+            "tlsSettings": {
+              "serverName": "front.example.com"
+            }
+          }
+        }
+      },
+      {
+        "id": "00000013",
+        "name": "vmess httpupgrade",
+        "link": "vmess://eyJhZGQiOiJleGFtcGxlLmNvbSIsInBvcnQiOjQ0MywiaWQiOiI1NzgzYTNlNy1lMzczLTUxY2QtODY0Mi1jODM3ODJiODA3YzUiLCJuZXQiOiJodHRwdXBncmFkZSIsInBhdGgiOiIvaHUiLCJob3N0IjoiY2RuLmV4YW1wbGUuY29tIiwidHlwZSI6Im5vbmUifQ==",
+        "outbound": {
+          "protocol": "vmess",
+          "settings": {
+            "vnext": [
+              {
+                "address": "example.com",
+                "port": 443,
+                "users": [
+                  {
+                    "id": "5783a3e7-e373-51cd-8642-c83782b807c5",
+                    "security": "auto"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "httpupgradeSettings": {
+              "host": "cdn.example.com",
+              "path": "/hu"
+            },
+            "network": "httpupgrade"
+          }
+        }
+      },
+      {
+        "id": "00000014",
+        "name": "vmess xhttp",
+        "link": "vmess://eyJhZGQiOiJleGFtcGxlLmNvbSIsInBvcnQiOjQ0MywiaWQiOiI1NzgzYTNlNy1lMzczLTUxY2QtODY0Mi1jODM3ODJiODA3YzUiLCJuZXQiOiJ4aHR0cCIsInBhdGgiOiIveCIsImhvc3QiOiJjZG4uZXhhbXBsZS5jb20iLCJ0eXBlIjoicGFja2V0LXVwIn0=",
+        "outbound": {
+          "protocol": "vmess",
+          "settings": {
+            "vnext": [
+              {
+                "address": "example.com",
+                "port": 443,
+                "users": [
+                  {
+                    "id": "5783a3e7-e373-51cd-8642-c83782b807c5",
+                    "security": "auto"
+                  }
+                ]
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "xhttp",
+            "xhttpSettings": {
+              "host": "cdn.example.com",
+              "mode": "packet-up",
+              "path": "/x"
+            }
+          }
+        }
+      },
+      {
+        "id": "00000015",
+        "name": "shadowsocks 2022 tcp",
+        "link": "ss://2022-blake3-aes-128-gcm:YWJjZGVmZ2hpamtsbW5vcA%3D%3D@h.example:443#b",
+        "outbound": {
+          "protocol": "shadowsocks",
+          "settings": {
+            "servers": [
+              {
+                "address": "h.example",
+                "method": "2022-blake3-aes-128-gcm",
+                "password": "YWJjZGVmZ2hpamtsbW5vcA==",
+                "port": 443
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "00000016",
+        "name": "shadowsocks tcp http header",
+        "link": "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388?type=tcp&headerType=http&host=a.example.com&path=/p",
+        "outbound": {
+          "protocol": "shadowsocks",
+          "settings": {
+            "servers": [
+              {
+                "address": "1.2.3.4",
+                "method": "aes-256-gcm",
+                "password": "pass",
+                "port": 8388
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "tcp",
+            "tcpSettings": {
+              "header": {
+                "request": {
+                  "headers": {
+                    "Host": [
+                      "a.example.com"
+                    ]
+                  },
+                  "path": [
+                    "/p"
+                  ]
+                },
+                "type": "http"
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "00000017",
+        "name": "shadowsocks tcp reality",
+        "link": "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388?security=reality&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&sni=www.example.com",
+        "outbound": {
+          "protocol": "shadowsocks",
+          "settings": {
+            "servers": [
+              {
+                "address": "1.2.3.4",
+                "method": "aes-256-gcm",
+                "password": "pass",
+                "port": 8388
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "tcp",
+            "realitySettings": {
+              "fingerprint": "chrome",
+              "publicKey": "SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc",
+              "serverName": "www.example.com"
+            },
+            "security": "reality"
+          }
+        }
+      },
+      {
+        "id": "00000018",
+        "name": "shadowsocks ws tls",
+        "link": "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388?type=ws&security=tls&path=%2Fws&host=cdn.example.com#a",
+        "outbound": {
+          "protocol": "shadowsocks",
+          "settings": {
+            "servers": [
+              {
+                "address": "1.2.3.4",
+                "method": "aes-256-gcm",
+                "password": "pass",
+                "port": 8388
+              }
+            ]
+          },
+          "streamSettings": {
+            "network": "ws",
+            "security": "tls",
+            "tlsSettings": {
+              "serverName": "cdn.example.com"
+            },
+            "wsSettings": {
+              "host": "cdn.example.com",
+              "path": "/ws"
+            }
+          }
+        }
+      },
+      {
+        "id": "00000019",
+        "name": "shadowsocks grpc",
+        "link": "ss://YWVzLTI1Ni1nY206cGFzcw@1.2.3.4:8388?type=grpc&serviceName=x",
+        "outbound": {
+          "protocol": "shadowsocks",
+          "settings": {
+            "servers": [
+              {
+                "address": "1.2.3.4",
+                "method": "aes-256-gcm",
+                "password": "pass",
+                "port": 8388
+              }
+            ]
+          },
+          "streamSettings": {
+            "grpcSettings": {
+              "multiMode": false,
+              "serviceName": "x"
+            },
+            "network": "grpc"
+          }
+        }
+      }
+    ],
+    "subscriptions": [],
+    "devices": [],
+    "default_policy": {
+      "mode": "smart"
+    },
+    "routing": {
+      "domestic": {}
+    },
+    "dns": {
+      "remote": "https://1.1.1.1/dns-query"
+    },
+    "network": {
+      "subnet": "172.31.255.0/29"
+    },
+    "health": {
+      "probe_url": "https://www.gstatic.com/generate_204"
+    }
+  }
+}

@@ -2,38 +2,38 @@
   {
     "id": "bootstrap",
     "pass": true,
-    "detail": "before: runner empty, gateway_up false, LAN direct after 4s: true; tikray core update 26.1.18 --config /data/inbox/xray-client.json: outcome=committed from= to=26.1.18 source=\"direct\" verified=dgst detail=\"\" (105s); runner running, active 26.1.18, xray_version \"Xray 26.1.18 (Xray, Penetrates Everything.) Custom (go1.25.6 linux/arm64)\", gateway_up true; xray api statssys on 26.1.18: exit 0, uptime line \"\\\"Uptime\\\": 13\", err \u003cnil\u003e; LAN proxied after 0s: true; tikray container cmd=\"core update 26.1.18 --config /data/inbox/xray-client.json\" entrypoint=\"\" default-entrypoint=\"/tikray\" user=\"\"",
-    "seconds": 109.7
+    "detail": "before: runner empty, gateway_up false, LAN direct after 4s: true; tikray core update 26.1.18 --config /data/inbox/xray-client.json: outcome=committed from= to=26.1.18 source=\"direct\" verified=dgst detail=\"\" (105s); pushed the state to disk1/tikray/data/state/state.v1.json: server lab-a (6fb73f7e), smart routing, the fixture's domestic names and resolvers; runner running, active 26.1.18, xray_version \"Xray 26.1.18 (Xray, Penetrates Everything.) Custom (go1.25.6 linux/arm64)\", gateway_up true; xray api statssys on 26.1.18: exit 0, uptime line \"\\\"Uptime\\\": 12\", err \u003cnil\u003e; LAN proxied after 0s: true (server \"a\"); tikray container cmd=\"core update 26.1.18 --config /data/inbox/xray-client.json\" entrypoint=\"\" default-entrypoint=\"/tikray\" user=\"\"",
+    "seconds": 111.3
   },
   {
     "id": "update_latest_via_proxy",
     "pass": true,
-    "detail": "tikray core update latest: outcome=committed from=26.1.18 to=26.10.21 source=\"proxy\" verified=dgst detail=\"\" (109s); runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/arm64)\", gateway_up true; xray api statssys on 26.10.21: exit 0, uptime line \"\\\"Uptime\\\": 10\", err \u003cnil\u003e; LAN proxied after 0s: true",
-    "seconds": 109.5
+    "detail": "tikray core update latest: outcome=committed from=26.1.18 to=26.10.21 source=\"proxy\" verified=dgst detail=\"\" (112s); runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/arm64)\", gateway_up true; xray api statssys on 26.10.21: exit 0, uptime line \"\\\"Uptime\\\": 12\", err \u003cnil\u003e; LAN proxied after 0s: true (server \"a\")",
+    "seconds": 112
   },
   {
     "id": "rejected",
     "pass": true,
-    "detail": "tikray core update 99.0.1 --allow-unverified: outcome=rejected from=26.10.21 to=99.0.1 source=\"inbox\" verified=unverified detail=\"Failed to start: failed to load config\\n\" (5s); runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/arm64)\", gateway_up true; LAN proxied after 0s: true",
-    "seconds": 6.1
+    "detail": "tikray core update 99.0.1 --allow-unverified: outcome=rejected from=26.10.21 to=99.0.1 source=\"inbox\" verified=unverified detail=\"Failed to start: failed to load config\\n\" (3s); runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/arm64)\", gateway_up true; LAN proxied after 0s: true (server \"a\")",
+    "seconds": 3.9
   },
   {
     "id": "crashing",
     "pass": true,
-    "detail": "tikray core update 99.0.2: outcome=exited from=26.10.21 to=99.0.2 source=\"proxy\" verified=dgst detail=\"ran 2.037s, within the 10s early-exit window: exit status 1\" (23s); runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/arm64)\", gateway_up true; LAN proxied after 0s: true",
-    "seconds": 22.9
+    "detail": "tikray core update 99.0.2: outcome=exited from=26.10.21 to=99.0.2 source=\"proxy\" verified=dgst detail=\"ran 2.062s, within the 10s early-exit window: exit status 1\" (23s); runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/arm64)\", gateway_up true; LAN proxied after 0s: true (server \"a\")",
+    "seconds": 23
   },
   {
     "id": "mirror_and_index",
     "pass": true,
-    "detail": "tikray core update 26.3.27: outcome=committed from=26.10.21 to=26.3.27 source=\"mirror 203.0.113.41\" verified=index detail=\"\" (108s); runner running, active 26.3.27, xray_version \"Xray 26.3.27 (Xray, Penetrates Everything.) Custom (go1.26.0 linux/arm64)\", gateway_up true; xray api statssys on 26.3.27: exit 0, uptime line \"\\\"Uptime\\\": 12\", err \u003cnil\u003e; LAN proxied after 0s: true",
-    "seconds": 108.7
+    "detail": "tikray core update 26.3.27: outcome=committed from=26.10.21 to=26.3.27 source=\"mirror 203.0.113.41\" verified=index detail=\"\" (109s); runner running, active 26.3.27, xray_version \"Xray 26.3.27 (Xray, Penetrates Everything.) Custom (go1.26.0 linux/arm64)\", gateway_up true; xray api statssys on 26.3.27: exit 0, uptime line \"\\\"Uptime\\\": 12\", err \u003cnil\u003e; LAN proxied after 0s: true (server \"a\")",
+    "seconds": 109.3
   },
   {
     "id": "rollback",
     "pass": true,
-    "detail": "tikray core rollback: outcome=committed from=26.3.27 to=26.10.21 source=\"proxy\" verified=dgst detail=\"\" (15s); runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/arm64)\", gateway_up true; LAN proxied after 0s: true",
-    "seconds": 14.9
+    "detail": "tikray core rollback: outcome=committed from=26.3.27 to=26.10.21 source=\"proxy\" verified=dgst detail=\"\" (15s); runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/arm64)\", gateway_up true; LAN proxied after 0s: true (server \"a\")",
+    "seconds": 15
   },
   {
     "id": "prune",
@@ -44,13 +44,13 @@
   {
     "id": "reboot_during_trial",
     "pass": true,
-    "detail": "runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/arm64)\", gateway_up true; router clock 2026-10-25T06:04:38Z, host clock 2026-10-25T06:04:37Z; before the power cut: runner trial, xray_version \"Xray 26.3.27 (Xray, Penetrates Everything.) Custom (go1.26.0 linux/arm64)\"; runner running 0s after SSH: true; runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/arm64)\", gateway_up true; last_trial: core 26.3.27, outcome reboot, detail \"the runner restarted during the trial\"; candidate.json present after the reboot: false; LAN proxied after 0s: true",
-    "seconds": 82.1
+    "detail": "runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/arm64)\", gateway_up true; router clock 2026-10-25T16:32:00Z, host clock 2026-10-25T16:32:01Z; before the power cut: runner trial, xray_version \"Xray 26.3.27 (Xray, Penetrates Everything.) Custom (go1.26.0 linux/arm64)\"; runner running 0s after SSH: true; runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/arm64)\", gateway_up true; last_trial: core 26.3.27, outcome reboot, detail \"the runner restarted during the trial\"; candidate.json present after the reboot: false; LAN proxied after 0s: true (server \"a\")",
+    "seconds": 82.4
   },
   {
     "id": "gateway_follows_xray",
     "pass": true,
-    "detail": "tikray core update 99.0.2 --allow-unverified: outcome=exited from=26.10.21 to=99.0.2 source=\"inbox\" verified=unverified detail=\"ran 2.03s, within the 10s early-exit window: exit status 1\" (13s); 50 status samples, 8 in the trial of 99.0.2, 7 of those with gateway_up false; gateway_up true again 0s after the update: true; runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/arm64)\", gateway_up true; LAN proxied after 2s: true",
-    "seconds": 16.4
+    "detail": "tikray core update 99.0.2 --allow-unverified: outcome=exited from=26.10.21 to=99.0.2 source=\"inbox\" verified=unverified detail=\"ran 2.038s, within the 10s early-exit window: exit status 1\" (15s); 59 status samples, 8 in the trial of 99.0.2, 8 of those with gateway_up false; gateway_up true again 0s after the update: true; runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/arm64)\", gateway_up true; LAN proxied after 0s: true (server \"a\")",
+    "seconds": 17
   }
 ]

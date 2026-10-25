@@ -5,11 +5,8 @@ package e2e
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -17,16 +14,22 @@ import (
 
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/runnerapi"
-	"github.com/Arman2122/tikray/test/lab"
+	"github.com/Arman2122/tikray/internal/store"
 )
 
-// result is one scenario's outcome, as written to
-// results/<routeros>-<arch>-m1.json.
-type result struct {
-	ID      string  `json:"id"`
-	Pass    bool    `json:"pass"`
-	Detail  string  `json:"detail"`
-	Seconds float64 `json:"seconds"`
+// lifecycleState is the state that makes tikray render what the M1 fixture
+// (config/xray-client.json) does: the fake internet's VLESS server a as the
+// only server, smart routing with the fixture's domestic names and address,
+// and its two resolvers (labState). The state is validated.
+func lifecycleState() (store.State, error) {
+	srv, err := serverFromLink(linkA)
+	if err != nil {
+		return store.State{}, err
+	}
+	st := labState()
+	st.Servers = []store.Server{srv}
+	st.DefaultPolicy = store.Policy{Mode: store.ModeSmart}
+	return st, st.Validate()
 }
 
 // TestCoreLifecycle deploys the real images once and takes xray-core through
@@ -40,71 +43,23 @@ func TestCoreLifecycle(t *testing.T) {
 	defer cancel()
 	l := Deploy(ctx, t)
 	c := l.CHR
+	check := l.recordChecks(t, "m1")
 
-	var results []result
-	t.Cleanup(func() {
-		dir := filepath.Join(e2eDir(), "results")
-		os.MkdirAll(dir, 0o755)
-		b, _ := json.MarshalIndent(results, "", "  ")
-		name := fmt.Sprintf("%s-%s-m1", l.Version, l.Arch)
-		if f := flag.Lookup("test.run"); f != nil && strings.Contains(f.Value.String(), "/") {
-			name += "-partial" // a filtered run must not replace the full results
-		}
-		path := filepath.Join(dir, name+".json")
-		if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
-			t.Error(err)
-		}
-		t.Logf("results: %s", path)
-	})
-	check := func(id string, f func(t *testing.T, note func(string, ...any))) {
-		t.Run(id, func(t *testing.T) {
-			var notes []string
-			note := func(format string, args ...any) { notes = append(notes, fmt.Sprintf(format, args...)) }
-			start := time.Now()
-			defer func() {
-				results = append(results, result{ID: id, Pass: !t.Failed(), Detail: strings.Join(notes, "; "), Seconds: time.Since(start).Round(100 * time.Millisecond).Seconds()})
-			}()
-			f(t, note)
-		})
-	}
-
-	// CHR's check-gateway pings every 10 s, and a trial that reverts takes
-	// the runner off the air for a few seconds.
-	proxiedWithin := 3 * time.Minute
-	if l.Arch == lab.ArchARM64 {
-		proxiedWithin = 5 * time.Minute
-	}
+	proxiedWithin := l.proxiedWithin()
+	// The fixture and the state both proxy through server a alone.
 	lanProxied := func(t *testing.T, note func(string, ...any)) {
-		took, ok := l.waitProxied(ctx, proxiedWithin)
-		note("LAN proxied after %.0fs: %v", took.Seconds(), ok)
-		if !ok {
-			t.Errorf("the LAN client was not proxied within %s: whoami %q, want 203.0.113.10", proxiedWithin, l.whoami(ctx))
+		t.Helper()
+		if server := l.lanProxied(ctx, t, note); server != "" && server != "a" {
+			t.Errorf("proxied through server %s (%s), want a (%s), the only server", server, serverEgress[server], serverEgress["a"])
 		}
 	}
 	tikray := func(t *testing.T, note func(string, ...any), args string) artifacts.Result {
-		start := time.Now()
-		res, err := runTikray(ctx, c, args)
-		note("tikray %s: %s (%.0fs)", args, describe(res), time.Since(start).Seconds())
-		if err != nil {
-			t.Fatalf("tikray %s: %v", args, err)
-		}
-		return res
+		t.Helper()
+		return l.tikray(ctx, t, note, args)
 	}
-	// onCore checks that the runner runs version from active.json.
 	onCore := func(t *testing.T, note func(string, ...any), version string) runnerapi.Status {
-		st, err := runnerStatus(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		active := "<none>"
-		if st.Active != nil {
-			active = st.Active.Core
-		}
-		note("runner %s, active %s, xray_version %q, gateway_up %v", st.State, active, st.XrayVersion, st.GatewayUp)
-		if st.State != runnerapi.StateRunning || active != version || !strings.HasPrefix(st.XrayVersion, "Xray "+version+" ") {
-			t.Errorf("runner state %s, active core %s, xray_version %q: want running on %s", st.State, active, st.XrayVersion, version)
-		}
-		return st
+		t.Helper()
+		return checkCore(ctx, t, note, version)
 	}
 	// statssys runs the health check's xray api call by hand against the
 	// running core, which must be version.
@@ -114,7 +69,7 @@ func TestCoreLifecycle(t *testing.T) {
 			t.Errorf("xray api statssys on %s: the runner runs %q (%v)", version, st.XrayVersion, err)
 			return
 		}
-		out, err := runnerAPI.XrayAPI(ctx, "statssys", "--server=127.0.0.1:10085")
+		out, err := runnerAPI.XrayAPI(ctx, "statssys", "--server="+xrayAPI)
 		note("xray api statssys on %s: exit %d, uptime line %q, err %v", version, out.ExitCode, uptimeLine(out.Stdout), err)
 		if err != nil || out.ExitCode != 0 {
 			t.Errorf("xray api statssys on %s: exit %d (%v): %s", version, out.ExitCode, err, out.Stderr)
@@ -136,6 +91,17 @@ func TestCoreLifecycle(t *testing.T) {
 		note("before: runner %s, gateway_up %v, LAN direct after %.0fs: %v", st.State, st.GatewayUp, took.Seconds(), direct)
 		res := tikray(t, note, "core update "+oldestXray+" --config "+clientConfig)
 		wantResult(t, res, artifacts.Result{Outcome: runnerapi.OutcomeCommitted, To: oldestXray, Source: "direct", Verified: "dgst"})
+		// From here on the updates and the rollback run with no --config, so
+		// tikray renders their config from the state. Give it one that
+		// reproduces the fixture's routing.
+		state, err := lifecycleState()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := l.pushState(ctx, state); err != nil {
+			t.Fatal(err)
+		}
+		note("pushed the state to %s: server %s (%s), smart routing, the fixture's domestic names and resolvers", statePath, state.Servers[0].Name, state.Servers[0].ID)
 		onCore(t, note, oldestXray)
 		statssys(t, note, oldestXray)
 		lanProxied(t, note)

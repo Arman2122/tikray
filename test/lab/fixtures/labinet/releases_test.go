@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	direct  = "198.51.100.2:1234" // a request that did not go through the proxy
-	proxied = "203.0.113.10:1234" // a request that left through the VLESS proxy
+	direct   = "198.51.100.2:1234" // a request that did not go through the proxy
+	proxied  = "203.0.113.10:1234" // a request that left through the VLESS proxy
+	proxiedB = "203.0.113.11:1234" // the same through the second VLESS server
 
 	zipURL = "/XTLS/Xray-core/releases/download/v26.10.21/Xray-linux-64.zip"
 )
@@ -100,8 +101,10 @@ func TestReleasesServe(t *testing.T) {
 		if w := get(h, direct, zipURL); w.Code != 403 {
 			t.Errorf("router WAN with .block-direct = %d, want 403", w.Code)
 		}
-		if w := get(h, proxied, zipURL); w.Code != 200 || w.Body.String() != "zip bytes" {
-			t.Errorf("proxied with .block-direct = %d %q, want 200 \"zip bytes\"", w.Code, w.Body)
+		for _, remote := range []string{proxied, proxiedB} {
+			if w := get(h, remote, zipURL); w.Code != 200 || w.Body.String() != "zip bytes" {
+				t.Errorf("%s with .block-direct = %d %q, want 200 \"zip bytes\"", remote, w.Code, w.Body)
+			}
 		}
 		os.Remove(filepath.Join(root, ".block-direct"))
 		if w := get(h, direct, zipURL); w.Code != 200 {

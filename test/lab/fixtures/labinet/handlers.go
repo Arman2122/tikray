@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"sync"
 	"time"
 
@@ -26,13 +27,24 @@ import (
 )
 
 var (
-	proxyEgress = netip.MustParseAddr("203.0.113.10")
-	realAnswer  = netip.MustParseAddr("203.0.113.30")
-	poisoned    = netip.MustParseAddr("10.10.34.34")
+	realAnswer = netip.MustParseAddr("203.0.113.30")
+	poisoned   = netip.MustParseAddr("10.10.34.34")
+
+	// proxyEgresses are the source addresses of requests that left through a
+	// VLESS server: each of the two sends from its own address.
+	proxyEgresses = []netip.Addr{
+		netip.MustParseAddr("203.0.113.10"),
+		netip.MustParseAddr("203.0.113.11"),
+	}
 )
 
+// viaProxy reports whether src is the egress address of a VLESS server.
+func viaProxy(src netip.Addr) bool {
+	return slices.Contains(proxyEgresses, src)
+}
+
 // DNSAnswer is the A record for qname as seen by a resolver at src: the real
-// address when the query came through the proxy, the poisoned one an ISP
+// address when the query came through a VLESS server, the poisoned one an ISP
 // resolver would give otherwise. ok is false for names the lab doesn't serve.
 func DNSAnswer(qname string, src netip.Addr) (addr netip.Addr, ok bool) {
 	switch qname {
@@ -40,7 +52,7 @@ func DNSAnswer(qname string, src netip.Addr) (addr netip.Addr, ok bool) {
 	default:
 		return netip.Addr{}, false
 	}
-	if src == proxyEgress {
+	if viaProxy(src) {
 		return realAnswer, true
 	}
 	return poisoned, true

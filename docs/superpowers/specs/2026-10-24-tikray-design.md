@@ -149,6 +149,7 @@ Go packages under `internal/`:
 | `xray` | gRPC client for read-only calls (stats, observatory, balancer info) using vendored protos; mutations go through the runner's `xray-api` |
 | `health` | Probes through the runner's SOCKS port, xray/runner liveness, outage detection |
 | `sharelink` | Parses `vless://`, `vmess://`, `trojan://`, `ss://` into xray outbound JSON |
+| `xraypolicy` | Knows which outbounds the newest xray refuses, so that `sharelink` and `store` refuse them when a server is added (§4.9) |
 | `subscription` | Fetches subscriptions (through the fetch chain), decodes base64/plain lists, refreshes on a schedule |
 | `api` | REST API with authentication; used by the UI and the CLI |
 | `cli` | `tikray` CLI subcommands (remote via REST, or inside the container) |
@@ -157,6 +158,24 @@ Go packages under `internal/`:
 Servers can be added by share link, subscription, or **raw outbound JSON**. Raw
 JSON lets power users run any protocol or transport xray supports, including
 ones newer than tikray's share-link parsers.
+
+M2 builds the control plane in two parts:
+- **M2a**, the model and the config: `store`, `sharelink`, `xraypolicy`,
+  `subscription` (decode, merge, fetch, without the schedule) and `render`,
+  plus an apply that puts the rendered config on trial with the active core.
+  Core updates and rollbacks render the config for the core they switch to
+  (§4.5 step 2). It runs as the one-shot CLI inside the `tikray` container:
+  `tikray config render`, `tikray apply`, `tikray core update|rollback`.
+  Until a state file is saved, the state is the default one, whose render
+  sends everything direct: apply, update and rollback then refuse to put it
+  in place of a config the runner already runs (such as an M1 `--config`
+  one), and only a runner with no core yet starts from it. A subscription
+  fetch can refuse a body (`Fetcher.Accept`) as a failed attempt, so that the
+  refresh M2b schedules treats a block page or an expiry notice with no
+  servers in it as a failure, never as an empty subscription.
+- **M2b**, the long-running service on top: the REST API and its
+  authentication, the `xray` gRPC client, the `health` monitor, hot changes,
+  subscription scheduling, and the CLI over REST.
 
 **How tikray talks to xray:**
 - **Config:** JSON, xray's stable public format. tikray never compiles xray
@@ -236,6 +255,21 @@ Each source is tried in order until one returns a file that passes verification:
   explicit confirmation. A core installed that way needs it again on every
   later update to it; once its hash becomes known, the installed zip must match
   it.
+- **Servers' TLS certificates** are always verified. xray 26.3.27 and later
+  refuse `allowInsecure` once past 2026-06-01, and 26.1.18 skips the check
+  with it (§4.9), so tikray keeps `allowInsecure: true` out of every
+  `tlsSettings` xray reads for a server:
+  - a share link that asks for `allowInsecure` (or `insecure`) is imported
+    with verification on and a warning, unless it also pins with `pcs`; the
+    parser never emits `allowInsecure`;
+  - a raw-JSON server with `allowInsecure: true` in any `tlsSettings` under
+    its `streamSettings`, at any depth (the stream's own, or a nested
+    stream's such as xhttp's `extra.downloadSettings`), is refused when it is
+    added, whatever its protocol or security, with the advice to pin the
+    certificate with `pinnedPeerCertSha256`.
+
+  A share link's `pcs` and `vcn` map to xray's `pinnedPeerCertSha256` and
+  `verifyPeerCertByName`, so a self-signed server can be pinned.
 
 ### 4.4 Slots and retention
 
@@ -305,6 +339,20 @@ Runner updates are rare because the runner holds no xray or geo code.
   allowed and labelled "untested"; the trial and `xray run -test` catch real breakage.
 - Versions too old for features the current config uses are refused with an
   explanation.
+- Newer releases also refuse configs older ones ran, and one refused outbound
+  fails the whole config, so one such server would make every later apply fail
+  its `xray run -test`. tikray follows the newest release and refuses these
+  servers when they are added, from a share link (a subscription skips the
+  line, with the reason) or as raw JSON (`internal/xraypolicy`):
+  - xray ≥ 26.3.27 refuses `tlsSettings.allowInsecure: true` after
+    2026-06-01. A share link never brings it in (§4.3); a raw-JSON outbound
+    of any protocol that holds it, in any `tlsSettings` under its
+    `streamSettings`, is refused.
+  - xray ≥ 26.7.11 refuses VLESS without TLS or VLESS encryption, and Trojan
+    without TLS, to an address outside xray's private lists, and refuses
+    Shadowsocks `none` (and `plain`). tikray also refuses 2022-blake3 keys
+    that aren't padded base64 of the cipher's key length, the one form every
+    supported release accepts.
 
 ### 4.10 Update policy
 
@@ -376,7 +424,16 @@ listed explicitly.
 
 - **TUN inbound** with sniffing (`tls`, `http`, `quic`) and `routeOnly: true`:
   the domain is used for routing, but the original destination IP is kept.
-- **Rule order:**
+- **Service inbounds** listen on the runner's bridge address, and their rules
+  come before every other rule:
+  - `socks-in`, for tikray's SOCKS probes and proxied fetches, answers tikray's
+    address only, through `proxy-closed`: a probe or fetch never passes by
+    going direct. Anything else on it is blocked.
+  - `api-in`, xray's gRPC API, answers only tikray's and the runner's own
+    addresses. Anything else on it is blocked.
+  - `dns-in` hands the devices' queries to xray's DNS (§5.4), whose own
+    queries have their rules next.
+- **Rule order** of the devices' traffic, from the TUN inbound:
   1. Block list (optional, e.g. ads).
   2. Sources in `full` policies → their balancer (skips domestic rules).
   3. Domestic domains (geosite) → `direct`.
@@ -384,11 +441,26 @@ listed explicitly.
   5. User custom rules (domain/IP → direct/proxy/block/specific server).
   6. Sources with kill switch → `proxy-closed`; everyone else → `proxy-open`.
 - **Balancers:** `proxy-open` (fallback `direct`) and `proxy-closed` (fallback
-  `block`) share the same server set. Health comes from xray's observatory
-  (burst observatory). The default strategy is lowest latency, and the user can
-  pin a server.
+  `block`) share the same server set. Health comes from xray's classic
+  `observatory`, which probes every server at once, through the server, at the
+  state's probe URL, as soon as xray starts and then every 10 s. (The burst
+  observatory spreads its first samples over its whole interval, so a config
+  just put on trial would run on the fallbacks for a while.) The strategy is
+  lowest latency (`leastPing`), and the user can pin a server, which is then
+  the balancers' only member. While the balancers have no member, because no
+  server is enabled or the pinned one is disabled, the balancers and the
+  observatory are left out and every rule names the fallback outbound itself.
 - **Outbounds:** one per server (rendered from share links, subscriptions or raw
-  JSON), plus `direct` (freedom) and `block` (blackhole).
+  JSON), plus `block` (blackhole), `direct` (freedom) and `dns-out`. `block`
+  comes first: xray sends traffic that no rule matches to the first outbound,
+  so that traffic is dropped, never sent direct. A server's outbound must be
+  a proxy: one whose protocol xray reads as freedom, blackhole, dns or
+  loopback, under any name it knows them by (`direct` and `block` included,
+  in any case), is refused, since it would let proxied and kill-switch
+  traffic out direct.
+- **Share links:** a TLS link with no `sni` takes its server name from the
+  first value of `host`, as v2rayN does, so that a CDN-fronted link to a bare
+  IP address still handshakes with the right name. Reality takes `sni` only.
 
 ### 5.4 DNS
 
@@ -399,8 +471,19 @@ listed explicitly.
     normal upstream is used), direct. The domestic server is rendered with
     `skipFallback: true`: in xray a server with `domains` is otherwise also a
     fallback for every other domain, which sends non-domestic lookups direct (M0).
-  - Everything else → DoH through the proxy.
+  - Everything else → the remote resolver through the proxy: DoH by default,
+    or plain DNS to an IPv4 address.
+  - The rule that sends the domestic resolver's queries direct matches its
+    address and port 53 only, so a remote resolver on the same host, such as
+    DoH on 443, still goes through the proxy. tikray refuses a plain-DNS
+    remote at the domestic resolver's address, since the two could not be
+    told apart.
   - `queryStrategy: UseIPv4` for these devices while the IPv6 leak guard is active.
+  - `dns-out` answers A and AAAA queries with xray's DNS and rejects every
+    other type (`nonIPQuery: reject`), so nothing is forwarded to the address
+    `dns-in` must name. xray 26.9.30 and later warn that `nonIPQuery` is
+    deprecated for `rules` (which 26.4.25 added); render keeps it while the
+    oldest supported release, 26.1.18, lacks the replacement.
 - **DNS follows the fallback.** The dst-NAT rules come in two sets, for fail-open
   and kill-switch sources. A RouterOS netwatch on the runner disables the
   fail-open set while the runner doesn't answer ping (§3.3), so fail-open devices
@@ -414,8 +497,9 @@ listed explicitly.
 - xray's DoH upstream uses the `proxy-open` balancer. During a full outage, DNS
   for kill-switch devices may therefore resolve over direct DoH. That connection is
   encrypted, so query contents aren't exposed, and those devices' traffic stays
-  blocked. The alternative, failing all non-domestic DNS for open-policy devices
-  during an outage, would break the direct fallback they rely on.
+  blocked. A plain-DNS remote sends those queries in clear. The alternative,
+  failing all non-domestic DNS for open-policy devices during an outage, would
+  break the direct fallback they rely on.
 
 ### 5.5 IPv6 leak guard (v1)
 
@@ -528,7 +612,9 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
 - **Authentication:** argon2id password hashing, secure cookies, CSRF protection,
   login rate limiting.
 - **Secrets:** server credentials and the RouterOS password are kept in the
-  `0600` state directory. Backup exports are encrypted with a user passphrase.
+  `0600` state directory. The rendered xray configs hold the servers'
+  credentials too, so they are `0600` in a `0700` `run/config/`; both images
+  run as root. Backup exports are encrypted with a user passphrase.
 - **Runner:** control API requires a token; SOCKS, DNS and control listen only on
   the bridge.
 - **RouterOS access:** least-privilege user restricted to the container IP.
@@ -597,6 +683,15 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
     down; rollback; pruning to two slots; a power cut during a trial, after
     which the runner boots from `active.json` and records `reboot`; and the
     runner's ping answer going down during a trial and back up after it;
+  - configs rendered from the state. Runs since M2a (`TestConfigApply` in
+    `test/e2e`, with a second VLESS server in the fake internet): a bootstrap
+    rendered from the default state; a server from a share link put on trial
+    with `tikray apply`; the smart split by sniffed HTTP Host, by domestic
+    address (in xray, with the RouterOS list entry off) and in DNS; failover
+    between the two servers; all servers down, open (direct) and with the
+    kill switch (blocked); a raw server that `xray run -test` rejects, with the
+    previous config kept; and a core update and rollback that render for
+    their core;
   - geo update and address-list diff;
   - tikray self-update and watchdog rollback;
   - uninstall leaves zero `tikray:` objects.
@@ -644,7 +739,7 @@ docs/
 |---|---|
 | **M0: data-path spike** | **Lab done:** all 22 checks pass on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25) with the newest xray; the real-hardware benchmark is pending. See `docs/superpowers/findings/2026-10-24-m0-data-path.md`. On RouterOS CHR ARM64 and real hardware, prove: xray TUN inbound inside a RouterOS container, mangle routing into it, no source NAT, sniffing with `routeOnly`, UDP, DNS redirect, fallback. Measure throughput and RAM. If something blocks this path, we change the design before building on it. (QUIC sniffing moved to M3: no QUIC fixture in M0.) |
 | **M1: runner + artifacts** | **Done:** the real `tikray-runner` and `tikray` images take xray-core through all nine lifecycle scenarios of `TestCoreLifecycle` (`test/e2e/core_lab_test.go`, §8.4) on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25), with 26.1.18, 26.3.27 and the newest release, 26.10.21. Results: `test/e2e/results/`. Runner with trial protocol; fetch chain, verification, slots; xray update and rollback end to end. |
-| **M2: control-plane core** | `store`, `render`, `xray` client, `sharelink`, `subscription`, `health`, REST API, CLI. |
+| **M2: control-plane core** | **M2a done** (§3.4): the desired state in versioned files (`store`), share links (`sharelink`), the outbound policy of the newest xray (`xraypolicy`), subscriptions without the schedule (`subscription`), the config renderer (`render`, its golden scenarios accepted by xray 26.1.18, 26.3.27, 26.9.30 and 26.10.21, §8.2), and `tikray config render` and `tikray apply`, with core updates and rollbacks rendering for their core. `TestConfigApply` (`test/e2e/config_lab_test.go`, §8.4) passes all eight checks on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25) with the newest xray, 26.10.21, and 26.3.27, after the final fix wave; `TestCoreLifecycle` still passes all nine on rendered configs on the same three (x86_64 long-term 7.23.8 and ARM64 stable 7.25 after the final fix wave, x86_64 stable 7.25 just before it). Results: `test/e2e/results/*-m2a.json` and `*-m1.json`. **M2b:** REST API and authentication, the `xray` client, `health`, hot changes, subscription scheduling, and the CLI over REST. |
 | **M3: RouterOS** | `install.rsc`, reconciler, version adapters, watchdog, uninstall, CHR e2e suite. |
 | **M4: web UI** | Dashboard, servers and subscriptions, devices and policies, routing, updates (history and rollback), settings, logs. |
 | **M5: v1.0** | Hardening, full e2e matrix, hardware benchmarks, docs, signed release. |

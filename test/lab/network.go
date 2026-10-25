@@ -64,7 +64,7 @@ func SetupNetwork(ctx context.Context) (*Network, error) {
 		{"ip", "-n", nsClient, "link", "set", "lo", "up"},
 		{"ip", "-n", nsClient, "route", "add", "default", "via", "192.168.88.1"},
 	}
-	for _, a := range []string{"203.0.113.10", "203.0.113.20", "203.0.113.30", "203.0.113.40", "203.0.113.41", "203.0.113.53", "203.0.113.54"} {
+	for _, a := range []string{"203.0.113.10", "203.0.113.11", "203.0.113.20", "203.0.113.30", "203.0.113.40", "203.0.113.41", "203.0.113.53", "203.0.113.54"} {
 		steps = append(steps, []string{"ip", "-n", nsInet, "addr", "add", a + "/32", "dev", "lo"})
 	}
 	for _, r := range hostRoutes {

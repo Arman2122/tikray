@@ -33,7 +33,7 @@ func TestNetworkSetupTeardown(t *testing.T) {
 	out(t, n.Inet(ctx, "ping", "-c1", "-W2", "198.51.100.1"))
 
 	lo := out(t, n.Inet(ctx, "ip", "-4", "addr", "show", "lo"))
-	for _, a := range []string{"203.0.113.10", "203.0.113.20", "203.0.113.30", "203.0.113.40", "203.0.113.41", "203.0.113.53", "203.0.113.54"} {
+	for _, a := range []string{"203.0.113.10", "203.0.113.11", "203.0.113.20", "203.0.113.30", "203.0.113.40", "203.0.113.41", "203.0.113.53", "203.0.113.54"} {
 		if !strings.Contains(lo, a) {
 			t.Errorf("tklab-inet lo lacks %s:\n%s", a, lo)
 		}
