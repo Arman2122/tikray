@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"path/filepath"
+	"sync"
 
 	"github.com/Arman2122/tikray/internal/api"
 	"github.com/Arman2122/tikray/internal/artifacts"
@@ -21,62 +24,68 @@ import (
 // 10 s for the requests it serves (api.Serve), and the service's loops stop.
 // It returns 0 for that, and 1 for a failure to start or to go on.
 //
-// The service owns the state from here on: the store is opened once, here,
-// and every change goes through the API. Everything it needs is checked
-// before the port is opened, so that a bad setup is an error and not a
-// service that is half there. It prints one line on stderr, with the address
-// and the fingerprint of its certificate, which is what a client pins; the
-// token is in no output, only in <data>/state/api.token.
+// The service owns the state from here on: it holds serve.lock for as long as
+// it runs (a second serve on the data root exits at once), the store is
+// opened once, here, and every change goes through the API. What it needs is
+// checked before the port is opened, so that a bad setup is an error and not a
+// service that is half there; the runner's token is not among it, since the
+// runner may start after it (see runnerToken): the API comes up, and the
+// status says what it waits for. It prints one line on stderr, with the
+// address and the fingerprint of its certificate, which is what a client pins;
+// the token is in no output, only in <data>/state/api.token.
 func (c *cli) serve(ctx context.Context, args []string) int {
 	fs := c.newFlagSet("serve", "serve")
 	if _, code, ok := c.parse(fs, args, 0); !ok {
 		return code
 	}
-	cfg, err := configFromEnv(c.getenv)
+	env, err := configFromEnv(c.getenv)
 	if err != nil {
 		return c.fail(err)
 	}
-	if err := prepareDirs(cfg.Data); err != nil {
+	if err := prepareDirs(env.Data); err != nil {
 		return c.fail(err)
 	}
-	s, err := store.Open(stateDir(cfg.Data))
+	// One process owns the state: this one, for as long as it runs. A command
+	// that runs the updater itself takes the same lock (runUpdater).
+	unlock, err := lockServe(env.Data)
+	switch {
+	case errors.Is(err, errServeHeld):
+		return c.fail(fmt.Errorf("another tikray serve owns %s", env.Data))
+	case err != nil:
+		return c.fail(err)
+	}
+	defer unlock()
+	s, err := store.Open(stateDir(env.Data))
 	if err != nil {
 		return c.fail(err)
 	}
 	st, _ := s.State()
-	// The runner's addresses follow the state's private subnet, which only a
-	// restart changes. The probe URL does not: serveUpdaters and serveMonitor
-	// take it from the state they are given.
-	cfg = cfg.withState(st)
-	runner, err := newRunner(cfg)
+	pub, err := indexKey(env)
 	if err != nil {
 		return c.fail(err)
 	}
-	pub, err := indexKey(cfg)
+	token, err := api.LoadOrCreateToken(stateDir(env.Data))
 	if err != nil {
 		return c.fail(err)
 	}
-	token, err := api.LoadOrCreateToken(stateDir(cfg.Data))
+	cert, fingerprint, err := api.LoadOrCreateCert(stateDir(env.Data), certIPs(env.Listen, net.InterfaceAddrs))
 	if err != nil {
 		return c.fail(err)
 	}
-	cert, fingerprint, err := api.LoadOrCreateCert(stateDir(cfg.Data), certIPs(cfg.Listen, net.InterfaceAddrs))
-	if err != nil {
-		return c.fail(err)
-	}
+	w := wireService(env, st, pub, c.stderr)
 	svc, err := service.New(service.Config{
 		Store:    s,
-		Updaters: serveUpdaters(cfg, runner, pub, c.stderr),
-		Runner:   runner,
-		Monitor:  serveMonitor(cfg, runner),
-		Data:     cfg.Data,
-		Socks:    cfg.Socks,
+		Updaters: w.updaters,
+		Runner:   w.runner,
+		Monitor:  w.monitor,
+		Data:     env.Data,
+		Socks:    w.cfg.Socks,
 		Log:      c.stderr,
 	})
 	if err != nil {
 		return c.fail(err)
 	}
-	ln, err := net.Listen("tcp", cfg.Listen)
+	ln, err := net.Listen("tcp", env.Listen)
 	if err != nil {
 		return c.fail(err)
 	}
@@ -85,6 +94,21 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 	// Either one ending is the end of both. Each returns nil once ctx is done.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	var watcher sync.WaitGroup
+	if !w.token.ready() {
+		// The runner has not made its token yet. The service is up all the same;
+		// when the token is there, a state that was saved is applied at once,
+		// not at the loop's next try.
+		watcher.Add(1)
+		go func() {
+			defer watcher.Done()
+			w.token.watch(ctx, func() {
+				if _, rev := svc.State(); rev > 0 {
+					svc.Kick()
+				}
+			})
+		}()
+	}
 	ended := make(chan error, 2)
 	go func() { ended <- svc.Run(ctx) }()
 	go func() { ended <- api.ServeListener(ctx, ln, api.NewHandler(svc, token), cert) }()
@@ -95,10 +119,51 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 		}
 		cancel()
 	}
+	watcher.Wait()
 	if first != nil {
 		return c.fail(first)
 	}
 	return 0
+}
+
+// serveWiring is what the service is made of, for a configuration and the state
+// at start.
+type serveWiring struct {
+	// cfg is the environment's configuration with the runner's addresses of
+	// the state at start. Its ProbeURL is the environment's: empty unless
+	// TIKRAY_PROBE_URL is set.
+	cfg      Config
+	token    *runnerToken
+	runner   *runnerapi.Client
+	updaters service.Updaters
+	monitor  *health.Monitor
+}
+
+// wireService makes the service's runner client, its Updaters factory and its
+// monitor from env, the configuration of the environment (configFromEnv), and
+// st, the state at start. Neither pub (see indexKey) nor log is changed.
+//
+// The runner's addresses follow the state's private subnet, which only a
+// restart changes: they are those of st. The probe URL does not stay as it is
+// at start. Where the environment leaves it unset, it is the state's own at the
+// time of each updater and each check (serveUpdaters, serveMonitor), so that
+// a PUT /v1/health takes effect without a restart. cfg.ProbeURL is therefore
+// the environment's alone, never filled in from st.
+//
+// The runner client has the package's timeouts (HTTP nil), and waits for the
+// runner's token (runnerToken).
+func wireService(env Config, st store.State, pub []byte, log io.Writer) serveWiring {
+	cfg := env.withState(st)
+	cfg.ProbeURL = env.ProbeURL // withState filled it from st, which would freeze it
+	tok := newRunnerToken(filepath.Join(env.Data, "run", "runner.token"))
+	runner := &runnerapi.Client{BaseURL: cfg.RunnerURL, TokenFunc: tok.get}
+	return serveWiring{
+		cfg:      cfg,
+		token:    tok,
+		runner:   runner,
+		updaters: serveUpdaters(cfg, runner, pub, log),
+		monitor:  serveMonitor(cfg, runner),
+	}
 }
 
 // serveUpdaters is the service's factory of CoreUpdaters. The service calls it

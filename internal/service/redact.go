@@ -39,12 +39,23 @@ var secretKeys = map[string]bool{"id": true, "password": true, "privatekey": tru
 // A string shorter than 4 bytes is left alone. Where secrets overlap in the
 // text, as when one holds another, the whole stretch they cover is replaced
 // once, so that no part of either is left.
-func RedactorFor(st store.State) func(string) string {
+func RedactorFor(st store.State) func(string) string { return RedactorWith(st) }
+
+// RedactorWith is RedactorFor(st) that also hides the credentials in the JSON
+// documents, each read as an outbound is: the strings under the same keys, at
+// any depth, whatever the document's shape. It is for what a command runs
+// that is no part of the state, such as an xray config file, whose outbounds
+// (and inbounds' clients) xray may quote when it rejects it. A document that is
+// not JSON has none to find.
+func RedactorWith(st store.State, documents ...json.RawMessage) func(string) string {
 	set := map[string]bool{}
 	add := func(s string) {
 		if len(s) >= minSecret {
 			set[s] = true
 		}
+	}
+	for _, doc := range documents {
+		outboundSecrets(doc, add)
 	}
 	for _, srv := range st.Servers {
 		outboundSecrets(srv.Outbound, add)

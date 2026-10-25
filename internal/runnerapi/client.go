@@ -29,7 +29,13 @@ var (
 type Client struct {
 	BaseURL string // such as http://192.168.88.2:8080
 	Token   string
-	HTTP    *http.Client // nil means a client with a 10 s timeout
+	// TokenFunc, if set, makes the token of each request, and Token is not
+	// used. A call whose token can't be had (it returns an error) fails with
+	// that error before anything is sent. It lets a client wait for a runner
+	// that has not made its token yet. It is called from whatever goroutine
+	// calls the client, and a copy of the client keeps it.
+	TokenFunc func(ctx context.Context) (string, error)
+	HTTP      *http.Client // nil means a client with a 10 s timeout
 }
 
 // errBody is the runner's JSON error body.
@@ -117,11 +123,18 @@ func (c *Client) send(ctx context.Context, def *http.Client, method, path string
 		}
 		body = bytes.NewReader(b)
 	}
+	token := c.Token
+	if c.TokenFunc != nil {
+		var err error
+		if token, err = c.TokenFunc(ctx); err != nil {
+			return fmt.Errorf("runnerapi: %s %s: %w", method, path, err)
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.BaseURL, "/")+path, body)
 	if err != nil {
 		return fmt.Errorf("runnerapi: %s %s: %w", method, path, err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

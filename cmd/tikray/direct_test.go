@@ -127,3 +127,57 @@ func TestDirectPathsNameTheServersOpenDisabled(t *testing.T) {
 		t.Errorf("core list: stderr %q", stderr)
 	}
 }
+
+// A config file given to core update is not in the state, so its credentials
+// are not the state's. If xray quotes them, they are redacted all the same: the
+// history and stdout must not hold them on this path either.
+func TestConfigFileCredentialsAreRedactedToo(t *testing.T) {
+	const fileSecret = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+	const filePassword = "tr0jan-passw0rd-of-the-file"
+	body := `{
+  "outbounds": [
+    {"protocol": "vless", "settings": {"vnext": [{"address": "198.51.100.7", "port": 443, "users": [{"id": "` + fileSecret + `"}]}]}},
+    {"protocol": "trojan", "settings": {"servers": [{"address": "198.51.100.8", "port": 443, "password": "` + filePassword + `"}]}}
+  ]
+}
+`
+	file, _ := configFile(t, body)
+
+	for name, setup := range map[string]func(t *testing.T, data string){
+		"a state with servers": func(t *testing.T, data string) { writeState(t, data, withServer) },
+		"no state file":        func(t *testing.T, data string) {},
+		"an unreadable state":  func(t *testing.T, data string) { writeBad(t, data, "state.v1.json", []byte("{not json")) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			vars, data, runner := trialEnv(t, &runnerapi.Selection{Core: "26.3.27", Config: testConfigRel})
+			installSlot(t, data, "26.10.21")
+			setup(t, data)
+			runner.mu.Lock()
+			runner.reject, runner.rejected = true, "bad outbounds: id "+fileSecret+", password "+filePassword
+			runner.mu.Unlock()
+
+			code, stdout, stderr := runFast(t, vars, "core", "update", "26.10.21", "--config", file)
+			if code != 1 || !strings.Contains(stdout, "bad outbounds") {
+				t.Fatalf("exit %d, stdout %q, stderr %q; want 1 and xray's rejection", code, stdout, stderr)
+			}
+			last, err := os.ReadFile(filepath.Join(data, "state", "last-result.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			history, err := os.ReadFile(filepath.Join(data, "state", "core-history.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for what, text := range map[string]string{"stdout": stdout, "stderr": stderr, "last-result.json": string(last), "core-history.jsonl": string(history)} {
+				for _, secret := range []string{fileSecret, filePassword} {
+					if strings.Contains(text, secret) {
+						t.Errorf("%s repeats a credential of the config file:\n%s", what, text)
+					}
+				}
+			}
+			if !strings.Contains(stdout, "‹redacted›") {
+				t.Errorf("stdout %q shows no redaction", stdout)
+			}
+		})
+	}
+}

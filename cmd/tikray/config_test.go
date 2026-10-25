@@ -122,6 +122,40 @@ func TestConfigFromEnv(t *testing.T) {
 		})
 	}
 
+	// Where the commands look for the daemon follows where it listens, so that
+	// a daemon on another port or address is not taken for no daemon.
+	t.Run("API follows TIKRAY_LISTEN", func(t *testing.T) {
+		for listen, want := range map[string]string{
+			"":                    "https://127.0.0.1:443",
+			":443":                "https://127.0.0.1:443",
+			":8443":               "https://127.0.0.1:8443",
+			"0.0.0.0:8443":        "https://127.0.0.1:8443",
+			"[::]:9000":           "https://127.0.0.1:9000",
+			"192.168.88.2:443":    "https://192.168.88.2:443",
+			"192.168.88.2:8443":   "https://192.168.88.2:8443",
+			"127.0.0.1:0":         "https://127.0.0.1:0",
+			"[fd00::2]:443":       "https://[fd00::2]:443",
+			"router.lan:8443":     "https://127.0.0.1:8443",
+			"192.168.88.2":        "https://127.0.0.1:443", // no port: serve will refuse it
+			"192.168.88.2:":       "https://192.168.88.2:443",
+			"not an address:port": "https://127.0.0.1:443",
+		} {
+			got, err := configFromEnv(envOf(map[string]string{"TIKRAY_LISTEN": listen}))
+			if err != nil {
+				t.Errorf("TIKRAY_LISTEN=%q: %v", listen, err)
+				continue
+			}
+			if got.API != want {
+				t.Errorf("TIKRAY_LISTEN=%q: API %q, want %q", listen, got.API, want)
+			}
+		}
+		// An address of its own wins.
+		got, err := configFromEnv(envOf(map[string]string{"TIKRAY_LISTEN": "192.168.88.2:8443", "TIKRAY_API": "https://router.lan:9443"}))
+		if err != nil || got.API != "https://router.lan:9443" {
+			t.Errorf("with TIKRAY_API set: %q, %v", got.API, err)
+		}
+	})
+
 	t.Run("fingerprint forms", func(t *testing.T) {
 		// The fingerprint a person copies: either case, colons between bytes.
 		for _, in := range []string{strings.Repeat("AB", 32), strings.Repeat("ab:", 31) + "ab", " " + strings.Repeat("ab", 32) + "\n"} {

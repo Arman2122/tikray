@@ -80,10 +80,17 @@
 // TIKRAY_INDEX_URLS, TIKRAY_INDEX_PUBKEY_FILE, TIKRAY_PROBE_URL. The runner's
 // three addresses default to its address on the state's private subnet, and
 // the probe URL to the state's health.probe_url. serve listens on
-// TIKRAY_LISTEN (default :443); the commands reach it at TIKRAY_API (default
-// https://127.0.0.1:443) with TIKRAY_API_TOKEN and TIKRAY_API_FINGERPRINT,
-// which default to the files serve makes in <data>/state: api.token and
-// tls.crt.
+// TIKRAY_LISTEN (default :443); the commands reach it at TIKRAY_API, which
+// defaults to the address serve listens on (its IP if TIKRAY_LISTEN names a
+// specific one, else 127.0.0.1, and its port) with TIKRAY_API_TOKEN and
+// TIKRAY_API_FINGERPRINT, which default to the files serve makes in
+// <data>/state: api.token and tls.crt.
+//
+// One process owns the state. serve holds an exclusive lock on
+// <data>/state/serve.lock for as long as it runs, and a second serve on the
+// same data root does not start. apply, core update and core rollback, where
+// they run the updater themselves, hold the same lock for as long as they run
+// and refuse when it is held.
 package main
 
 import (
@@ -182,10 +189,15 @@ TIKRAY_PROBE_URL. The runner's addresses default to the one the state's
 private subnet gives it, and the probe URL to the state's.
 
 serve listens on TIKRAY_LISTEN (default :443). The commands reach it at
-TIKRAY_API (default https://127.0.0.1:443), with the token in
-TIKRAY_API_TOKEN and the certificate's SHA-256 fingerprint in
-TIKRAY_API_FINGERPRINT; where those are unset they come from state/api.token
-and state/tls.crt in the data root, which serve makes.
+TIKRAY_API, by default the address it listens on (https://127.0.0.1:443, or
+the IP and the port TIKRAY_LISTEN names), with the token in TIKRAY_API_TOKEN
+and the certificate's SHA-256 fingerprint in TIKRAY_API_FINGERPRINT; where
+those are unset they come from state/api.token and state/tls.crt in the data
+root, which serve makes.
+
+One process owns the state: serve holds state/serve.lock while it runs, and
+apply, core update and core rollback refuse to run in their own process while
+it is held.
 `
 
 func main() {
@@ -372,7 +384,7 @@ func (c *cli) update(ctx context.Context, args []string) int {
 			return cl.CoreUpdate(ctx, pos[0], *allow)
 		}
 	}
-	return c.runUpdater(ctx, artifacts.Result{To: pos[0]}, *configFile == "", viaAPI, func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
+	return c.runUpdater(ctx, artifacts.Result{To: pos[0]}, *configFile, viaAPI, func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
 		return u.Update(ctx, pos[0], artifacts.UpdateOptions{ConfigFile: *configFile, AllowUnverified: *allow})
 	})
 }
@@ -382,7 +394,7 @@ func (c *cli) rollback(ctx context.Context, args []string) int {
 	if _, code, ok := c.parse(fs, args, 0); !ok {
 		return code
 	}
-	return c.runUpdater(ctx, artifacts.Result{}, true, (*apiclient.Client).CoreRollback, func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
+	return c.runUpdater(ctx, artifacts.Result{}, "", (*apiclient.Client).CoreRollback, func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
 		return u.Rollback(ctx)
 	})
 }
@@ -392,15 +404,15 @@ func (c *cli) apply(ctx context.Context, args []string) int {
 	if _, code, ok := c.parse(fs, args, 0); !ok {
 		return code
 	}
-	return c.runUpdater(ctx, artifacts.Result{Kind: artifacts.KindConfig}, true, (*apiclient.Client).Apply, func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
+	return c.runUpdater(ctx, artifacts.Result{Kind: artifacts.KindConfig}, "", (*apiclient.Client).Apply, func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
 		return u.Apply(ctx)
 	})
 }
 
 // runUpdater builds the updater, runs do and reports its result. base is what
 // a refusal before the updater runs keeps of the result: the version asked
-// for, or the Kind of an apply. fromState is whether the config is rendered
-// from the state, as opposed to named by the user (update --config).
+// for, or the Kind of an apply. configFile is the config file the user named
+// (update --config); empty, the config is rendered from the state.
 //
 // Once the data root is known to be usable, the previous last-result.json is
 // removed, before anything else can fail. From then on the file is either
@@ -419,11 +431,17 @@ func (c *cli) apply(ctx context.Context, args []string) int {
 // reported as a refused result with the daemon's words, since all the command
 // knows is that it failed.
 //
+// A process that runs the updater itself owns the state for as long as it
+// runs: it takes serve.lock (lockServe), and refuses if it is held. That is a
+// tikray serve whose address the probe did not find, or one that has just
+// started; the probe alone could not rule them out.
+//
 // The state is read once, and the render, the health checks and the runner's
-// addresses all follow that one snapshot. With a config file (not fromState)
-// the state supplies the addresses alone, and one that cannot be read is
-// replaced, with a warning, by the default state.
-func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, fromState bool, viaAPI apiCall, do func(context.Context, *artifacts.CoreUpdater) (artifacts.Result, error)) int {
+// addresses all follow that one snapshot. With a config file the state
+// supplies the addresses alone, and one that cannot be read is replaced, with
+// a warning, by the default state.
+func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, configFile string, viaAPI apiCall, do func(context.Context, *artifacts.CoreUpdater) (artifacts.Result, error)) int {
+	fromState := configFile == ""
 	cfg, err := configFromEnv(c.getenv)
 	if err != nil {
 		return c.fail(err)
@@ -441,6 +459,14 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, fromState b
 	if running {
 		return c.viaDaemon(ctx, cfg, base, cl, viaAPI)
 	}
+	unlock, err := lockServe(cfg.Data)
+	switch {
+	case errors.Is(err, errServeHeld):
+		return c.refused(cfg, base, fmt.Errorf("tikray serve is running (it holds %s)", filepath.Join(stateDir(cfg.Data), serveLockName)))
+	case err != nil:
+		return c.refused(cfg, base, err)
+	}
+	defer unlock()
 	var st store.State
 	var rev uint64
 	if fromState {
@@ -472,8 +498,17 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, fromState b
 	}
 	// What xray says of a config can quote the credentials in it, and the
 	// result, the history and stderr must not repeat them (the daemon's
-	// service sets the same).
-	u.Redact = service.RedactorFor(st)
+	// service sets the same). A config file is no part of the state, so its
+	// credentials are added: those of its outbounds, and of whatever else it
+	// holds under the same keys. A file that can't be read is the updater's
+	// error to report; one that is no JSON has none to find.
+	var documents []json.RawMessage
+	if configFile != "" {
+		if b, err := os.ReadFile(configFile); err == nil {
+			documents = append(documents, b)
+		}
+	}
+	u.Redact = service.RedactorWith(st, documents...)
 	// Revision 0 is no state file: the render is the default state's, which
 	// must not replace a config the runner already runs.
 	u.NoState = fromState && rev == 0

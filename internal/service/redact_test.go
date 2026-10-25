@@ -114,6 +114,37 @@ func TestRedactorReplacesLongerSecretsFirst(t *testing.T) {
 	wantText(t, got, "a "+redacted+" b "+redacted+" c "+redacted, secrets...)
 }
 
+// RedactorWith reads documents that are no part of the state, such as an xray
+// config a command runs a core with, by the rules RedactorFor reads an
+// outbound by: the credentials at any depth, whatever the document's shape.
+func TestRedactorWithDocuments(t *testing.T) {
+	st := store.Default()
+	st.Servers = []store.Server{server("00000001", `{"protocol":"trojan","settings":{"servers":[{"password":"state-password"}]}}`)}
+	doc := json.RawMessage(`{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"users":[{"id":"file-uuid-0001"}]}]}},{"protocol":"trojan","settings":{"servers":[{"password":"file-password","address":"198.51.100.8"}]}}],"inbounds":[{"settings":{"clients":[{"id":"inbound-uuid-02"}]}}]}`)
+	secrets := []secret{
+		{"the state's password", "state-password"}, {"a file ID", "file-uuid-0001"},
+		{"a file password", "file-password"}, {"an inbound ID", "inbound-uuid-02"},
+	}
+	text := "x state-password y file-uuid-0001 z file-password w inbound-uuid-02 v 198.51.100.8"
+
+	got := RedactorWith(st, doc)(text)
+	wantRedacted(t, got, secrets...)
+	if !strings.Contains(got, "198.51.100.8") {
+		t.Errorf("redacted text %q hides an address, which is no credential", got)
+	}
+	// Without the document its credentials are not known, and a document that
+	// is no JSON adds nothing and breaks nothing.
+	if got := RedactorFor(st)(text); !strings.Contains(got, "file-uuid-0001") {
+		t.Errorf("RedactorFor hides a credential it was not told: %q", got)
+	}
+	if got := RedactorWith(st, json.RawMessage(`not json`), nil)("state-password file-uuid-0001"); strings.Contains(got, "state-password") || !strings.Contains(got, "file-uuid-0001") {
+		t.Errorf("with a document that is no JSON: %q", got)
+	}
+	if got := RedactorWith(store.Default())("nothing here"); got != "nothing here" {
+		t.Errorf("with nothing to hide: %q", got)
+	}
+}
+
 // A subscription URL is a secret in every form a client's error can show it
 // in: as it is, with its password masked, without its userinfo, and its
 // userinfo alone. The probe URL is no secret, but its userinfo is.

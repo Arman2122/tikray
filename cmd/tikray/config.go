@@ -27,7 +27,8 @@ type Config struct {
 	// Listen is where tikray serve listens (TIKRAY_LISTEN).
 	Listen string
 	// API is the address of tikray serve's API, for the commands that talk to
-	// it (TIKRAY_API). APIToken and APIFingerprint (TIKRAY_API_TOKEN and
+	// it (TIKRAY_API); unset, it follows Listen (see apiForListen). APIToken
+	// and APIFingerprint (TIKRAY_API_TOKEN and
 	// TIKRAY_API_FINGERPRINT, the latter in the normal form of
 	// apiclient.NormalizeFingerprint) are empty where their variable is unset:
 	// apiClient and apiToken then take them from the files tikray serve
@@ -67,8 +68,8 @@ const (
 	// defaultListen is where tikray serve listens: every interface of the
 	// container, which has the bridge veth alone.
 	defaultListen = ":443"
-	// defaultAPI is where the CLI looks for it, from inside the container.
-	defaultAPI = "https://127.0.0.1:443"
+	// defaultAPIPort is the API's port where TIKRAY_LISTEN names none.
+	defaultAPIPort = "443"
 	// runnerPort is the port of the runner's control API, which
 	// cmd/tikray-runner serves on its address of the private subnet.
 	runnerPort = 8080
@@ -163,8 +164,11 @@ func configFromEnv(getenv func(string) string) (Config, error) {
 		IndexPubKeyFile: getenv("TIKRAY_INDEX_PUBKEY_FILE"),
 		ProbeURL:        getenv("TIKRAY_PROBE_URL"),
 		Listen:          str("TIKRAY_LISTEN", defaultListen),
-		API:             str("TIKRAY_API", defaultAPI),
+		API:             getenv("TIKRAY_API"),
 		APIToken:        strings.TrimSpace(getenv("TIKRAY_API_TOKEN")),
+	}
+	if cfg.API == "" {
+		cfg.API = apiForListen(cfg.Listen)
 	}
 	// The messages below never repeat the value: a URL can hold a password.
 	if err := checkAPI(cfg.API); err != nil {
@@ -200,6 +204,25 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// apiForListen is where the commands look for the daemon that listens at
+// listen (TIKRAY_LISTEN), when TIKRAY_API does not say: the address it names,
+// when that is a specific IP address, else this machine's loopback address,
+// which every address of an interface answers; and its port, 443 if there is
+// none. A listen address that is no host:port, or whose port is no number,
+// gives the default (serve itself refuses such an address).
+func apiForListen(listen string) string {
+	host, port := "127.0.0.1", defaultAPIPort
+	if h, p, err := net.SplitHostPort(listen); err == nil {
+		if ip := net.ParseIP(h); ip != nil && !ip.IsUnspecified() {
+			host = ip.String()
+		}
+		if n, err := strconv.ParseUint(p, 10, 16); err == nil {
+			port = strconv.FormatUint(n, 10)
+		}
+	}
+	return "https://" + net.JoinHostPort(host, port)
 }
 
 // checkAPI checks the address of the API: an https URL with a host, and no user

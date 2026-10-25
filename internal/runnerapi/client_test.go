@@ -345,3 +345,48 @@ func TestTestResultWireNames(t *testing.T) {
 		t.Errorf("TestResult JSON = %s, want %s", b, want)
 	}
 }
+
+// A TokenFunc makes the token of each request, so that a client can wait for a
+// runner that has not made its token yet, and a copy of the client keeps it.
+func TestClientTokenFunc(t *testing.T) {
+	var auths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auths = append(auths, r.Header.Get("Authorization"))
+		io.WriteString(w, `{"state":"empty"}`)
+	}))
+	defer srv.Close()
+
+	token, failure := "first", error(nil)
+	c := &Client{BaseURL: srv.URL, Token: "ignored", TokenFunc: func(ctx context.Context) (string, error) { return token, failure }}
+	ctx := context.Background()
+	if _, err := c.Status(ctx); err != nil {
+		t.Fatal(err)
+	}
+	token = "second"
+	cc := *c // a copy, as artifacts' withTimeout makes
+	cc.HTTP = &http.Client{Timeout: time.Minute}
+	if _, err := cc.Status(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"Bearer first", "Bearer second"}; !reflect.DeepEqual(auths, want) {
+		t.Errorf("Authorization headers %q, want %q", auths, want)
+	}
+
+	// A token that can't be had ends the call before it is sent, with the cause.
+	failure = errors.New("waiting for the runner token")
+	if _, err := c.Status(ctx); !errors.Is(err, failure) || !strings.Contains(err.Error(), "GET /v1/status") {
+		t.Errorf("error %v, want one that wraps the token's and names the call", err)
+	}
+	for _, call := range []func() error{
+		func() error { return c.Trial(ctx) },
+		func() error { _, err := c.Test(ctx, []byte("{}")); return err },
+		func() error { _, err := c.XrayAPI(ctx, "statssys"); return err },
+	} {
+		if err := call(); !errors.Is(err, failure) {
+			t.Errorf("error %v, want the token's", err)
+		}
+	}
+	if len(auths) != 2 {
+		t.Errorf("%d requests reached the runner, want the two with a token", len(auths))
+	}
+}
