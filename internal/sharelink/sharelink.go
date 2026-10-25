@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // maxNameRunes is the longest name a link can give a server.
@@ -25,7 +27,16 @@ type Server struct {
 	// Outbound is an xray outbound object without a tag. It is marshalled from
 	// maps, so its keys are sorted.
 	Outbound json.RawMessage
+	// Warnings are notes about what the parser changed or ignored, safe to show
+	// the user: they hold no secrets. It is nil when there are none.
+	Warnings []string
 }
+
+// warnInsecureRemoved is the warning for a link that asks to skip the
+// verification of the server's certificate. It is shown to the user, so it
+// says what the parser did and what a link needs instead.
+const warnInsecureRemoved = "allowInsecure was ignored because xray-core removed it: " +
+	"the server's certificate must be valid, or pinned with the pcs parameter"
 
 // ErrUnsupported is wrapped by the error for a link that is valid but that
 // tikray cannot use: a scheme it does not read or a transport it does not run.
@@ -78,13 +89,27 @@ type target struct {
 }
 
 // parseTarget splits a link of the given scheme into its parts. It checks the
-// host and the port, and that the query is well formed, but not the secret,
-// which only the caller knows the rules for. The errors it returns do not
-// repeat any of the link: the text of a net/url error would.
-func parseTarget(link, scheme string) (target, error) {
+// host and the port, and the query parameters that the parser reads, which are
+// streamKeys and the extra keys the scheme adds. It does not check the secret,
+// which only the caller knows the rules for.
+//
+// The name after the # is only a label, so a bad escape in it never fails the
+// link: the raw text is the name. A query parameter that the parser does not
+// read is ignored even when it is malformed, but a malformed one that it reads
+// fails the link, because dropping it would change the outbound.
+//
+// The errors it returns do not repeat any of the link: the text of a net/url
+// error would.
+func parseTarget(link, scheme string, extraKeys ...string) (target, error) {
+	// url.Parse refuses the whole link when the fragment has a bad escape.
+	link, rawFragment, _ := strings.Cut(link, "#")
 	u, err := url.Parse(link)
 	if err != nil {
 		return target{}, fmt.Errorf("sharelink: malformed %s link", scheme)
+	}
+	fragment, err := url.PathUnescape(rawFragment)
+	if err != nil {
+		fragment = rawFragment
 	}
 	host := u.Hostname()
 	if host == "" {
@@ -97,13 +122,11 @@ func parseTarget(link, scheme string) (target, error) {
 	if err != nil || port < 1 || port > 65535 {
 		return target{}, fmt.Errorf("sharelink: %s link has an invalid port, want 1 to 65535", scheme)
 	}
-	// Query would silently drop a parameter with a bad escape, and the outbound
-	// would then not match the server.
-	q, err := url.ParseQuery(u.RawQuery)
-	if err != nil {
-		return target{}, fmt.Errorf("sharelink: malformed query in %s link", scheme)
+	q, bad := parseQuery(u.RawQuery, append(slices.Clone(streamKeys), extraKeys...))
+	if bad != "" {
+		return target{}, fmt.Errorf("sharelink: %s link has a malformed %q parameter", scheme, bad)
 	}
-	t := target{host: host, port: port, query: q, fragment: u.Fragment}
+	t := target{host: host, port: port, query: q, fragment: fragment}
 	if u.User != nil {
 		t.secret = u.User.Username()
 		// A colon splits the userinfo into a user and a password, but in a
@@ -115,10 +138,41 @@ func parseTarget(link, scheme string) (target, error) {
 	return t, nil
 }
 
+// parseQuery splits a raw query into its parameters, like url.ParseQuery, but
+// it skips a malformed pair instead of failing. A pair is malformed when its
+// key or value has a bad escape, or it has a semicolon, which url.ParseQuery
+// also refuses. If a malformed pair is for a key in read, parseQuery stops
+// and returns that key as bad. A key with a bad escape is none of read, which
+// are all plain text.
+func parseQuery(raw string, read []string) (q url.Values, bad string) {
+	q = url.Values{}
+	for raw != "" {
+		var pair string
+		pair, raw, _ = strings.Cut(raw, "&")
+		if pair == "" {
+			continue
+		}
+		k, v, _ := strings.Cut(pair, "=")
+		key, kerr := url.QueryUnescape(k)
+		value, verr := url.QueryUnescape(v)
+		if kerr != nil {
+			continue
+		}
+		if verr != nil || strings.Contains(pair, ";") {
+			if slices.Contains(read, key) {
+				return nil, key
+			}
+			continue
+		}
+		q.Add(key, value)
+	}
+	return q, ""
+}
+
 // name gives the name of a server: the link's fragment, trimmed and cut to 128
 // runes, or host:port when the fragment is empty. An IPv6 host is bracketed.
 func name(fragment, host string, port int) string {
-	n := strings.TrimSpace(strings.ToValidUTF8(fragment, "�"))
+	n := strings.TrimSpace(strings.ToValidUTF8(fragment, string(utf8.RuneError)))
 	if n == "" {
 		return net.JoinHostPort(host, strconv.Itoa(port))
 	}

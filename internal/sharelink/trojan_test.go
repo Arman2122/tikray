@@ -39,10 +39,31 @@ func TestParseTrojan(t *testing.T) {
 		},
 		{
 			name:     "websocket over tls",
-			link:     "trojan://pw@[2001:db8::2]:443?type=ws&host=cdn.example.com&path=%2Fws&sni=cdn.example.com&fp=chrome&alpn=http/1.1&allowInsecure=1#ws%20node",
+			link:     "trojan://pw@[2001:db8::2]:443?type=ws&host=cdn.example.com&path=%2Fws&sni=cdn.example.com&fp=chrome&alpn=http/1.1#ws%20node",
 			wantName: "ws node",
 			wantJSON: trojanOut("2001:db8::2", "443", "pw",
-				`{"network":"ws","security":"tls","tlsSettings":{"allowInsecure":true,"alpn":["http/1.1"],"fingerprint":"chrome","serverName":"cdn.example.com"},"wsSettings":{"host":"cdn.example.com","path":"/ws"}}`),
+				`{"network":"ws","security":"tls","tlsSettings":{"alpn":["http/1.1"],"fingerprint":"chrome","serverName":"cdn.example.com"},"wsSettings":{"host":"cdn.example.com","path":"/ws"}}`),
+		},
+		{
+			// Trojan's default security is tls, so the flag is as live here as in a vless link.
+			name:         "an insecure trojan link keeps verification on and warns",
+			link:         "trojan://pw@example.com:443?allowInsecure=1&sni=example.com",
+			wantName:     "example.com:443",
+			wantWarnings: []string{warnInsecureRemoved},
+			wantJSON:     trojanOut("example.com", "443", "pw", `{"network":"tcp","security":"tls","tlsSettings":{"serverName":"example.com"}}`),
+		},
+		{
+			name:     "a pinned trojan link",
+			link:     "trojan://pw@example.com:443?insecure=1&sni=example.com&pcs=" + pinA + "&vcn=example.com",
+			wantName: "example.com:443",
+			wantJSON: trojanOut("example.com", "443", "pw",
+				`{"network":"tcp","security":"tls","tlsSettings":{"pinnedPeerCertSha256":"`+pinA+`","serverName":"example.com","verifyPeerCertByName":"example.com"}}`),
+		},
+		{
+			name:     "a percent in the name",
+			link:     "trojan://pw@example.com:443?security=none#50%",
+			wantName: "50%",
+			wantJSON: trojanOut("example.com", "443", "pw", `{"network":"tcp"}`),
 		},
 		{
 			name:     "grpc over tls",

@@ -7,14 +7,15 @@ import "errors"
 // The encryption parameter is passed through as it is, so VLESS post-quantum
 // encryption strings work; it is "none" when the link does not set it.
 func parseVLESS(link string) (Server, error) {
-	t, err := parseTarget(link, "vless")
+	t, err := parseTarget(link, "vless", "encryption", "flow")
 	if err != nil {
 		return Server{}, err
 	}
 	if t.secret == "" {
 		return Server{}, errors.New("sharelink: vless link has no id")
 	}
-	st, err := streamFromQuery(t.query, "").settings()
+	strm := streamFromQuery(t.query, "")
+	st, err := strm.settings()
 	if err != nil {
 		return Server{}, err
 	}
@@ -35,5 +36,5 @@ func parseVLESS(link string) (Server, error) {
 	if err != nil {
 		return Server{}, err
 	}
-	return Server{Name: name(t.fragment, t.host, t.port), Outbound: out}, nil
+	return Server{Name: name(t.fragment, t.host, t.port), Outbound: out, Warnings: strm.warnings()}, nil
 }

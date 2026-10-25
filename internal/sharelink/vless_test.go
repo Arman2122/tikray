@@ -5,6 +5,10 @@ import "testing"
 const (
 	vlessID  = "b831381d-6324-4d53-ad4f-8cda48b30811"
 	vlessPBK = "SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc"
+	// pinA and pinB are certificate pins in the two formats xray reads: hex,
+	// and hex with colons.
+	pinA = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	pinB = "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99"
 )
 
 // vlessOut is the expected VLESS outbound for the user users[0] at addr:port
@@ -143,19 +147,36 @@ func TestParseVLESS(t *testing.T) {
 			wantJSON: vlessOut("example.com", "443", plainUser,
 				`{"network":"ws","security":"tls","tlsSettings":{"serverName":"a.example.com"},"wsSettings":{"path":"/"}}`),
 		},
+		// xray-core refuses allowInsecure, so no outbound carries it: the link
+		// still parses, with verification on and a warning.
 		{
-			name:     "tls with fingerprint and allowInsecure",
-			link:     base + "?security=tls&sni=a.example.com&fp=firefox&allowInsecure=1",
-			wantName: "example.com:443",
+			name:         "allowInsecure is never emitted",
+			link:         base + "?security=tls&sni=a.example.com&fp=firefox&allowInsecure=1",
+			wantName:     "example.com:443",
+			wantWarnings: []string{warnInsecureRemoved},
 			wantJSON: vlessOut("example.com", "443", plainUser,
-				`{"network":"tcp","security":"tls","tlsSettings":{"allowInsecure":true,"fingerprint":"firefox","serverName":"a.example.com"}}`),
+				`{"network":"tcp","security":"tls","tlsSettings":{"fingerprint":"firefox","serverName":"a.example.com"}}`),
 		},
 		{
-			name:     "tls with insecure true",
-			link:     base + "?security=tls&insecure=true",
-			wantName: "example.com:443",
-			wantJSON: vlessOut("example.com", "443", plainUser,
-				`{"network":"tcp","security":"tls","tlsSettings":{"allowInsecure":true}}`),
+			name:         "insecure true is not emitted either",
+			link:         base + "?security=tls&insecure=true",
+			wantName:     "example.com:443",
+			wantWarnings: []string{warnInsecureRemoved},
+			wantJSON:     vlessOut("example.com", "443", plainUser, `{"network":"tcp","security":"tls","tlsSettings":{}}`),
+		},
+		{
+			name:         "allowInsecure True counts as insecure",
+			link:         base + "?security=tls&allowInsecure=True",
+			wantName:     "example.com:443",
+			wantWarnings: []string{warnInsecureRemoved},
+			wantJSON:     vlessOut("example.com", "443", plainUser, `{"network":"tcp","security":"tls","tlsSettings":{}}`),
+		},
+		{
+			name:         "insecure TRUE counts as insecure",
+			link:         base + "?security=tls&insecure=TRUE",
+			wantName:     "example.com:443",
+			wantWarnings: []string{warnInsecureRemoved},
+			wantJSON:     vlessOut("example.com", "443", plainUser, `{"network":"tcp","security":"tls","tlsSettings":{}}`),
 		},
 		{
 			name:     "tls with allowInsecure off",
@@ -164,11 +185,87 @@ func TestParseVLESS(t *testing.T) {
 			wantJSON: vlessOut("example.com", "443", plainUser, `{"network":"tcp","security":"tls","tlsSettings":{}}`),
 		},
 		{
-			name:     "tls with only one of the insecure flags on",
-			link:     base + "?security=tls&allowInsecure=0&insecure=1",
+			name:         "tls with only one of the insecure flags on",
+			link:         base + "?security=tls&allowInsecure=0&insecure=1",
+			wantName:     "example.com:443",
+			wantWarnings: []string{warnInsecureRemoved},
+			wantJSON:     vlessOut("example.com", "443", plainUser, `{"network":"tcp","security":"tls","tlsSettings":{}}`),
+		},
+		{
+			name:         "both insecure flags give one warning",
+			link:         base + "?security=tls&allowInsecure=1&insecure=1",
+			wantName:     "example.com:443",
+			wantWarnings: []string{warnInsecureRemoved},
+			wantJSON:     vlessOut("example.com", "443", plainUser, `{"network":"tcp","security":"tls","tlsSettings":{}}`),
+		},
+		{
+			name:     "insecure without tls has nothing to warn about",
+			link:     base + "?security=none&allowInsecure=1",
+			wantName: "example.com:443",
+			wantJSON: vlessOut("example.com", "443", plainUser, `{"network":"tcp"}`),
+		},
+		{
+			name:     "pcs pins the certificate",
+			link:     base + "?security=tls&sni=a.example.com&pcs=" + pinA,
 			wantName: "example.com:443",
 			wantJSON: vlessOut("example.com", "443", plainUser,
-				`{"network":"tcp","security":"tls","tlsSettings":{"allowInsecure":true}}`),
+				`{"network":"tcp","security":"tls","tlsSettings":{"pinnedPeerCertSha256":"`+pinA+`","serverName":"a.example.com"}}`),
+		},
+		{
+			name:     "pcs replaces the insecure flag, with no warning",
+			link:     base + "?security=tls&allowInsecure=1&insecure=true&pcs=" + pinA,
+			wantName: "example.com:443",
+			wantJSON: vlessOut("example.com", "443", plainUser,
+				`{"network":"tcp","security":"tls","tlsSettings":{"pinnedPeerCertSha256":"`+pinA+`"}}`),
+		},
+		{
+			name:     "pcs is given as it is, trimmed",
+			link:     base + "?security=tls&pcs=%20" + pinA + "," + pinB + "%20",
+			wantName: "example.com:443",
+			wantJSON: vlessOut("example.com", "443", plainUser,
+				`{"network":"tcp","security":"tls","tlsSettings":{"pinnedPeerCertSha256":"`+pinA+","+pinB+`"}}`),
+		},
+		{
+			name:         "a blank pcs does not count as a pin",
+			link:         base + "?security=tls&allowInsecure=1&pcs=%20",
+			wantName:     "example.com:443",
+			wantWarnings: []string{warnInsecureRemoved},
+			wantJSON:     vlessOut("example.com", "443", plainUser, `{"network":"tcp","security":"tls","tlsSettings":{}}`),
+		},
+		{
+			name:     "vcn names the certificate",
+			link:     base + "?security=tls&sni=a.example.com&vcn=real.example.com&pcs=" + pinA,
+			wantName: "example.com:443",
+			wantJSON: vlessOut("example.com", "443", plainUser,
+				`{"network":"tcp","security":"tls","tlsSettings":{"pinnedPeerCertSha256":"`+pinA+`","serverName":"a.example.com","verifyPeerCertByName":"real.example.com"}}`),
+		},
+		{
+			name:     "vcn alone",
+			link:     base + "?security=tls&vcn=real.example.com",
+			wantName: "example.com:443",
+			wantJSON: vlessOut("example.com", "443", plainUser,
+				`{"network":"tcp","security":"tls","tlsSettings":{"verifyPeerCertByName":"real.example.com"}}`),
+		},
+		{
+			name:         "vcn does not stop the insecure warning",
+			link:         base + "?security=tls&insecure=1&vcn=real.example.com",
+			wantName:     "example.com:443",
+			wantWarnings: []string{warnInsecureRemoved},
+			wantJSON: vlessOut("example.com", "443", plainUser,
+				`{"network":"tcp","security":"tls","tlsSettings":{"verifyPeerCertByName":"real.example.com"}}`),
+		},
+		{
+			name:     "pcs and vcn are for tls only",
+			link:     base + "?security=none&pcs=" + pinA + "&vcn=real.example.com",
+			wantName: "example.com:443",
+			wantJSON: vlessOut("example.com", "443", plainUser, `{"network":"tcp"}`),
+		},
+		{
+			name:     "pcs and vcn are not reality settings",
+			link:     base + "?security=reality&pbk=" + vlessPBK + "&pcs=" + pinA + "&vcn=real.example.com",
+			wantName: "example.com:443",
+			wantJSON: vlessOut("example.com", "443", plainUser,
+				`{"network":"tcp","realitySettings":{"fingerprint":"chrome","publicKey":"`+vlessPBK+`"},"security":"reality"}`),
 		},
 		{
 			name:     "alpn is trimmed and split on commas",
@@ -238,6 +335,25 @@ func TestParseVLESS(t *testing.T) {
 			wantJSON: vlessOut("example.com", "443", plainUser, `{"network":"tcp"}`),
 		},
 
+		{
+			name:     "a bare percent in the name",
+			link:     base + "#50%",
+			wantName: "50%",
+			wantJSON: vlessOut("example.com", "443", plainUser, `{"network":"tcp"}`),
+		},
+		{
+			name:     "a short escape in the name",
+			link:     base + "#a%2",
+			wantName: "a%2",
+			wantJSON: vlessOut("example.com", "443", plainUser, `{"network":"tcp"}`),
+		},
+		{
+			name:     "a percent in a name beside a bad query parameter nobody reads",
+			link:     base + "?remark=50%&type=ws#🔥 20% off",
+			wantName: "🔥 20% off",
+			wantJSON: vlessOut("example.com", "443", plainUser, `{"network":"ws","wsSettings":{"path":"/"}}`),
+		},
+
 		{name: "kcp", link: base + "?type=kcp&seed=x", wantErr: kindUnsupported, secret: vlessID},
 		{name: "mkcp", link: base + "?type=mkcp", wantErr: kindUnsupported, secret: vlessID},
 		{name: "quic", link: base + "?type=quic", wantErr: kindUnsupported, secret: vlessID},
@@ -263,6 +379,8 @@ func TestParseVLESS(t *testing.T) {
 		// A dropped parameter would give an outbound that does not match the server.
 		{name: "malformed escape in the query", link: base + "?type=ws&path=%zz", wantErr: kindInvalid, secret: vlessID},
 		{name: "semicolon in the query", link: base + "?security=tls&alpn=h2;http/1.1", wantErr: kindInvalid, secret: vlessID},
+		{name: "malformed escape in the encryption", link: base + "?encryption=%zz", wantErr: kindInvalid, errContains: `"encryption"`, secret: vlessID},
+		{name: "malformed escape in the flow", link: base + "?flow=xtls-rprx-vision%", wantErr: kindInvalid, errContains: `"flow"`, secret: vlessID},
 		{name: "malformed escape in the id", link: "vless://secret%zz@example.com:443", wantErr: kindInvalid, secret: "secret"},
 	})
 }

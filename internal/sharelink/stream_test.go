@@ -24,15 +24,33 @@ func TestStreamFromQuery(t *testing.T) {
 		"mode":          {"multi"},
 		"headerType":    {"http"},
 		"allowInsecure": {"true"},
+		"pcs":           {" PIN "},
+		"vcn":           {"real.example.com"},
 	}
 	want := stream{
 		Network: "ws", Security: "reality", SNI: "www.example.com", Fingerprint: "chrome",
 		ALPN: "h2,http/1.1", PublicKey: "PBK", ShortID: "SID", SpiderX: "/spider",
 		Host: "h.example.com", Path: "/p", ServiceName: "gun", Authority: "a.example.com",
 		Mode: "multi", HeaderType: "http", AllowInsecure: true,
+		PinnedCertSHA256: " PIN ", VerifyCertByName: "real.example.com",
 	}
 	if got := streamFromQuery(q, "tls"); !reflect.DeepEqual(got, want) {
 		t.Errorf("streamFromQuery:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// TestStreamKeys keeps streamKeys, which decides which malformed parameters
+// fail a link, in step with what streamFromQuery reads.
+func TestStreamKeys(t *testing.T) {
+	empty := streamFromQuery(url.Values{}, "")
+	for _, k := range streamKeys {
+		if reflect.DeepEqual(streamFromQuery(url.Values{k: {"true"}}, ""), empty) {
+			t.Errorf("streamFromQuery does not read %q", k)
+		}
+	}
+	// Each field comes from one key, but allowInsecure and insecure share one.
+	if got, want := len(streamKeys), reflect.TypeOf(stream{}).NumField()+1; got != want {
+		t.Errorf("streamKeys has %d keys, but stream has %d fields (and one is set by two keys)", got, want-1)
 	}
 }
 
@@ -75,6 +93,12 @@ func TestStreamFromQueryAllowInsecure(t *testing.T) {
 		{"allowInsecure=0&insecure=1", true},
 		{"allowInsecure=1&insecure=0", true},
 		{"allowInsecure=0&insecure=0", false},
+		{"allowInsecure=True", true},
+		{"allowInsecure=TRUE", true},
+		{"insecure=True", true},
+		{"insecure=tRuE", true},
+		{"allowInsecure=%20true", true},
+		{"allowInsecure=2", false},
 	}
 	for _, tc := range tests {
 		q, err := url.ParseQuery(tc.query)
@@ -120,6 +144,30 @@ func TestStreamSettings(t *testing.T) {
 			"alpn of only separators", stream{Security: "tls", ALPN: " , ,"},
 			map[string]any{"network": "tcp", "security": "tls", "tlsSettings": map[string]any{}},
 		},
+		{
+			// xray-core refuses allowInsecure, so it is never written.
+			"allowInsecure is dropped", stream{Security: "tls", SNI: "a.example.com", AllowInsecure: true},
+			map[string]any{"network": "tcp", "security": "tls", "tlsSettings": map[string]any{"serverName": "a.example.com"}},
+		},
+		{
+			"pin and verify name", stream{Security: "tls", PinnedCertSHA256: " aa:bb ", VerifyCertByName: "real.example.com", AllowInsecure: true},
+			map[string]any{"network": "tcp", "security": "tls", "tlsSettings": map[string]any{
+				"pinnedPeerCertSha256": "aa:bb",
+				"verifyPeerCertByName": "real.example.com",
+			}},
+		},
+		{
+			"pin and verify name are for tls only", stream{Security: "none", PinnedCertSHA256: "aa", VerifyCertByName: "real.example.com"},
+			map[string]any{"network": "tcp"},
+		},
+		{
+			"pin and verify name are not reality settings", stream{Security: "reality", PublicKey: "k", PinnedCertSHA256: "aa", VerifyCertByName: "real.example.com"},
+			map[string]any{
+				"network":         "tcp",
+				"security":        "reality",
+				"realitySettings": map[string]any{"fingerprint": "chrome", "publicKey": "k"},
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -158,6 +206,33 @@ func TestStreamSettingsErrors(t *testing.T) {
 			}
 			if is := errors.Is(err, ErrUnsupported); is != tc.unsupported {
 				t.Errorf("errors.Is(%q, ErrUnsupported) = %v, want %v", err, is, tc.unsupported)
+			}
+		})
+	}
+}
+
+func TestStreamWarnings(t *testing.T) {
+	insecure := []string{warnInsecureRemoved}
+	tests := []struct {
+		name string
+		s    stream
+		want []string
+	}{
+		{"nothing set", stream{}, nil},
+		{"tls", stream{Security: "tls"}, nil},
+		{"tls, insecure", stream{Security: "tls", AllowInsecure: true}, insecure},
+		{"security case and space", stream{Security: " TLS ", AllowInsecure: true}, insecure},
+		{"tls, insecure, pinned", stream{Security: "tls", AllowInsecure: true, PinnedCertSHA256: "aa"}, nil},
+		{"tls, insecure, blank pin", stream{Security: "tls", AllowInsecure: true, PinnedCertSHA256: "  "}, insecure},
+		{"tls, insecure, verify name only", stream{Security: "tls", AllowInsecure: true, VerifyCertByName: "a.example.com"}, insecure},
+		{"no security, insecure", stream{AllowInsecure: true}, nil},
+		{"none, insecure", stream{Security: "none", AllowInsecure: true}, nil},
+		{"reality, insecure", stream{Security: "reality", PublicKey: "k", AllowInsecure: true}, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.s.warnings(); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("warnings() = %q, want %q", got, tc.want)
 			}
 		})
 	}

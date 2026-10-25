@@ -12,7 +12,8 @@ func parseTrojan(link string) (Server, error) {
 	if t.secret == "" {
 		return Server{}, errors.New("sharelink: trojan link has no password")
 	}
-	st, err := streamFromQuery(t.query, "tls").settings()
+	strm := streamFromQuery(t.query, "tls")
+	st, err := strm.settings()
 	if err != nil {
 		return Server{}, err
 	}
@@ -26,5 +27,5 @@ func parseTrojan(link string) (Server, error) {
 	if err != nil {
 		return Server{}, err
 	}
-	return Server{Name: name(t.fragment, t.host, t.port), Outbound: out}, nil
+	return Server{Name: name(t.fragment, t.host, t.port), Outbound: out, Warnings: strm.warnings()}, nil
 }

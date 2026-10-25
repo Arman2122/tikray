@@ -35,8 +35,23 @@ type stream struct {
 	Mode string
 	// HeaderType is the tcp header: none or http.
 	HeaderType string
-	// AllowInsecure turns off verification of the TLS certificate.
+	// AllowInsecure is that the link asked to skip verification of the TLS
+	// certificate. xray-core has removed that option, so settings never writes
+	// it: the certificate is still verified, and warnings says so.
 	AllowInsecure bool
+	// PinnedCertSHA256 lists SHA-256 hashes of the server's certificate, in hex
+	// and separated by commas; a certificate that matches one is trusted even
+	// if it does not chain to a CA. VerifyCertByName is the name the
+	// certificate is verified against instead of the SNI. Both are for tls
+	// only, and settings passes them on as they are, trimmed.
+	PinnedCertSHA256, VerifyCertByName string
+}
+
+// streamKeys are the query parameters that streamFromQuery reads. A malformed
+// one fails the link, as dropping it would change the outbound.
+var streamKeys = []string{
+	"type", "security", "sni", "fp", "alpn", "pbk", "sid", "spx", "host", "path",
+	"serviceName", "authority", "mode", "headerType", "allowInsecure", "insecure", "pcs", "vcn",
 }
 
 // streamFromQuery reads the transport and security from a share link's query.
@@ -59,6 +74,9 @@ func streamFromQuery(q url.Values, defaultSecurity string) stream {
 		Mode:          q.Get("mode"),
 		HeaderType:    q.Get("headerType"),
 		AllowInsecure: isTrue(q.Get("allowInsecure")) || isTrue(q.Get("insecure")),
+
+		PinnedCertSHA256: q.Get("pcs"),
+		VerifyCertByName: q.Get("vcn"),
 	}
 	if strings.TrimSpace(s.Security) == "" {
 		s.Security = defaultSecurity
@@ -66,8 +84,25 @@ func streamFromQuery(q url.Values, defaultSecurity string) stream {
 	return s
 }
 
-// isTrue reports whether a query flag is on: 1 or true.
-func isTrue(v string) bool { return v == "1" || v == "true" }
+// isTrue reports whether a query flag is on: 1 or true, in any case.
+func isTrue(v string) bool {
+	v = strings.TrimSpace(v)
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
+// security is the security with its case and space normalized.
+func (s stream) security() string { return strings.ToLower(strings.TrimSpace(s.Security)) }
+
+// warnings says what settings ignored that the user should know. A link that
+// asks for allowInsecure over tls still parses, with verification on, unless
+// it pins the certificate with pcs, which is what replaces allowInsecure. It
+// returns nil when there is nothing to say.
+func (s stream) warnings() []string {
+	if s.security() == "tls" && s.AllowInsecure && strings.TrimSpace(s.PinnedCertSHA256) == "" {
+		return []string{warnInsecureRemoved}
+	}
+	return nil
+}
 
 // settings builds the xray streamSettings object. Network, Security and
 // HeaderType are matched without regard to case. It returns an error that
@@ -115,15 +150,18 @@ func (s stream) settings() (map[string]any, error) {
 	}
 	out["network"] = network
 
-	switch security := strings.ToLower(strings.TrimSpace(s.Security)); security {
+	switch s.security() {
 	case "", "none":
 	case "tls":
-		t := compact(map[string]string{"serverName": s.SNI, "fingerprint": s.Fingerprint})
+		// AllowInsecure is not written: current xray refuses a config that has it.
+		t := compact(map[string]string{
+			"serverName":           s.SNI,
+			"fingerprint":          s.Fingerprint,
+			"pinnedPeerCertSha256": strings.TrimSpace(s.PinnedCertSHA256),
+			"verifyPeerCertByName": strings.TrimSpace(s.VerifyCertByName),
+		})
 		if alpn := splitList(s.ALPN); len(alpn) > 0 {
 			t["alpn"] = alpn
-		}
-		if s.AllowInsecure {
-			t["allowInsecure"] = true
 		}
 		out["security"] = "tls"
 		out["tlsSettings"] = t

@@ -27,7 +27,11 @@ type parseCase struct {
 	wantName string
 	// wantJSON is the exact outbound, compared after a canonical re-marshal.
 	wantJSON string
-	wantErr  errKind
+	// wantWarnings is the exact Server.Warnings; nil means there must be none.
+	wantWarnings []string
+	wantErr      errKind
+	// errContains, when set, is text the error message must contain.
+	errContains string
 	// secret is a part of the link that no error message may repeat.
 	secret string
 }
@@ -62,6 +66,9 @@ func runParseCases(t *testing.T, cases []parseCase) {
 				if is := errors.Is(err, ErrUnsupported); is != (tc.wantErr == kindUnsupported) {
 					t.Errorf("errors.Is(%q, ErrUnsupported) = %v, want %v", err, is, !is)
 				}
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+					t.Errorf("error %q does not contain %q", err, tc.errContains)
+				}
 				if tc.secret != "" && strings.Contains(err.Error(), tc.secret) {
 					t.Errorf("error %q repeats the link's secret", err)
 				}
@@ -72,6 +79,13 @@ func runParseCases(t *testing.T, cases []parseCase) {
 			}
 			if got.Name != tc.wantName {
 				t.Errorf("Name = %q, want %q", got.Name, tc.wantName)
+			}
+			if !reflect.DeepEqual(got.Warnings, tc.wantWarnings) {
+				t.Errorf("Warnings = %q, want %q", got.Warnings, tc.wantWarnings)
+			}
+			// Current xray refuses a config that has it.
+			if strings.Contains(string(got.Outbound), "allowInsecure") {
+				t.Errorf("Outbound has allowInsecure: %s", got.Outbound)
 			}
 			var gotV, wantV any
 			if err := json.Unmarshal(got.Outbound, &gotV); err != nil {
@@ -150,4 +164,66 @@ func TestParseUserinfoAndHost(t *testing.T) {
 		{name: "encoded colon", link: "trojan://pa%3Ass@example.com:443", wantName: "example.com:443", wantJSON: want},
 		{name: "plain colon", link: "trojan://pa:ss@example.com:443", wantName: "example.com:443", wantJSON: want},
 	})
+}
+
+func TestParseFragment(t *testing.T) {
+	const out = `{"protocol":"trojan","settings":{"servers":[{"address":"example.com","port":443,"password":"pw"}]},"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{}}}`
+	const link = "trojan://pw@example.com:443"
+	tests := []struct {
+		name     string
+		fragment string
+		want     string
+	}{
+		{"encoded", "lab%20%F0%9F%9A%80", "lab 🚀"},
+		{"encoded percent", "20%25%20off", "20% off"},
+		{"plus stays a plus", "a+b%2Bc", "a+b+c"},
+		{"empty", "", "example.com:443"},
+		// A name is only a label: a bad escape must not cost the server.
+		{"bare percent", "50%", "50%"},
+		{"short escape", "a%2", "a%2"},
+		{"not hex", "a%zzb", "a%zzb"},
+		{"literal name with a percent", "🔥 20% off", "🔥 20% off"},
+		{"good escapes beside a bad one stay raw", "a%20b%", "a%20b%"},
+		{"second hash", "a#b", "a#b"},
+		{"only a bad escape", "%", "%"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runParseCases(t, []parseCase{{name: "trojan", link: link + "#" + tc.fragment, wantName: tc.want, wantJSON: out}})
+		})
+	}
+}
+
+// TestParseUnreadQuery checks that a parameter the parser does not read cannot
+// cost a server, and that one it reads cannot be dropped silently.
+func TestParseUnreadQuery(t *testing.T) {
+	const ws = `{"protocol":"trojan","settings":{"servers":[{"address":"example.com","port":443,"password":"pw"}]},"streamSettings":{"network":"ws","security":"tls","tlsSettings":{},"wsSettings":{"path":"/"}}}`
+	const link = "trojan://pw@example.com:443?"
+	runParseCases(t, []parseCase{
+		{name: "unread parameter with a bare percent", link: link + "remark=50%&type=ws", wantName: "example.com:443", wantJSON: ws},
+		{name: "unread parameter with a bad escape last", link: link + "type=ws&remark=%zz", wantName: "example.com:443", wantJSON: ws},
+		{name: "unread parameter with a semicolon", link: link + "remark=a;b&type=ws", wantName: "example.com:443", wantJSON: ws},
+		{name: "unread parameter with a bad escape in its name", link: link + "re%zzmark=1&type=ws", wantName: "example.com:443", wantJSON: ws},
+		{name: "unread parameter without a value", link: link + "remark&type=ws", wantName: "example.com:443", wantJSON: ws},
+		{name: "empty pairs", link: link + "&&type=ws&", wantName: "example.com:443", wantJSON: ws},
+		{name: "vless-only parameters on a trojan link", link: link + "type=ws&encryption=%zz&flow=%zz", wantName: "example.com:443", wantJSON: ws},
+		{name: "escaped parameter name", link: link + "%74ype=ws", wantName: "example.com:443", wantJSON: ws},
+
+		{name: "read parameter with a bad escape", link: link + "type=ws&path=%zz", wantErr: kindInvalid, errContains: `"path"`, secret: "%zz"},
+		{name: "read parameter with a bare percent", link: link + "type=ws&host=50%", wantErr: kindInvalid, errContains: `"host"`},
+		{name: "read parameter with a semicolon", link: link + "alpn=h2;http/1.1", wantErr: kindInvalid, errContains: `"alpn"`},
+		{name: "read parameter that comes first", link: link + "sni=%zz&type=ws", wantErr: kindInvalid, errContains: `"sni"`},
+		{name: "read parameter repeated, second one bad", link: link + "type=ws&type=%zz", wantErr: kindInvalid, errContains: `"type"`},
+		{name: "pinned certificate with a bad escape", link: link + "pcs=%zz", wantErr: kindInvalid, errContains: `"pcs"`},
+		{name: "insecure flag with a bad escape", link: link + "allowInsecure=%zz", wantErr: kindInvalid, errContains: `"allowInsecure"`},
+	})
+}
+
+func TestInsecureWarning(t *testing.T) {
+	// The user is shown this text, so it must say what happened and the way out.
+	for _, want := range []string{"allowInsecure", "xray-core", "pcs"} {
+		if !strings.Contains(warnInsecureRemoved, want) {
+			t.Errorf("warning %q does not mention %q", warnInsecureRemoved, want)
+		}
+	}
 }
