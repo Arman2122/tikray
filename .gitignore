@@ -1,3 +1,4 @@
+/out/
 /spike/m0/out/
 *.part
 # Filtered lab runs (go test -run with a subtest filter)

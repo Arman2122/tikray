@@ -13,3 +13,26 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make test
+
+  # RouterOS cannot import archives that Docker's containerd image store
+  # writes, so the job switches Docker to the classic store first.
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Use Docker's classic image store
+        run: |
+          echo '{"features":{"containerd-snapshotter":false}}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+      - name: Build the images
+        run: |
+          scripts/build-images.sh amd64
+          scripts/build-images.sh arm64
+      - name: Check the archives
+        run: |
+          for arch in amd64 arm64; do
+            tar -xOf "out/tikray-runner-$arch.tar" manifest.json | grep -q '"Layers"'
+          done

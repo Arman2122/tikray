@@ -6,13 +6,15 @@
 // Modes: ok (serves until SIGTERM, then exits 0), badconfig (rejects "run
 // -test"), exit2s and exit15s (exit 1 after 2 s or 15 s), stubborn (ignores
 // SIGTERM, so only SIGKILL stops it), slowtest (takes 1 s to accept "run
-// -test").
+// -test"). In every mode "api <args>" echoes its arguments, and the first
+// argument "fail" or "hang" makes it fail or never return.
 package main
 
 import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -36,9 +38,27 @@ func main() {
 			time.Sleep(time.Second)
 		}
 		fmt.Println("Configuration OK.")
+	case len(args) >= 2 && args[0] == "api":
+		api(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "fakexray: unexpected arguments %q\n", args)
 		os.Exit(2)
+	}
+}
+
+// api is "xray api <args>", the same in every mode. "fail" prints some output,
+// complains and exits 3; "hang" never returns; anything else echoes its
+// arguments, joined by "|".
+func api(args []string) {
+	switch args[0] {
+	case "fail":
+		fmt.Println("partial")
+		fmt.Fprintln(os.Stderr, "fakexray: api failed")
+		os.Exit(3)
+	case "hang":
+		time.Sleep(time.Hour)
+	default:
+		fmt.Printf("api: %s\n", strings.Join(args, "|"))
 	}
 }
 

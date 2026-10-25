@@ -129,7 +129,8 @@ The runner does only what is needed to carry traffic safely:
   6. On boot, the runner always starts from `active.json`, never from a candidate.
 
   This means a crash or reboot at any point during an update cannot leave xray broken.
-- Sets `GOMEMLIMIT` for xray (configurable) to cap memory growth.
+- Sets `GOMEMLIMIT` for xray to cap memory growth. The default is `128MiB`; the
+  runner env `XRAY_GOMEMLIMIT` changes it, and `off` leaves it unset.
 
 ### 3.4 `tikray` (control plane)
 
