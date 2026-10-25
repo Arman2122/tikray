@@ -939,8 +939,15 @@ type config struct {
 // newConfig names data by its SHA-256, so that a file and a render with the
 // same bytes are the same config.
 func newConfig(data []byte) *config {
+	return &config{data: data, rel: ConfigName(data)}
+}
+
+// ConfigName is the name under run/ of the config file with data,
+// config/<sha256>.json, as a runner's Selection.Config names it: a config is
+// named by its content.
+func ConfigName(data []byte) string {
 	sum := sha256.Sum256(data)
-	return &config{data: data, rel: "config/" + hex.EncodeToString(sum[:]) + ".json"}
+	return "config/" + hex.EncodeToString(sum[:]) + ".json"
 }
 
 // readConfig reads the config file at path; an empty path gives nil.

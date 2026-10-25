@@ -80,6 +80,18 @@ func appendHistory(path string, r Result) error {
 	return err
 }
 
+// ReadHistory returns the results that updates, rollbacks and applies have
+// recorded in <data>/state/core-history.jsonl, oldest first. A data root
+// without the file has an empty history, and a line that does not parse,
+// such as one a crash cut short, is skipped.
+func ReadHistory(data string) ([]Result, error) {
+	h, err := readHistory(filepath.Join(data, "state", historyName))
+	if err == nil && h == nil {
+		h = []Result{}
+	}
+	return h, err
+}
+
 // readHistory returns the results in the history file, oldest first. A
 // missing file is an empty history, and a line that does not parse, such as
 // one a crash cut short, is skipped.

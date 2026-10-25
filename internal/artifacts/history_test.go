@@ -35,6 +35,28 @@ func TestHistoryAppendAndRead(t *testing.T) {
 	}
 }
 
+// ReadHistory reads <data>/state/core-history.jsonl; a data root without one
+// has an empty history, not a nil one.
+func TestReadHistory(t *testing.T) {
+	data := t.TempDir()
+	h, err := ReadHistory(data)
+	if err != nil || h == nil || len(h) != 0 {
+		t.Fatalf("ReadHistory of a data root without a history = %#v, %v; want an empty list", h, err)
+	}
+	if err := os.Mkdir(filepath.Join(data, "state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a := Result{To: "26.10.21", Outcome: runnerapi.OutcomeCommitted, At: t0}
+	if err := appendHistory(filepath.Join(data, "state", "core-history.jsonl"), a); err != nil {
+		t.Fatal(err)
+	}
+	h, err = ReadHistory(data)
+	if err != nil || len(h) != 1 {
+		t.Fatalf("ReadHistory = %+v, %v; want one result", h, err)
+	}
+	wantResult(t, h[0], a)
+}
+
 // A crash can cut the last line short; it must not take the next one with it.
 func TestHistoryTornLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "core-history.jsonl")
