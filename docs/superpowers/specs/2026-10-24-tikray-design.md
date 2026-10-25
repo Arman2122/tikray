@@ -111,10 +111,11 @@ The runner does only what is needed to carry traffic safely:
   RouterOS (`/tool fetch`, Winbox uploads) have no execute bit and RouterOS has no
   `chmod`, so the runner copies the active core into its own filesystem with mode
   0755 and runs that copy (M0).
-- **Control API**, listening only on the bridge and protected by a token
-  (`/data/run/runner.token`): `status`, `reload`, `restart`, `trial`, `commit`,
-  and `xray-api` (runs `xray api <cmd>` with the active core binary, so JSON →
-  protobuf conversion always matches the running version).
+- **Control API**, listening only on the runner's bridge address, port 8080, and
+  protected by a bearer token (`/data/run/runner.token`): `status`, `reload`,
+  `restart`, `trial`, `commit`, `abort`, and `xray-api` (runs `xray api <cmd>`
+  with the active core binary, so JSON → protobuf conversion always matches the
+  running version).
 - **Trial protocol (A/B slots):**
   1. tikray writes `/data/run/candidate.json` (core version, geo version, config
      file, deadline) and calls `trial`.

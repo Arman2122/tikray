@@ -65,7 +65,7 @@ func (c *Client) Restart(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/v1/restart", nil, nil)
 }
 
-// Reload asks the runner to reload the xray it is running.
+// Reload asks the runner to re-read active.json and start it.
 func (c *Client) Reload(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/v1/reload", nil, nil)
 }
