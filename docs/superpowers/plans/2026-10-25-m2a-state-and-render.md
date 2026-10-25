@@ -197,10 +197,10 @@
 
 **Interfaces:**
 - Produces:
-  - `type Server struct{ Name string; Outbound json.RawMessage }`. `Outbound` is an xray outbound object without `tag`, marshalled from maps so its keys are sorted.
+  - `type Server struct{ Name string; Outbound json.RawMessage }`. `Outbound` is an xray outbound object without `tag`, marshalled from maps so its keys are sorted. (changed: it also has `Warnings []string`, notes for the user, nil when there are none; R3.)
   - `var ErrUnsupported = errors.New("sharelink: unsupported")`, wrapped by every refusal of a valid but unsupported link.
   - `func Parse(link string) (Server, error)` dispatches on the scheme, case-insensitively. This task wires up `vless` and `trojan`; Task 4 adds `vmess` and `ss`. Any other scheme gives `ErrUnsupported`.
-  - Unexported, also used by Task 4: `type stream struct{ Network, Security, SNI, Fingerprint, ALPN, PublicKey, ShortID, SpiderX, Host, Path, ServiceName, Authority, Mode, HeaderType string; AllowInsecure bool }`, `func streamFromQuery(q url.Values, defaultSecurity string) stream`, `func (s stream) settings() (map[string]any, error)` and `func name(fragment, host string, port int) string`.
+  - Unexported, also used by Task 4: `type stream struct{ Network, Security, SNI, Fingerprint, ALPN, PublicKey, ShortID, SpiderX, Host, Path, ServiceName, Authority, Mode, HeaderType string; AllowInsecure bool }`, `func streamFromQuery(q url.Values, defaultSecurity string) stream`, `func (s stream) settings() (map[string]any, error)` and `func name(fragment, host string, port int) string`. (changed: the stream also has `PinnedCertSHA256` and `VerifyCertByName`, from `pcs` and `vcn`, and `warnings()` gives the insecure-link warning; R3.)
 - Rules (xray 26 field names):
   - **Name:** the fragment, URL-decoded and trimmed, cut to 128 runes. Empty means `host:port`.
   - **Host and port:** the host may be an IPv6 literal in brackets; the address is written without them. The port must be 1–65535.
@@ -215,6 +215,8 @@
   - **`security`:**
     - `none` (or empty, unless the scheme's default applies): no TLS settings at all.
     - `tls` → `tlsSettings {serverName: sni, fingerprint: fp, alpn: split(alpn, ","), allowInsecure: true}`. `allowInsecure` appears only when `allowInsecure` or `insecure` is `1` or `true`.
+      (changed: `allowInsecure` is never emitted, since xray ≥26.3.27 refuses the whole config with it once past 2026-06-01. `pcs` maps to `pinnedPeerCertSha256` and `vcn` to `verifyPeerCertByName`. A link asking for `allowInsecure`/`insecure` parses with verification on and a warning in `Server.Warnings`, with no warning when `pcs` is present; R3.)
+      (changed: with no `sni`, `serverName` is the first comma-separated `host` value, as in v2rayN; Reality keeps `sni` only; R7.)
     - `reality` → `realitySettings {serverName: sni, fingerprint: fp or "chrome", publicKey: pbk, shortId: sid, spiderX: spx}`. pbk is required. The network must be tcp, grpc or xhttp.
     - Anything else gives an error.
   - **VLESS:** `vless://<id>@<host>:<port>?<query>#<name>` → `{"protocol":"vless","settings":{"vnext":[{"address":H,"port":P,"users":[{"id":ID,"encryption":E,"flow":F}]}]},"streamSettings":S}`.
@@ -271,8 +273,9 @@
   - `aid` other than 0 or absent gives `ErrUnsupported`: xray dropped legacy alterId.
   - `scy` defaults to `auto`. It must be one of `auto`, `aes-128-gcm`, `chacha20-poly1305`, `none` or `zero`.
   - `tls` is `tls` or empty/`none`.
-  - The output is `{"protocol":"vmess","settings":{"vnext":[{"address":A,"port":P,"users":[{"id":ID,"security":SCY}]}]},"streamSettings":S}`, where S comes from the same `stream`.
+  - The output is `{"protocol":"vmess","settings":{"vnext":[{"address":A,"port":P,"users":[{"id":ID,"security":SCY}]}]},"streamSettings":S}`, where S comes from the same `stream`. (changed: the JSON's `allowInsecure` gives the same warning as in Task 3 and is never emitted; R3.)
   - The URL form `vmess://uuid@host:port?...` gives `ErrUnsupported`.
+  - (changed: a `#name` after the base64 body parses, and names the server when `ps` is empty; a `?…` after the body is still refused; R6.)
 - **Shadowsocks:**
   - SIP002, `ss://<userinfo>@<host>:<port>[/][?plugin=...]#name`. The userinfo is base64url (padding optional) of `method:password`, or the percent-encoded `method:password` that 2022 ciphers use.
   - Legacy: `ss://<base64 of method:password@host:port>#name`.
@@ -283,8 +286,8 @@
     - `xchacha20-poly1305`, also accepted as `xchacha20-ietf-poly1305`;
     - `2022-blake3-aes-128-gcm`, `2022-blake3-aes-256-gcm`, `2022-blake3-chacha20-poly1305`;
     - `none`.
-    Any other method gives `ErrUnsupported`.
-  - The output is `{"protocol":"shadowsocks","settings":{"servers":[{"address":A,"port":P,"method":M,"password":PW}]}}`.
+    Any other method gives `ErrUnsupported`. (changed: since Task 8b, `none` and 2022 keys that xray refuses give `ErrUnsupported` too.)
+  - The output is `{"protocol":"shadowsocks","settings":{"servers":[{"address":A,"port":P,"method":M,"password":PW}]}}`. (changed: SS links honour the shared stream parameters, `type`, `security` and the rest, by Task 3's rules with security `none` by default; `streamSettings` is added only when the stream asks for more than plain TCP without TLS, so plain links keep this exact output; R5.)
 
 - [ ] **Step 1: Write the failing tests.**
   - VMess:
@@ -423,7 +426,7 @@
     - then each enabled server's outbound with `"tag": "srv-<id>"` added, in state order.
   - **Top level:**
     - `log {"loglevel":"warning"}`;
-    - `api {"tag":"api","services":["HandlerService","RoutingService","StatsService","ObservatoryService"]}`;
+    - `api {"tag":"api","services":["HandlerService","RoutingService","StatsService","ObservatoryService"]}`; (changed: `ObservatoryService` is listed only with the observatory, since xray refuses to start the service without one, "not all dependencies are resolved"; R9.)
     - `stats {}`;
     - `policy {"system":{"statsOutboundUplink":true,"statsOutboundDownlink":true}}`.
   - **When `ProxyAvailable`:**
@@ -528,8 +531,9 @@
   - When `DD` isn't empty, the first server is `{"address":R,"domains":DD,"skipFallback":true}`.
   - The last server is `DNS.Remote` as a string: a DoH URL, or an IPv4 address for plain DNS.
   - Two rules go right after the service rules, before the traffic rules:
-    - `{"inboundTag":["dns-internal"],"ip":["R/32"],"outboundTag":"direct"}`, only when `DD` isn't empty;
+    - `{"inboundTag":["dns-internal"],"ip":["R/32"],"outboundTag":"direct"}`, only when `DD` isn't empty; (changed: it also matches `"port":"53"`, so DoH to the same host still goes through `proxy-open`, and `store.Validate` refuses a plain-IPv4 `DNS.Remote` equal to R; R10.)
     - `{"inboundTag":["dns-internal"]} → via(proxy-open)`.
+  - (changed: Render also refuses a `Geo` whose `Site` entry isn't `geosite:<code>` or whose `IP` entry isn't `geoip:<code>`: an empty or plain entry would match every domain or address; R11.)
 
 - [ ] **Step 1: Write the failing tests.** The cases are table-driven, with assertions on the unmarshalled `routing.rules` and `dns`:
   - `TestRulesDefaultSmart`: default smart; no devices; one server; domestic extras `domain:domestic.test` and `203.0.113.20/32`; one block-list entry. The traffic rules are exactly:
@@ -639,6 +643,15 @@
 
   `git add internal/render test/compat test/lab/xray.go .github/workflows/ci.yml && git commit -m "Pin render with golden scenarios and test them against xray releases"`
 
+### Task 8b: Refuse outbounds the newest xray refuses
+
+(changed: inserted during execution, by ruling R12, after Task 8's compat run found that xray-core 26.7.11 and newer refuse a whole config that holds one of these outbounds. Its brief is `.superpowers/sdd/2026-10-25-m2a-state-and-render/task-8b-brief.md`.)
+
+- Create: `internal/xraypolicy` with `Check(outbound json.RawMessage) error`, `ErrRefused` and `PrivateAddress(host string) bool`. The private address and domain lists are copied from xray-core v26.10.21 (`common/geodata/consts.go`).
+- Refused, as xray ≥26.7.11 refuses them: VLESS with encryption `none` and no stream security, or Trojan without TLS, to an address that isn't private; Shadowsocks `none` and `plain`. Also refused: 2022-blake3 passwords that aren't padded standard base64 keys of the cipher's length, and more than one key for chacha20-poly1305 (R13, R14). A shape the rules can't read is left to store validation and `xray run -test`.
+- Wiring: `sharelink.Parse` returns a refusal wrapping both `ErrUnsupported` and `ErrRefused`, so a subscription skips the line with the reason; `store.Validate` reports it at `servers[<i>].outbound`. No refusal repeats an id, a password or a key.
+- Commit: "Refuse outbounds the newest xray-core refuses".
+
 ### Task 9: Apply a rendered config through the trial
 
 **Files:**
@@ -708,12 +721,13 @@
   - `tikray config render [--core VER]`: the rendered config on stdout. The core defaults to the runner's active core; with no runner or no active core, `--core` is required.
   - `tikray apply`: `CoreUpdater.Apply`, reported and given exit codes like `core update`.
   - `tikray core update` and `tikray core rollback` render from the state unless `--config` is given (M1's behaviour then).
-  - The state is `<data>/state`, opened read-only in practice: these commands never call `Update`.
+  - The state is `<data>/state`, opened read-only in practice: these commands never call `Update`. (changed: with `--config`, a state that can't be read no longer blocks the update: it warns and takes the runner's addresses from `store.Default()`; R16.)
   - The renderer passes a nil `Geo` when the geo name is empty. Any other name is refused with "geo bundles are not supported yet": nothing installs them before M3.
   - **Defaults:** `TIKRAY_RUNNER_URL`, `TIKRAY_SOCKS` and the new `TIKRAY_XRAY_API` default to `http://<runner>:8080`, `<runner>:1080` and `<runner>:10085`, where `<runner>` is the state's `Network.Runner()`. Set variables still win.
   - `XrayAPIProbe.Server` is the xray API address.
   - **Health:** for a rendered config, the SOCKS probe runs only when `render.ProxyAvailable(state)`. Without a server, `socks-in` goes to `block`, so the probe can only fail. The data path and xray API probes always run. With `--config`, all probes run, as in M1.
   - In `test/e2e/config/xray-client.json`, the `api` block's `listen` becomes `172.31.255.3:10085`, since the probe now asks the runner's address.
+  - (changed: Task 10 also added `Lab.pushState`, moved forward from Task 12, and `TestCoreLifecycle` pushes a state that reproduces the fixture right after its `--config` bootstrap, since its later updates render from the state; R15.)
 
 - [ ] **Step 1: Write the failing tests** in `cmd/tikray`, against M1's test helpers (fake runner, temp data dir):
   - `TestConfigRender`: a state file with one server and `--core 26.10.21` prints exactly `render.Render`'s bytes. With no `--core` and a fake runner whose active core is 26.3.27, it renders for 26.3.27.
@@ -778,7 +792,7 @@
   - `test/e2e/state/` fixtures, or states built in Go with `store` types;
   - `test/e2e/results/<ros>-<arch>-m2a.json`.
 - Modify:
-  - `test/e2e/lab.go`: use `StartInetLab`, and add a helper that pushes a state file to `/data/state/state.v1.json`;
+  - `test/e2e/lab.go`: use `StartInetLab`, and add a helper that pushes a state file to `/data/state/state.v1.json`; (changed: the helper, `pushState`, came with Task 10; `waitProxied` takes either server's egress and `proxiedVia` names the server, R17. Every lab state sets `health.probe_url` to the lab's target, `http://203.0.113.30/whoami`: the lab has no internet, so with the default probe URL the observatory finds every server down and the balancers fall back.)
   - the spec, §3.4, §5.3, §5.4 and §10.
 
 **Interfaces:**
@@ -811,7 +825,7 @@
 
 - [ ] **Step 2: Run it on x86_64 stable**
 
-  Run: `TIKRAY_LAB_ROS=stable go test -tags lab -p 1 -count=1 -timeout 240m -run TestConfigApply ./test/e2e/`. Expected: 8/8 pass.
+  Run: `TIKRAY_LAB_ROS=stable go test -tags lab -p 1 -count=1 -timeout 240m -run TestConfigApply ./test/e2e/`. Expected: 8/8 pass. (changed: the variable `Deploy` reads is `TIKRAY_LAB_CHANNEL`, as in M0 and M1; `TIKRAY_LAB_ROS` is not read.)
 
   A check that fails is a finding: debug it with superpowers:systematic-debugging. Fix the code, not the check, unless the check contradicts the spec.
 
