@@ -560,3 +560,81 @@ func TestFetchWithoutClients(t *testing.T) {
 		t.Errorf("%d requests, want 1", n)
 	}
 }
+
+// blockPage is what an ISP answers, with a 200, for a subscription it blocks.
+const blockPage = "<html><body><h1>Access to this site is restricted</h1></body></html>\n"
+
+// hasServers is the Accept a refresh passes: a body that Parse finds no server
+// in is refused. Its reason does not repeat the body.
+func hasServers(body []byte) error {
+	if len(Parse(body).Entries) == 0 {
+		return errors.New("no servers in it")
+	}
+	return nil
+}
+
+func TestFetchAccept(t *testing.T) {
+	links := linkVLESS + "\n" + linkTrojan + "\n"
+
+	t.Run("a refused direct body leaves it to the proxy", func(t *testing.T) {
+		dp := newPeer(t, answer(200, blockPage))
+		pp := newPeer(t, answer(200, links))
+		f := Fetcher{Direct: clientTo(dp), Proxy: clientTo(pp), ProxyHealthy: healthy(true), Accept: hasServers}
+		body, via, err := f.Fetch(context.Background(), subURL)
+		if err != nil || via != "proxy" || string(body) != links {
+			t.Errorf("Fetch = %q via %q, %v; want the proxy's links", body, via, err)
+		}
+		if dp.hits.Load() != 1 || pp.hits.Load() != 1 {
+			t.Errorf("direct got %d requests and the proxy %d, want 1 each", dp.hits.Load(), pp.hits.Load())
+		}
+	})
+
+	t.Run("an accepted direct body is the answer", func(t *testing.T) {
+		dp := newPeer(t, answer(200, links))
+		pp := newPeer(t, answer(200, links))
+		f := Fetcher{Direct: clientTo(dp), Proxy: clientTo(pp), ProxyHealthy: healthy(true), Accept: hasServers}
+		if body, via, err := f.Fetch(context.Background(), subURL); err != nil || via != "direct" || string(body) != links {
+			t.Errorf("Fetch = %q via %q, %v; want the direct links", body, via, err)
+		}
+		if pp.hits.Load() != 0 {
+			t.Errorf("the proxy got %d requests", pp.hits.Load())
+		}
+	})
+
+	t.Run("both refused: the error names both attempts", func(t *testing.T) {
+		dp := newPeer(t, answer(200, blockPage))
+		pp := newPeer(t, answer(200, "Your account has expired.\n"))
+		f := Fetcher{Direct: clientTo(dp), Proxy: clientTo(pp), ProxyHealthy: healthy(true), Accept: hasServers}
+		body, via, err := f.Fetch(context.Background(), subURL)
+		if err == nil || body != nil || via != "" {
+			t.Fatalf("Fetch = %q via %q, %v; want an error", body, via, err)
+		}
+		want := "subscription: direct: body refused: no servers in it; proxy: body refused: no servers in it"
+		if err.Error() != want {
+			t.Errorf("error %q, want %q", err, want)
+		}
+		checkNoURL(t, err, subToken, "sub.example", dp.URL, pp.URL)
+	})
+
+	t.Run("a refused body, then an error status", func(t *testing.T) {
+		dp := newPeer(t, answer(200, blockPage))
+		pp := newPeer(t, answer(503, links))
+		f := Fetcher{Direct: clientTo(dp), Proxy: clientTo(pp), ProxyHealthy: healthy(true), Accept: hasServers}
+		_, _, err := f.Fetch(context.Background(), subURL)
+		if err == nil || !strings.Contains(err.Error(), "direct: body refused: no servers in it; proxy: HTTP 503") {
+			t.Errorf("error %v, want both attempts named", err)
+		}
+	})
+
+	t.Run("a nil Accept takes any body", func(t *testing.T) {
+		dp := newPeer(t, answer(200, blockPage))
+		pp := newPeer(t, answer(200, links))
+		f := Fetcher{Direct: clientTo(dp), Proxy: clientTo(pp), ProxyHealthy: healthy(true)}
+		if body, via, err := f.Fetch(context.Background(), subURL); err != nil || via != "direct" || string(body) != blockPage {
+			t.Errorf("Fetch = %q via %q, %v; want the block page, direct", body, via, err)
+		}
+		if pp.hits.Load() != 0 {
+			t.Errorf("the proxy got %d requests", pp.hits.Load())
+		}
+	})
+}

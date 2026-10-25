@@ -35,11 +35,23 @@ type Fetcher struct {
 	MaxBytes int64
 	// UserAgent is sent with every request; empty means "tikray".
 	UserAgent string
+	// Accept, if set, checks the body of a 2xx answer. A body it refuses fails
+	// that attempt, as an error status would: the proxy still gets its turn,
+	// and Fetch's error names the attempt with Accept's reason, which must not
+	// repeat the body, since a body holds the servers' credentials. A nil
+	// Accept takes every body.
+	//
+	// A refresh should pass an Accept that refuses a body Parse finds no
+	// entries in. An ISP's block page or a provider's notice that the account
+	// has expired comes with a 200 too, and merging it would remove every
+	// server of the subscription.
+	Accept func(body []byte) error
 }
 
 // Fetch downloads the body of the subscription at rawURL, which must be an
 // absolute http or https URL. The answer must be 2xx, and its body no longer
-// than MaxBytes. via says which route supplied it: "direct" or "proxy".
+// than MaxBytes and taken by Accept. via says which route supplied it:
+// "direct" or "proxy".
 //
 // Fetch tries Direct first. When that fails it tries Proxy, if there is one and
 // ProxyHealthy says it works. A fetch that ctx cancelled, or whose deadline
@@ -65,9 +77,20 @@ func (f Fetcher) Fetch(ctx context.Context, rawURL string) (body []byte, via str
 	ended := func(attempt string) error {
 		return fmt.Errorf("subscription: %s: %w", strings.Join(append(failed, attempt), "; "), ctx.Err())
 	}
+	// try is one attempt with hc: the download, then Accept.
+	try := func(hc *http.Client) ([]byte, error) {
+		body, err := get(ctx, hc, rawURL, agent, maxBytes)
+		if err != nil || f.Accept == nil {
+			return body, err
+		}
+		if err := f.Accept(body); err != nil {
+			return nil, errors.New("body refused: " + err.Error())
+		}
+		return body, nil
+	}
 
 	if f.Direct != nil {
-		body, err := get(ctx, f.Direct, rawURL, agent, maxBytes)
+		body, err := try(f.Direct)
 		if err == nil {
 			return body, "direct", nil
 		}
@@ -78,7 +101,7 @@ func (f Fetcher) Fetch(ctx context.Context, rawURL string) (body []byte, via str
 	}
 
 	if f.Proxy != nil && f.ProxyHealthy != nil && f.ProxyHealthy(ctx) {
-		body, err := get(ctx, f.Proxy, rawURL, agent, maxBytes)
+		body, err := try(f.Proxy)
 		if err == nil {
 			return body, "proxy", nil
 		}
