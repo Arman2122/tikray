@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,8 +24,17 @@ const (
 	defaultRepo     = "https://github.com/XTLS/Xray-core"
 	defaultMaxBytes = 200 << 20
 	defaultTimeout  = 10 * time.Minute
+	defaultStall    = time.Minute
 	// latestTimeout bounds one source's release lookup.
 	latestTimeout = 30 * time.Second
+)
+
+// The bounds of every network source's transport (see newTransport). They are
+// variables so that tests can shorten them.
+var (
+	dialTimeout           = 30 * time.Second
+	tlsHandshakeTimeout   = 20 * time.Second
+	responseHeaderTimeout = 30 * time.Second
 )
 
 // errProxyUnavailable is the proxy source's refusal while xray is not healthy.
@@ -60,12 +70,41 @@ type upstream struct {
 }
 
 // Direct fetches from the upstream release server at repo, which defaults to
-// https://github.com/XTLS/Xray-core. A nil hc means a default client.
+// https://github.com/XTLS/Xray-core. A nil hc means a client with the
+// bounds of newTransport, which honours the environment's proxy settings.
 func Direct(repo string, hc *http.Client) Source {
 	if hc == nil {
-		hc = &http.Client{}
+		hc = &http.Client{Transport: newTransport(nil, http.ProxyFromEnvironment)}
 	}
 	return &upstream{name: "direct", repo: repoOrDefault(repo), hc: hc}
+}
+
+// newTransport is the HTTP transport of every network source. dial makes the
+// connections, nil meaning a plain TCP dial, and proxyFn chooses an HTTP
+// proxy, nil meaning none. The dial (dialTimeout), the TLS handshake
+// (tlsHandshakeTimeout) and the wait for the response headers
+// (responseHeaderTimeout) each have a bound, so a peer that accepts the
+// connection and then holds it, as xray's SOCKS inbound does in front of a
+// dead or throttled outbound, fails the attempt in seconds rather than at the
+// chain's Timeout. A body that stops is the chain's watchdog's (Chain.Stall).
+func newTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error), proxyFn func(*http.Request) (*url.URL, error)) *http.Transport {
+	if dial == nil {
+		dial = (&net.Dialer{KeepAlive: 30 * time.Second}).DialContext
+	}
+	return &http.Transport{
+		Proxy: proxyFn,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+			defer cancel()
+			return dial(ctx, network, addr)
+		},
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		ResponseHeaderTimeout: responseHeaderTimeout,
+		ExpectContinueTimeout: time.Second,
+	}
 }
 
 // Proxy fetches from the same server through the SOCKS5 proxy at socksAddr.
@@ -87,7 +126,9 @@ func Proxy(socksAddr, repo string, healthy func(context.Context) bool) Source {
 		return u
 	}
 	// No Proxy func: the environment's proxy settings never apply here.
-	u.hc = &http.Client{Transport: &http.Transport{DialContext: cd.DialContext, DisableKeepAlives: true}}
+	tr := newTransport(cd.DialContext, nil)
+	tr.DisableKeepAlives = true
+	u.hc = &http.Client{Transport: tr}
 	return u
 }
 
@@ -181,10 +222,10 @@ type mirror struct {
 // Mirror fetches from a URL template in which {version} (26.10.21), {arch}
 // (GOARCH) and {file} are replaced. The template must be an http(s) URL with a
 // host and must contain {file}; a bad template gives a source that always
-// fails. A nil hc means a default client.
+// fails. A nil hc means a client like Direct's.
 func Mirror(template string, hc *http.Client) Source {
 	if hc == nil {
-		hc = &http.Client{}
+		hc = &http.Client{Transport: newTransport(nil, http.ProxyFromEnvironment)}
 	}
 	m := &mirror{name: "mirror", template: template, hc: hc}
 	u, err := url.Parse(template)
@@ -241,25 +282,29 @@ type Chain struct {
 	Sources  []Source
 	MaxBytes int64         // most bytes one attempt may write; 0 means 200 MiB
 	Timeout  time.Duration // longest one attempt may take; 0 means 10 minutes
+	Stall    time.Duration // longest one attempt may go without receiving a byte; 0 means 1 minute
 }
 
 // Fetch writes the first acceptable file to dst and returns the name of the
 // source that supplied it. Each attempt goes to dst+".part", where check, which
-// must not be nil, inspects it; an attempt that fails, exceeds MaxBytes or
-// outlasts Timeout is discarded and the next source is tried. On total failure
-// the error lists every "source: reason", and dst and the part file are not
-// left behind (a dst that already existed is untouched). A canceled ctx stops
-// the chain.
+// must not be nil, inspects it; an attempt that fails, exceeds MaxBytes,
+// outlasts Timeout or receives nothing for Stall is discarded and the next
+// source is tried. On total failure the error lists every "source: reason",
+// and dst and the part file are not left behind (a dst that already existed is
+// untouched). A canceled ctx stops the chain.
 func (c Chain) Fetch(ctx context.Context, r Request, dst string, check func(path string) error) (string, error) {
 	if len(c.Sources) == 0 {
 		return "", errors.New("no fetch sources configured")
 	}
-	limit, timeout := c.MaxBytes, c.Timeout
-	if limit <= 0 {
-		limit = defaultMaxBytes
+	b := bounds{limit: c.MaxBytes, timeout: c.Timeout, stall: c.Stall}
+	if b.limit <= 0 {
+		b.limit = defaultMaxBytes
 	}
-	if timeout <= 0 {
-		timeout = defaultTimeout
+	if b.timeout <= 0 {
+		b.timeout = defaultTimeout
+	}
+	if b.stall <= 0 {
+		b.stall = defaultStall
 	}
 	part := dst + ".part"
 	var failed []string
@@ -277,7 +322,7 @@ func (c Chain) Fetch(ctx context.Context, r Request, dst string, check func(path
 		if err != nil {
 			return "", fmt.Errorf("fetch %s: %w", r.File, err)
 		}
-		if err := attempt(ctx, s, r, f, limit, timeout, check); err != nil {
+		if err := attempt(ctx, s, r, f, b, check); err != nil {
 			os.Remove(part)
 			failed = append(failed, s.Name()+": "+err.Error())
 			if cerr := ctx.Err(); cerr != nil {
@@ -294,14 +339,32 @@ func (c Chain) Fetch(ctx context.Context, r Request, dst string, check func(path
 	return "", fmt.Errorf("fetch %s: no source worked: %s", r.File, strings.Join(failed, "; "))
 }
 
-// attempt has s write f, closes f, and runs check on it.
-func attempt(ctx context.Context, s Source, r Request, f *os.File, limit int64, timeout time.Duration, check func(string) error) error {
-	actx, cancel := context.WithTimeout(ctx, timeout)
+// bounds are the limits of one attempt (see Chain).
+type bounds struct {
+	limit          int64
+	timeout, stall time.Duration
+}
+
+// errStalled is why the watchdog cancels an attempt.
+var errStalled = errors.New("stalled")
+
+// attempt has s write f, closes f, and runs check on it. A watchdog cancels
+// the attempt once it has received nothing for b.stall, from its start or
+// from the last byte written.
+func attempt(ctx context.Context, s Source, r Request, f *os.File, b bounds, check func(string) error) error {
+	actx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
-	cw := &capWriter{w: f, left: limit}
+	actx, stop := context.WithCancelCause(actx)
+	defer stop(nil)
+	watchdog := time.AfterFunc(b.stall, func() { stop(errStalled) })
+	defer watchdog.Stop()
+	cw := &capWriter{w: f, left: b.limit, wrote: func() { watchdog.Reset(b.stall) }}
 	err := s.Fetch(actx, r, cw)
-	if cw.over {
-		err = fmt.Errorf("file is larger than %d bytes", limit)
+	switch {
+	case cw.over:
+		err = fmt.Errorf("file is larger than %d bytes", b.limit)
+	case err != nil && errors.Is(context.Cause(actx), errStalled):
+		err = fmt.Errorf("no data for %s: %w", b.stall, err)
 	}
 	if err == nil {
 		err = f.Sync()
@@ -315,11 +378,13 @@ func attempt(ctx context.Context, s Source, r Request, f *os.File, limit int64, 
 	return check(f.Name())
 }
 
-// capWriter fails the write that would take the total past the cap.
+// capWriter fails the write that would take the total past the cap. wrote,
+// if set, is called after each write of at least one byte.
 type capWriter struct {
-	w    io.Writer
-	left int64
-	over bool
+	w     io.Writer
+	left  int64
+	over  bool
+	wrote func()
 }
 
 func (c *capWriter) Write(p []byte) (int, error) {
@@ -329,6 +394,9 @@ func (c *capWriter) Write(p []byte) (int, error) {
 	}
 	n, err := c.w.Write(p)
 	c.left -= int64(n)
+	if n > 0 && c.wrote != nil {
+		c.wrote()
+	}
 	return n, err
 }
 

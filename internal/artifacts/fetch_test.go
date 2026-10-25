@@ -314,6 +314,168 @@ func TestChainTimeout(t *testing.T) {
 	wantOnly(t, dir, "xray.zip")
 }
 
+// shorten sets *v to d for the rest of the test.
+func shorten(t *testing.T, v *time.Duration, d time.Duration) {
+	t.Helper()
+	old := *v
+	*v = d
+	t.Cleanup(func() { *v = old })
+}
+
+// holdingServer accepts connections and then holds them: with hold "tls" it
+// sends nothing, so a TLS handshake never completes; with "headers" it reads
+// the request and never answers. It returns the server's base URL and address.
+func holdingServer(t *testing.T, hold string) (baseURL, addr string) {
+	t.Helper()
+	if hold == "headers" {
+		release := make(chan struct{})
+		srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		})
+		t.Cleanup(func() { close(release) }) // runs before srv.Close
+		return srv.URL, srv.Listener.Addr().String()
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		mu    sync.Mutex
+		conns []net.Conn
+		done  = make(chan struct{})
+	)
+	go func() {
+		defer close(done)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		<-done
+		mu.Lock()
+		for _, c := range conns {
+			c.Close()
+		}
+		mu.Unlock()
+	})
+	return "https://" + ln.Addr().String(), ln.Addr().String()
+}
+
+// A source whose peer accepts the connection and then holds it, as xray's
+// SOCKS inbound does in front of a dead outbound, fails its attempt within
+// the transport's bounds, long before the chain's Timeout, and the next
+// source is used.
+func TestNetworkSourcesDoNotHang(t *testing.T) {
+	shorten(t, &tlsHandshakeTimeout, 100*time.Millisecond)
+	shorten(t, &responseHeaderTimeout, 100*time.Millisecond)
+	for _, hold := range []string{"tls", "headers"} {
+		for _, kind := range []string{"direct", "mirror", "proxy"} {
+			t.Run(kind+" "+hold, func(t *testing.T) {
+				base, addr := holdingServer(t, hold)
+				var s Source
+				switch kind {
+				case "direct":
+					s = Direct(base, nil)
+				case "mirror":
+					s = Mirror(base+"/{file}", nil)
+				case "proxy":
+					_, port, _ := net.SplitHostPort(addr)
+					host := "github.invalid:" + port
+					socks, _ := startSOCKS5(t, map[string]string{host: addr})
+					s = Proxy(socks, strings.Replace(base, addr, host, 1), func(context.Context) bool { return true })
+				}
+				good := &funcSource{name: "good", fn: writes(payload)}
+				dst := filepath.Join(t.TempDir(), "xray.zip")
+				chain := Chain{Sources: []Source{s, good}, Timeout: 3 * time.Second}
+				start := time.Now()
+				src, err := chain.Fetch(context.Background(), testReq, dst, payloadCheck(t, dst))
+				if err != nil || src != "good" {
+					t.Fatalf("Fetch = %q, %v; want the next source", src, err)
+				}
+				if d := time.Since(start); d > 1500*time.Millisecond {
+					t.Errorf("took %v to give up on %s", d, s.Name())
+				}
+
+				chain.Sources = chain.Sources[:1]
+				_, err = chain.Fetch(context.Background(), testReq, dst+"2", payloadCheck(t, dst+"2"))
+				want := map[string]string{"tls": "TLS handshake timeout", "headers": "timeout awaiting response headers"}[hold]
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("error %v, want %q", err, want)
+				}
+			})
+		}
+	}
+}
+
+// An attempt that stops receiving data is cancelled after Stall, however long
+// its Timeout, and the next source is used.
+func TestChainStallWatchdog(t *testing.T) {
+	release := make(chan struct{})
+	stall := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, payload[:3])
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	})
+	t.Cleanup(func() { close(release) }) // runs before stall.Close
+	good := &funcSource{name: "good", fn: writes(payload)}
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "xray.zip")
+	// The test server's own client has no header timeout of its own.
+	chain := Chain{Sources: []Source{Direct(stall.URL, stall.Client()), good}, Timeout: 3 * time.Second, Stall: 200 * time.Millisecond}
+	start := time.Now()
+	src, err := chain.Fetch(context.Background(), testReq, dst, payloadCheck(t, dst))
+	if err != nil || src != "good" {
+		t.Fatalf("Fetch = %q, %v; want the next source", src, err)
+	}
+	if d := time.Since(start); d > 1500*time.Millisecond {
+		t.Errorf("took %v with a 200ms stall bound", d)
+	}
+	wantOnly(t, dir, "xray.zip")
+
+	chain.Sources = chain.Sources[:1]
+	_, err = chain.Fetch(context.Background(), testReq, dst+"2", payloadCheck(t, dst+"2"))
+	if err == nil || !strings.Contains(err.Error(), "direct: no data for 200ms") {
+		t.Errorf("error %v, want the direct attempt cancelled for a stall", err)
+	}
+	wantOnly(t, dir, "xray.zip")
+}
+
+// A slow body that keeps arriving is not a stall, even when the whole of it
+// takes longer than Stall.
+func TestChainSlowButSteady(t *testing.T) {
+	slow := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		for i := range len(payload) {
+			io.WriteString(w, payload[i:i+1])
+			w.(http.Flusher).Flush()
+			time.Sleep(40 * time.Millisecond)
+		}
+	})
+	dst := filepath.Join(t.TempDir(), "xray.zip")
+	chain := Chain{Sources: []Source{Direct(slow.URL, slow.Client())}, Stall: 200 * time.Millisecond}
+	start := time.Now()
+	src, err := chain.Fetch(context.Background(), testReq, dst, payloadCheck(t, dst))
+	if err != nil || src != "direct" {
+		t.Fatalf("Fetch = %q, %v; want the slow body", src, err)
+	}
+	if d := time.Since(start); d < 400*time.Millisecond {
+		t.Errorf("took only %v: the body was not slower than Stall", d)
+	}
+}
+
 func TestChainContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
