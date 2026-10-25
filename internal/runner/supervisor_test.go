@@ -209,6 +209,40 @@ func TestTestAcceptsGoodConfig(t *testing.T) {
 	}
 }
 
+func TestTestRenamesTunDevice(t *testing.T) {
+	// xray before 26.10 opens the TUN device while it tests a config, and
+	// the running xray holds xray0 (M1 lab): -test must use another name.
+	f := newFixture(t, "ok", nil)
+	orig := f.d.ConfigPath(f.sel.Config)
+	writeFile(t, orig, `{"inbounds": [{"tag": "tun-in", "protocol": "tun", "settings": {"name": "xray0", "MTU": 1500}}]}`)
+	out, err := f.sup.Test(t.Context(), f.sel)
+	if err != nil {
+		t.Fatalf("Test: %v\n%s", err, out)
+	}
+	// The fake prints the path it tested and the config it read there.
+	path, _, _ := strings.Cut(strings.TrimPrefix(out, "config "), "\n")
+	if path == orig || !strings.Contains(out, `"name":"xray-test0"`) || strings.Contains(out, "xray0") {
+		t.Errorf("xray run -test ran on %s with output\n%s\nwant a copy of the config with the TUN device named xray-test0", path, out)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the tested copy %s is still there after Test (%v)", path, err)
+	}
+	if b, err := os.ReadFile(orig); err != nil || !strings.Contains(string(b), `"name": "xray0"`) {
+		t.Errorf("the selection's config changed: %s (%v)", b, err)
+	}
+}
+
+func TestTestUsesConfigWithoutTunAsIs(t *testing.T) {
+	f := newFixture(t, "ok", nil)
+	out, err := f.sup.Test(t.Context(), f.sel)
+	if err != nil {
+		t.Fatalf("Test: %v\n%s", err, out)
+	}
+	if want := "config " + f.d.ConfigPath(f.sel.Config) + "\n"; !strings.HasPrefix(out, want) {
+		t.Errorf("Test output %q, want xray run -test on the selection's config (%q)", out, want)
+	}
+}
+
 func TestVersion(t *testing.T) {
 	f := newFixture(t, "ok", nil)
 	got, err := f.sup.Version(f.sel)

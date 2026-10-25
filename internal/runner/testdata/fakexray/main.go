@@ -6,8 +6,9 @@
 // Modes: ok (serves until SIGTERM, then exits 0), badconfig (rejects "run
 // -test"), exit2s and exit15s (exit 1 after 2 s or 15 s), stubborn (ignores
 // SIGTERM, so only SIGKILL stops it), slowtest (takes 1 s to accept "run
-// -test"). In every mode "api <args>" echoes its arguments, and the first
-// argument "fail" or "hang" makes it fail or never return.
+// -test"). A "run -test" that accepts the config prints "config <path>" and
+// the file's contents first. In every mode "api <args>" echoes its arguments,
+// and the first argument "fail" or "hang" makes it fail or never return.
 package main
 
 import (
@@ -36,6 +37,11 @@ func main() {
 			os.Exit(23)
 		case "slowtest":
 			time.Sleep(time.Second)
+		}
+		// What was tested, for the tests to check.
+		fmt.Printf("config %s\n", args[3])
+		if b, err := os.ReadFile(args[3]); err == nil {
+			fmt.Printf("%s\n", b)
 		}
 		fmt.Println("Configuration OK.")
 	case len(args) >= 2 && args[0] == "api":

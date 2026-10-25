@@ -150,19 +150,58 @@ func stageCopy(src, dst string) (err error) {
 
 // Test runs "xray run -test" on the selection's config with the staged core
 // and returns what xray printed. A rejected config is an error wrapping the
-// *exec.ExitError; the output says why.
+// *exec.ExitError; the output says why. The config's TUN devices are renamed
+// for the test (see testConfig), so that it can run beside the active xray.
 func (s *Supervisor) Test(ctx context.Context, sel runnerapi.Selection) (string, error) {
 	path, err := s.Stage(sel)
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.CommandContext(ctx, path, "run", "-test", "-c", s.cfg.Dirs.ConfigPath(sel.Config))
+	config, cleanup, err := s.testConfigFile(sel)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	cmd := exec.CommandContext(ctx, path, "run", "-test", "-c", config)
 	cmd.Env = s.env(sel)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(out), fmt.Errorf("runner: xray run -test: %w", err)
 	}
 	return string(out), nil
+}
+
+// testConfigFile returns the config file Test hands to xray: a copy of the
+// selection's config made by testConfig, in StageDir, or the config itself
+// when testConfig leaves it as it is or it cannot be read (xray then says
+// why). cleanup removes the copy.
+func (s *Supervisor) testConfigFile(sel runnerapi.Selection) (path string, cleanup func(), err error) {
+	orig := s.cfg.Dirs.ConfigPath(sel.Config)
+	data, err := os.ReadFile(orig)
+	if err != nil {
+		return orig, func() {}, nil
+	}
+	renamed, changed := testConfig(data)
+	if !changed {
+		return orig, func() {}, nil
+	}
+	if err := os.MkdirAll(s.cfg.StageDir, 0o755); err != nil {
+		return "", nil, fmt.Errorf("runner: test config: %w", err)
+	}
+	f, err := os.CreateTemp(s.cfg.StageDir, ".test-config-*.json")
+	if err != nil {
+		return "", nil, fmt.Errorf("runner: test config: %w", err)
+	}
+	cleanup = func() { os.Remove(f.Name()) }
+	_, err = f.Write(renamed)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("runner: test config: %w", err)
+	}
+	return f.Name(), cleanup, nil
 }
 
 // Version returns the first line of "xray version" for the selection's core.
