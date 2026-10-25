@@ -126,6 +126,10 @@ type rule struct {
 	Source     []string `json:"source,omitempty"`
 	Domain     []string `json:"domain,omitempty"`
 	IP         []string `json:"ip,omitempty"`
+	// Port is a list of destination ports, such as "53". Like an empty
+	// list, an empty Port is left out and matches every port, so it is set
+	// only by matchPort, which refuses an empty one.
+	Port string `json:"port,omitempty"`
 	// Network is set on the catch-all rule alone, to "tcp,udp": all the
 	// traffic the TUN inbound carries.
 	Network     string `json:"network,omitempty"`

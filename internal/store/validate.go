@@ -57,7 +57,7 @@ func (s State) Validate() error {
 	p.devices(s.Devices)
 	p.policy("default_policy", s.DefaultPolicy)
 	p.routing(s.Routing, servers)
-	p.dns(s.DNS)
+	p.dns(s.DNS, s.DomesticResolver())
 	p.network(s.Network)
 	if !httpURL(s.Health.ProbeURL) {
 		p.add("health.probe_url", "must be an absolute http or https URL")
@@ -240,12 +240,19 @@ func (p *problems) matchers(path string, domains, ips []string) {
 	}
 }
 
-func (p *problems) dns(d DNS) {
+// dns checks the resolvers, where domestic is the domestic resolver's
+// address (State.DomesticResolver).
+func (p *problems) dns(d DNS, domestic netip.Addr) {
 	if d.Domestic.IsValid() && !d.Domestic.Is4() {
 		p.add("dns.domestic", "must be an IPv4 address")
 	}
-	if !dnsRemote(d.Remote) {
+	switch a, err := netip.ParseAddr(d.Remote); {
+	case !dnsRemote(d.Remote):
 		p.add("dns.remote", "must be an https:// URL or an IPv4 address")
+	case err == nil && a == domestic:
+		// The plain queries to the domestic resolver go out direct, so the
+		// remote resolver's would too, every name with them.
+		p.add("dns.remote", "is %s, the domestic resolver: the remote resolver must be another one, or every lookup goes out without the proxy", a)
 	}
 }
 

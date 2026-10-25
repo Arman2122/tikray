@@ -61,6 +61,23 @@ func TestNetworkAddresses(t *testing.T) {
 	}
 }
 
+func TestDomesticResolver(t *testing.T) {
+	for _, c := range []struct{ subnet, domestic, want string }{
+		{"172.31.255.0/29", "", "172.31.255.1"},
+		{"10.9.8.0/28", "", "10.9.8.1"},
+		{"172.31.255.0/29", "192.168.88.1", "192.168.88.1"},
+	} {
+		s := Default()
+		s.Network.Subnet = netip.MustParsePrefix(c.subnet)
+		if c.domestic != "" {
+			s.DNS.Domestic = netip.MustParseAddr(c.domestic)
+		}
+		if got := s.DomesticResolver(); got != netip.MustParseAddr(c.want) {
+			t.Errorf("subnet %s, dns.domestic %q: DomesticResolver() = %v, want %s", c.subnet, c.domestic, got, c.want)
+		}
+	}
+}
+
 // fixture is a Default-based state with something in every list, so a clone
 // that shares memory with it shows up.
 func fixture() State {
@@ -368,6 +385,17 @@ func TestValidateRejects(t *testing.T) {
 		{"dns remote empty", func(s *State) { s.DNS.Remote = "" }, "dns.remote"},
 		{"dns remote ipv6", func(s *State) { s.DNS.Remote = "2001:db8::53" }, "dns.remote"},
 		{"dns remote https without host", func(s *State) { s.DNS.Remote = "https:///dns-query" }, "dns.remote"},
+		// The domestic resolver's queries go out direct, and so would every
+		// query to a remote resolver at the same address.
+		{"dns remote is the domestic resolver", func(s *State) {
+			s.DNS.Domestic = netip.MustParseAddr("203.0.113.53")
+			s.DNS.Remote = "203.0.113.53"
+		}, "dns.remote"},
+		{"dns remote is the router, which is the domestic resolver", func(s *State) { s.DNS.Remote = "172.31.255.1" }, "dns.remote"},
+		{"dns remote is the router of another subnet", func(s *State) {
+			s.Network.Subnet = netip.MustParsePrefix("10.9.8.0/29")
+			s.DNS.Remote = "10.9.8.1"
+		}, "dns.remote"},
 
 		{"subnet /30", func(s *State) { s.Network.Subnet = netip.MustParsePrefix("172.31.255.0/30") }, "network.subnet"},
 		{"subnet ipv6", func(s *State) { s.Network.Subnet = netip.MustParsePrefix("fd00::/64") }, "network.subnet"},
@@ -465,6 +493,29 @@ func TestValidateAccepts(t *testing.T) {
 		t.Run("dns remote "+dns, func(t *testing.T) {
 			s := valid()
 			s.DNS.Remote = dns
+			if err := s.Validate(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	for _, tt := range []struct {
+		name     string
+		domestic string
+		remote   string
+	}{
+		// DoH reaches the domestic resolver's host on another port, which
+		// render sends through the proxy.
+		{"DoH on the domestic resolver's host", "1.1.1.1", "https://1.1.1.1/dns-query"},
+		{"DoH on the router", "", "https://172.31.255.1/dns-query"},
+		// With a domestic resolver set, the router is not the domestic one.
+		{"plain remote at the router beside a domestic resolver", "192.168.88.1", "172.31.255.1"},
+	} {
+		t.Run("dns "+tt.name, func(t *testing.T) {
+			s := valid()
+			if tt.domestic != "" {
+				s.DNS.Domestic = netip.MustParseAddr(tt.domestic)
+			}
+			s.DNS.Remote = tt.remote
 			if err := s.Validate(); err != nil {
 				t.Error(err)
 			}

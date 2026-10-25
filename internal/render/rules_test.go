@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -633,6 +634,50 @@ func TestRulesGeo(t *testing.T) {
 	}
 }
 
+// TestRenderRefusesInvalidGeo checks that every entry of the geo data is a
+// geosite: or geoip: matcher with a code. Any other entry would join the
+// domestic matchers, and an empty or prefix-less domain matcher matches
+// every domain: the domestic rule would send all sniffed traffic direct,
+// kill-switch traffic among it.
+func TestRenderRefusesInvalidGeo(t *testing.T) {
+	site, ip := []string{"geosite:category-ir"}, []string{"geoip:ir"}
+	tests := []struct {
+		name string
+		geo  Geo
+		// path is the entry the error names, or "" when the geo data is
+		// valid.
+		path string
+	}{
+		{"valid", Geo{Site: site, IP: ip}, ""},
+		{"no matchers", Geo{Version: "202610250000"}, ""},
+		{"empty site", Geo{Site: []string{"geosite:category-ir", ""}, IP: ip}, "geo.site[1]"},
+		{"site without a code", Geo{Site: []string{"geosite:"}, IP: ip}, "geo.site[0]"},
+		{"site without a prefix", Geo{Site: []string{"example.com"}, IP: ip}, "geo.site[0]"},
+		{"site with the geoip prefix", Geo{Site: []string{"geoip:ir"}, IP: ip}, "geo.site[0]"},
+		{"IP without a prefix", Geo{Site: site, IP: []string{"10.0.0.0/8"}}, "geo.ip[0]"},
+		{"IP without a code", Geo{Site: site, IP: []string{"geoip:ir", "geoip:"}}, "geo.ip[1]"},
+		{"empty IP", Geo{Site: site, IP: []string{""}}, "geo.ip[0]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			geo := tt.geo
+			b, err := Render(withGeo(input(func(st *store.State) { st.Routing.Domestic = extras() }), &geo))
+			if tt.path == "" {
+				if err != nil {
+					t.Fatalf("Render: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Render succeeded:\n%s", b)
+			}
+			if !strings.HasPrefix(err.Error(), "render: ") || !strings.Contains(err.Error(), tt.path) {
+				t.Fatalf("Render = %q, want a render: error naming %s", err, tt.path)
+			}
+		})
+	}
+}
+
 // allCases are the inputs of every table above and of TestDNS.
 func allCases() []ruleCase {
 	cases := slices.Concat(defaultSmartCases, killSwitchCases, fullDefaultCases, fullDeviceCases,
@@ -667,6 +712,18 @@ var genActions = []store.Action{store.ActionDirect, store.ActionProxy, store.Act
 // genServerIDs are the IDs of the generated servers, in order.
 var genServerIDs = []string{"a1b2c3d4", "0badf00d", "deadbeef"}
 
+// genDomestic and genRemote are the domestic resolvers ("" for the router)
+// and the remote resolvers a generated state takes. Each DoH remote shares
+// its host with one of the domestic resolvers. No plain remote is ever one
+// of them, which Validate refuses.
+var (
+	genDomestic = []string{"", "203.0.113.54", "1.1.1.1"}
+	genRemote   = []string{
+		"https://1.1.1.1/dns-query", "https://203.0.113.54/dns-query", "https://172.31.255.1/dns-query",
+		"https://dns.example/dns-query", "203.0.113.53",
+	}
+)
+
 // generated returns genCount valid inputs drawn from genSeed, each with:
 //   - up to 8 devices, each in one of the five policy sets, in random order,
 //     with prefixes from /28 to /32 that never overlap, all inside
@@ -676,7 +733,7 @@ var genServerIDs = []string{"a1b2c3d4", "0badf00d", "deadbeef"}
 //     a pinned one, which may be disabled;
 //   - up to 2 block-list entries, 2 domestic domains and 2 domestic IPs, and
 //     up to 4 custom rules of any action;
-//   - either domestic resolver and either kind of remote one.
+//   - any of genDomestic and genRemote.
 //
 // Every domain matcher is domain:g<N>.test and every IP matcher
 // 10.200.<N>.0/24. None has geo data.
@@ -729,12 +786,10 @@ func generated(t *testing.T) []Input {
 			}
 			st.Routing.Rules = append(st.Routing.Rules, r)
 		}
-		if rng.IntN(2) == 0 {
-			st.DNS.Domestic = netip.MustParseAddr("203.0.113.54")
+		if d := genDomestic[rng.IntN(len(genDomestic))]; d != "" {
+			st.DNS.Domestic = netip.MustParseAddr(d)
 		}
-		if rng.IntN(2) == 0 {
-			st.DNS.Remote = "203.0.113.53"
-		}
+		st.DNS.Remote = genRemote[rng.IntN(len(genRemote))]
 		if err := st.Validate(); err != nil {
 			t.Fatalf("generated state %d is invalid: %v", i, err)
 		}
@@ -783,9 +838,13 @@ func TestGeneratorCoverage(t *testing.T) {
 		if st.DefaultPolicy.Mode == store.ModeFull && smart == 0 && len(st.Routing.Rules) > 0 {
 			seen["full default with custom rules, no smart device"]++
 		}
+		if len(st.Routing.Domestic.Domains) > 0 && remoteConn(t, st.DNS.Remote).ip == st.DomesticResolver() {
+			seen["DoH remote on the domestic resolver's host"]++
+		}
 	}
 	want := []string{"no balancer member", "pinned to a disabled server", "rule naming a disabled server",
-		"kill switch default, no open device", "full default with custom rules, no smart device"}
+		"kill switch default, no open device", "full default with custom rules, no smart device",
+		"DoH remote on the domestic resolver's host"}
 	for _, p := range genPolicies {
 		want = append(want, fmt.Sprintf("default %+v", p), fmt.Sprintf("device %+v", p))
 	}
@@ -862,6 +921,12 @@ func TestNoEmptyMatchers(t *testing.T) {
 					t.Errorf("rendered rule %d has an empty or invalid %s: %s", i, key, raw)
 				}
 			}
+			if v, ok := obj["port"]; ok {
+				var port string
+				if err := json.Unmarshal(v, &port); err != nil || strings.TrimSpace(port) == "" {
+					t.Errorf("rendered rule %d has an empty or invalid port: %s", i, raw)
+				}
+			}
 		}
 	}
 	for _, tc := range allCases() {
@@ -930,15 +995,36 @@ func TestRulesIgnoreDeviceOrder(t *testing.T) {
 	}
 }
 
-// route walks rules in order with a tcp connection from src, arriving on the
-// TUN inbound for a destination that only the matcher dst names, as xray's
-// router would. With dst "", no domain or IP matcher matches it. It returns
-// the index of the first rule that matches and that rule's target, such as
+// conn is a connection the walker routes.
+type conn struct {
+	// inbound is the tag of the inbound it arrives on; network is "tcp" or
+	// "udp".
+	inbound, network string
+	// src is its source address. The zero Addr is in no source list.
+	src netip.Addr
+	// domain is the domain matcher its sniffed domain matches, such as
+	// "domain:g7.test", or "" when it matches none.
+	domain string
+	// ip and port are its destination. The zero Addr is in no ip list: a
+	// domain that xray has not resolved.
+	ip   netip.Addr
+	port uint16
+}
+
+// tunConn is the probe of the kill-switch tests: a tcp connection from src
+// on the TUN inbound, to port 443 of a destination that no domain or IP
+// matcher matches.
+func tunConn(src netip.Addr) conn {
+	return conn{inbound: TagTUN, network: "tcp", src: src, port: 443}
+}
+
+// route walks rules in order with c, as xray's router would. It returns the
+// index of the first rule that matches and that rule's target, such as
 // "outboundTag:block", or -1 and xray's default, its first outbound, block,
 // when no rule matches.
-func route(rules []json.RawMessage, src netip.Addr, dst string) (int, string, error) {
+func route(rules []json.RawMessage, c conn) (int, string, error) {
 	for i, raw := range rules {
-		ok, target, err := matches(raw, src, dst)
+		ok, target, err := matches(raw, c)
 		if err != nil {
 			return i, "", fmt.Errorf("rule %d %s: %w", i, raw, err)
 		}
@@ -949,10 +1035,10 @@ func route(rules []json.RawMessage, src netip.Addr, dst string) (int, string, er
 	return -1, "outboundTag:" + TagBlock, nil
 }
 
-// matches reports whether the rule raw matches route's connection, and gives
-// its target. A list that is there but empty is no condition, as in xray. It
-// fails on a key it does not know, rather than guess whether it matches.
-func matches(raw json.RawMessage, src netip.Addr, dst string) (bool, string, error) {
+// matches reports whether the rule raw matches c, and gives its target. A
+// list that is there but empty is no condition, as in xray. It fails on a
+// key it does not know, rather than guess whether it matches.
+func matches(raw json.RawMessage, c conn) (bool, string, error) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return false, "", err
@@ -971,9 +1057,17 @@ func matches(raw json.RawMessage, src netip.Addr, dst string) (bool, string, err
 			if err := json.Unmarshal(v, &network); err != nil {
 				return false, "", err
 			}
-			if !slices.Contains(strings.Split(network, ","), "tcp") {
-				match = false
+			match = match && slices.Contains(strings.Split(network, ","), c.network)
+		case "port":
+			var ports string
+			if err := json.Unmarshal(v, &ports); err != nil {
+				return false, "", err
 			}
+			in, err := portIn(ports, c.port)
+			if err != nil {
+				return false, "", err
+			}
+			match = match && in
 		case "inboundTag", "source", "domain", "ip":
 			var list []string
 			if err := json.Unmarshal(v, &list); err != nil {
@@ -982,18 +1076,26 @@ func matches(raw json.RawMessage, src netip.Addr, dst string) (bool, string, err
 			if len(list) == 0 {
 				continue
 			}
+			var in bool
+			var err error
 			switch key {
 			case "inboundTag":
-				match = match && slices.Contains(list, TagTUN)
+				in = slices.Contains(list, c.inbound)
 			case "source":
-				in, err := anyContains(list, src)
-				if err != nil {
-					return false, "", err
+				if c.src.IsValid() {
+					in, err = anyContains(list, c.src)
 				}
-				match = match && in
-			default:
-				match = match && dst != "" && slices.Contains(list, dst)
+			case "domain":
+				in = c.domain != "" && slices.Contains(list, c.domain)
+			case "ip":
+				if c.ip.IsValid() {
+					in, err = anyContains(list, c.ip)
+				}
 			}
+			if err != nil {
+				return false, "", err
+			}
+			match = match && in
 		default:
 			return false, "", fmt.Errorf("the walker does not know the key %q", key)
 		}
@@ -1004,14 +1106,16 @@ func matches(raw json.RawMessage, src netip.Addr, dst string) (bool, string, err
 	return match, target, nil
 }
 
-// anyContains reports whether a prefix or address in list holds a.
+// anyContains reports whether a prefix or address in list holds a. An entry
+// that is neither, such as geoip:ir, is an error: the walker cannot tell
+// whether it holds a.
 func anyContains(list []string, a netip.Addr) (bool, error) {
 	for _, s := range list {
 		p, err := netip.ParsePrefix(s)
 		if err != nil {
 			addr, err := netip.ParseAddr(s)
 			if err != nil {
-				return false, fmt.Errorf("source %q is not a prefix or an address", s)
+				return false, fmt.Errorf("%q is not a prefix or an address", s)
 			}
 			p = netip.PrefixFrom(addr, addr.BitLen())
 		}
@@ -1020,6 +1124,32 @@ func anyContains(list []string, a netip.Addr) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// portIn reports whether port is in ports, an xray port list such as "53" or
+// "80,443,1000-2000". A list with no entry is no condition, as in xray.
+func portIn(ports string, port uint16) (bool, error) {
+	entries := 0
+	for _, part := range strings.Split(ports, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		entries++
+		lo, hi, isRange := strings.Cut(part, "-")
+		if !isRange {
+			hi = lo
+		}
+		from, err1 := strconv.ParseUint(lo, 10, 16)
+		to, err2 := strconv.ParseUint(hi, 10, 16)
+		if err1 != nil || err2 != nil {
+			return false, fmt.Errorf("port %q is not a port or a range", part)
+		}
+		if uint64(port) >= from && uint64(port) <= to {
+			return true, nil
+		}
+	}
+	return entries == 0, nil
 }
 
 // leaks reports whether target can send traffic out direct: the direct
@@ -1056,18 +1186,18 @@ func killSwitchSources(t *testing.T, st store.State) []netip.Addr {
 	return srcs
 }
 
-// killSwitchLeak walks rules with a kill-switch source's connection and
-// returns why it leaks, or "" when it does not: its first matching rule is
-// neither the direct outbound nor proxy-open.
-func killSwitchLeak(rules []json.RawMessage, src netip.Addr, dst string) (string, error) {
-	i, target, err := route(rules, src, dst)
+// killSwitchLeak walks rules with the probe from the kill-switch source src
+// and returns why it leaks, or "" when it does not: its first matching rule
+// is neither the direct outbound nor proxy-open.
+func killSwitchLeak(rules []json.RawMessage, src netip.Addr) (string, error) {
+	i, target, err := route(rules, tunConn(src))
 	if err != nil {
 		return "", err
 	}
 	if !leaks(target) {
 		return "", nil
 	}
-	return fmt.Sprintf("kill-switch source %s, destination %q: rule %d %s sends it to %s", src, dst, i, rules[i], target), nil
+	return fmt.Sprintf("kill-switch source %s: rule %d %s sends it to %s", src, i, rules[i], target), nil
 }
 
 func TestKillSwitchNeverDirect(t *testing.T) {
@@ -1080,7 +1210,7 @@ func TestKillSwitchNeverDirect(t *testing.T) {
 		out, _ := mustRenderInput(t, in)
 		for _, src := range killSwitchSources(t, in.State) {
 			probes++
-			leak, err := killSwitchLeak(out.Routing.Rules, src, "")
+			leak, err := killSwitchLeak(out.Routing.Rules, src)
 			if err != nil {
 				t.Fatalf("input %d: %v", i, err)
 			}
@@ -1107,24 +1237,36 @@ func TestKillSwitchMatchedTraffic(t *testing.T) {
 		for _, m := range slices.Concat(r.Domestic.Domains, r.Domestic.IPs) {
 			directOK[m] = true
 		}
-		var named []string
-		named = append(named, r.BlockList...)
-		named = append(named, r.Domestic.Domains...)
-		named = append(named, r.Domestic.IPs...)
+		domains := slices.Concat(r.BlockList, r.Domestic.Domains)
+		ips := slices.Clone(r.Domestic.IPs)
 		for _, cr := range r.Rules {
-			named = append(named, cr.Domains...)
-			named = append(named, cr.IPs...)
+			domains = append(domains, cr.Domains...)
+			ips = append(ips, cr.IPs...)
 			if cr.Action == store.ActionDirect {
 				for _, m := range slices.Concat(cr.Domains, cr.IPs) {
 					directOK[m] = true
 				}
 			}
 		}
-		slices.Sort(named)
-		for _, dst := range slices.Compact(named) {
+		slices.Sort(domains)
+		slices.Sort(ips)
+		// A domain matcher is the connection's sniffed domain; an IP
+		// matcher, 10.200.<N>.0/24, holds its destination address.
+		var dsts []string
+		var withDst []func(conn) conn
+		for _, m := range slices.Compact(domains) {
+			dsts = append(dsts, m)
+			withDst = append(withDst, func(c conn) conn { c.domain = m; return c })
+		}
+		for _, m := range slices.Compact(ips) {
+			a := netip.MustParsePrefix(m).Addr()
+			dsts = append(dsts, m)
+			withDst = append(withDst, func(c conn) conn { c.ip = a; return c })
+		}
+		for j, dst := range dsts {
 			for _, src := range killSwitchSources(t, in.State) {
 				probes++
-				idx, target, err := route(out.Routing.Rules, src, dst)
+				idx, target, err := route(out.Routing.Rules, withDst[j](tunConn(src)))
 				if err != nil {
 					t.Fatalf("generated state %d: %v", i, err)
 				}
@@ -1169,7 +1311,7 @@ func TestKillSwitchWalkerCatchesLeaks(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rs := slices.Clone(rules)
 			tt.edit(rs)
-			leak, err := killSwitchLeak(rs, unlisted, "")
+			leak, err := killSwitchLeak(rs, unlisted)
 			if err != nil {
 				t.Fatal(err)
 			}

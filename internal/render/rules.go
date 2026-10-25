@@ -110,6 +110,15 @@ func matchIP(ms []string) cond {
 	}
 }
 
+// matchPort matches the traffic to the destination ports in ports, an xray
+// port list such as "53".
+func matchPort(ports string) cond {
+	return func(r *rule) bool {
+		r.Port = ports
+		return ports != ""
+	}
+}
+
 // matchAll matches all the traffic: the TUN inbound carries tcp and udp.
 func matchAll(r *rule) bool {
 	r.Network = "tcp,udp"
@@ -243,14 +252,16 @@ func (r *renderer) serverTag(id string) (string, bool) {
 	return "", false
 }
 
-// checkGeo returns an error naming the first geosite: or geoip: matcher in
-// st when there is no geo data: xray loads them from geosite.dat and
+// checkGeo checks the geo matchers. With geo data, it returns an error
+// naming the first entry of geo that is not a geosite: or geoip: matcher
+// with a code (Geo.check). Without, it returns an error naming the first
+// geosite: or geoip: matcher in st: xray loads them from geosite.dat and
 // geoip.dat, and refuses the whole config without those files. A matcher in
 // a rule that is not rendered, such as one naming a disabled server, counts
 // too: enabling that server must not be what breaks the config.
 func checkGeo(st store.State, geo *Geo) error {
 	if geo != nil {
-		return nil
+		return geo.check()
 	}
 	type matchers struct {
 		path string
@@ -272,6 +283,25 @@ func checkGeo(st store.State, geo *Geo) error {
 				if strings.HasPrefix(m, prefix) {
 					return fmt.Errorf("render: %s[%d]: a %s matcher needs geo data, and none is installed", l.path, j, prefix)
 				}
+			}
+		}
+	}
+	return nil
+}
+
+// check returns an error naming the first entry of g's Site that is not
+// geosite:<code>, or of its IP that is not geoip:<code>. The entries join
+// the domestic matchers as they are, and an empty or prefix-less domain
+// matcher matches every domain: the domestic rule would send all sniffed
+// traffic direct, kill-switch traffic among it.
+func (g *Geo) check() error {
+	for _, l := range []struct {
+		path, prefix string
+		list         []string
+	}{{"geo.site", "geosite:", g.Site}, {"geo.ip", "geoip:", g.IP}} {
+		for i, m := range l.list {
+			if code, ok := strings.CutPrefix(m, l.prefix); !ok || code == "" {
+				return fmt.Errorf("render: %s[%d]: %q is not %s<code>", l.path, i, m, l.prefix)
 			}
 		}
 	}

@@ -82,7 +82,8 @@ type Geo struct {
 	// Version names the geo data release.
 	Version string
 	// Site and IP are its domestic matchers, such as "geosite:category-ir"
-	// and "geoip:ir".
+	// and "geoip:ir". Render refuses an entry of Site that is not
+	// geosite:<code>, or of IP that is not geoip:<code>.
 	Site, IP []string
 }
 
@@ -110,8 +111,8 @@ func ProxyAvailable(st store.State) bool {
 // Render returns the xray-core config for in, as two-space indented JSON
 // with a trailing newline. The same input always gives the same bytes. It
 // fails if in.Core is too old for the config (see Check), if in.State is not
-// valid, or if in.State uses a geosite: or geoip: matcher while in.Geo is
-// nil.
+// valid, if in.State uses a geosite: or geoip: matcher while in.Geo is nil,
+// or if in.Geo holds an entry that is not a geosite: or geoip: matcher.
 func Render(in Input) ([]byte, error) {
 	c, err := build(in)
 	if err != nil {

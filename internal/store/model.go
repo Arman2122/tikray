@@ -201,6 +201,15 @@ type State struct {
 	Health        Health  `json:"health"`
 }
 
+// DomesticResolver is the address of the resolver for domestic names:
+// DNS.Domestic, or the router's bridge address when that is unset.
+func (s State) DomesticResolver() netip.Addr {
+	if s.DNS.Domestic.IsValid() {
+		return s.DNS.Domestic
+	}
+	return s.Network.Router()
+}
+
 // Default returns the state of a fresh install: nothing configured and
 // everything direct. Its lists are empty, not nil, so that they marshal as [].
 func Default() State {
