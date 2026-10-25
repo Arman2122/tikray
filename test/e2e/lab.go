@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Arman2122/tikray/internal/apiclient"
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/sharelink"
@@ -39,6 +40,11 @@ import (
 // route to the tikray bridge.
 const runnerURL = "http://172.31.255.3:8080"
 
+// apiURL is the tikray service's API, which the host reaches the same way. The
+// service listens on TIKRAY_LISTEN's default, :443, and the lab does not set
+// it.
+const apiURL = "https://172.31.255.2:443"
+
 // xrayAPI is where xray's gRPC API listens, on the runner's address: the
 // "api" block of config/xray-client.json says so (JSON cannot refer to this
 // constant, so the two must agree), and so does the state-derived default of
@@ -51,6 +57,8 @@ const (
 	lastResult    = dataRoot + "/state/last-result.json"
 	indexKey      = dataRoot + "/state/index.pub"
 	runnerToken   = dataRoot + "/run/runner.token"
+	apiToken      = dataRoot + "/state/api.token"
+	apiCert       = dataRoot + "/state/tls.crt"
 	candidateFile = dataRoot + "/run/candidate.json"
 	coresDir      = dataRoot + "/cores"
 	inboxDir      = dataRoot + "/inbox"
@@ -83,7 +91,8 @@ var serverEgress = map[string]string{"a": "203.0.113.10", "b": "203.0.113.11"}
 // Lab is a CHR with tikray deployed: the tikray-runner and tikray containers
 // from the real images, the RouterOS objects of routeros/m1-setup.rsc, and
 // the fake internet with its two VLESS servers, a fake GitHub (203.0.113.40)
-// and a mirror with a signed hash index (203.0.113.41) serving Releases.
+// and a mirror with a signed hash index (203.0.113.41) serving Releases, and
+// subscriptions (http://203.0.113.30/sub/<name>) serving Subs.
 type Lab struct {
 	Net *lab.Network
 	// Inet is the fake internet, whose VLESS servers a test can stop and
@@ -97,6 +106,9 @@ type Lab struct {
 	// Releases is the root the fake GitHub and the mirror serve. Flag files
 	// in it switch them (see labinet.ReleasesHandler).
 	Releases string
+	// Subs is the root the fake internet serves at http://203.0.113.30/sub/:
+	// the file Subs/<name> is the subscription <name>. setSub changes them.
+	Subs string
 	// Zips holds every zip the test built, by version, including the one
 	// kept out of Releases.
 	Zips map[string]string
@@ -173,7 +185,11 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Net.Teardown() })
-	if l.Inet, err = lab.StartInetLab(ctx, l.Net, lab.InetOptions{ReleasesDir: l.Releases}); err != nil {
+	l.Subs = filepath.Join(wd, "subs")
+	if err := os.MkdirAll(l.Subs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if l.Inet, err = lab.StartInetLab(ctx, l.Net, lab.InetOptions{ReleasesDir: l.Releases, SubsDir: l.Subs}); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(l.Inet.Stop)
@@ -668,6 +684,75 @@ func (l *Lab) setFlag(name string, on bool) error {
 		return err
 	}
 	return nil
+}
+
+// setSub makes http://203.0.113.30/sub/<name> answer with body from now on,
+// as a subscription provider changing its list. name is a plain file name. The
+// file is replaced in one step, so that a fetch never sees half of it.
+func (l *Lab) setSub(name, body string) error {
+	if name == "" || strings.HasPrefix(name, ".") || filepath.Base(name) != name {
+		return fmt.Errorf("subscription name %q: want a plain file name without a leading dot", name)
+	}
+	if l.Subs == "" {
+		return errors.New("setSub: the lab has no subscriptions directory (Deploy sets Subs)")
+	}
+	// The dot keeps the file under construction out of reach of labinet.
+	tmp := filepath.Join(l.Subs, "."+name+".tmp")
+	if err := os.WriteFile(tmp, []byte(body), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(l.Subs, name))
+}
+
+// api returns a client for the tikray service's API: the token the service
+// wrote to state/api.token, and the fingerprint of the certificate in
+// state/tls.crt as the one to trust, which the service made when it first
+// started. It reads both from the router (the service owns them, and the host
+// has no other way to them) and waits for the service to have written them,
+// until ctx ends: the files are there a moment after `tikray serve` starts, and
+// never when nothing started it.
+func (l *Lab) api(ctx context.Context) (*apiclient.Client, error) {
+	for {
+		tok, crt, err := l.apiFiles(ctx)
+		if err == nil {
+			return apiClient(tok, crt)
+		}
+		if serr := sleep(ctx, 2*time.Second); serr != nil {
+			return nil, fmt.Errorf("the tikray service has not written its token and certificate: %v (%w)", err, serr)
+		}
+	}
+}
+
+// apiFiles reads the API token and the certificate from the router; an error
+// means one is not there yet.
+func (l *Lab) apiFiles(ctx context.Context) (token, cert string, err error) {
+	if token, err = l.CHR.Get(ctx, fileContents(apiToken)); err != nil {
+		return "", "", err
+	}
+	if cert, err = l.CHR.Get(ctx, fileContents(apiCert)); err != nil {
+		return "", "", err
+	}
+	if token == "" || cert == "" {
+		return "", "", errors.New("a file is empty")
+	}
+	return token, cert, nil
+}
+
+// apiClient is the client of the service at apiURL for the contents of its
+// token and certificate files, as the router gave them. The fingerprint is
+// the one the service prints and the CLI pins (apiclient.FingerprintOfPEM).
+func apiClient(token, certPEM string) (*apiclient.Client, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, errors.New("the API token is empty")
+	}
+	// FingerprintOfPEM takes CRLF line ends, which a console may give the
+	// file's lines back with, as it takes LF.
+	fp, err := apiclient.FingerprintOfPEM([]byte(certPEM))
+	if err != nil {
+		return nil, err
+	}
+	return &apiclient.Client{BaseURL: apiURL, Token: token, Fingerprint: fp}, nil
 }
 
 // toInbox puts the zip of version in the inbox under the release asset's

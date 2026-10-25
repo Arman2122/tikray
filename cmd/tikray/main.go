@@ -723,8 +723,9 @@ func (c *cli) printJSON(v any) int {
 
 // prepareDirs creates the directories tikray works in under data: state/
 // (0700, it holds secrets), state/tmp and inbox/. It points TMPDIR at
-// state/tmp, because the image is FROM scratch and has no /tmp, and the
-// verification of a download makes temporary files. Call it before any
+// state/tmp, so that the temporary files the verification of a download makes
+// are on the data volume, and not in the container's own layer (and the image
+// had no /tmp at all while it was FROM scratch). Call it before any
 // artifacts work. What a killed run leaves in state/tmp is removed by the
 // next update or rollback, once it holds the artifacts lock (never before, so
 // a concurrent update's files are not touched).

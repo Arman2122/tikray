@@ -31,6 +31,11 @@ type InetOptions struct {
 	// 203.0.113.40:80 and the mirror on 203.0.113.41:80; when empty, it
 	// serves neither.
 	ReleasesDir string
+	// SubsDir holds the subscriptions: http://203.0.113.30/sub/<name> serves
+	// the file SubsDir/<name> as text/plain, and answers 404 for a file that
+	// is not there. The directory must exist, and the test may change its
+	// files while the services run. When empty, /sub/ serves nothing.
+	SubsDir string
 }
 
 // vlessServers are the lab's two VLESS servers. Each listens on its own address
@@ -99,6 +104,17 @@ func StartInetLab(ctx context.Context, n *Network, o InetOptions) (*Inet, error)
 		}
 		labinetArgs = append(labinetArgs, "-releases", releases)
 		waitFor = append(waitFor, "203.0.113.40:80", "203.0.113.41:80")
+	}
+
+	if o.SubsDir != "" {
+		subs, err := filepath.Abs(o.SubsDir)
+		if err != nil {
+			return nil, err
+		}
+		if fi, err := os.Stat(subs); err != nil || !fi.IsDir() {
+			return nil, fmt.Errorf("subs dir %s is not a directory (%v)", subs, err)
+		}
+		labinetArgs = append(labinetArgs, "-subs", subs)
 	}
 
 	dir, err := os.MkdirTemp("", "labinet-")
