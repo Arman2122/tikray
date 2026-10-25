@@ -204,15 +204,36 @@ func (c *CHR) Push(ctx context.Context, localPath, dstPath string) error {
 	defer srv.Close()
 
 	url := "http://" + ln.Addr().String() + "/" + filepath.Base(localPath)
-	if _, err := c.Run(ctx, fmt.Sprintf(`/tool/fetch url="%s" dst-path="%s"`, url, dstPath)); err != nil {
-		return err
+	want := strconv.FormatInt(st.Size(), 10)
+	// Right after a boot, a fetch that reported no failure once left no file
+	// behind (M2a lab, 7.25 x86_64, the first push after SSH came up). Such a
+	// fetch is tried once more, after a short wait in case the file only shows
+	// up late.
+	var size, out string
+	for attempt := 1; ; attempt++ {
+		if out, err = c.Run(ctx, fmt.Sprintf(`/tool/fetch url="%s" dst-path="%s"`, url, dstPath)); err != nil {
+			return err
+		}
+		for range 5 {
+			if size, err = c.Get(ctx, fmt.Sprintf(`/file/get [find name="%s"] size`, dstPath)); err == nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Second):
+			}
+		}
+		if err == nil || attempt == 2 {
+			break
+		}
+		c.logf("push %s: no file at %s after the fetch, which said %q; fetching again", localPath, dstPath, strings.TrimSpace(out))
 	}
-	size, err := c.Get(ctx, fmt.Sprintf(`/file/get [find name="%s"] size`, dstPath))
 	if err != nil {
-		return err
+		return fmt.Errorf("push %s: %w (the fetch said %q)", localPath, err, strings.TrimSpace(out))
 	}
-	if size != strconv.FormatInt(st.Size(), 10) {
-		return fmt.Errorf("push %s: router has %s bytes at %s, want %d", localPath, size, dstPath, st.Size())
+	if size != want {
+		return fmt.Errorf("push %s: router has %s bytes at %s, want %s", localPath, size, dstPath, want)
 	}
 	return nil
 }
