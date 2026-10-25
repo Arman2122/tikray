@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
@@ -278,6 +279,145 @@ func TestRunRollbackRefused(t *testing.T) {
 	// The scratch directory exists and is what temp files use.
 	if got := os.Getenv("TMPDIR"); got != filepath.Join(data, "state", "tmp") {
 		t.Errorf("TMPDIR = %q", got)
+	}
+}
+
+// seedResult leaves a previous run's last-result.json in data and returns its path.
+func seedResult(t *testing.T, data string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(data, "state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(data, "state", "last-result.json")
+	if err := os.WriteFile(path, []byte("{\n  \"to\": \"26.1.18\",\n  \"outcome\": \"committed\"\n}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A command that fails before the updater runs must not leave the previous
+// run's result for a reader to take as its own.
+func TestRunSetupFailureSavesARefusedResult(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		setup  func(vars map[string]string, data string)
+		to     string
+		detail string
+	}{
+		{"missing runner token, update", []string{"core", "update", "26.10.21"}, noToken, "26.10.21", "runner.token"},
+		{"missing runner token, rollback", []string{"core", "rollback"}, noToken, "", "runner.token"},
+		{"unreadable index key", []string{"core", "update", "latest"}, func(vars map[string]string, data string) {
+			vars["TIKRAY_INDEX_URLS"] = "https://idx.example/hashes.json"
+			vars["TIKRAY_INDEX_PUBKEY_FILE"] = filepath.Join(data, "no-such-key")
+		}, "latest", "no-such-key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vars, data := testEnv(t, runnerapi.Status{})
+			saved := seedResult(t, data)
+			tc.setup(vars, data)
+
+			code, stdout, stderr := runCLI(t, vars, tc.args...)
+			if code != 1 {
+				t.Errorf("exit %d, want 1", code)
+			}
+			if !strings.Contains(stderr, tc.detail) {
+				t.Errorf("stderr %q does not name %q", stderr, tc.detail)
+			}
+			got, err := os.ReadFile(saved)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != stdout {
+				t.Errorf("last-result.json is\n%s\nstdout is\n%s", got, stdout)
+			}
+			var res artifacts.Result
+			if err := json.Unmarshal(got, &res); err != nil {
+				t.Fatalf("last-result.json is not a Result: %v\n%s", err, got)
+			}
+			if res.Outcome != artifacts.OutcomeRefused || res.To != tc.to || !strings.Contains(res.Detail, tc.detail) || res.At.IsZero() {
+				t.Errorf("result %+v, want a refusal to %q naming %q", res, tc.to, tc.detail)
+			}
+			if fi, _ := os.Stat(saved); fi.Mode().Perm() != 0o600 {
+				t.Errorf("last-result.json has mode %v, want 0600", fi.Mode().Perm())
+			}
+		})
+	}
+}
+
+func noToken(_ map[string]string, data string) {
+	os.Remove(filepath.Join(data, "run", "runner.token"))
+}
+
+// A run that dies midway (SIGKILL, out of memory) must leave no result at all,
+// so the previous file has to be gone before the first call to the runner.
+func TestRunRemovesThePreviousResultBeforeAnyWork(t *testing.T) {
+	data := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(data, "run"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "run", "runner.token"), []byte(testToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	saved := seedResult(t, data)
+	t.Setenv("TMPDIR", t.TempDir())
+
+	var called, existed atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Store(true)
+		if _, err := os.Stat(saved); err == nil {
+			existed.Store(true)
+		}
+		json.NewEncoder(w).Encode(runnerapi.Status{State: runnerapi.StateEmpty})
+	}))
+	t.Cleanup(srv.Close)
+
+	vars := map[string]string{"TIKRAY_DATA": data, "TIKRAY_RUNNER_URL": srv.URL}
+	if code, _, stderr := runCLI(t, vars, "core", "rollback"); code != 1 {
+		t.Fatalf("exit %d, want 1 (nothing to roll back); stderr %q", code, stderr)
+	}
+	if !called.Load() {
+		t.Fatal("the runner was never called")
+	}
+	if existed.Load() {
+		t.Error("the previous last-result.json was still there when the runner was called")
+	}
+	var res artifacts.Result
+	if b, err := os.ReadFile(saved); err != nil || json.Unmarshal(b, &res) != nil || res.Outcome != artifacts.OutcomeRefused {
+		t.Errorf("last-result.json is %q (%v), want this run's refusal", b, err)
+	}
+}
+
+// With a bad environment there is no data root to put a result in.
+func TestRunBadEnvironmentLeavesTheResult(t *testing.T) {
+	data := t.TempDir()
+	saved := seedResult(t, data)
+	before, _ := os.ReadFile(saved)
+	vars := map[string]string{"TIKRAY_DATA": data, "TIKRAY_MIRRORS": "https://m.example/nofile"}
+	if code, stdout, stderr := runCLI(t, vars, "core", "update", "26.10.21"); code != 1 || stdout != "" || !strings.Contains(stderr, "TIKRAY_MIRRORS") {
+		t.Errorf("exit %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if after, _ := os.ReadFile(saved); string(after) != string(before) {
+		t.Errorf("last-result.json changed to %q", after)
+	}
+}
+
+func TestRemoveFileDurably(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ { // the second time the file is already gone
+		if err := removeFileDurably(path); err != nil {
+			t.Fatalf("call %d: %v", i+1, err)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("call %d: the file is still there: %v", i+1, err)
+		}
+	}
+	if err := removeFileDurably(filepath.Join(dir, "no-such-dir", "f")); err == nil {
+		t.Error("a missing directory gave no error")
 	}
 }
 

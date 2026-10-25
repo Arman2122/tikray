@@ -11,6 +11,11 @@
 // already active and 1 otherwise. Progress and errors go to stderr. Usage
 // errors exit 2.
 //
+// They remove the previous last-result.json as soon as the data root is ready,
+// so the file is always this run's result or absent. A failure before the
+// updater runs, such as an unreadable runner token, is saved as a refused
+// result. A run that is killed leaves no file.
+//
 // Environment (see Config): TIKRAY_DATA, TIKRAY_ARCH, TIKRAY_RUNNER_URL,
 // TIKRAY_SOCKS, TIKRAY_UPSTREAM, TIKRAY_MIRRORS, TIKRAY_INDEX_URLS,
 // TIKRAY_INDEX_PUBKEY_FILE, TIKRAY_PROBE_URL.
@@ -175,7 +180,7 @@ func (c *cli) update(ctx context.Context, args []string) int {
 	if !ok {
 		return code
 	}
-	return c.updateOrRollback(ctx, func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
+	return c.updateOrRollback(ctx, pos[0], func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
 		return u.Update(ctx, pos[0], artifacts.UpdateOptions{ConfigFile: *configFile, AllowUnverified: *allow})
 	})
 }
@@ -185,13 +190,21 @@ func (c *cli) rollback(ctx context.Context, args []string) int {
 	if _, code, ok := c.parse(fs, args, 0); !ok {
 		return code
 	}
-	return c.updateOrRollback(ctx, func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
+	return c.updateOrRollback(ctx, "", func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
 		return u.Rollback(ctx)
 	})
 }
 
-// updateOrRollback builds the updater, runs do and reports its result.
-func (c *cli) updateOrRollback(ctx context.Context, do func(context.Context, *artifacts.CoreUpdater) (artifacts.Result, error)) int {
+// updateOrRollback builds the updater, runs do and reports its result. to is
+// the version asked for, empty for a rollback.
+//
+// Once the data root is known to be usable, the previous last-result.json is
+// removed, before anything else can fail. From then on the file is either
+// this run's result or absent, so that a reader never mistakes an older run
+// for this one: a failure in setup leaves a refused result, and a run that is
+// killed leaves none. Only a bad environment or an unusable data root leave
+// the file as it was; there is no place to write one.
+func (c *cli) updateOrRollback(ctx context.Context, to string, do func(context.Context, *artifacts.CoreUpdater) (artifacts.Result, error)) int {
 	cfg, err := configFromEnv(c.getenv)
 	if err != nil {
 		return c.fail(err)
@@ -199,15 +212,26 @@ func (c *cli) updateOrRollback(ctx context.Context, do func(context.Context, *ar
 	if err := prepareDirs(cfg.Data); err != nil {
 		return c.fail(err)
 	}
+	if err := removeFileDurably(filepath.Join(cfg.Data, "state", lastResultName)); err != nil {
+		return c.refused(cfg, to, fmt.Errorf("removing the previous result: %w", err))
+	}
 	runner, err := newRunner(cfg)
 	if err != nil {
-		return c.fail(err)
+		return c.refused(cfg, to, err)
 	}
 	u, err := newUpdater(cfg, runner, c.stderr)
 	if err != nil {
-		return c.fail(err)
+		return c.refused(cfg, to, err)
 	}
 	res, err := do(ctx, u)
+	return c.report(cfg, res, err)
+}
+
+// refused reports a refusal that no CoreUpdater made, because the command
+// failed before it could run: the result is not in the history, which is the
+// updater's.
+func (c *cli) refused(cfg Config, to string, err error) int {
+	res := artifacts.Result{To: to, Outcome: artifacts.OutcomeRefused, Detail: err.Error(), At: time.Now()}
 	return c.report(cfg, res, err)
 }
 
@@ -422,6 +446,21 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
 	if err = os.Rename(f.Name(), path); err != nil {
 		return err
 	}
+	return syncDir(dir)
+}
+
+// removeFileDurably removes path, then fsyncs its directory so that the
+// removal survives a crash. A missing file is not an error.
+func removeFileDurably(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// syncDir fsyncs a directory so that the entries made or removed in it survive
+// a crash.
+func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
 		return err
