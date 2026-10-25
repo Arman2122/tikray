@@ -332,6 +332,18 @@ func TestValidateRejects(t *testing.T) {
 		{"outbound loopback", withOutbound(`{"protocol":"loopback"}`), "servers[0].outbound.protocol"},
 		{"outbound freedom in capitals", withOutbound(`{"protocol":"Freedom"}`), "servers[0].outbound.protocol"},
 		{"outbound freedom under a second protocol key", withOutbound(`{"protocol":"vless","Protocol":"freedom"}`), "servers[0].outbound.protocol"},
+		// xray's outboundConfigLoader also knows freedom as direct and
+		// blackhole as block, and it lower-cases the protocol with
+		// strings.ToLower, which makes U+0130 an i and the Kelvin sign
+		// U+212A a k.
+		{"outbound direct", withOutbound(`{"protocol":"direct"}`), "servers[0].outbound.protocol"},
+		{"outbound Direct", withOutbound(`{"protocol":"Direct"}`), "servers[0].outbound.protocol"},
+		{"outbound block", withOutbound(`{"protocol":"block"}`), "servers[0].outbound.protocol"},
+		{"outbound BLOCK", withOutbound(`{"protocol":"BLOCK"}`), "servers[0].outbound.protocol"},
+		{"outbound direct with a dotted capital I", withOutbound(`{"protocol":"dİrect"}`), "servers[0].outbound.protocol"},
+		{"outbound block with a Kelvin sign", withOutbound(`{"protocol":"blocK"}`), "servers[0].outbound.protocol"},
+		{"outbound loopback with a Kelvin sign", withOutbound(`{"protocol":"loopbacK"}`), "servers[0].outbound.protocol"},
+		{"outbound direct under a second protocol key", withOutbound(`{"protocol":"vless","PROTOCOL":"direct"}`), "servers[0].outbound.protocol"},
 		{"outbound tag", withOutbound(`{"protocol":"vless","tag":"mine"}`), "servers[0].outbound.tag"},
 		{"outbound tag in capitals", withOutbound(`{"protocol":"vless","Tag":"mine"}`), "servers[0].outbound.tag"},
 		{"outbound empty tag", withOutbound(`{"protocol":"vless","tag":""}`), "servers[0].outbound.tag"},

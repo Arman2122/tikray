@@ -33,7 +33,19 @@ var idRE = regexp.MustCompile(`^[0-9a-f]{8}$`)
 // traffic out direct, blackhole drops it, dns answers it and loopback hands it
 // back to xray's routing. A server using one would let kill-switch traffic
 // out direct, so none may be a server.
-var notProxies = map[string]bool{"freedom": true, "blackhole": true, "dns": true, "loopback": true}
+//
+// The list is every name that outboundConfigLoader in infra/conf/xray.go maps
+// to one of the four, in each supported release (26.1.18, 26.3.27 and
+// 26.10.21 alike): "direct" is freedom and "block" is blackhole there. The
+// loader looks a name up after strings.ToLower, as outbound does here, so
+// "Direct" or "blocK" (a Kelvin sign) is the same name. A release that
+// adds a name for one of them must add it here.
+var notProxies = map[string]bool{
+	"freedom": true, "direct": true,
+	"blackhole": true, "block": true,
+	"dns":      true,
+	"loopback": true,
+}
 
 // domainPrefixes are the matcher prefixes xray's router reads. A matcher
 // without a prefix is a substring match.
