@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -65,7 +66,9 @@ func testEnv(t *testing.T, st runnerapi.Status) (vars map[string]string, data st
 	}
 	t.Setenv("TMPDIR", t.TempDir())
 	srv := fakeRunner(t, st)
-	return map[string]string{"TIKRAY_DATA": data, "TIKRAY_RUNNER_URL": srv.URL}, data
+	// Nothing listens on the API's address: apply, update and rollback take
+	// their direct paths, whatever else listens on this machine's port 443.
+	return map[string]string{"TIKRAY_DATA": data, "TIKRAY_RUNNER_URL": srv.URL, "TIKRAY_API": "https://" + closedAddr(t)}, data
 }
 
 func runCLI(t *testing.T, vars map[string]string, args ...string) (code int, stdout, stderr string) {
@@ -794,6 +797,7 @@ type trialRunner struct {
 	mu       sync.Mutex
 	st       runnerapi.Status
 	reject   bool                  // trial answers 422, as it does for a config xray run -test refuses
+	rejected string                // what xray said then; "xray says no" if empty
 	cands    []runnerapi.Candidate // as each trial found candidate.json
 	apiCalls [][]string            // the arguments of each call to the xray API
 }
@@ -871,7 +875,7 @@ func (r *trialRunner) trial(w http.ResponseWriter) {
 	switch {
 	case r.reject:
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		io.WriteString(w, `{"error":"test_failed","detail":"xray says no"}`)
+		json.NewEncoder(w).Encode(map[string]string{"error": "test_failed", "detail": cmp.Or(r.rejected, "xray says no")})
 	case r.st.State == runnerapi.StateTrial:
 		w.WriteHeader(http.StatusConflict)
 		io.WriteString(w, `{"error":"busy"}`)

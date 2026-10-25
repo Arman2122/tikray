@@ -24,6 +24,8 @@ func TestConfigFromEnv(t *testing.T) {
 		Data:     "/data",
 		Arch:     runtime.GOARCH,
 		Upstream: "https://github.com/XTLS/Xray-core",
+		Listen:   ":443",
+		API:      "https://127.0.0.1:443",
 	}
 
 	t.Run("defaults", func(t *testing.T) {
@@ -48,11 +50,19 @@ func TestConfigFromEnv(t *testing.T) {
 			"TIKRAY_INDEX_URLS":        "https://idx1.example/hashes.json, https://idx2.example/hashes.json",
 			"TIKRAY_INDEX_PUBKEY_FILE": "/data/inbox/index.pub",
 			"TIKRAY_PROBE_URL":         "https://probe.example/204",
+			"TIKRAY_LISTEN":            "10.0.0.2:8443",
+			"TIKRAY_API":               "https://10.0.0.2:8443",
+			"TIKRAY_API_TOKEN":         "a-token",
+			"TIKRAY_API_FINGERPRINT":   strings.Repeat("ab", 32),
 		}))
 		if err != nil {
 			t.Fatal(err)
 		}
 		want := Config{
+			Listen:          "10.0.0.2:8443",
+			API:             "https://10.0.0.2:8443",
+			APIToken:        "a-token",
+			APIFingerprint:  strings.Repeat("ab", 32),
 			Data:            "/srv/tikray",
 			Arch:            "amd64",
 			RunnerURL:       "http://10.0.0.2:9090",
@@ -90,6 +100,12 @@ func TestConfigFromEnv(t *testing.T) {
 		{"mirror without {file}", map[string]string{"TIKRAY_MIRRORS": "https://ok.example/{file},https://m.example/{version}/xray.zip"}, "https://m.example/{version}/xray.zip"},
 		{"mirror that is not an http(s) URL", map[string]string{"TIKRAY_MIRRORS": "ftp://m.example/{file}"}, "ftp://m.example/{file}"},
 		{"index URLs without a key", map[string]string{"TIKRAY_INDEX_URLS": "https://idx.example/hashes.json"}, "TIKRAY_INDEX_PUBKEY_FILE"},
+		{"API over plain http", map[string]string{"TIKRAY_API": "http://127.0.0.1:443"}, "TIKRAY_API"},
+		{"API without a scheme", map[string]string{"TIKRAY_API": "127.0.0.1:443"}, "TIKRAY_API"},
+		{"API without a host", map[string]string{"TIKRAY_API": "https://"}, "TIKRAY_API"},
+		{"API with a password", map[string]string{"TIKRAY_API": "https://admin:hunter2@127.0.0.1"}, "TIKRAY_API"},
+		{"fingerprint that is not hex", map[string]string{"TIKRAY_API_FINGERPRINT": "tikray"}, "TIKRAY_API_FINGERPRINT"},
+		{"fingerprint too short", map[string]string{"TIKRAY_API_FINGERPRINT": "abcd"}, "TIKRAY_API_FINGERPRINT"},
 	}
 	for _, tc := range bad {
 		t.Run(tc.name, func(t *testing.T) {
@@ -100,8 +116,20 @@ func TestConfigFromEnv(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error %q does not mention %q", err, tc.want)
 			}
+			if strings.Contains(err.Error(), "hunter2") {
+				t.Errorf("error %q repeats the password in the URL", err)
+			}
 		})
 	}
+
+	t.Run("fingerprint forms", func(t *testing.T) {
+		// The fingerprint a person copies: either case, colons between bytes.
+		for _, in := range []string{strings.Repeat("AB", 32), strings.Repeat("ab:", 31) + "ab", " " + strings.Repeat("ab", 32) + "\n"} {
+			if _, err := configFromEnv(envOf(map[string]string{"TIKRAY_API_FINGERPRINT": in})); err != nil {
+				t.Errorf("fingerprint %q: %v", in, err)
+			}
+		}
+	})
 }
 
 func TestDefaultsFromState(t *testing.T) {
@@ -112,7 +140,7 @@ func TestDefaultsFromState(t *testing.T) {
 	})
 
 	t.Run("no variables", func(t *testing.T) {
-		cfg, st, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": data}))
+		cfg, st, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": data}), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -136,7 +164,7 @@ func TestDefaultsFromState(t *testing.T) {
 			"TIKRAY_XRAY_API":   "10.0.0.2:10086",
 			"TIKRAY_PROBE_URL":  "https://probe.env.example/204",
 		}
-		cfg, _, err := loadConfig(envOf(all))
+		cfg, _, err := loadConfig(envOf(all), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -145,7 +173,7 @@ func TestDefaultsFromState(t *testing.T) {
 		}
 		// Each one on its own leaves the others to the state.
 		for _, key := range []string{"TIKRAY_RUNNER_URL", "TIKRAY_SOCKS", "TIKRAY_XRAY_API", "TIKRAY_PROBE_URL"} {
-			cfg, _, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": data, key: all[key]}))
+			cfg, _, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": data, key: all[key]}), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -160,7 +188,7 @@ func TestDefaultsFromState(t *testing.T) {
 
 	t.Run("no state file", func(t *testing.T) {
 		// A fresh install: the default subnet, which is where M1 pointed.
-		cfg, _, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": t.TempDir()}))
+		cfg, _, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": t.TempDir()}), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -176,7 +204,7 @@ func TestDefaultsFromState(t *testing.T) {
 	t.Run("bad environment comes first", func(t *testing.T) {
 		// The state is not even opened: the data root is left as it was.
 		fresh := t.TempDir()
-		_, _, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": fresh, "TIKRAY_MIRRORS": "https://m.example/nofile"}))
+		_, _, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": fresh, "TIKRAY_MIRRORS": "https://m.example/nofile"}), nil)
 		if err == nil || !strings.Contains(err.Error(), "TIKRAY_MIRRORS") {
 			t.Fatalf("error %v, want one naming TIKRAY_MIRRORS", err)
 		}
@@ -193,7 +221,7 @@ func TestDefaultsFromState(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(bad, "state", "state.v1.json"), []byte("{not json"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		_, _, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": bad}))
+		_, _, err := loadConfig(envOf(map[string]string{"TIKRAY_DATA": bad}), nil)
 		if err == nil || !strings.Contains(err.Error(), "state.v1.json") {
 			t.Errorf("error %v, want one naming the state file", err)
 		}

@@ -1,6 +1,20 @@
-// Command tikray is the control plane's command line. It renders the xray
-// config from the state and drives xray-core updates; the daemon, REST API and
-// UI come with M2b.
+// Command tikray is the control plane: the long-running service, and its
+// command line.
+//
+//	tikray serve
+//
+//	tikray server add <link> | --json FILE [--name N]
+//	tikray server list [--json]
+//	tikray server rm|enable|disable <id>
+//	tikray sub add <url> [--name N] [--interval 24h]
+//	tikray sub list [--json]
+//	tikray sub rm|refresh <id>
+//	tikray device set <ip|cidr> <direct|smart|full> [--kill-switch] [--name N]
+//	tikray device rm <ip|cidr>
+//	tikray device list [--json]
+//	tikray policy default <direct|smart|full> [--kill-switch]
+//	tikray status [--json]
+//	tikray events [--after N]
 //
 //	tikray config render [--core VER]
 //	tikray apply
@@ -8,6 +22,26 @@
 //	tikray core rollback
 //	tikray core list [--json]
 //	tikray core status
+//
+// serve owns the state: it keeps xray applied to it, refreshes the
+// subscriptions, watches the proxy, and serves the API (see serve.go). The
+// server, sub, device, policy, status and events commands talk to it over
+// HTTPS, and fail with "tikray serve is not running" where nothing answers;
+// they never write the state themselves. Their output is for people: a table
+// or a line, with no credential in it (no outbound's, no subscription's URL,
+// never the API token). --json prints what the API answered, as it is,
+// credentials and URLs included. See commands.go and commands_servers.go.
+//
+// apply, core update and core rollback go through the daemon too when it
+// answers GET /healthz within two seconds: it applies, and the command prints
+// and saves its result as below. Where nothing listens (the connection is
+// refused), they are the direct commands described below, which run the
+// updater in this process. Any other failure to reach the daemon, a certificate
+// that is not the pinned one or an answer that does not come in time, is an
+// error and never a reason to go direct: two processes would then write the
+// state. core update --config FILE has no route through the daemon and is
+// refused while one runs. config render, core list and core status always read
+// directly.
 //
 // config render prints the config the state renders to, for xray-core VER
 // (default: the runner's active core). It only reads: the one thing it may
@@ -38,12 +72,18 @@
 // from it: they go on with a warning, using the addresses of a fresh install
 // where no variable names them. config render, which has nothing to render
 // then, says that the state can't be read before it asks the runner anything.
+// A server that this tikray refuses is disabled when the state is opened, and
+// each command that opens it says so on stderr, once for each such server.
 //
 // Environment (see Config): TIKRAY_DATA, TIKRAY_ARCH, TIKRAY_RUNNER_URL,
 // TIKRAY_SOCKS, TIKRAY_XRAY_API, TIKRAY_UPSTREAM, TIKRAY_MIRRORS,
 // TIKRAY_INDEX_URLS, TIKRAY_INDEX_PUBKEY_FILE, TIKRAY_PROBE_URL. The runner's
 // three addresses default to its address on the state's private subnet, and
-// the probe URL to the state's health.probe_url.
+// the probe URL to the state's health.probe_url. serve listens on
+// TIKRAY_LISTEN (default :443); the commands reach it at TIKRAY_API (default
+// https://127.0.0.1:443) with TIKRAY_API_TOKEN and TIKRAY_API_FINGERPRINT,
+// which default to the files serve makes in <data>/state: api.token and
+// tls.crt.
 package main
 
 import (
@@ -56,15 +96,18 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
+	"github.com/Arman2122/tikray/internal/apiclient"
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/atomicfile"
 	"github.com/Arman2122/tikray/internal/render"
 	"github.com/Arman2122/tikray/internal/runnerapi"
+	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 	"github.com/Arman2122/tikray/internal/xrayver"
 )
@@ -78,9 +121,39 @@ const (
 const usageText = `usage: tikray <command> [flags]
 
 commands:
-  config render [--core VER]
-                 print the xray config rendered from the state, for xray-core
-                 VER (default: the runner's active core)
+  serve          run the service: keep xray applied to the state, refresh the
+                 subscriptions, watch the proxy, and serve the API on
+                 TIKRAY_LISTEN. It prints the certificate's fingerprint.
+
+The commands below talk to a running "tikray serve" and fail with "tikray
+serve is not running" without one. --json prints the API's answer as it is,
+credentials and subscription URLs included; the tables leave them out.
+
+  server add <link> | --json FILE [--name N]
+                 add a server from a share link, or from an xray outbound
+                 object in FILE (which needs --name)
+  server list [--json]
+  server rm <id>
+  server enable <id>
+  server disable <id>
+  sub add <url> [--name N] [--interval 24h]
+                 add a subscription (named after its host without --name)
+  sub list [--json]
+  sub rm <id>
+  sub refresh <id>
+                 fetch the subscription now
+  device set <ip|cidr> <direct|smart|full> [--kill-switch] [--name N]
+                 set the policy of a device, or of a range of them
+  device rm <ip|cidr>
+  device list [--json]
+  policy default <direct|smart|full> [--kill-switch]
+                 set the policy of the devices that are not listed
+  status [--json]
+                 print whether the state is applied, the core, the proxy's
+                 health and each server's
+  events [--after N]
+                 print what the service has done, oldest first
+
   apply          render the config from the state for the active core and put
                  it on trial
   core update <version|latest> [--config FILE] [--allow-unverified]
@@ -90,6 +163,14 @@ commands:
                  and trials the config when the state changed.
   core rollback  switch back to the previously committed core, with a config
                  rendered from the state
+
+apply, core update and core rollback go through "tikray serve" when it
+answers, and run in this process when nothing listens. core update --config
+needs the service stopped.
+
+  config render [--core VER]
+                 print the xray config rendered from the state, for xray-core
+                 VER (default: the runner's active core)
   core list [--json]
                  list the installed cores
   core status    print the runner's status as JSON
@@ -99,6 +180,12 @@ TIKRAY_RUNNER_URL, TIKRAY_SOCKS, TIKRAY_XRAY_API, TIKRAY_UPSTREAM,
 TIKRAY_MIRRORS, TIKRAY_INDEX_URLS, TIKRAY_INDEX_PUBKEY_FILE and
 TIKRAY_PROBE_URL. The runner's addresses default to the one the state's
 private subnet gives it, and the probe URL to the state's.
+
+serve listens on TIKRAY_LISTEN (default :443). The commands reach it at
+TIKRAY_API (default https://127.0.0.1:443), with the token in
+TIKRAY_API_TOKEN and the certificate's SHA-256 fingerprint in
+TIKRAY_API_FINGERPRINT; where those are unset they come from state/api.token
+and state/tls.crt in the data root, which serve makes.
 `
 
 func main() {
@@ -138,6 +225,20 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		return c.apply(ctx, args[1:])
 	case "core":
 		return c.core(ctx, args[1:])
+	case "serve":
+		return c.serve(ctx, args[1:])
+	case "server":
+		return c.serverCommand(ctx, args[1:])
+	case "sub":
+		return c.subCommand(ctx, args[1:])
+	case "device":
+		return c.deviceCommand(ctx, args[1:])
+	case "policy":
+		return c.policyCommand(ctx, args[1:])
+	case "status":
+		return c.statusCommand(ctx, args[1:])
+	case "events":
+		return c.eventsCommand(ctx, args[1:])
 	}
 	return c.usageError(fmt.Sprintf("unknown command %q", args[0]))
 }
@@ -168,7 +269,7 @@ func (c *cli) core(ctx context.Context, args []string) int {
 	case "list":
 		return c.list(args[1:])
 	case "status":
-		return c.status(ctx, args[1:])
+		return c.coreStatus(ctx, args[1:])
 	case "help", "-h", "--help":
 		io.WriteString(c.stdout, usageText)
 		return 0
@@ -195,18 +296,36 @@ func (c *cli) fail(err error) int {
 // may come in either order. want is the number of positional arguments. The
 // ok result is false when the command is not to run, and code is its exit code.
 func (c *cli) parse(fs *flag.FlagSet, args []string, want int) (pos []string, code int, ok bool) {
+	return c.parseRange(fs, args, want, want)
+}
+
+// parseRange is parse for a command that takes from min to max positional
+// arguments.
+func (c *cli) parseRange(fs *flag.FlagSet, args []string, min, max int) (pos []string, code int, ok bool) {
 	pos, err := parseInterleaved(fs, args)
 	switch {
 	case errors.Is(err, flag.ErrHelp):
 		return nil, 0, false // the FlagSet has printed the usage
 	case err != nil:
 		return nil, 2, false // so has it the error
-	case len(pos) != want:
-		fmt.Fprintf(c.stderr, "%s: want %d argument(s), got %d\n", fs.Name(), want, len(pos))
+	case len(pos) < min || len(pos) > max:
+		want := fmt.Sprint(min)
+		if max != min {
+			want = fmt.Sprintf("%d to %d", min, max)
+		}
+		fmt.Fprintf(c.stderr, "%s: want %s argument(s), got %d\n", fs.Name(), want, len(pos))
 		fs.Usage()
 		return nil, 2, false
 	}
 	return pos, 0, true
+}
+
+// flagError reports that the arguments of a command that parsed are no good,
+// as a usage error: msg and the command's usage, on stderr.
+func (c *cli) flagError(fs *flag.FlagSet, msg string) int {
+	fmt.Fprintf(c.stderr, "%s: %s\n", fs.Name(), msg)
+	fs.Usage()
+	return 2
 }
 
 // newFlagSet is the FlagSet of one subcommand, such as "core update"; usage is
@@ -246,7 +365,14 @@ func (c *cli) update(ctx context.Context, args []string) int {
 	if !ok {
 		return code
 	}
-	return c.runUpdater(ctx, artifacts.Result{To: pos[0]}, *configFile == "", func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
+	// The API takes no config file: an update with one is the direct path's.
+	var viaAPI apiCall
+	if *configFile == "" {
+		viaAPI = func(cl *apiclient.Client, ctx context.Context) (apiclient.Response, error) {
+			return cl.CoreUpdate(ctx, pos[0], *allow)
+		}
+	}
+	return c.runUpdater(ctx, artifacts.Result{To: pos[0]}, *configFile == "", viaAPI, func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
 		return u.Update(ctx, pos[0], artifacts.UpdateOptions{ConfigFile: *configFile, AllowUnverified: *allow})
 	})
 }
@@ -256,7 +382,7 @@ func (c *cli) rollback(ctx context.Context, args []string) int {
 	if _, code, ok := c.parse(fs, args, 0); !ok {
 		return code
 	}
-	return c.runUpdater(ctx, artifacts.Result{}, true, func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
+	return c.runUpdater(ctx, artifacts.Result{}, true, (*apiclient.Client).CoreRollback, func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
 		return u.Rollback(ctx)
 	})
 }
@@ -266,7 +392,7 @@ func (c *cli) apply(ctx context.Context, args []string) int {
 	if _, code, ok := c.parse(fs, args, 0); !ok {
 		return code
 	}
-	return c.runUpdater(ctx, artifacts.Result{Kind: artifacts.KindConfig}, true, func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
+	return c.runUpdater(ctx, artifacts.Result{Kind: artifacts.KindConfig}, true, (*apiclient.Client).Apply, func(ctx context.Context, u *artifacts.CoreUpdater) (artifacts.Result, error) {
 		return u.Apply(ctx)
 	})
 }
@@ -284,11 +410,20 @@ func (c *cli) apply(ctx context.Context, args []string) int {
 // environment or an unusable data root leave the file as it was; there is no
 // place to write one.
 //
+// The daemon is looked for next (see daemon). Where tikray serve answers, it
+// owns the state and runs the updater: viaAPI asks it to, and its result is
+// reported like the direct path's. A nil viaAPI is a command the API has no
+// route for, which is refused. Where nothing listens, this process runs the
+// updater, as below; no other failure to reach the daemon does, since two
+// processes would then write the state. The daemon's failure of an operation is
+// reported as a refused result with the daemon's words, since all the command
+// knows is that it failed.
+//
 // The state is read once, and the render, the health checks and the runner's
 // addresses all follow that one snapshot. With a config file (not fromState)
 // the state supplies the addresses alone, and one that cannot be read is
 // replaced, with a warning, by the default state.
-func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, fromState bool, do func(context.Context, *artifacts.CoreUpdater) (artifacts.Result, error)) int {
+func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, fromState bool, viaAPI apiCall, do func(context.Context, *artifacts.CoreUpdater) (artifacts.Result, error)) int {
 	cfg, err := configFromEnv(c.getenv)
 	if err != nil {
 		return c.fail(err)
@@ -299,10 +434,17 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, fromState b
 	if err := removeFileDurably(filepath.Join(stateDir(cfg.Data), lastResultName)); err != nil {
 		return c.refused(cfg, base, fmt.Errorf("removing the previous result: %w", err))
 	}
+	cl, running, err := c.daemon(ctx, cfg)
+	if err != nil {
+		return c.refused(cfg, base, err)
+	}
+	if running {
+		return c.viaDaemon(ctx, cfg, base, cl, viaAPI)
+	}
 	var st store.State
 	var rev uint64
 	if fromState {
-		if st, rev, err = readState(cfg.Data); err != nil {
+		if st, rev, err = readState(cfg.Data, c.stderr); err != nil {
 			return c.refused(cfg, base, err)
 		}
 	} else {
@@ -328,6 +470,10 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, fromState b
 	if err != nil {
 		return c.refused(cfg, base, err)
 	}
+	// What xray says of a config can quote the credentials in it, and the
+	// result, the history and stderr must not repeat them (the daemon's
+	// service sets the same).
+	u.Redact = service.RedactorFor(st)
 	// Revision 0 is no state file: the render is the default state's, which
 	// must not replace a config the runner already runs.
 	u.NoState = fromState && rev == 0
@@ -344,7 +490,7 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, fromState b
 // command then goes on with the addresses of a fresh install where no
 // variable names them.
 func (c *cli) addressState(data string) store.State {
-	st, _, err := readState(data)
+	st, _, err := readState(data, c.stderr)
 	if err != nil {
 		fmt.Fprintf(c.stderr, "tikray: warning: %s; taking the runner's default addresses from the default state\n",
 			strings.ReplaceAll(err.Error(), "\n", "; "))
@@ -378,7 +524,7 @@ func (c *cli) configRender(ctx context.Context, args []string) int {
 	if _, code, ok := c.parse(fs, args, 0); !ok {
 		return code
 	}
-	cfg, st, err := loadConfig(c.getenv)
+	cfg, st, err := loadConfig(c.getenv, c.stderr)
 	if err != nil {
 		return c.fail(err)
 	}
@@ -510,7 +656,7 @@ func orDash(s string) string {
 	return s
 }
 
-func (c *cli) status(ctx context.Context, args []string) int {
+func (c *cli) coreStatus(ctx context.Context, args []string) int {
 	fs := c.newFlagSet("core status", "core status")
 	if _, code, ok := c.parse(fs, args, 0); !ok {
 		return code
@@ -600,13 +746,31 @@ func healthChecks(cfg Config, runner *runnerapi.Client) (health, proxy artifacts
 // (Health). rend renders the config of an update, rollback or apply; nil leaves
 // an update to its --config file.
 func newUpdater(cfg Config, runner *runnerapi.Client, log io.Writer, rend artifacts.Renderer, socks bool) (*artifacts.CoreUpdater, error) {
-	var pub []byte
-	if cfg.IndexPubKeyFile != "" {
-		var err error
-		if pub, err = os.ReadFile(cfg.IndexPubKeyFile); err != nil {
-			return nil, fmt.Errorf("reading the hash index key: %w", err)
-		}
+	pub, err := indexKey(cfg)
+	if err != nil {
+		return nil, err
 	}
+	return buildUpdater(cfg, pub, runner, log, rend, socks), nil
+}
+
+// indexKey reads the key the hash index is signed with, nil when there is no
+// key file.
+func indexKey(cfg Config) ([]byte, error) {
+	if cfg.IndexPubKeyFile == "" {
+		return nil, nil
+	}
+	pub, err := os.ReadFile(cfg.IndexPubKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading the hash index key: %w", err)
+	}
+	return pub, nil
+}
+
+// buildUpdater is newUpdater with the index key already read (see indexKey),
+// which is all that can fail in it: tikray serve reads the key once, and makes
+// an updater for each state. It shares no mutable value with cfg, pub or
+// another updater it made.
+func buildUpdater(cfg Config, pub []byte, runner *runnerapi.Client, log io.Writer, rend artifacts.Renderer, socks bool) *artifacts.CoreUpdater {
 	upstream := []artifacts.Source{
 		artifacts.Direct(cfg.Upstream, nil),
 		artifacts.Proxy(cfg.Socks, cfg.Upstream, proxyHealthy(runner)),
@@ -624,13 +788,13 @@ func newUpdater(cfg Config, runner *runnerapi.Client, log io.Writer, rend artifa
 		Data:        cfg.Data,
 		Arch:        cfg.Arch,
 		Fetch:       artifacts.Chain{Sources: fetch},
-		Verify:      artifacts.Verifier{Upstream: artifacts.Chain{Sources: upstream}, IndexURLs: cfg.IndexURLs, IndexPub: pub},
+		Verify:      artifacts.Verifier{Upstream: artifacts.Chain{Sources: upstream}, IndexURLs: slices.Clone(cfg.IndexURLs), IndexPub: slices.Clone(pub)},
 		Runner:      runner,
 		Render:      rend,
 		Health:      health,
 		ProxyHealth: proxy,
 		Log:         log,
-	}, nil
+	}
 }
 
 // removeFileDurably removes path, then fsyncs its directory so that the

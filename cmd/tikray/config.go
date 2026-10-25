@@ -1,14 +1,20 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/Arman2122/tikray/internal/apiclient"
 	"github.com/Arman2122/tikray/internal/render"
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -18,6 +24,17 @@ import (
 type Config struct {
 	Data string // the data root (TIKRAY_DATA)
 	Arch string // GOARCH of the cores to fetch (TIKRAY_ARCH)
+	// Listen is where tikray serve listens (TIKRAY_LISTEN).
+	Listen string
+	// API is the address of tikray serve's API, for the commands that talk to
+	// it (TIKRAY_API). APIToken and APIFingerprint (TIKRAY_API_TOKEN and
+	// TIKRAY_API_FINGERPRINT, the latter in the normal form of
+	// apiclient.NormalizeFingerprint) are empty where their variable is unset:
+	// apiClient and apiToken then take them from the files tikray serve
+	// makes.
+	API            string
+	APIToken       string
+	APIFingerprint string
 	// RunnerURL, Socks and XrayAPI default to the runner's address on the
 	// private subnet, which the state holds, and ProbeURL to the state's
 	// Health.ProbeURL. configFromEnv leaves them empty where their variable is
@@ -47,6 +64,11 @@ type Config struct {
 const (
 	defaultData     = "/data"
 	defaultUpstream = "https://github.com/XTLS/Xray-core"
+	// defaultListen is where tikray serve listens: every interface of the
+	// container, which has the bridge veth alone.
+	defaultListen = ":443"
+	// defaultAPI is where the CLI looks for it, from inside the container.
+	defaultAPI = "https://127.0.0.1:443"
 	// runnerPort is the port of the runner's control API, which
 	// cmd/tikray-runner serves on its address of the private subnet.
 	runnerPort = 8080
@@ -59,12 +81,23 @@ func stateDir(data string) string { return filepath.Join(data, "state") }
 // the state: a directory without one gives the default state at revision 0,
 // and the store is not changed. Opening the store makes the directory (0700)
 // if it is missing.
-func readState(data string) (store.State, uint64, error) {
+//
+// A server that this tikray refuses is disabled when the state is opened
+// (store.Open). If warn is not nil it gets one line for each, as the daemon
+// records them: "server <id> (<name>) disabled: <reason>".
+func readState(data string, warn io.Writer) (store.State, uint64, error) {
 	s, err := store.Open(stateDir(data))
 	if err != nil {
 		return store.State{}, 0, err
 	}
 	st, rev := s.State()
+	if warn != nil {
+		for _, id := range s.Degraded() {
+			if i := slices.IndexFunc(st.Servers, func(srv store.Server) bool { return srv.ID == id }); i >= 0 {
+				fmt.Fprintf(warn, "server %s (%s) disabled: %s\n", id, oneLine(st.Servers[i].Name), oneLine(st.Servers[i].Invalid))
+			}
+		}
+	}
 	return st, rev, nil
 }
 
@@ -93,12 +126,13 @@ func (c Config) withState(st store.State) Config {
 // configuration they give together with the state it was derived from. The
 // environment is checked first: a bad one never opens the state. A state
 // that cannot be read gives an error that starts "the state can't be read: ".
-func loadConfig(getenv func(string) string) (Config, store.State, error) {
+// warn is readState's.
+func loadConfig(getenv func(string) string, warn io.Writer) (Config, store.State, error) {
 	cfg, err := configFromEnv(getenv)
 	if err != nil {
 		return Config{}, store.State{}, err
 	}
-	st, _, err := readState(cfg.Data)
+	st, _, err := readState(cfg.Data, warn)
 	if err != nil {
 		return Config{}, store.State{}, fmt.Errorf("the state can't be read: %w", err)
 	}
@@ -128,6 +162,20 @@ func configFromEnv(getenv func(string) string) (Config, error) {
 		IndexURLs:       splitList(getenv("TIKRAY_INDEX_URLS")),
 		IndexPubKeyFile: getenv("TIKRAY_INDEX_PUBKEY_FILE"),
 		ProbeURL:        getenv("TIKRAY_PROBE_URL"),
+		Listen:          str("TIKRAY_LISTEN", defaultListen),
+		API:             str("TIKRAY_API", defaultAPI),
+		APIToken:        strings.TrimSpace(getenv("TIKRAY_API_TOKEN")),
+	}
+	// The messages below never repeat the value: a URL can hold a password.
+	if err := checkAPI(cfg.API); err != nil {
+		return Config{}, fmt.Errorf("TIKRAY_API: %w", err)
+	}
+	if v := getenv("TIKRAY_API_FINGERPRINT"); strings.TrimSpace(v) != "" {
+		fp, err := apiclient.NormalizeFingerprint(v)
+		if err != nil {
+			return Config{}, errors.New("TIKRAY_API_FINGERPRINT: want the SHA-256 of the certificate, as 64 hex digits (colons between the bytes are fine)")
+		}
+		cfg.APIFingerprint = fp
 	}
 	for _, m := range cfg.Mirrors {
 		if err := checkMirror(m); err != nil {
@@ -152,6 +200,61 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// checkAPI checks the address of the API: an https URL with a host, and no user
+// info, which a person would put a password in. The error does not repeat it.
+func checkAPI(s string) error {
+	u, err := url.Parse(s)
+	switch {
+	case err != nil, u.Scheme != "https", u.Host == "":
+		return errors.New("want an https URL with a host, such as https://127.0.0.1:443")
+	case u.User != nil:
+		return errors.New("the URL must not hold a user name or a password; the token is TIKRAY_API_TOKEN")
+	}
+	return nil
+}
+
+// apiClient returns the client of the daemon at c.API, without its token (see
+// apiToken). It trusts the certificate with the fingerprint of
+// TIKRAY_API_FINGERPRINT, or else the one in <data>/state/tls.crt, which tikray
+// serve made. Where neither exists the client has no fingerprint and trusts
+// nothing: a connection refused still shows that no daemon is there, and one
+// that is made is refused in the handshake.
+func (c Config) apiClient() (*apiclient.Client, error) {
+	fp := c.APIFingerprint
+	if fp == "" {
+		path := filepath.Join(stateDir(c.Data), "tls.crt")
+		b, err := os.ReadFile(path)
+		switch {
+		case err == nil:
+			if fp, err = apiclient.FingerprintOfPEM(b); err != nil {
+				return nil, fmt.Errorf("%s: %w", path, err)
+			}
+		case !errors.Is(err, fs.ErrNotExist):
+			return nil, fmt.Errorf("reading the API certificate: %w", err)
+		}
+	}
+	return &apiclient.Client{BaseURL: c.API, Fingerprint: fp}, nil
+}
+
+// apiToken is the token for the API: TIKRAY_API_TOKEN, or else the contents of
+// <data>/state/api.token, which tikray serve made. It is only read once a
+// daemon has answered, and no error repeats it.
+func (c Config) apiToken() (string, error) {
+	if c.APIToken != "" {
+		return c.APIToken, nil
+	}
+	path := filepath.Join(stateDir(c.Data), "api.token")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("no API token: TIKRAY_API_TOKEN is not set, and %w", err)
+	}
+	tok := strings.TrimSpace(string(b))
+	if tok == "" {
+		return "", fmt.Errorf("no API token: TIKRAY_API_TOKEN is not set, and %s is empty", path)
+	}
+	return tok, nil
 }
 
 // checkMirror applies the rules artifacts.Mirror holds a template to, so that
