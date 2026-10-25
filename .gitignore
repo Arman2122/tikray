@@ -3,3 +3,4 @@
 *.part
 # Filtered lab runs (go test -run with a subtest filter)
 spike/m0/results/*-partial.json
+test/e2e/results/*-partial.json

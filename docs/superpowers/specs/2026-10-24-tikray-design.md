@@ -572,7 +572,16 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
   - failover between two servers;
   - DNS paths and the IPv6 leak guard;
   - drift repair after deleting a tikray rule;
-  - xray update, plus an update with a broken binary that must revert;
+  - xray update, plus an update with a broken binary that must revert. Runs
+    since M1 (`TestCoreLifecycle` in `test/e2e`, with the real images and a
+    fake GitHub and mirror): bootstrap from an empty runner; an update to the
+    newest release through the proxy while GitHub refuses direct requests; a
+    core that `xray run -test` rejects (an unverified inbox upload) and one
+    that crashes within 10 s, both reverted with traffic still proxied; an
+    install from a mirror verified by the signed hash index while GitHub is
+    down; rollback; pruning to two slots; a power cut during a trial, after
+    which the runner boots from `active.json` and records `reboot`; and the
+    runner's ping answer going down during a trial and back up after it;
   - geo update and address-list diff;
   - tikray self-update and watchdog rollback;
   - uninstall leaves zero `tikray:` objects.
@@ -619,7 +628,7 @@ docs/
 | Milestone | Outcome |
 |---|---|
 | **M0: data-path spike** | **Lab done:** all 22 checks pass on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25) with the newest xray; the real-hardware benchmark is pending. See `docs/superpowers/findings/2026-10-24-m0-data-path.md`. On RouterOS CHR ARM64 and real hardware, prove: xray TUN inbound inside a RouterOS container, mangle routing into it, no source NAT, sniffing with `routeOnly`, UDP, DNS redirect, fallback. Measure throughput and RAM. If something blocks this path, we change the design before building on it. (QUIC sniffing moved to M3: no QUIC fixture in M0.) |
-| **M1: runner + artifacts** | Runner with trial protocol; fetch chain, verification, slots; xray update and rollback end to end. |
+| **M1: runner + artifacts** | **Done:** the real `tikray-runner` and `tikray` images take xray-core through all nine lifecycle scenarios of `TestCoreLifecycle` (`test/e2e/core_lab_test.go`, §8.4) on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25), with 26.1.18, 26.3.27 and the newest release, 26.10.21. Results: `test/e2e/results/`. Runner with trial protocol; fetch chain, verification, slots; xray update and rollback end to end. |
 | **M2: control-plane core** | `store`, `render`, `xray` client, `sharelink`, `subscription`, `health`, REST API, CLI. |
 | **M3: RouterOS** | `install.rsc`, reconciler, version adapters, watchdog, uninstall, CHR e2e suite. |
 | **M4: web UI** | Dashboard, servers and subscriptions, devices and policies, routing, updates (history and rollback), settings, logs. |
