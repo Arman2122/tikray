@@ -32,7 +32,8 @@ func (r *renderer) dns() (dnsConfig, []rule) {
 		})
 		// Only plain DNS to the resolver, on port 53, goes direct. A remote
 		// resolver on the same host, such as DoH on 443, still takes the
-		// rule below; Validate refuses a plain remote at this address.
+		// rule below; Validate refuses a remote resolver on port 53 of this
+		// address, plain or DoH.
 		l.add(toOutbound(TagDirect), matchIP([]string{host(resolver)}), matchPort(plainDNSPort))
 	}
 	c.Servers = append(c.Servers, r.st.DNS.Remote)

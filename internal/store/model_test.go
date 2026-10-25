@@ -429,6 +429,14 @@ func TestValidateRejects(t *testing.T) {
 			s.Network.Subnet = netip.MustParsePrefix("10.9.8.0/29")
 			s.DNS.Remote = "10.9.8.1"
 		}, "dns.remote"},
+		// The domestic resolver's port 53 goes out direct, DoH to it as well.
+		{"dns remote is DoH on port 53 of the domestic resolver", func(s *State) {
+			s.DNS.Domestic = netip.MustParseAddr("203.0.113.53")
+			s.DNS.Remote = "https://203.0.113.53:53/dns-query"
+		}, "dns.remote"},
+		{"dns remote is DoH on port 53 of the router", func(s *State) { s.DNS.Remote = "https://172.31.255.1:53/dns-query" }, "dns.remote"},
+		{"dns remote is DoH on port 053 of the router", func(s *State) { s.DNS.Remote = "https://172.31.255.1:053/dns-query" }, "dns.remote"},
+		{"dns remote is DoH on port 53 of the router, mapped into IPv6", func(s *State) { s.DNS.Remote = "https://[::ffff:172.31.255.1]:53/dns-query" }, "dns.remote"},
 
 		{"subnet /30", func(s *State) { s.Network.Subnet = netip.MustParsePrefix("172.31.255.0/30") }, "network.subnet"},
 		{"subnet ipv6", func(s *State) { s.Network.Subnet = netip.MustParsePrefix("fd00::/64") }, "network.subnet"},
@@ -587,7 +595,9 @@ func TestValidateAccepts(t *testing.T) {
 		// DoH reaches the domestic resolver's host on another port, which
 		// render sends through the proxy.
 		{"DoH on the domestic resolver's host", "1.1.1.1", "https://1.1.1.1/dns-query"},
+		{"DoH on port 443 of the domestic resolver's host", "203.0.113.53", "https://203.0.113.53:443/dns-query"},
 		{"DoH on the router", "", "https://172.31.255.1/dns-query"},
+		{"DoH on port 53 of another host", "203.0.113.53", "https://203.0.113.54:53/dns-query"},
 		// With a domestic resolver set, the router is not the domestic one.
 		{"plain remote at the router beside a domestic resolver", "192.168.88.1", "172.31.255.1"},
 	} {

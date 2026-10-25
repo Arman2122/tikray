@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -277,7 +278,30 @@ func (p *problems) dns(d DNS, domestic netip.Addr) {
 		// The plain queries to the domestic resolver go out direct, so the
 		// remote resolver's would too, every name with them.
 		p.add("dns.remote", "is %s, the domestic resolver: the remote resolver must be another one, or every lookup goes out without the proxy", a)
+	case err != nil && dohOnPort53(d.Remote, domestic):
+		// Render sends whatever goes to port 53 of the domestic resolver out
+		// direct, DoH as well as plain DNS.
+		p.add("dns.remote", "is DoH on port 53 of %s, the domestic resolver, which goes out direct: every lookup would go out without the proxy (use another port, such as 443)", domestic)
 	}
+}
+
+// dohOnPort53 reports whether the DoH URL s is for port 53 of addr: its host
+// is addr, written as IPv4 or mapped into IPv6, and its port, or https's 443
+// when it names none, is 53.
+func dohOnPort53(s string, addr netip.Addr) bool {
+	u, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	if h, err := netip.ParseAddr(u.Hostname()); err != nil || h.Unmap() != addr {
+		return false
+	}
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n == 53
 }
 
 func (p *problems) network(n Network) {
