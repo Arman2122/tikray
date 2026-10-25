@@ -6,6 +6,9 @@
 // Kick). It and the operations a caller starts (ApplyNow, CoreUpdate,
 // CoreRollback) take one lock, so that only one of them runs at a time; a
 // change made while one runs leads to another apply after it.
+//
+// A second goroutine, the scheduler, refreshes the subscriptions that are due
+// (see RefreshSubscription and schedule). Run starts both.
 package service
 
 import (
@@ -25,6 +28,7 @@ import (
 	"github.com/Arman2122/tikray/internal/render"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/store"
+	"github.com/Arman2122/tikray/internal/subscription"
 	"github.com/Arman2122/tikray/internal/xrayver"
 )
 
@@ -84,6 +88,15 @@ type Config struct {
 	Now func() time.Time
 	// Log gets a line for each event; nil drops them.
 	Log io.Writer
+	// Fetcher makes the fetcher that a subscription refresh downloads with,
+	// for the state it refreshes in. A refresh sets its Accept itself. Nil
+	// means a fetcher that goes direct, and through the runner's SOCKS
+	// inbound at Socks when the monitor says the proxy works.
+	Fetcher func(st store.State) subscription.Fetcher
+	// Socks is the address (host:port) of the runner's SOCKS inbound, which
+	// the default Fetcher takes its second attempt through. Empty means the
+	// default Fetcher goes direct only.
+	Socks string
 }
 
 // Service owns the desired state and keeps xray applied to it.
@@ -106,6 +119,11 @@ type Service struct {
 	kicks   chan struct{}
 	running atomic.Bool
 
+	fetcher func(st store.State) subscription.Fetcher
+	// refreshing holds a token while a subscription refresh runs: a channel,
+	// so that a caller's context can end the wait.
+	refreshing chan struct{}
+
 	mu sync.Mutex // guards the fields below
 	// kicked counts the kicks, and served is the count a pass that ended
 	// had read when it started: the kicks up to it are served. retrying is
@@ -116,6 +134,9 @@ type Service struct {
 	// renderErr is the render error last recorded, so that Status records
 	// each one once.
 	renderErr string
+	// holds is, by subscription ID, the time before which the scheduler
+	// leaves a subscription whose refresh failed alone. It is in memory only.
+	holds map[string]time.Time
 
 	emu    sync.Mutex // guards events and seq, and orders the log's lines
 	events []Event
@@ -128,10 +149,13 @@ type Service struct {
 	// after makes the loop's timers: a time.Timer's channel and Stop, or a
 	// fake clock's in tests. Tests also set idle, called each time the loop
 	// is about to wait, and onWait, called when an operation has to wait
-	// for the lock.
-	after  func(time.Duration) (<-chan time.Time, func() bool)
-	idle   func()
-	onWait func()
+	// for the lock. The scheduler has the same, schedAfter and schedIdle,
+	// apart from the loop's, so that its timers are no part of the loop's.
+	after      func(time.Duration) (<-chan time.Time, func() bool)
+	idle       func()
+	onWait     func()
+	schedAfter func(time.Duration) (<-chan time.Time, func() bool)
+	schedIdle  func()
 }
 
 // New makes a service from c. Every server that c.Store's Open disabled
@@ -159,13 +183,18 @@ func New(c Config) (*Service, error) {
 		log:      c.Log,
 		lock:     make(chan struct{}, 1),
 		kicks:    make(chan struct{}, 1),
-		after: func(d time.Duration) (<-chan time.Time, func() bool) {
-			t := time.NewTimer(d)
-			return t.C, t.Stop
-		},
+
+		fetcher:    c.Fetcher,
+		refreshing: make(chan struct{}, 1),
+		holds:      map[string]time.Time{},
+		after:      realTimer,
+		schedAfter: realTimer,
 	}
 	if s.now == nil {
 		s.now = time.Now
+	}
+	if s.fetcher == nil {
+		s.fetcher = defaultFetcher(c.Socks, c.Monitor)
 	}
 	if m := c.Monitor; m != nil && m.State == nil {
 		m.State = func() store.State {
@@ -185,11 +214,11 @@ func New(c Config) (*Service, error) {
 	return s, nil
 }
 
-// Run runs the apply loop, and the monitor if there is one, until ctx ends,
-// and returns nil once both have stopped. At the start, a state that was
-// saved (its revision is above 0) and that the runner does not run, or that
-// the runner can't be asked about, is applied as if kicked. Run refuses to run
-// twice at once.
+// Run runs the apply loop, the subscription scheduler and the monitor if
+// there is one, until ctx ends, and returns nil once all have stopped. At the
+// start, a state that was saved (its revision is above 0) and that the runner
+// does not run, or that the runner can't be asked about, is applied as if
+// kicked. Run refuses to run twice at once.
 func (s *Service) Run(ctx context.Context) error {
 	if !s.running.CompareAndSwap(false, true) {
 		return errors.New("service: Run is already running")
@@ -203,6 +232,11 @@ func (s *Service) Run(ctx context.Context) error {
 			s.monitor.Run(ctx)
 		}()
 	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.schedule(ctx)
+	}()
 	s.loop(ctx)
 	wg.Wait()
 	return nil
@@ -365,6 +399,12 @@ type redactedError struct {
 
 func (e *redactedError) Error() string { return e.text }
 func (e *redactedError) Unwrap() error { return e.err }
+
+// realTimer is a time.Timer's channel and Stop.
+func realTimer(d time.Duration) (<-chan time.Time, func() bool) {
+	t := time.NewTimer(d)
+	return t.C, t.Stop
+}
 
 // orDefault is v, or def when v is not positive.
 func orDefault(v, def time.Duration) time.Duration {

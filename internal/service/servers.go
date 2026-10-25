@@ -105,6 +105,42 @@ func testConfig(srv store.Server) ([]byte, error) {
 	return json.Marshal(map[string]any{"outbounds": []any{out, map[string]string{"protocol": "freedom", "tag": "direct"}}})
 }
 
+// verdict is how the runner's test of a server went. At most one field is
+// set: both empty means that xray took the server.
+type verdict struct {
+	// rejected is xray's rejection of the server, as text for the person who
+	// asked. It is the runner's words, which can repeat the outbound's
+	// credentials: it must be redacted (see refuse) before it is shown.
+	rejected string
+	// unavailable is why the runner could not test: no xray runs, or the
+	// runner can't be reached, or it failed.
+	unavailable error
+}
+
+// tryServer has the runner's xray test srv in a config of its own. The error
+// is for a test that did not take place for a reason that is not the runner's:
+// ctx ended (the caller gave up), or the outbound is not an object.
+func (s *Service) tryServer(ctx context.Context, srv store.Server) (verdict, error) {
+	cfg, err := testConfig(srv)
+	if err != nil {
+		return verdict{}, err
+	}
+	res, err := s.runner.Test(ctx, cfg)
+	switch {
+	case ctx.Err() != nil:
+		return verdict{}, ctx.Err()
+	case err != nil:
+		return verdict{unavailable: err}, nil
+	case !res.OK:
+		reason := "xray rejected the server"
+		if out := strings.TrimSpace(res.Output); out != "" {
+			reason += ": " + out
+		}
+		return verdict{rejected: reason}, nil
+	}
+	return verdict{}, nil
+}
+
 // testServer has the runner's xray test server id as it is in the state that
 // fn leads to, before that state is written, and returns a *Refused if xray
 // rejects it. When the runner can't test (no xray runs, or it can't be
@@ -117,24 +153,15 @@ func (s *Service) testServer(ctx context.Context, rev uint64, id string, fn edit
 		return nil, err
 	}
 	srv := serverIn(next, id)
-	cfg, err := testConfig(srv)
-	if err != nil {
-		return nil, err
-	}
-	res, err := s.runner.Test(ctx, cfg)
+	v, err := s.tryServer(ctx, srv)
 	switch {
-	case ctx.Err() != nil:
-		return nil, ctx.Err()
 	case err != nil:
-		return []note{{KindUntested, fmt.Sprintf("server %s (%s) saved without xray's test of it: %v", srv.ID, srv.Name, s.runnerError(ctx, err))}}, nil
-	case !res.OK:
-		// res.Output is the runner's text, which can repeat the outbound's
-		// credentials: refuse redacts it with those of the new server.
-		reason := "xray rejected the server"
-		if out := strings.TrimSpace(res.Output); out != "" {
-			reason += ": " + out
-		}
-		return nil, refuse(next, reason)
+		return nil, err
+	case v.unavailable != nil:
+		return []note{{KindUntested, fmt.Sprintf("server %s (%s) saved without xray's test of it: %v", srv.ID, srv.Name, s.runnerError(ctx, v.unavailable))}}, nil
+	case v.rejected != "":
+		// refuse redacts the text with the credentials of the new server.
+		return nil, refuse(next, v.rejected)
 	}
 	return nil, nil
 }
@@ -252,19 +279,27 @@ func (s *Service) RemoveServer(ctx context.Context, rev uint64, id string) (uint
 		}
 		srv := st.Servers[i]
 		st.Servers = slices.Delete(st.Servers, i, i+1)
-		var notes []note
-		if st.Routing.Pinned == id {
-			st.Routing.Pinned = ""
-			notes = append(notes, note{KindCleanup, fmt.Sprintf("server %s (%s) removed: the pin on it is cleared", srv.ID, srv.Name)})
-		}
-		before := len(st.Routing.Rules)
-		st.Routing.Rules = slices.DeleteFunc(st.Routing.Rules, func(r store.Rule) bool {
-			return r.Action == store.ActionServer && r.Server == id
-		})
-		if n := before - len(st.Routing.Rules); n > 0 {
-			notes = append(notes, note{KindCleanup, fmt.Sprintf("server %s (%s) removed: %d custom routing rule(s) that sent traffic through it are dropped", srv.ID, srv.Name, n)})
-		}
-		return notes, nil
+		return forget(st, srv), nil
 	})
 	return next, err
+}
+
+// forget clears the pin on srv, a server that st no longer holds, and drops
+// the custom rules that send traffic through it, and returns a cleanup event
+// for the pin, if it cleared one, and one for the rules, if it dropped any.
+// The state would be invalid otherwise.
+func forget(st *store.State, srv store.Server) []note {
+	var notes []note
+	if st.Routing.Pinned == srv.ID {
+		st.Routing.Pinned = ""
+		notes = append(notes, note{KindCleanup, fmt.Sprintf("server %s (%s) removed: the pin on it is cleared", srv.ID, srv.Name)})
+	}
+	before := len(st.Routing.Rules)
+	st.Routing.Rules = slices.DeleteFunc(st.Routing.Rules, func(r store.Rule) bool {
+		return r.Action == store.ActionServer && r.Server == srv.ID
+	})
+	if n := before - len(st.Routing.Rules); n > 0 {
+		notes = append(notes, note{KindCleanup, fmt.Sprintf("server %s (%s) removed: %d custom routing rule(s) that sent traffic through it are dropped", srv.ID, srv.Name, n)})
+	}
+	return notes
 }

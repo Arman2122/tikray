@@ -152,11 +152,14 @@ type fakeRunner struct {
 	// tests are the configs that POST /v1/test got, in order. That route
 	// accepts a config unless testReject is set, the xray output it then
 	// answers with (ok false), or testNoCore makes it answer no_core, or
-	// testBroken makes it fail with a 500.
-	tests      [][]byte
-	testReject string
-	testNoCore bool
-	testBroken bool
+	// testBroken makes it fail with a 500. testRejectFor, when set, makes
+	// it reject only the configs that hold that text, with testRejectOut.
+	tests         [][]byte
+	testReject    string
+	testNoCore    bool
+	testBroken    bool
+	testRejectFor string
+	testRejectOut string
 }
 
 func newFakeRunner(t *testing.T, run string) *fakeRunner {
@@ -192,6 +195,14 @@ func (f *fakeRunner) setTestReject(output string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.testReject = output
+}
+
+// setTestRejectFor makes the runner's test fail with output for the configs
+// that hold text, and pass for the others.
+func (f *fakeRunner) setTestRejectFor(text, output string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.testRejectFor, f.testRejectOut = text, output
 }
 
 // failTest makes the runner's test of a config fail as if no xray ran
@@ -321,6 +332,8 @@ func (f *fakeRunner) test(req *http.Request) *http.Response {
 		return reply(http.StatusInternalServerError, map[string]string{"error": "internal", "detail": "the trial ended while the config was tested"})
 	case f.testReject != "":
 		return reply(http.StatusOK, runnerapi.TestResult{Output: f.testReject})
+	case f.testRejectFor != "" && bytes.Contains(body, []byte(f.testRejectFor)):
+		return reply(http.StatusOK, runnerapi.TestResult{Output: f.testRejectOut})
 	}
 	return reply(http.StatusOK, runnerapi.TestResult{OK: true, Output: "Configuration OK."})
 }
@@ -554,6 +567,13 @@ type env struct {
 	done    chan error
 	edits   int
 
+	// ticks makes the timers of the subscription scheduler: it has its own
+	// clock, so that its timers stay out of the apply loop's armed and
+	// pending ones. schedQuiet gets a value each time the scheduler is about
+	// to wait.
+	ticks      *fakeClock
+	schedQuiet chan struct{}
+
 	mu        sync.Mutex
 	renderErr error // what the renders fail with, if set
 }
@@ -579,6 +599,9 @@ func newEnv(t *testing.T) *env {
 		health:  &stubHealth{},
 		quiet:   make(chan struct{}, 1000),
 		lockers: make(chan struct{}, 16),
+
+		ticks:      newFakeClock(),
+		schedQuiet: make(chan struct{}, 1000),
 	}
 	e.s = e.newService(Config{})
 	return e
@@ -614,6 +637,8 @@ func (e *env) newService(c Config) *Service {
 		}
 	}
 	s.onWait = func() { e.lockers <- struct{}{} }
+	s.schedAfter = e.ticks.timer
+	s.schedIdle = func() { e.schedQuiet <- struct{}{} }
 	return s
 }
 
