@@ -3,6 +3,8 @@
 package e2e
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/netip"
 	"os"
@@ -61,6 +63,11 @@ func TestLifecycleState(t *testing.T) {
 	}
 	if st.Network != store.Default().Network {
 		t.Errorf("network %+v, want the default subnet", st.Network)
+	}
+	// The lab has no internet: with the default probe URL the observatory
+	// would find lab-a down, and the balancers would fall back.
+	if st.Health.ProbeURL != labProbeURL {
+		t.Errorf("probe URL %q, want the lab's %q", st.Health.ProbeURL, labProbeURL)
 	}
 
 	// The newest core renders it, with the server in.
@@ -121,5 +128,69 @@ func TestWriteStateFile(t *testing.T) {
 	bad.DefaultPolicy.Mode = "bogus"
 	if _, err := writeStateFile(t.TempDir(), bad); err == nil {
 		t.Error("an invalid state was written")
+	}
+}
+
+// TestConfigStates checks the states TestConfigApply pushes, without a lab:
+// each is valid and renders for every core the test runs, the LAN client is
+// the one smart device, and the raw server that its bad_raw_server check
+// adds passes the store's checks and the render, so that only xray run -test
+// can refuse it. Run it with
+//
+//	go test -tags lab -run TestConfigStates ./test/e2e/
+func TestConfigStates(t *testing.T) {
+	a, err := serverFromLink(linkA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := serverFromLink(linkB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Link != linkA || b.Name != "lab-b" || a.ID == b.ID {
+		t.Fatalf("servers %+v and %+v, want lab-a and lab-b with their links and IDs of their own", a, b)
+	}
+	bad := configState(true, a, b)
+	bad.Servers = append(bad.Servers, badServer())
+	cores := []string{"26.10.21", previousXray, oldestXray}
+	for name, st := range map[string]store.State{
+		"default":          store.Default(),
+		"lab-a":            configState(false, a),
+		"lab-a and lab-b":  configState(false, a, b),
+		"kill switch":      configState(true, a, b),
+		"with the bad one": bad,
+	} {
+		if err := st.Validate(); err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		for _, core := range cores {
+			if _, err := renderedName(st, core); err != nil {
+				t.Errorf("%s for %s: %v", name, core, err)
+			}
+		}
+		if name == "default" {
+			continue
+		}
+		if st.DefaultPolicy.Mode != store.ModeDirect || len(st.Devices) != 1 || st.Devices[0].Address != lanClient || st.Devices[0].Policy.Mode != store.ModeSmart {
+			t.Errorf("%s: default policy %+v and devices %+v, want direct and the LAN client smart", name, st.DefaultPolicy, st.Devices)
+		}
+		if st.Health.ProbeURL != labProbeURL || st.DNS.Remote != "203.0.113.53" {
+			t.Errorf("%s: probe URL %q and DNS %+v, want the lab's", name, st.Health.ProbeURL, st.DNS)
+		}
+	}
+
+	// renderedName names the render as artifacts does: by the SHA-256 of the
+	// bytes.
+	out, err := render.Render(render.Input{State: store.Default(), Core: xrayver.Version{Major: 26, Minor: 10, Patch: 21}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := renderedName(store.Default(), "26.10.21")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum := sha256.Sum256(out); got != "config/"+hex.EncodeToString(sum[:])+".json" {
+		t.Errorf("renderedName = %s, want the SHA-256 of the render", got)
 	}
 }
