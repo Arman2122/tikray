@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Arman2122/tikray/internal/atomicfile"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/xrayver"
 )
@@ -662,49 +663,17 @@ func (c *config) write(runDir string) error {
 	if err := os.MkdirAll(filepath.Join(runDir, "config"), 0o755); err != nil {
 		return err
 	}
-	return writeFileAtomic(filepath.Join(runDir, c.rel), c.data, 0o644)
+	return atomicfile.WriteFile(filepath.Join(runDir, c.rel), c.data, 0o644)
 }
 
-// writeJSONAtomic writes v as indented JSON, mode 0644, with writeFileAtomic.
+// writeJSONAtomic writes v as indented JSON, mode 0644, with
+// atomicfile.WriteFile.
 func writeJSONAtomic(path string, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(path, append(b, '\n'), 0o644)
-}
-
-// writeFileAtomic replaces path with data so that a crash leaves either the
-// old file or the new one: it writes a temporary file in the same directory,
-// fsyncs it, renames it over path and fsyncs the directory.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			f.Close()
-			os.Remove(f.Name())
-		}
-	}()
-	if _, err = f.Write(data); err != nil {
-		return err
-	}
-	if err = f.Chmod(perm); err != nil {
-		return err
-	}
-	if err = f.Sync(); err != nil {
-		return err
-	}
-	if err = f.Close(); err != nil {
-		return err
-	}
-	if err = os.Rename(f.Name(), path); err != nil {
-		return err
-	}
-	return syncDir(dir)
+	return atomicfile.WriteFile(path, append(b, '\n'), 0o644)
 }
 
 // removeSynced removes path durably; a missing file is not an error.

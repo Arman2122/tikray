@@ -175,33 +175,6 @@ func TestReportExitCodeFollowsTheOutcome(t *testing.T) {
 	}
 }
 
-func TestWriteFileAtomic(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "last-result.json")
-	for _, content := range []string{"first\n", "second\n"} {
-		if err := writeFileAtomic(path, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		got, err := os.ReadFile(path)
-		if err != nil || string(got) != content {
-			t.Fatalf("read %q, %v; want %q", got, err, content)
-		}
-		if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
-			t.Fatalf("mode %v, %v; want 0600", fi.Mode(), err)
-		}
-	}
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ents) != 1 {
-		t.Errorf("the directory holds %d entries, want only the file: %v", len(ents), ents)
-	}
-	if err := writeFileAtomic(filepath.Join(dir, "missing", "f"), nil, 0o600); err == nil {
-		t.Error("writing into a missing directory gave no error")
-	}
-}
-
 func TestRunUsage(t *testing.T) {
 	vars := map[string]string{"TIKRAY_DATA": t.TempDir()}
 	for _, args := range [][]string{

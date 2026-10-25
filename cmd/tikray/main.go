@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/atomicfile"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 )
 
@@ -250,7 +251,7 @@ func (c *cli) report(cfg Config, res artifacts.Result, err error) int {
 	}
 	code := exitCode(res)
 	path := filepath.Join(cfg.Data, "state", lastResultName)
-	if werr := writeFileAtomic(path, b, 0o600); werr != nil {
+	if werr := atomicfile.WriteFile(path, b, 0o600); werr != nil {
 		// Whoever reads last-result.json would find the previous run's result.
 		fmt.Fprintf(c.stderr, "tikray: saving the result (outcome %q): %v\n", res.Outcome, werr)
 		code = 1
@@ -418,58 +419,11 @@ func newUpdater(cfg Config, runner *runnerapi.Client, log io.Writer) (*artifacts
 	}, nil
 }
 
-// writeFileAtomic replaces path with data so that a crash leaves either the
-// old file or the new one: it writes a temporary file in the same directory,
-// sets its mode, fsyncs it, renames it over path and fsyncs the directory.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			f.Close()
-			os.Remove(f.Name())
-		}
-	}()
-	if _, err = f.Write(data); err != nil {
-		return err
-	}
-	if err = f.Chmod(perm); err != nil {
-		return err
-	}
-	if err = f.Sync(); err != nil {
-		return err
-	}
-	if err = f.Close(); err != nil {
-		return err
-	}
-	if err = os.Rename(f.Name(), path); err != nil {
-		return err
-	}
-	return syncDir(dir)
-}
-
 // removeFileDurably removes path, then fsyncs its directory so that the
 // removal survives a crash. A missing file is not an error.
 func removeFileDurably(path string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return syncDir(filepath.Dir(path))
-}
-
-// syncDir fsyncs a directory so that the entries made or removed in it survive
-// a crash.
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	err = d.Sync()
-	if cerr := d.Close(); err == nil {
-		err = cerr
-	}
-	return err
+	return atomicfile.SyncDir(filepath.Dir(path))
 }
