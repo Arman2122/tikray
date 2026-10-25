@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,9 +86,12 @@ func NewSupervisor(c SupervisorConfig) *Supervisor {
 }
 
 // Stage copies the selection's core to <StageDir>/<core>/xray with mode 0755
-// and returns that path. A staged copy of the same size is reused, so staging
-// a core again is cheap. The copy appears atomically, so a running xray is
-// never disturbed and a failed copy leaves nothing behind.
+// and returns that path. The copy gets the core's modification time, and a
+// staged copy is reused only while it has the core's size and modification
+// time, so staging a core again is cheap but a slot installed again with
+// another binary, even of the same size, is staged again (an install writes
+// a new file, which has a new time). The copy appears atomically, so a
+// running xray is never disturbed and a failed copy leaves nothing behind.
 func (s *Supervisor) Stage(sel runnerapi.Selection) (string, error) {
 	dst := s.stagedPath(sel)
 	if err := stageCopy(s.cfg.Dirs.CoreBinary(sel.Core), dst); err != nil {
@@ -113,7 +118,8 @@ func stageCopy(src, dst string) (err error) {
 	if !si.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a regular file", src)
 	}
-	if di, err := os.Stat(dst); err == nil && di.Mode().IsRegular() && di.Mode().Perm() == 0o755 && di.Size() == si.Size() {
+	if di, err := os.Stat(dst); err == nil && di.Mode().IsRegular() && di.Mode().Perm() == 0o755 &&
+		di.Size() == si.Size() && di.ModTime().Equal(si.ModTime()) {
 		return nil
 	}
 
@@ -145,7 +151,44 @@ func stageCopy(src, dst string) (err error) {
 	if err = tmp.Close(); err != nil {
 		return err
 	}
+	if err = os.Chtimes(tmp.Name(), time.Time{}, si.ModTime()); err != nil {
+		return err
+	}
 	return os.Rename(tmp.Name(), dst)
+}
+
+// CleanStage removes from StageDir the staged copy of every core not in keep,
+// and what an interrupted staging or test left: the .xray.tmp-* files of the
+// kept cores and the .test-config-* files. Anything else in StageDir is left
+// alone. Call it only while nothing stages or tests, with every core that
+// may still run in keep.
+func (s *Supervisor) CleanStage(keep ...string) error {
+	ents, err := os.ReadDir(s.cfg.StageDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("runner: clean %s: %w", s.cfg.StageDir, err)
+	}
+	var errs []error
+	for _, e := range ents {
+		path := filepath.Join(s.cfg.StageDir, e.Name())
+		switch {
+		case e.IsDir() && slices.Contains(keep, e.Name()):
+			tmps, _ := filepath.Glob(filepath.Join(path, ".xray.tmp-*"))
+			for _, tmp := range tmps {
+				errs = append(errs, os.Remove(tmp))
+			}
+		case e.IsDir():
+			errs = append(errs, os.RemoveAll(path))
+		case strings.HasPrefix(e.Name(), ".test-config-"):
+			errs = append(errs, os.Remove(path))
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("runner: clean %s: %w", s.cfg.StageDir, err)
+	}
+	return nil
 }
 
 // Test runs "xray run -test" on the selection's config with the staged core

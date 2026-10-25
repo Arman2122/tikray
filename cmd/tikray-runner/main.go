@@ -33,7 +33,9 @@ const (
 	// listenPort is the control API's port, on the ingress link's address.
 	listenPort = "8080"
 	// stageDir is where the supervisor stages cores, which RouterOS places
-	// without the execute bit.
+	// without the execute bit. It is on the container's root-dir, which
+	// persists across restarts; the runner keeps only the running and active
+	// cores there.
 	stageDir = "/run/xray"
 
 	defaultData     = "/data"

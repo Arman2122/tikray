@@ -304,6 +304,7 @@ func (r *Runner) boot() error {
 	if err := r.startActive(); err != nil {
 		log.Printf("runner: %v", err)
 	}
+	r.cleanStage()
 	return errors.Join(aerr, cerr)
 }
 
@@ -367,6 +368,7 @@ func (r *Runner) trial(ctx context.Context) error {
 			log.Printf("runner: %v", err)
 		}
 		r.record(*cand, runnerapi.OutcomeRejected, out)
+		r.cleanStage()
 		return &runnerapi.TestFailedError{Output: out}
 	}
 
@@ -399,6 +401,7 @@ func (r *Runner) commit() error {
 		log.Printf("runner: %v", err)
 	}
 	r.record(cand, runnerapi.OutcomeCommitted, "")
+	r.cleanStage()
 	return nil
 }
 
@@ -418,6 +421,23 @@ func (r *Runner) revert(outcome, detail string) {
 		log.Printf("runner: %v", err)
 	}
 	r.record(cand, outcome, detail)
+	r.cleanStage()
+}
+
+// cleanStage removes the staged cores that neither run nor are active, and
+// the leftovers of interrupted staging (see Supervisor.CleanStage). Every
+// core takes about 30 MB of the container's disk, and nothing else removes
+// them. It runs on the loop between trials, when nothing stages or tests.
+func (r *Runner) cleanStage() {
+	var keep []string
+	for _, sel := range []*runnerapi.Selection{r.v.active, r.v.running} {
+		if sel != nil {
+			keep = append(keep, sel.Core)
+		}
+	}
+	if err := r.sup.CleanStage(keep...); err != nil {
+		log.Printf("%v", err)
+	}
 }
 
 // startActive starts the active selection, or stops xray when there is none.

@@ -135,7 +135,7 @@ func TestStageCopiesWithExecBit(t *testing.T) {
 	}
 }
 
-func TestStageReusesSameSizeCopy(t *testing.T) {
+func TestStageReusesStagedCopy(t *testing.T) {
 	f := newFixture(t, "ok", nil)
 	path, err := f.sup.Stage(f.sel)
 	if err != nil {
@@ -149,7 +149,7 @@ func TestStageReusesSameSizeCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if second, err := os.Stat(path); err != nil || !os.SameFile(first, second) {
-		t.Fatalf("a copy of the same size was staged again (err %v)", err)
+		t.Fatalf("the same core was staged again (err %v)", err)
 	}
 
 	// A core of another size under the same version replaces the staged copy.
@@ -165,6 +165,34 @@ func TestStageReusesSameSizeCopy(t *testing.T) {
 	third, err := os.Stat(path)
 	if err != nil || os.SameFile(first, third) || third.Size() != int64(len(b)+len("padding")) {
 		t.Fatalf("staged copy was not replaced: %v, err %v", third, err)
+	}
+}
+
+// A staged copy is reused only while it is the slot's binary. A slot pruned
+// and installed again with another binary of the same size is staged again,
+// so the old copy never runs under the slot's name.
+func TestStageReplacesSameSizeOtherCore(t *testing.T) {
+	f := newFixture(t, "ok", nil)
+	src := f.d.CoreBinary(f.sel.Core)
+	writeFile(t, src, "binary A")
+	path, err := f.sup.Stage(f.sel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "binary A" {
+		t.Fatalf("staged %q, %v", got, err)
+	}
+
+	writeFile(t, src, "binary B")
+	later := time.Now().Add(time.Hour) // installed again, later
+	if err := os.Chtimes(src, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.sup.Stage(f.sel); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "binary B" {
+		t.Errorf("staged copy is %q (%v) after the slot's binary became %q", got, err, "binary B")
 	}
 }
 

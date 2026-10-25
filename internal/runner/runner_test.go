@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -385,6 +387,67 @@ func TestAbort(t *testing.T) {
 	g.wantNoCandidate(t)
 	if err := g.r.Abort(); !errors.Is(err, runnerapi.ErrNoTrial) {
 		t.Errorf("second Abort = %v, want ErrNoTrial", err)
+	}
+}
+
+// The staging directory keeps only the cores that run or are active: after a
+// boot, a revert, a rejection and a commit the others go, and so does what an
+// interrupted staging or test left there.
+func TestStageDirSwept(t *testing.T) {
+	g := newRig(t, nil)
+	g.active(t, "ok")
+	// What earlier runs left: another core, half a copy and a test config.
+	writeFile(t, filepath.Join(g.stage, "26.3.27", "xray"), "an old staged core")
+	writeFile(t, filepath.Join(g.stage, oldCore, ".xray.tmp-123"), "half a copy")
+	writeFile(t, filepath.Join(g.stage, ".test-config-456.json"), "{}")
+	g.boot(t)
+	wantStaged(t, g.stage, oldCore)
+
+	g.candidate(t, "ok", 5*time.Second)
+	g.trial(t)
+	wantStaged(t, g.stage, oldCore, newCore)
+	if err := g.r.Abort(); err != nil {
+		t.Fatalf("Abort: %v", err)
+	}
+	wantStaged(t, g.stage, oldCore)
+
+	g.candidate(t, "badconfig", 5*time.Second)
+	var tf *runnerapi.TestFailedError
+	if err := g.r.Trial(t.Context()); !errors.As(err, &tf) {
+		t.Fatalf("Trial of a bad config = %v, want a TestFailedError", err)
+	}
+	wantStaged(t, g.stage, oldCore)
+
+	cand := g.candidate(t, "ok", 5*time.Second)
+	g.trial(t)
+	if err := g.r.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	wantStaged(t, g.stage, cand.Core)
+	g.wantState(t, runnerapi.StateRunning, newCore)
+}
+
+// wantStaged fails unless dir holds exactly the staged copies of cores.
+func wantStaged(t *testing.T, dir string, cores ...string) {
+	t.Helper()
+	var got, want []string
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			rel, _ := filepath.Rel(dir, p)
+			got = append(got, rel)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cores {
+		want = append(want, filepath.Join(c, "xray"))
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("staging directory holds %q, want %q", got, want)
 	}
 }
 
