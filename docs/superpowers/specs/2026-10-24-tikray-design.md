@@ -111,15 +111,20 @@ The runner does only what is needed to carry traffic safely:
   RouterOS (`/tool fetch`, Winbox uploads) have no execute bit and RouterOS has no
   `chmod`, so the runner copies the active core into its own filesystem with mode
   0755 and runs that copy (M0).
-- **Control API**, listening only on the bridge and protected by a token
-  (`/data/run/runner.token`): `status`, `reload`, `restart`, `trial`, `commit`,
-  and `xray-api` (runs `xray api <cmd>` with the active core binary, so JSON →
-  protobuf conversion always matches the running version).
+- **Control API**, listening only on the runner's bridge address, port 8080, and
+  protected by a bearer token (`/data/run/runner.token`): `status`, `reload`,
+  `restart`, `trial`, `commit`, `abort`, and `xray-api` (runs `xray api <cmd>`
+  with the active core binary, so JSON → protobuf conversion always matches the
+  running version).
 - **Trial protocol (A/B slots):**
   1. tikray writes `/data/run/candidate.json` (core version, geo version, config
      file, deadline) and calls `trial`.
   2. The runner runs `xray run -test` with the candidate. On failure it rejects
-     the candidate without switching.
+     the candidate without switching. It tests a copy of the candidate's config
+     whose TUN devices are renamed (`xray-test<n>`): xray releases before 26.10
+     open their TUN during `-test`, and the running xray already holds `xray0`
+     ("device or resource busy", M1 lab). A config it can't rewrite (such as
+     JSON with comments) is tested unchanged.
   3. Otherwise it stops the active xray and starts the candidate. If the candidate
      exits within 10 s, the runner reverts to `active.json`.
   4. If tikray does not call `commit` before the deadline (default 120 s), the
@@ -128,7 +133,8 @@ The runner does only what is needed to carry traffic safely:
   6. On boot, the runner always starts from `active.json`, never from a candidate.
 
   This means a crash or reboot at any point during an update cannot leave xray broken.
-- Sets `GOMEMLIMIT` for xray (configurable) to cap memory growth.
+- Sets `GOMEMLIMIT` for xray to cap memory growth. The default is `128MiB`; the
+  runner env `XRAY_GOMEMLIMIT` changes it, and `off` leaves it unset.
 
 ### 3.4 `tikray` (control plane)
 
@@ -185,6 +191,9 @@ them with `mountlists=`; `mode=ro` is enforced (M0).
 
 - One bridge `tikray`, default subnet `172.31.255.0/29` (configurable at install
   time to avoid clashing with the LAN): router `.1`, `tikray` `.2`, runner `.3`.
+- The bridge is created with `protocol-mode=none`. With RouterOS's default RSTP
+  a freshly started container's veth spends the forward delay blocked, so a
+  just-started container couldn't reach the runner (M1 lab, 2/2 A/B each way).
 - NAT masquerade for the container subnet out to the WAN.
 - Every container sets `dns=` explicitly (the router's bridge address): RouterOS
   refuses to start a container without DNS ("no default dns servers") even when
@@ -224,7 +233,9 @@ Each source is tried in order until one returns a file that passes verification:
   profiles (v2fly, Loyalsoldier, Iran-focused lists, custom URL).
 - **tikray images:** cosign signature check before installation.
 - **Manual uploads** with no known hash show an "unverified" warning and need an
-  explicit confirmation.
+  explicit confirmation. A core installed that way needs it again on every
+  later update to it; once its hash becomes known, the installed zip must match
+  it.
 
 ### 4.4 Slots and retention
 
@@ -236,8 +247,13 @@ configurable). Older slots are removed automatically after a successful commit.
 1. Fetch and verify the selected version into `/data/cores/<ver>/`.
 2. Render the config for that version (§4.9).
 3. Runner trial (§3.3).
-4. Health check: real traffic through the proxy (SOCKS probe to a configurable
-   URL), plus gRPC responding.
+4. Health check: the running core reports the requested version
+   (`xray version` says `Xray <ver> `, so a slot holding another release is
+   never committed under its name); the runner's data-path signals hold
+   (`routes_ok`: its routes into `xray0` are in place; `gateway_up`: it answers
+   ping); real traffic through the proxy (SOCKS probe to a configurable URL);
+   and gRPC responding. The probes alone pass without `xray0`, while a runner
+   that doesn't answer ping sends fail-open devices direct.
 5. Commit, or let the runner revert. The UI shows the result and keeps history.
 
 A manual **Roll back** button switches to the previous slot through the same trial flow.
@@ -436,7 +452,8 @@ file through Winbox/WebFig when GitHub is blocked.
    - Enough free disk (~150 MB) and RAM.
    - Router DNS accepts LAN requests (`allow-remote-requests=yes`), needed for
      the DNS fallback (§5.4).
-2. **Network:** bridge, veths, IPs, NAT, firewall rules (§3.6).
+2. **Network:** bridge (`protocol-mode=none`), veths, IPs, NAT, firewall rules
+   (§3.6).
 3. **Containers:** container config (tmp dir, registry), both containers with
    mount lists, env lists, explicit `dns=`, start-on-boot, and memory limits
    (`memory-high`/`memory-max` exist on 7.25).
@@ -570,7 +587,16 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
   - failover between two servers;
   - DNS paths and the IPv6 leak guard;
   - drift repair after deleting a tikray rule;
-  - xray update, plus an update with a broken binary that must revert;
+  - xray update, plus an update with a broken binary that must revert. Runs
+    since M1 (`TestCoreLifecycle` in `test/e2e`, with the real images and a
+    fake GitHub and mirror): bootstrap from an empty runner; an update to the
+    newest release through the proxy while GitHub refuses direct requests; a
+    core that `xray run -test` rejects (an unverified inbox upload) and one
+    that crashes within 10 s, both reverted with traffic still proxied; an
+    install from a mirror verified by the signed hash index while GitHub is
+    down; rollback; pruning to two slots; a power cut during a trial, after
+    which the runner boots from `active.json` and records `reboot`; and the
+    runner's ping answer going down during a trial and back up after it;
   - geo update and address-list diff;
   - tikray self-update and watchdog rollback;
   - uninstall leaves zero `tikray:` objects.
@@ -617,7 +643,7 @@ docs/
 | Milestone | Outcome |
 |---|---|
 | **M0: data-path spike** | **Lab done:** all 22 checks pass on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25) with the newest xray; the real-hardware benchmark is pending. See `docs/superpowers/findings/2026-10-24-m0-data-path.md`. On RouterOS CHR ARM64 and real hardware, prove: xray TUN inbound inside a RouterOS container, mangle routing into it, no source NAT, sniffing with `routeOnly`, UDP, DNS redirect, fallback. Measure throughput and RAM. If something blocks this path, we change the design before building on it. (QUIC sniffing moved to M3: no QUIC fixture in M0.) |
-| **M1: runner + artifacts** | Runner with trial protocol; fetch chain, verification, slots; xray update and rollback end to end. |
+| **M1: runner + artifacts** | **Done:** the real `tikray-runner` and `tikray` images take xray-core through all nine lifecycle scenarios of `TestCoreLifecycle` (`test/e2e/core_lab_test.go`, §8.4) on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25), with 26.1.18, 26.3.27 and the newest release, 26.10.21. Results: `test/e2e/results/`. Runner with trial protocol; fetch chain, verification, slots; xray update and rollback end to end. |
 | **M2: control-plane core** | `store`, `render`, `xray` client, `sharelink`, `subscription`, `health`, REST API, CLI. |
 | **M3: RouterOS** | `install.rsc`, reconciler, version adapters, watchdog, uninstall, CHR e2e suite. |
 | **M4: web UI** | Dashboard, servers and subscriptions, devices and policies, routing, updates (history and rollback), settings, logs. |

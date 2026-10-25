@@ -1,7 +1,8 @@
 // Package labinet is the lab's fake internet: target web servers that report
-// the caller's IP, a UDP echo, and a DNS server that answers differently
-// depending on whether the query came through the VLESS proxy. The source IP
-// a fixture sees tells a test which path a request took.
+// the caller's IP, a UDP echo, a DNS server that answers differently
+// depending on whether the query came through the VLESS proxy, and a
+// stand-in for XTLS's GitHub releases with a mirror of them. The source IP a
+// fixture sees tells a test which path a request took.
 package labinet
 
 import (

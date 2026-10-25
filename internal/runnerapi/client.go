@@ -1,0 +1,160 @@
+package runnerapi
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+const (
+	// maxBody bounds what the client reads from the runner; xray api output
+	// is the largest thing it sends.
+	maxBody = 8 << 20
+	// maxErrText bounds the response body quoted in an error message.
+	maxErrText = 1024
+)
+
+var defaultHTTP = &http.Client{Timeout: 10 * time.Second}
+
+// Client calls the runner's control API.
+type Client struct {
+	BaseURL string // such as http://192.168.88.2:8080
+	Token   string
+	HTTP    *http.Client // nil means a client with a 10 s timeout
+}
+
+// errBody is the runner's JSON error body.
+type errBody struct {
+	Error  string `json:"error"`
+	Detail string `json:"detail"`
+}
+
+// Status returns the runner's state.
+func (c *Client) Status(ctx context.Context) (Status, error) {
+	var st Status
+	err := c.do(ctx, http.MethodGet, "/v1/status", nil, &st)
+	return st, err
+}
+
+// Trial starts a trial of the candidate in candidate.json. It returns a
+// *TestFailedError when xray run -test rejects the config, and ErrBusy when a
+// trial is already open.
+func (c *Client) Trial(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/v1/trial", nil, nil)
+}
+
+// Commit makes the open trial's candidate the active selection. It returns
+// ErrNoTrial when no trial is open.
+func (c *Client) Commit(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/v1/commit", nil, nil)
+}
+
+// Abort ends the open trial and reverts to the active selection. It returns
+// ErrNoTrial when no trial is open.
+func (c *Client) Abort(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/v1/abort", nil, nil)
+}
+
+// Restart restarts xray from the active selection.
+func (c *Client) Restart(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/v1/restart", nil, nil)
+}
+
+// Reload asks the runner to re-read active.json and start it.
+func (c *Client) Reload(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/v1/reload", nil, nil)
+}
+
+// XrayAPI runs "xray api <args>" in the runner and returns its output.
+func (c *Client) XrayAPI(ctx context.Context, args ...string) (XrayAPIResponse, error) {
+	if args == nil {
+		args = []string{}
+	}
+	var resp XrayAPIResponse
+	err := c.do(ctx, http.MethodPost, "/v1/xray-api", XrayAPIRequest{Args: args}, &resp)
+	return resp, err
+}
+
+// do sends one request. A 2xx answer is decoded into out when out is non-nil;
+// anything else becomes an error, see statusError.
+func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		b, err := json.Marshal(in)
+		if err != nil {
+			return fmt.Errorf("runnerapi: %s %s: %w", method, path, err)
+		}
+		body = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.BaseURL, "/")+path, body)
+	if err != nil {
+		return fmt.Errorf("runnerapi: %s %s: %w", method, path, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	hc := c.HTTP
+	if hc == nil {
+		hc = defaultHTTP
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("runnerapi: %s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if err != nil {
+		return fmt.Errorf("runnerapi: %s %s: reading response: %w", method, path, err)
+	}
+	if resp.StatusCode/100 != 2 {
+		return statusError(method, path, resp, raw)
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("runnerapi: %s %s: decoding response: %w", method, path, err)
+	}
+	return nil
+}
+
+// statusError turns a non-2xx answer into the error the caller can test for.
+func statusError(method, path string, resp *http.Response, raw []byte) error {
+	var eb errBody
+	_ = json.Unmarshal(raw, &eb) // a body that is not JSON leaves eb empty
+	switch {
+	case resp.StatusCode == http.StatusConflict && eb.Error == "busy":
+		return wrapDetail(ErrBusy, eb.Detail)
+	case resp.StatusCode == http.StatusConflict && eb.Error == "no_trial":
+		return wrapDetail(ErrNoTrial, eb.Detail)
+	case resp.StatusCode == http.StatusUnprocessableEntity:
+		out := eb.Detail
+		if out == "" {
+			out = strings.TrimSpace(string(raw))
+		}
+		return &TestFailedError{Output: out}
+	}
+	text := strings.TrimSpace(string(raw))
+	if len(text) > maxErrText {
+		text = text[:maxErrText] + "..."
+	}
+	if text == "" {
+		return fmt.Errorf("runnerapi: %s %s: %s", method, path, resp.Status)
+	}
+	return fmt.Errorf("runnerapi: %s %s: %s: %s", method, path, resp.Status, text)
+}
+
+// wrapDetail keeps the sentinel testable with errors.Is and adds the runner's
+// explanation when it gave one.
+func wrapDetail(err error, detail string) error {
+	if detail == "" {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, detail)
+}

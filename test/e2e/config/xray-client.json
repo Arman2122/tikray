@@ -1,0 +1,60 @@
+{
+  "log": {"loglevel": "warning", "access": "/data/run/access.log"},
+  "api": {"tag": "api", "listen": "127.0.0.1:10085", "services": ["StatsService"]},
+  "stats": {},
+  "dns": {
+    "servers": [
+      {"address": "203.0.113.54", "domains": ["domain:domestic.test"], "skipFallback": true},
+      "203.0.113.53"
+    ]
+  },
+  "inbounds": [
+    {
+      "tag": "tun-in",
+      "protocol": "tun",
+      "settings": {"name": "xray0", "MTU": 1500},
+      "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true}
+    },
+    {
+      "tag": "dns-in",
+      "listen": "0.0.0.0",
+      "port": 53,
+      "protocol": "dokodemo-door",
+      "settings": {"address": "203.0.113.53", "port": 53, "network": "tcp,udp"}
+    },
+    {
+      "tag": "socks-in",
+      "listen": "0.0.0.0",
+      "port": 1080,
+      "protocol": "socks",
+      "settings": {"auth": "noauth"}
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "proxy",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [{
+          "address": "203.0.113.10",
+          "port": 443,
+          "users": [{"id": "b831381d-6324-4d53-ad4f-8cda48b30811", "encryption": "none"}]
+        }]
+      },
+      "streamSettings": {"network": "tcp", "security": "none"}
+    },
+    {"tag": "direct", "protocol": "freedom"},
+    {"tag": "block", "protocol": "blackhole"},
+    {"tag": "dns-out", "protocol": "dns"}
+  ],
+  "routing": {
+    "rules": [
+      {"inboundTag": ["dns-in"], "outboundTag": "dns-out"},
+      {"ip": ["203.0.113.54"], "outboundTag": "direct"},
+      {"ip": ["203.0.113.53"], "outboundTag": "proxy"},
+      {"domain": ["domain:domestic.test"], "outboundTag": "direct"},
+      {"ip": ["203.0.113.20"], "outboundTag": "direct"},
+      {"network": "tcp,udp", "outboundTag": "proxy"}
+    ]
+  }
+}
