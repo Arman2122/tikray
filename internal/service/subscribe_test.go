@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -497,6 +498,124 @@ func TestRefreshConflictTwiceFails(t *testing.T) {
 	}
 	if got := e.subOf(sub.ID); got.LastError != "" {
 		t.Errorf("LastError = %q, want none: the fetch did not fail", got.LastError)
+	}
+}
+
+// A refresh that fails for the address a subscription had must not blame the
+// address it has now: no error on it, no wait, no event.
+func TestRefreshFailureOfARepointedSubscriptionIsDropped(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		setup func(e *env, feed *fakeFeed)
+	}{
+		{"the fetch fails", func(_ *env, feed *fakeFeed) {
+			feed.setDirect(feedReply{status: http.StatusInternalServerError})
+			feed.setProxy(feedReply{status: http.StatusInternalServerError})
+		}},
+		{"xray rejects every entry", func(e *env, feed *fakeFeed) {
+			feed.setDirect(okFeed(feedBody(feedLink(21, "x"))))
+			e.runner.setTestReject("Failed to start")
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, feed := newSubEnv(t)
+			sub, olds := e.addSub("provider", feedLink(11, "a"))
+			c.setup(e, feed)
+			next := "https://other.example.org/list"
+			done := false
+			feed.onDirect = func(string) {
+				if done {
+					return
+				}
+				done = true
+				if _, _, err := e.s.UpdateSubscription(bg, store.AnyRevision, sub.ID, SubscriptionPatch{URL: &next}); err != nil {
+					t.Error(show(err))
+				}
+			}
+
+			if _, err := e.s.RefreshSubscription(bg, sub.ID); err == nil {
+				t.Fatal("the refresh worked, want its failure returned to the caller")
+			}
+			got := e.subOf(sub.ID)
+			if got.URL != next || got.LastError != "" || !got.LastFetch.IsZero() {
+				t.Errorf("URL %q, LastError %q, LastFetch %v; want the new URL, no error and never fetched", got.URL, got.LastError, got.LastFetch)
+			}
+			if events := e.eventsOf(KindError); len(events) != 0 {
+				t.Errorf("error events %q, want none: the new address has not failed", events)
+			}
+			e.s.mu.Lock()
+			held := len(e.s.holds)
+			e.s.mu.Unlock()
+			if held != 0 || !e.s.due(got, t0) {
+				t.Errorf("%d holds, due %t; want no wait, and due at once", held, e.s.due(got, t0))
+			}
+			if st, _ := e.store.State(); !reflect.DeepEqual(st.Servers, olds) {
+				t.Error("the servers changed")
+			}
+		})
+	}
+}
+
+// A refresh that gives a server that was invalid an outbound that passes
+// clears the reason, and not Disabled; one that gives the same outbound does
+// not.
+func TestRefreshClearsInvalidOfAChangedOutbound(t *testing.T) {
+	e, feed := newSubEnv(t)
+	a, b := feedLink(11, "a"), feedLink(12, "b")
+	sub, olds := e.addSub("provider", a, b)
+	if _, _, err := e.store.Update(store.AnyRevision, func(st *store.State) error {
+		// a's outbound is not what its link gives, as if the parser has
+		// changed; b's is. Open disabled both.
+		st.Servers[0].Outbound = json.RawMessage(trojanOutbound)
+		for i := range st.Servers {
+			st.Servers[i].Invalid, st.Servers[i].Disabled = "an older tikray refused it", true
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	feed.setDirect(okFeed(feedBody(a, b)))
+
+	res, err := e.s.RefreshSubscription(bg, sub.ID)
+	if err != nil {
+		t.Fatal(show(err))
+	}
+	if res.Updated != 1 || res.Kept != 1 {
+		t.Errorf("result = %+v, want 1 updated (a) and 1 kept (b)", res)
+	}
+	st, _ := e.store.State()
+	if err := st.Validate(); err != nil {
+		t.Fatalf("the state is not valid: %v", show(err))
+	}
+	if len(st.Servers) != 2 || st.Servers[0].ID != olds[0].ID || st.Servers[1].ID != olds[1].ID {
+		t.Fatalf("servers %s, want the two kept", show(st.Servers))
+	}
+	if a := st.Servers[0]; a.Invalid != "" || !a.Disabled || sameJSON(a.Outbound, json.RawMessage(trojanOutbound)) {
+		t.Errorf("a: %s with a new outbound %t; want a new outbound, no reason and still disabled", show(a), !sameJSON(a.Outbound, json.RawMessage(trojanOutbound)))
+	}
+	if b := st.Servers[1]; b.Invalid != "an older tikray refused it" || !b.Disabled {
+		t.Errorf("b: %s, want the same outbound to keep its reason and Disabled", show(b))
+	}
+	if n := len(e.runner.gotTests()); n != 1 {
+		t.Errorf("the runner tested %d configs, want only a's", n)
+	}
+}
+
+func TestPassesChecks(t *testing.T) {
+	good := store.Server{ID: "0000000a", Name: "ok", Subscription: "0000000b", Invalid: "a reason", Outbound: json.RawMessage(vlessOutbound)}
+	if !passesChecks(good) {
+		t.Error("a server with a good name and outbound does not pass")
+	}
+	for name, mutate := range map[string]func(*store.Server){
+		"a name with a control character": func(s *store.Server) { s.Name = "a\x1bb" },
+		"no name":                         func(s *store.Server) { s.Name = "" },
+		"an outbound that isn't one":      func(s *store.Server) { s.Outbound = json.RawMessage(`[]`) },
+	} {
+		bad := good
+		mutate(&bad)
+		if passesChecks(bad) {
+			t.Errorf("a server with %s passes", name)
+		}
 	}
 }
 

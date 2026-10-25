@@ -175,6 +175,44 @@ func TestScheduleURLChangeLiftsTheHold(t *testing.T) {
 	}
 }
 
+// A subscription pointed elsewhere while its old address failed is not held
+// for that failure: the next look fetches the new address.
+func TestScheduleFailureOfAnOldAddressHoldsNothing(t *testing.T) {
+	e, feed := newSubEnv(t)
+	sub := schedSub("old", 0, false)
+	e.putSub(sub)
+	feed.setPer("/old", feedReply{status: 500})
+	feed.setProxy(feedReply{status: 500})
+	feed.setPer("/new", okFeed(feedBody(feedLink(11, "a"))))
+	done := false
+	feed.onDirect = func(path string) {
+		if path != "/old" || done {
+			return
+		}
+		done = true
+		next := "https://" + subHost + "/new"
+		if _, _, err := e.s.UpdateSubscription(bg, store.AnyRevision, sub.ID, SubscriptionPatch{URL: &next}); err != nil {
+			t.Error(show(err))
+		}
+	}
+	e.startScheduler()
+	e.tick(30 * time.Second) // /old fails, after the subscription moved on
+	if got := e.subOf(sub.ID); got.LastError != "" || !got.LastFetch.IsZero() {
+		t.Fatalf("LastError %q, LastFetch %v; want the old address's failure not to show", got.LastError, got.LastFetch)
+	}
+
+	e.tick(time.Minute)
+	if got := e.subOf(sub.ID); got.LastError != "" || !got.LastFetch.Equal(t0.Add(90*time.Second)) {
+		t.Errorf("LastError %q, LastFetch %v; want the new address fetched at the next look", got.LastError, got.LastFetch)
+	}
+	if got := feed.requests(); !slices.Contains(got, "direct /new") {
+		t.Errorf("requests %q, want one for /new", got)
+	}
+	if got := e.eventsOf(KindError); len(got) != 0 {
+		t.Errorf("error events %q, want none", got)
+	}
+}
+
 // A refresh that failed for a reason other than the fetch is told as an event,
 // and tried again at the next look.
 func TestScheduleRecordsARefreshThatCouldNotBeStored(t *testing.T) {

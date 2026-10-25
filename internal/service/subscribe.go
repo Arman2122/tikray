@@ -203,6 +203,10 @@ type RefreshResult struct {
 // entries already fetched and tested; a second change in the meantime ends
 // the refresh with store.ErrConflict. Refreshes run one at a time.
 //
+// A kept server that has a reason in Invalid and gets a new outbound that
+// passes the checks loses the reason, and stays Disabled, as with
+// UpdateServer; the same outbound keeps it.
+//
 // A subscription that is disabled is not fetched: *Refused.
 func (s *Service) RefreshSubscription(ctx context.Context, id string) (RefreshResult, error) {
 	if err := s.acquireRefresh(ctx); err != nil {
@@ -388,7 +392,8 @@ func (s *Service) mergeFetched(id string, got fetched, res *RefreshResult) edit 
 		var warnings []note
 		stays := map[string]bool{}
 		j := 0 // the entry of the next server of the subscription
-		for _, srv := range merged {
+		for k := range merged {
+			srv := &merged[k]
 			if srv.Subscription != id {
 				continue
 			}
@@ -404,7 +409,15 @@ func (s *Service) mergeFetched(id string, got fetched, res *RefreshResult) edit 
 				res.Kept++
 			}
 			if changed {
-				warnings = append(warnings, warningNotes(srv, got.entries[j].Server.Warnings)...)
+				warnings = append(warnings, warningNotes(*srv, got.entries[j].Server.Warnings)...)
+			}
+			// Merge copies Invalid from the old server. A new outbound that
+			// passes the checks (and the runner's test, which testEntries
+			// did) clears it, as UpdateServer's does, and Disabled stays as
+			// it is: enabling the server is for its owner. An outbound
+			// that is the same keeps its reason.
+			if ok && changed && srv.Invalid != "" && passesChecks(*srv) {
+				srv.Invalid = ""
 			}
 			j++
 		}
@@ -424,25 +437,33 @@ func (s *Service) mergeFetched(id string, got fetched, res *RefreshResult) edit 
 	}
 }
 
+// errMoved is the edit's answer when the subscription a refresh failed for is
+// gone, or points elsewhere now.
+var errMoved = errors.New("service: the subscription is gone or points elsewhere")
+
 // refreshFailed keeps reason as the LastError of the subscription, and records
 // it as an error event; the servers and LastFetch are not touched. The
 // scheduler leaves the subscription alone for min(1 h, Interval) after this.
 // reason must be redacted already.
+//
+// It is the failure of the refresh of sub's URL. A subscription that was
+// removed, or pointed at another URL, while that was fetched has nothing to
+// answer for it: nothing is written, held or recorded.
 func (s *Service) refreshFailed(sub store.Subscription, reason string) {
 	var name string
 	var wait time.Duration
 	_, _, err := s.store.Update(store.AnyRevision, func(st *store.State) error {
 		i := subscriptionIndex(st.Subscriptions, sub.ID)
-		if i < 0 {
-			return ErrNotFound
+		if i < 0 || st.Subscriptions[i].URL != sub.URL {
+			return errMoved
 		}
 		cur := &st.Subscriptions[i]
 		cur.LastError = reason
 		name, wait = cur.Name, min(time.Hour, time.Duration(cur.Interval))
 		return nil
 	})
-	if name == "" {
-		return // the subscription is gone
+	if errors.Is(err, errMoved) {
+		return
 	}
 	s.mu.Lock()
 	s.holds[sub.ID] = s.now().Add(wait)
@@ -451,6 +472,16 @@ func (s *Service) refreshFailed(sub store.Subscription, reason string) {
 		reason += fmt.Sprintf(" (and the error could not be kept: %v)", err)
 	}
 	s.record(KindError, fmt.Sprintf("subscription %s (%s): %s", sub.ID, name, reason))
+}
+
+// passesChecks reports whether srv, with its reason for being invalid
+// cleared, passes the store's checks of a server on its own: its name, its
+// outbound and the outbound policy.
+func passesChecks(srv store.Server) bool {
+	srv.Invalid, srv.Subscription = "", ""
+	st := store.Default()
+	st.Servers = []store.Server{srv}
+	return st.Validate() == nil
 }
 
 // lift ends the wait that a failed refresh put on subscription id.
