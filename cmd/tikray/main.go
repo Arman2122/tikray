@@ -30,7 +30,10 @@
 // changed.
 //
 // The state is <data>/state. A command reads it once and never writes it; the
-// daemon owns it.
+// daemon owns it. A state that cannot be read fails the command, except
+// update --config, which only takes the runner's addresses from it: that goes
+// on with a warning, using the addresses of a fresh install where no variable
+// names them.
 //
 // Environment (see Config): TIKRAY_DATA, TIKRAY_ARCH, TIKRAY_RUNNER_URL,
 // TIKRAY_SOCKS, TIKRAY_XRAY_API, TIKRAY_UPSTREAM, TIKRAY_MIRRORS,
@@ -76,8 +79,10 @@ commands:
   apply          render the config from the state for the active core and put
                  it on trial
   core update <version|latest> [--config FILE] [--allow-unverified]
-                 switch the runner to another xray-core, on a trial; the config
-                 is rendered from the state unless --config names one
+                 switch the runner to another xray-core, on a trial. Without
+                 --config the config is rendered from the state for the target
+                 core, so updating to the version already active re-renders
+                 and trials the config when the state changed.
   core rollback  switch back to the previously committed core, with a config
                  rendered from the state
   core list [--json]
@@ -230,7 +235,7 @@ func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
 
 func (c *cli) update(ctx context.Context, args []string) int {
 	fs := c.newFlagSet("core update", "core update <version|latest> [--config FILE] [--allow-unverified]")
-	configFile := fs.String("config", "", "run the core with the xray config in `FILE` (default: render the config from the state for the core)")
+	configFile := fs.String("config", "", "run the core with the xray config in `FILE`. Without --config the config is rendered from the state for the target core, so updating to the version already active re-renders and trials the config when the state changed.")
 	allow := fs.Bool("allow-unverified", false, "install a core whose SHA-256 nobody knows, if it is in the inbox")
 	pos, code, ok := c.parse(fs, args, 1)
 	if !ok {
@@ -275,7 +280,9 @@ func (c *cli) apply(ctx context.Context, args []string) int {
 // place to write one.
 //
 // The state is read once, and the render, the health checks and the runner's
-// addresses all follow that one snapshot.
+// addresses all follow that one snapshot. With a config file (not fromState)
+// the state supplies the addresses alone, and one that cannot be read is
+// replaced, with a warning, by the default state.
 func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, fromState bool, do func(context.Context, *artifacts.CoreUpdater) (artifacts.Result, error)) int {
 	cfg, err := configFromEnv(c.getenv)
 	if err != nil {
@@ -289,7 +296,16 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, fromState b
 	}
 	st, err := readState(cfg.Data)
 	if err != nil {
-		return c.refused(cfg, base, err)
+		if fromState {
+			return c.refused(cfg, base, err)
+		}
+		// With a config file of its own the update needs the state for
+		// nothing but the runner's default addresses. A state that cannot be
+		// read must not stand in the way of M1's recovery path, so the
+		// defaults of a fresh install do, and the variables still win.
+		fmt.Fprintf(c.stderr, "tikray: warning: %s; taking the runner's default addresses from the default state\n",
+			strings.ReplaceAll(err.Error(), "\n", "; "))
+		st = store.Default()
 	}
 	cfg = cfg.withState(st)
 	runner, err := newRunner(cfg)

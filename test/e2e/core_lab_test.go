@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/runnerapi"
+	"github.com/Arman2122/tikray/internal/sharelink"
+	"github.com/Arman2122/tikray/internal/store"
 	"github.com/Arman2122/tikray/test/lab"
 )
 
@@ -27,6 +30,24 @@ type result struct {
 	Pass    bool    `json:"pass"`
 	Detail  string  `json:"detail"`
 	Seconds float64 `json:"seconds"`
+}
+
+// lifecycleState is the state that makes tikray render what the M1 fixture
+// (config/xray-client.json) does: the fake internet's proxy as the only server,
+// smart routing with the fixture's domestic names and address, and its two
+// resolvers. The subnet stays the default, which is the lab's. The state is
+// validated.
+func lifecycleState() (store.State, error) {
+	srv, err := sharelink.Parse("vless://b831381d-6324-4d53-ad4f-8cda48b30811@203.0.113.10:443?type=tcp&security=none#lab-a")
+	if err != nil {
+		return store.State{}, err
+	}
+	st := store.Default()
+	st.Servers = []store.Server{{ID: store.NewID(), Name: srv.Name, Outbound: srv.Outbound}}
+	st.DefaultPolicy = store.Policy{Mode: store.ModeSmart}
+	st.Routing.Domestic = store.Domestic{Domains: []string{"domain:domestic.test"}, IPs: []string{"203.0.113.20/32"}}
+	st.DNS = store.DNS{Remote: "203.0.113.53", Domestic: netip.MustParseAddr("203.0.113.54")}
+	return st, st.Validate()
 }
 
 // TestCoreLifecycle deploys the real images once and takes xray-core through
@@ -114,7 +135,7 @@ func TestCoreLifecycle(t *testing.T) {
 			t.Errorf("xray api statssys on %s: the runner runs %q (%v)", version, st.XrayVersion, err)
 			return
 		}
-		out, err := runnerAPI.XrayAPI(ctx, "statssys", "--server=127.0.0.1:10085")
+		out, err := runnerAPI.XrayAPI(ctx, "statssys", "--server="+xrayAPI)
 		note("xray api statssys on %s: exit %d, uptime line %q, err %v", version, out.ExitCode, uptimeLine(out.Stdout), err)
 		if err != nil || out.ExitCode != 0 {
 			t.Errorf("xray api statssys on %s: exit %d (%v): %s", version, out.ExitCode, err, out.Stderr)
@@ -136,6 +157,17 @@ func TestCoreLifecycle(t *testing.T) {
 		note("before: runner %s, gateway_up %v, LAN direct after %.0fs: %v", st.State, st.GatewayUp, took.Seconds(), direct)
 		res := tikray(t, note, "core update "+oldestXray+" --config "+clientConfig)
 		wantResult(t, res, artifacts.Result{Outcome: runnerapi.OutcomeCommitted, To: oldestXray, Source: "direct", Verified: "dgst"})
+		// From here on the updates and the rollback run with no --config, so
+		// tikray renders their config from the state. Give it one that
+		// reproduces the fixture's routing.
+		state, err := lifecycleState()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := l.pushState(ctx, state); err != nil {
+			t.Fatal(err)
+		}
+		note("pushed the state to %s: server %s (%s), smart routing, the fixture's domestic names and resolvers", statePath, state.Servers[0].Name, state.Servers[0].ID)
 		onCore(t, note, oldestXray)
 		statssys(t, note, oldestXray)
 		lanProxied(t, note)

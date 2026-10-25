@@ -26,6 +26,7 @@ import (
 
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/runnerapi"
+	"github.com/Arman2122/tikray/internal/store"
 	"github.com/Arman2122/tikray/internal/xrayver"
 	"github.com/Arman2122/tikray/test/lab"
 	"github.com/Arman2122/tikray/test/lab/fixtures/labinet"
@@ -34,6 +35,12 @@ import (
 // The runner's control API, which the host reaches through the lab's host
 // route to the tikray bridge.
 const runnerURL = "http://172.31.255.3:8080"
+
+// xrayAPI is where xray's gRPC API listens, on the runner's address: the
+// "api" block of config/xray-client.json says so (JSON cannot refer to this
+// constant, so the two must agree), and so does the state-derived default of
+// tikray's health check (TIKRAY_XRAY_API).
+const xrayAPI = "172.31.255.3:10085"
 
 // Paths on the router.
 const (
@@ -45,6 +52,9 @@ const (
 	coresDir      = dataRoot + "/cores"
 	inboxDir      = dataRoot + "/inbox"
 )
+
+// statePath is the state file on the router, where tikray reads it.
+var statePath = fmt.Sprintf("%s/state/state.v%d.json", dataRoot, store.Current)
 
 // clientConfig is the xray client config as the tikray container sees it.
 const clientConfig = "/data/inbox/xray-client.json"
@@ -517,6 +527,45 @@ func (l *Lab) setFlag(name string, on bool) error {
 // name, as an operator's manual upload.
 func (l *Lab) toInbox(ctx context.Context, version string) error {
 	return l.CHR.Push(ctx, l.Zips[version], inboxDir+"/"+l.Asset)
+}
+
+// writeStateFile saves st in dir as revision 1, in the format of the state
+// file, and returns its path. It is the store that writes it, with the checks
+// of Validate, so that what the lab pushes is what the daemon would have saved.
+func writeStateFile(dir string, st store.State) (string, error) {
+	s, err := store.Open(dir)
+	if err != nil {
+		return "", err
+	}
+	if _, _, err := s.Update(0, func(next *store.State) error {
+		*next = st
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, fmt.Sprintf("state.v%d.json", store.Current)), nil
+}
+
+// pushState puts st on the router as the state tikray reads, replacing the one
+// there. It refuses a state that does not validate.
+func (l *Lab) pushState(ctx context.Context, st store.State) error {
+	if err := st.Validate(); err != nil {
+		return fmt.Errorf("pushing the state: %w", err)
+	}
+	dir, err := os.MkdirTemp("", "tikray-state-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	local, err := writeStateFile(dir, st)
+	if err != nil {
+		return err
+	}
+	// Replace the file rather than count on the fetch overwriting it.
+	if _, err := l.CHR.Run(ctx, fmt.Sprintf(`:foreach f in=[/file/find where name="%s"] do={/file/remove $f}`, statePath)); err != nil {
+		return err
+	}
+	return l.CHR.Push(ctx, local, statePath)
 }
 
 // clearInbox removes the release zip from the inbox.

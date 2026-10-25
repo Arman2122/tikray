@@ -1,5 +1,8 @@
 {
   "log": {"loglevel": "warning", "access": "/data/run/access.log"},
+  // The api listens on the runner's address, where tikray's health check asks
+  // for it (TIKRAY_XRAY_API). test/e2e's xrayAPI constant (lab.go) repeats it,
+  // as JSON cannot refer to a constant: change the two together.
   "api": {"tag": "api", "listen": "172.31.255.3:10085", "services": ["StatsService"]},
   "stats": {},
   "dns": {

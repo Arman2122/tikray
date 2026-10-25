@@ -1366,11 +1366,146 @@ func TestUsageTextListsTheNewCommands(t *testing.T) {
 	}
 }
 
-// With no --config, an update runs the config the state renders to; its help
-// says so.
+// With no --config, an update runs the config the state renders to, and so
+// updating to the active version trials a changed render. Both the flag's help
+// and the usage text say so, in one sentence.
 func TestUpdateHelpSaysItRenders(t *testing.T) {
+	const sentence = "without --config the config is rendered from the state for the target core, " +
+		"so updating to the version already active re-renders and trials the config when the state changed"
+	flat := func(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
+
 	code, stdout, stderr := runCLI(t, nil, "core", "update", "-h")
-	if got := stdout + stderr; code != 0 || !strings.Contains(got, "render the config from the state") {
-		t.Errorf("exit %d; the help is\n%s", code, got)
+	if code != 0 {
+		t.Fatalf("core update -h: exit %d", code)
 	}
+	if got := flat(stdout + stderr); !strings.Contains(got, sentence) {
+		t.Errorf("the --config help lacks %q:\n%s", sentence, stdout+stderr)
+	}
+
+	code, stdout, _ = runCLI(t, nil, "help")
+	if code != 0 {
+		t.Fatalf("help: exit %d", code)
+	}
+	if got := flat(stdout); !strings.Contains(got, sentence) {
+		t.Errorf("the usage text lacks %q:\n%s", sentence, stdout)
+	}
+}
+
+// configFile writes an xray config with body and returns its path and its name
+// under run/ once the CoreUpdater has stored it: config/<SHA-256>.json.
+func configFile(t *testing.T, body string) (path, rel string) {
+	t.Helper()
+	path = filepath.Join(t.TempDir(), "xray.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(body))
+	return path, "config/" + hex.EncodeToString(sum[:]) + ".json"
+}
+
+// With --config the state only supplies the runner's addresses, so an
+// unreadable one (M1's recovery path: the user has a config to run) costs a
+// warning and the default addresses, not the command. Without --config the
+// config comes from the state, which then must be readable.
+func TestUpdateConfigFileSurvivesAnUnreadableState(t *testing.T) {
+	writeBad := func(t *testing.T, data, name string, body []byte) string {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(data, "state"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(data, "state", name), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return name
+	}
+	// Each makes the state unreadable and returns the name of the file the
+	// error blames.
+	unreadable := map[string]func(t *testing.T, data string) string{
+		"corrupt": func(t *testing.T, data string) string {
+			return writeBad(t, data, "state.v1.json", []byte("{not json"))
+		},
+		"invalid": func(t *testing.T, data string) string {
+			// A state the store refuses to load: take a saved one and spoil a policy.
+			writeState(t, data, func(*store.State) {})
+			file := filepath.Join(data, "state", "state.v1.json")
+			b, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(b, []byte(`"direct"`)) {
+				t.Fatalf("the saved state has no policy to spoil:\n%s", b)
+			}
+			return writeBad(t, data, "state.v1.json", bytes.Replace(b, []byte(`"direct"`), []byte(`"bogus"`), 1))
+		},
+		"only newer files": func(t *testing.T, data string) string {
+			return writeBad(t, data, "state.v99.json", []byte(`{"version":99,"revision":1,"state":{}}`))
+		},
+	}
+	for name, breakState := range unreadable {
+		t.Run(name, func(t *testing.T) {
+			active, activeRel := configFile(t, `{"inbounds":[]}`+"\n")
+			other, _ := configFile(t, `{"inbounds":[{"protocol":"tun"}]}`+"\n")
+			vars, data, runner := trialEnv(t, &runnerapi.Selection{Core: "26.10.21", Config: activeRel})
+			installSlot(t, data, "26.10.21")
+			bad := breakState(t, data)
+			warnings := func(stderr string) int { return strings.Count(stderr, "warning") }
+
+			// The runner is already on this config: the update is a noop, which
+			// takes the runner, and so its address, and nothing else.
+			code, stdout, stderr := runFast(t, vars, "core", "update", "26.10.21", "--config", active)
+			if res := decodeResult(t, stdout); code != 0 || res.Outcome != artifacts.OutcomeNoop {
+				t.Errorf("noop: exit %d, result %+v, stderr %q; want exit 0 and a noop", code, res, stderr)
+			}
+			if line := lineWith(stderr, "warning"); warnings(stderr) != 1 || !strings.Contains(line, bad) {
+				t.Errorf("noop: stderr %q; want one warning line naming %s", stderr, bad)
+			}
+
+			// A different config goes on trial. The runner's addresses come from
+			// the default state: the health check probes SOCKS at its .3.
+			code, stdout, stderr = runFast(t, vars, "core", "update", "26.10.21", "--config", other)
+			res := decodeResult(t, stdout)
+			if code != 1 || res.Outcome != artifacts.OutcomeUnhealthy || !strings.Contains(res.Detail, "172.31.255.3:1080") {
+				t.Errorf("trial: exit %d, result %+v; want exit 1, unhealthy through the default SOCKS address", code, res)
+			}
+			if line := lineWith(stderr, "warning"); warnings(stderr) != 1 || !strings.Contains(line, bad) {
+				t.Errorf("trial: stderr %q; want one warning line naming %s", stderr, bad)
+			}
+			if n := len(runner.candidates()); n != 1 {
+				t.Errorf("%d trials, want 1", n)
+			}
+
+			// A variable still wins over the default state.
+			vars["TIKRAY_SOCKS"] = closedAddr(t)
+			code, stdout, _ = runFast(t, vars, "core", "update", "26.10.21", "--config", other)
+			res = decodeResult(t, stdout)
+			if code != 1 || !strings.Contains(res.Detail, vars["TIKRAY_SOCKS"]) {
+				t.Errorf("TIKRAY_SOCKS set: exit %d, result %+v; want the probe at %s", code, res, vars["TIKRAY_SOCKS"])
+			}
+			delete(vars, "TIKRAY_SOCKS")
+
+			// With the config from the state, the state has to be readable.
+			trials := len(runner.candidates())
+			code, stdout, stderr = runFast(t, vars, "core", "update", "26.10.21")
+			res = decodeResult(t, stdout)
+			if code != 1 || res.Outcome != artifacts.OutcomeRefused || !strings.Contains(res.Detail, bad) || !strings.Contains(stderr, bad) {
+				t.Errorf("no --config: exit %d, result %+v, stderr %q; want a refusal naming %s", code, res, stderr, bad)
+			}
+			if warnings(stderr) != 0 {
+				t.Errorf("no --config: stderr %q carries a warning; the refusal is the error", stderr)
+			}
+			if n := len(runner.candidates()); n != trials {
+				t.Errorf("no --config: %d trials after the refusal, want %d", n, trials)
+			}
+		})
+	}
+}
+
+// lineWith returns the first line of s that holds sub.
+func lineWith(s, sub string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.Contains(line, sub) {
+			return line
+		}
+	}
+	return ""
 }
