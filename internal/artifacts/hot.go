@@ -261,9 +261,12 @@ type hotAttempt struct {
 	// touched says that the marker is there: a call may have changed the
 	// running xray.
 	touched bool
-	// pid is the PID of the last xray the hot change saw that runs what the
-	// runner records as active, -1 for none since the adopt: an xray with
-	// another PID was started after it, from the active config.
+	// pid is the PID of an xray seen after the change's last xray api call
+	// (and after the adopt, once there was one), -1 when none was: an xray
+	// with another PID was started after that call, from the active config or
+	// a trial's candidate, and so runs nothing of the change that the runner
+	// does not record. Until the change makes a call it is the PID at Apply's
+	// start.
 	pid int
 	// gate is the baseline's verdict once the hot path has taken it. The
 	// trial keeps it: by then xray may run a part of the change, which says
@@ -347,22 +350,28 @@ func (u *CoreUpdater) change(ctx context.Context, st runnerapi.Status, cfg *conf
 		}
 		h.touched = true
 	}
+	// The runner may have started xray again since st, so the calls may have
+	// reached another xray than st's: a failure takes the PID from after it.
+	failed := func(err error) error {
+		h.pid = u.pidNow(ctx)
+		return err
+	}
 	u.logf("xray-core %s: changing xray's outbounds without a restart", st.Active.Core)
 	api := withTimeout(u.Runner, xrayAPIProbeTimeout)
 	server := "--server=" + cmp.Or(u.XrayAPIServer, defaultStatsServer)
 	for _, tag := range p.remove {
 		if err := xrayAPI(ctx, api, "rmo", server, tag); err != nil {
-			return err
+			return failed(err)
 		}
 	}
 	if len(p.add) > 0 {
 		if err := u.addOutbounds(ctx, api, server, p.add); err != nil {
-			return err
+			return failed(err)
 		}
 	}
 	if g.proxy != nil {
 		if err := u.within(ctx, g.proxy.Check); err != nil {
-			return fmt.Errorf("the proxy probe after the change: %w", err)
+			return failed(fmt.Errorf("the proxy probe after the change: %w", err))
 		}
 	}
 	aerr := u.Runner.Adopt(ctx, cfg.rel)
@@ -385,6 +394,18 @@ func (u *CoreUpdater) change(ctx context.Context, st runnerapi.Status, cfg *conf
 		return fmt.Errorf("xray restarted during the change (pid %d, then %d, %s), so it may lack a part of it", st.XrayPID, after.XrayPID, after.State)
 	}
 	return nil
+}
+
+// pidNow is the PID of the xray that the runner's status shows now, -1 when
+// the status can't be had. It runs even once ctx has ended.
+func (u *CoreUpdater) pidNow(ctx context.Context) int {
+	cctx, cancel := cleanupContext(ctx)
+	defer cancel()
+	st, err := u.Runner.Status(cctx)
+	if err != nil {
+		return -1
+	}
+	return st.XrayPID
 }
 
 // addOutbounds has xray api ado add the outbounds add, from a file in

@@ -621,6 +621,51 @@ func TestHotFallbackRestoresXray(t *testing.T) {
 		wantLive(t, e, candidate)
 		wantPending(t, e, false)
 	})
+	// The runner's supervisor started xray again from the active config while
+	// the candidate was tested, so the xray api calls reach that new xray. A
+	// PID other than the one Apply saw at its start says nothing of the change
+	// then: only one other than the xray's after the failed call does.
+	restartedWhileTested := func(f *fakeRunner) {
+		f.onTest = func(w http.ResponseWriter, config []byte) bool {
+			f.st.XrayPID = 77
+			f.restartLive(f.st.Active.Config)
+			return false
+		}
+	}
+	t.Run("xray restarted before the change, and the ado's answer is lost", func(t *testing.T) {
+		e, _ := newHotEnv(t, active, rendered(t, withServers(srvA, srvB)))
+		e.runner.script(func(f *fakeRunner) {
+			restartedWhileTested(f)
+			refuseTrials(f)
+			f.onXrayAPI = func(w http.ResponseWriter, args []string) {
+				f.liveAPI(args) // server b is added, and the answer lost
+				fakeError(w, http.StatusBadGateway, "internal", "answer lost")
+			}
+		})
+
+		res, err := e.u.Apply(bg)
+		wantOutcome(t, res, err, OutcomeRefused)
+		wantDetail(t, res, "xray was restarted from the active config")
+		wantActions(t, e.runner, "test", "xray-api", "trial", "restart")
+		wantLive(t, e, active)
+		wantPending(t, e, false)
+	})
+	t.Run("xray restarted before the change, an rmo, and the ado fails", func(t *testing.T) {
+		e, _ := newHotEnv(t, active, candidate)
+		e.runner.script(func(f *fakeRunner) {
+			restartedWhileTested(f)
+			refuseTrials(f)
+			failAdo(f)
+		})
+
+		res, err := e.u.Apply(bg)
+		wantOutcome(t, res, err, OutcomeRefused)
+		wantDetail(t, res, "xray was restarted from the active config")
+		wantActions(t, e.runner, "test", "xray-api", "xray-api", "trial", "restart")
+		// Server a, which the rmo took, is back.
+		wantLive(t, e, active)
+		wantPending(t, e, false)
+	})
 	t.Run("the restart fails", func(t *testing.T) {
 		e, _ := newHotEnv(t, active, candidate)
 		newProxyProbe(e, failsUntilTrial(e))
