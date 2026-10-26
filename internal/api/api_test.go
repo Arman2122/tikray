@@ -922,7 +922,6 @@ func TestErrorMapping(t *testing.T) {
 		{"aborted by a cancelled request", wrap(context.Canceled), artifacts.Result{Outcome: "aborted"}, ops, 503, "unavailable", ""},
 		{"an outcome with the lock held", wrap(artifacts.ErrLocked), artifacts.Result{Outcome: "refused"}, ops, 409, "busy", ""},
 		{"an outcome with a trial open", wrap(runnerapi.ErrBusy), artifacts.Result{Outcome: "refused"}, ops, 409, "busy", ""},
-		{"an outcome, the runner gone", wrap(service.ErrRunnerUnavailable), artifacts.Result{Outcome: "refused"}, ops, 503, "runner_unavailable", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

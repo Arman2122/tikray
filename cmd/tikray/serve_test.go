@@ -531,6 +531,44 @@ func TestRunnerTokenIsReadAgainAfterA401(t *testing.T) {
 	}
 }
 
+// The runner client's callers share the token, and any of them may drop it
+// after a 401 while the others read it, as the monitor, the apply loop and a
+// handler do when the runner makes a new token: no read may find it gone half
+// way.
+func TestRunnerTokenGetWhileDropped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.token")
+	if err := os.WriteFile(path, []byte(testToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tok := newRunnerToken(path)
+	var wg sync.WaitGroup
+	panicked := make(chan any, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panicked <- r
+				}
+			}()
+			for range 5000 {
+				s, err := tok.get(context.Background())
+				if err != nil || s != testToken {
+					t.Errorf("get = %q, %v; want the token", s, err)
+					return
+				}
+				tok.drop(s) // the runner refused it
+			}
+		}()
+	}
+	wg.Wait()
+	close(panicked)
+	for r := range panicked {
+		t.Fatalf("get panicked: %v", r)
+	}
+}
+
 // One process owns the state. A second serve on the data root does not start,
 // and the first goes on.
 func TestSecondServeExits(t *testing.T) {

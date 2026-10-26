@@ -36,31 +36,39 @@ func newRunnerToken(path string) *runnerToken {
 	return t
 }
 
-// ready reports whether the token is known, reading the file if it is not yet.
-// A file that is empty holds no token: the runner may have made it and not yet
-// written it.
-func (t *runnerToken) ready() bool {
-	if t.tok.Load() != nil {
-		return true
+// load returns the token, reading the file if it is not known yet, and
+// whether there is one. A file that is empty holds no token: the runner may
+// have made it and not yet written it. The token is read from tok once, and
+// the value is what is used: drop may clear tok at any time.
+func (t *runnerToken) load() (string, bool) {
+	if p := t.tok.Load(); p != nil {
+		return *p, true
 	}
 	b, err := os.ReadFile(t.path)
 	if err != nil {
-		return false
+		return "", false
 	}
 	tok := strings.TrimSpace(string(b))
 	if tok == "" {
-		return false
+		return "", false
 	}
 	t.tok.Store(&tok)
-	return true
+	return tok, true
+}
+
+// ready reports whether the token is known, reading the file if it is not yet.
+func (t *runnerToken) ready() bool {
+	_, ok := t.load()
+	return ok
 }
 
 // get is the runnerapi.Client.TokenFunc.
 func (t *runnerToken) get(context.Context) (string, error) {
-	if !t.ready() {
+	tok, ok := t.load()
+	if !ok {
 		return "", runnerapi.ErrNoToken
 	}
-	return *t.tok.Load(), nil
+	return tok, nil
 }
 
 // drop is the runnerapi.Client.Unauthorized: it forgets the token the runner
