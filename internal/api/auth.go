@@ -106,9 +106,9 @@ func (h *handler) guard(next http.Handler) http.Handler {
 	})
 }
 
-// setSecurityHeaders sets what every response has: it is not a page to sniff,
-// frame or send on as a referrer, and nothing it may load, and it is not kept
-// (a body may hold a credential).
+// setSecurityHeaders sets what every response has. A response is data, not a
+// page: a browser must not sniff its type, frame it, send it on as a referrer
+// or load anything for it, and must not keep it (a body may hold a credential).
 func setSecurityHeaders(h http.Header) {
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "no-referrer")
@@ -245,7 +245,7 @@ func (h *handler) refuseErr(w http.ResponseWriter, err error) {
 func (h *handler) tooMany(w http.ResponseWriter, wait time.Duration) {
 	secs := max(int64((wait+time.Second-1)/time.Second), 1)
 	w.Header().Set("Retry-After", strconv.FormatInt(secs, 10))
-	h.refuse(w, http.StatusTooManyRequests, codeRateLimited, "too many failed attempts from this address: try again later")
+	h.refuse(w, http.StatusTooManyRequests, codeRateLimited, "too many failed attempts: try again later")
 }
 
 // forbid answers a caller whose credential may not do this.
