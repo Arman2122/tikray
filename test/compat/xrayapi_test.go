@@ -72,31 +72,39 @@ func TestXrayAPIAgainstReleases(t *testing.T) {
 }
 
 // apiConfig is an xray config with its API on 127.0.0.1:port and srv-a
-// probed at probeURL.
+// probed at probeURL. The observatory probes once at start and the next time
+// after the test is over, so the counters stay put while it reads and resets
+// them.
 func apiConfig(port int, probeURL string) []byte {
+	return apiConfigWith(port, probeURL, "60s",
+		[]string{"StatsService", "ObservatoryService", "RoutingService"},
+		[]any{map[string]any{"tag": "srv-a", "protocol": "freedom"}})
+}
+
+// apiConfigWith is apiConfig with the API's services, the observatory's probe
+// interval and the outbounds chosen.
+func apiConfigWith(port int, probeURL, probeInterval string, services []string, outbounds []any) []byte {
 	config := map[string]any{
 		"log":    map[string]any{"loglevel": "warning"},
 		"stats":  map[string]any{},
 		"policy": map[string]any{"system": map[string]any{"statsOutboundUplink": true, "statsOutboundDownlink": true}},
 		"api": map[string]any{
 			"tag":      "api",
-			"services": []string{"StatsService", "ObservatoryService", "RoutingService"},
+			"services": services,
 		},
 		"inbounds": []any{map[string]any{
 			"tag": "api-in", "protocol": "dokodemo-door", "listen": "127.0.0.1", "port": port,
 			"settings": map[string]any{"address": "127.0.0.1"},
 		}},
-		"outbounds": []any{map[string]any{"tag": "srv-a", "protocol": "freedom"}},
+		"outbounds": outbounds,
 		"routing": map[string]any{
 			"rules": []any{map[string]any{"type": "field", "inboundTag": []string{"api-in"}, "outboundTag": "api"}},
 			"balancers": []any{map[string]any{
 				"tag": "proxy-open", "selector": []string{"srv-"}, "strategy": map[string]any{"type": "leastPing"},
 			}},
 		},
-		// One probe at start and the next one after the test is over, so the
-		// counters stay put while it reads and resets them.
 		"observatory": map[string]any{
-			"subjectSelector": []string{"srv-"}, "probeURL": probeURL, "probeInterval": "60s", "enableConcurrency": true,
+			"subjectSelector": []string{"srv-"}, "probeURL": probeURL, "probeInterval": probeInterval, "enableConcurrency": true,
 		},
 	}
 	b, err := json.Marshal(config)
