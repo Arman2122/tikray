@@ -55,6 +55,11 @@ var (
 	// ErrNoAdmin is what a change of password gets when there is no admin
 	// (yet, or any more: a reset came first).
 	ErrNoAdmin = errors.New("auth: there is no admin")
+
+	// ErrNoSetupCode is what ReadSetupCode says when there is no admin and no
+	// setup.code: serve has not started in this directory yet, or the file was
+	// removed by hand.
+	ErrNoSetupCode = errors.New("auth: there is no setup code yet")
 )
 
 // admin is the one account. The password is kept only as its PHC hash.
@@ -342,6 +347,50 @@ func (s *Store) SetupCode() (string, error) {
 		return "", err
 	}
 	return formatSetupCode(norm), nil
+}
+
+// ReadSetupCode is what `tikray setup-code` shows, read from the files in dir
+// with no Store: it never writes, and never makes the directory or a file. A
+// Store does (OpenStore saves auth.json and makes setup.code), and only the
+// process that holds serve.lock may, so the CLI reads here while serve runs.
+//
+// With an admin there is no code to show, whatever setup.code holds (a claim
+// that died between saving the admin and removing the file leaves a stale one):
+// claimed is true. With no admin it returns the code in setup.code as it is
+// shown, XXXX-XXXX-XXXX. With no admin and no file it is ErrNoSetupCode, and
+// never "claimed": serve makes the code when it starts and at a claim, and this
+// does not. A file it can't use (see OpenStore for auth.json; a setup.code that
+// holds no code) is an error that shows none of it.
+func ReadSetupCode(dir string) (code string, claimed bool, err error) {
+	// hasAdmin reads auth.json afresh, since a claim saves it and removes the
+	// code, and a read can fall between the two.
+	hasAdmin := func() (bool, error) {
+		d, _, err := loadFile(filepath.Join(dir, authFile))
+		if err != nil {
+			return false, err // d is what was read before it failed
+		}
+		return d.Admin != nil, nil
+	}
+	if has, err := hasAdmin(); err != nil || has {
+		return "", has, err
+	}
+	path := filepath.Join(dir, codeFile)
+	b, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// Gone because the admin was just claimed?
+		if has, err := hasAdmin(); err != nil || has {
+			return "", has, err
+		}
+		return "", false, ErrNoSetupCode
+	case err != nil:
+		return "", false, fmt.Errorf("auth: reading %s: %w", codeFile, err)
+	}
+	norm := NormalizeSetupCode(string(b))
+	if !validSetupCode(norm) {
+		return "", false, fmt.Errorf("auth: %s does not hold a setup code; reset the admin to make a new one", path)
+	}
+	return formatSetupCode(norm), false, nil
 }
 
 // checkClaimLocked is the part of a claim that is about the state and the

@@ -15,6 +15,12 @@
 //	tikray policy default <direct|smart|full> [--kill-switch]
 //	tikray status [--json]
 //	tikray events [--after N]
+//	tikray token create <name> [--expires 720h]
+//	tikray token list [--json]
+//	tikray token rm <id>
+//
+//	tikray setup-code
+//	tikray admin reset
 //
 //	tikray config render [--core VER]
 //	tikray apply
@@ -31,6 +37,15 @@
 // or a line, with no credential in it (no outbound's, no subscription's URL,
 // never the API token). --json prints what the API answered, as it is,
 // credentials and URLs included. See commands.go and commands_servers.go.
+//
+// Signing in starts with the setup code, which serve makes at its first start
+// (in <data>/state/setup.code) and never prints: it prints a line that says to
+// run setup-code, which reads the file, so it works while serve runs, takes no
+// token or lock, and writes nothing. admin reset removes the admin and the
+// sessions and makes a new code: through serve, with the root token, when it
+// answers, and, where nothing listens, in its own process under serve.lock.
+// token create prints a named API token once, and token list and token rm go
+// through serve like the commands above; no list has a secret in it.
 //
 // apply, core update and core rollback go through the daemon too when it
 // answers GET /healthz within two seconds: it applies, and the command prints
@@ -89,8 +104,8 @@
 // One process owns the state. serve holds an exclusive lock on
 // <data>/state/serve.lock for as long as it runs, and a second serve on the
 // same data root does not start. apply, core update and core rollback, where
-// they run the updater themselves, hold the same lock for as long as they run
-// and refuse when it is held.
+// they run the updater themselves, and admin reset, where it resets the admin
+// itself, hold the same lock for as long as they run and refuse when it is held.
 package main
 
 import (
@@ -160,6 +175,13 @@ credentials and subscription URLs included; the tables leave them out.
                  health and each server's
   events [--after N]
                  print what the service has done, oldest first
+  token create <name> [--expires 720h]
+                 make a named API token for a script, and print it: it is
+                 shown only this once, since only a hash of it is kept. It
+                 stops working after --expires, if given.
+  token list [--json]
+                 list the tokens: no secret is in the list
+  token rm <id>  revoke a token
 
   apply          render the config from the state for the active core and put
                  it on trial
@@ -182,6 +204,17 @@ needs the service stopped.
                  list the installed cores
   core status    print the runner's status as JSON
 
+The first admin of the web page is made with a setup code, which "tikray
+serve" makes at its first start and does not print, since its output is logged:
+
+  setup-code     print the setup code. It reads state/setup.code, so it works
+                 while "tikray serve" runs, and needs no token. Once the admin
+                 is made it says so.
+  admin reset    remove the admin and every session, and make a new setup
+                 code, for a lost password (the API tokens stay). It goes
+                 through "tikray serve" with the root token when it answers,
+                 and runs in this process when nothing listens.
+
 Configuration comes from the environment: TIKRAY_DATA, TIKRAY_ARCH,
 TIKRAY_RUNNER_URL, TIKRAY_SOCKS, TIKRAY_XRAY_API, TIKRAY_UPSTREAM,
 TIKRAY_MIRRORS, TIKRAY_INDEX_URLS, TIKRAY_INDEX_PUBKEY_FILE and
@@ -196,8 +229,8 @@ those are unset they come from state/api.token and state/tls.crt in the data
 root, which serve makes.
 
 One process owns the state: serve holds state/serve.lock while it runs, and
-apply, core update and core rollback refuse to run in their own process while
-it is held.
+apply, core update, core rollback and admin reset refuse to run in their own
+process while it is held.
 `
 
 func main() {
@@ -251,6 +284,12 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		return c.statusCommand(ctx, args[1:])
 	case "events":
 		return c.eventsCommand(ctx, args[1:])
+	case "setup-code":
+		return c.setupCodeCommand(args[1:])
+	case "admin":
+		return c.adminCommand(ctx, args[1:])
+	case "token":
+		return c.tokenCommand(ctx, args[1:])
 	}
 	return c.usageError(fmt.Sprintf("unknown command %q", args[0]))
 }

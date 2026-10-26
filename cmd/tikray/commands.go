@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Arman2122/tikray/internal/apiclient"
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/health"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
@@ -23,7 +25,8 @@ import (
 // state, and what they print leaves out every credential: an outbound's, a
 // subscription's URL, the API token. Only --json prints the API's answer as
 // it is. The nouns are in commands_servers.go (server, sub, device and
-// policy); here are the daemon, status and events.
+// policy); here are the daemon, status and events, and at the end the sign-in:
+// setup-code, admin reset and token, which are told there.
 
 // apiCall is a call of the API that a command makes, written as a method
 // expression, such as (*apiclient.Client).Apply.
@@ -438,4 +441,191 @@ func upDown(ok bool) string {
 		return "ok"
 	}
 	return "down"
+}
+
+// --- sign-in: the setup code, the admin and the tokens
+
+// adminResetDone is what admin reset says, whichever way it did it.
+const adminResetDone = `the admin was reset: run "tikray setup-code" for the new setup code`
+
+// setupCodeCommand prints the code that makes the first admin, or says that
+// there is none to show. It only reads <data>/state/setup.code (and auth.json,
+// to know whether the admin exists): it never opens the auth store, which saves
+// auth.json and makes the code file, and only the process that holds serve.lock
+// may. So it takes no lock, needs no daemon and no token, works while serve
+// runs, and makes nothing, not even the state directory.
+func (c *cli) setupCodeCommand(args []string) int {
+	fs := c.newFlagSet("setup-code", "setup-code")
+	if _, code, ok := c.parse(fs, args, 0); !ok {
+		return code
+	}
+	cfg, err := configFromEnv(c.getenv)
+	if err != nil {
+		return c.fail(err)
+	}
+	code, claimed, err := auth.ReadSetupCode(stateDir(cfg.Data))
+	switch {
+	case errors.Is(err, auth.ErrNoSetupCode):
+		// No admin and no code: not "claimed".
+		return c.fail(errors.New("no setup code yet: start tikray serve"))
+	case err != nil:
+		return c.fail(err)
+	case claimed:
+		return c.say("the admin has been claimed")
+	}
+	return c.say("%s", code)
+}
+
+func (c *cli) adminCommand(ctx context.Context, args []string) int {
+	return c.subcommands("admin", args, map[string]func([]string) int{
+		"reset": func(args []string) int { return c.adminReset(ctx, args) },
+	})
+}
+
+// adminReset removes the admin and every session and makes a new setup code
+// (the API tokens stay). Where tikray serve answers it asks it to, with the
+// token this process has, which must be the root token: the API refuses any
+// other. Where nothing listens it does it itself, as the direct paths of apply
+// and core update do: it takes serve.lock, opens the auth store, resets it and
+// lets go. Any other failure to reach the daemon is an error, never a reason to
+// write beside a process that may own the state (see daemon).
+func (c *cli) adminReset(ctx context.Context, args []string) int {
+	fs := c.newFlagSet("admin reset", "admin reset")
+	if _, code, ok := c.parse(fs, args, 0); !ok {
+		return code
+	}
+	cfg, err := configFromEnv(c.getenv)
+	if err != nil {
+		return c.fail(err)
+	}
+	cl, running, err := c.daemon(ctx, cfg)
+	switch {
+	case err != nil:
+		return c.fail(err)
+	case running:
+		if _, err := cl.ResetAdmin(ctx); err != nil {
+			return c.failAPI(ctx, err)
+		}
+		return c.say(adminResetDone)
+	}
+	unlock, err := lockServe(cfg.Data)
+	switch {
+	case errors.Is(err, errServeHeld):
+		return c.fail(fmt.Errorf("tikray serve is running (it holds %s)", filepath.Join(stateDir(cfg.Data), serveLockName)))
+	case err != nil:
+		return c.fail(err)
+	}
+	defer unlock()
+	people, err := auth.OpenStore(stateDir(cfg.Data))
+	if err != nil {
+		return c.fail(err)
+	}
+	if err := people.Reset(); err != nil {
+		return c.fail(err)
+	}
+	return c.say(adminResetDone)
+}
+
+func (c *cli) tokenCommand(ctx context.Context, args []string) int {
+	return c.subcommands("token", args, map[string]func([]string) int{
+		"create": func(args []string) int { return c.tokenCreate(ctx, args) },
+		"list":   func(args []string) int { return c.tokenList(ctx, args) },
+		"rm":     func(args []string) int { return c.tokenRemove(ctx, args) },
+	})
+}
+
+// tokenCreate makes a named API token and prints it on a line of its own, and
+// then a line that says it is shown this once: the service keeps only a hash,
+// and no later call shows it again.
+func (c *cli) tokenCreate(ctx context.Context, args []string) int {
+	fs := c.newFlagSet("token create", "token create <name> [--expires 720h]")
+	var expires time.Duration
+	fs.Func("expires", "the token stops working after `DURATION`, such as 720h (default: it never expires)", func(s string) error {
+		d, err := time.ParseDuration(s)
+		switch {
+		case err != nil:
+			return errors.New("want a duration such as 720h")
+		case d <= 0:
+			return errors.New("must be longer than zero")
+		}
+		expires = d
+		return nil
+	})
+	pos, code, ok := c.parse(fs, args, 1)
+	if !ok {
+		return code
+	}
+	n := apiclient.NewToken{Name: pos[0]}
+	if expires > 0 {
+		n.ExpiresIn = expires.String()
+	}
+	return c.withDaemon(ctx, func(cl *apiclient.Client) int {
+		resp, err := cl.CreateToken(ctx, n)
+		if err != nil {
+			return c.failAPI(ctx, err)
+		}
+		var made apiclient.CreatedToken
+		if err := resp.Decode(&made); err != nil {
+			return c.fail(err)
+		}
+		if made.Token == "" {
+			return c.fail(errors.New("tikray serve's answer holds no token"))
+		}
+		c.say("%s", oneWord(made.Token))
+		return c.say("this token is shown only once")
+	})
+}
+
+// tokenList lists the tokens: never a secret, for the API sends none.
+func (c *cli) tokenList(ctx context.Context, args []string) int {
+	fs := c.newFlagSet("token list", "token list [--json]")
+	asJSON := fs.Bool("json", false, "print the API's JSON instead of a table")
+	if _, code, ok := c.parse(fs, args, 0); !ok {
+		return code
+	}
+	return c.withDaemon(ctx, func(cl *apiclient.Client) int {
+		resp, err := cl.Tokens(ctx)
+		if err != nil {
+			return c.failAPI(ctx, err)
+		}
+		if *asJSON {
+			return c.passJSON(resp)
+		}
+		var tokens []apiclient.TokenInfo
+		if err := resp.Decode(&tokens); err != nil {
+			return c.fail(err)
+		}
+		tw := c.table()
+		fmt.Fprintln(tw, "ID\tNAME\tCREATED\tEXPIRES\tLAST USED")
+		for _, t := range tokens {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", oneWord(t.ID), oneLine(t.Name), atTime(t.Created), neverOr(t.Expires), neverOr(t.LastUsed))
+		}
+		if err := tw.Flush(); err != nil {
+			return c.fail(err)
+		}
+		return 0
+	})
+}
+
+func (c *cli) tokenRemove(ctx context.Context, args []string) int {
+	fs := c.newFlagSet("token rm", "token rm <id>")
+	pos, code, ok := c.parse(fs, args, 1)
+	if !ok {
+		return code
+	}
+	return c.withDaemon(ctx, func(cl *apiclient.Client) int {
+		if _, err := cl.RevokeToken(ctx, pos[0]); err != nil {
+			return c.failAPI(ctx, err)
+		}
+		return c.say("revoked token %s", oneWord(pos[0]))
+	})
+}
+
+// neverOr is t as text, "never" for the zero time: a token with no expiry, or
+// one that was never used.
+func neverOr(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	return atTime(t)
 }

@@ -449,3 +449,50 @@ func (c *Client) CoreUpdate(ctx context.Context, version string, allowUnverified
 func (c *Client) CoreRollback(ctx context.Context) (Response, error) {
 	return c.send(ctx, http.MethodPost, "/v1/core/rollback", nil)
 }
+
+// --- sign-in: tokens and the admin
+
+// NewToken is an API token to make. ExpiresIn is a duration as the API reads
+// it, such as "720h", from the moment it is made; left empty, the token does not
+// expire.
+type NewToken struct {
+	Name      string `json:"name"`
+	ExpiresIn string `json:"expires_in,omitempty"`
+}
+
+// TokenInfo is an API token as the API lists it: what is known of it, and never
+// its secret. A zero Expires is a token that does not expire, and a zero
+// LastUsed one that was never used.
+type TokenInfo struct {
+	ID       string    `json:"id"`
+	Name     string    `json:"name"`
+	Created  time.Time `json:"created"`
+	Expires  time.Time `json:"expires,omitzero"`
+	LastUsed time.Time `json:"last_used,omitzero"`
+}
+
+// CreatedToken is the answer to a new token: the token itself, which is shown
+// this once and can't be asked for again, and what is known of it.
+type CreatedToken struct {
+	Token string    `json:"token"`
+	Info  TokenInfo `json:"info"`
+}
+
+// Tokens is GET /v1/tokens: a list of TokenInfo, the oldest first.
+func (c *Client) Tokens(ctx context.Context) (Response, error) { return c.get(ctx, "/v1/tokens") }
+
+// CreateToken is POST /v1/tokens; the answer is a CreatedToken.
+func (c *Client) CreateToken(ctx context.Context, n NewToken) (Response, error) {
+	return c.send(ctx, http.MethodPost, "/v1/tokens", n)
+}
+
+// RevokeToken is DELETE /v1/tokens/{id}.
+func (c *Client) RevokeToken(ctx context.Context, id string) (Response, error) {
+	return c.send(ctx, http.MethodDelete, "/v1/tokens/"+url.PathEscape(id), nil)
+}
+
+// ResetAdmin is POST /v1/auth/reset: it removes the admin and every session and
+// makes a new setup code. Only the root token may.
+func (c *Client) ResetAdmin(ctx context.Context) (Response, error) {
+	return c.send(ctx, http.MethodPost, "/v1/auth/reset", nil)
+}

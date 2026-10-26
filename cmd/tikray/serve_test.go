@@ -3,6 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -128,6 +132,178 @@ func (r *running) client(t *testing.T, data string) *apiclient.Client {
 		t.Fatal(err)
 	}
 	return &apiclient.Client{BaseURL: "https://" + r.addr, Token: strings.TrimSpace(string(tok)), Fingerprint: r.fingerprint}
+}
+
+// The sign-in, as the tests of serve and of the commands that go with it need
+// it. The CLI has no command for it (a person signs in at a page), and apiclient
+// no call, so a test makes the requests as a browser would.
+
+const (
+	// noAdminHint is the line serve prints while there is no admin.
+	noAdminHint = `tikray: no admin yet: run "tikray setup-code" in this container to get the setup code` + "\n"
+	// adminPassword is the password the tests give their admin.
+	adminPassword = "correct horse battery staple"
+)
+
+// setupCodeForm is a setup code as it is shown: three groups of four symbols of
+// Crockford's base32.
+var setupCodeForm = regexp.MustCompile(`^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$`)
+
+// call sends a request to the API without a token, with the body (nil for none)
+// as JSON and the session cookie (nil for none). It trusts the certificate that
+// serve printed, and no other.
+func (r *running) call(t *testing.T, method, path string, body any, cookie *http.Cookie) (*http.Response, []byte) {
+	t.Helper()
+	var in io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		in = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, "https://"+r.addr+path, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	hc := &http.Client{Transport: &http.Transport{DisableKeepAlives: true, TLSClientConfig: &tls.Config{
+		InsecureSkipVerify: true, // a self-signed certificate: the pin below is the check
+		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
+			if sum := sha256.Sum256(raw[0]); hex.EncodeToString(sum[:]) != r.fingerprint {
+				return errors.New("not the certificate serve printed")
+			}
+			return nil
+		},
+	}}}
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp, out
+}
+
+// claimAdmin makes the admin (alice, with adminPassword) with the setup code,
+// as the setup page does, and returns the cookie of the session it starts.
+func (r *running) claimAdmin(t *testing.T, code string) *http.Cookie {
+	t.Helper()
+	resp, _ := r.call(t, http.MethodPost, "/v1/auth/setup", map[string]string{"code": code, "username": "alice", "password": adminPassword}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("claiming the admin with the setup code: status %d, want 200", resp.StatusCode)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == "tikray_session" {
+			return c
+		}
+	}
+	t.Fatal("claiming the admin started no session")
+	return nil
+}
+
+// authState is what GET /v1/auth/state says to the holder of cookie (nil for
+// none): whether an admin is yet to be made, and whether the cookie is a session.
+func (r *running) authState(t *testing.T, cookie *http.Cookie) (setupRequired, signedIn bool) {
+	t.Helper()
+	resp, body := r.call(t, http.MethodGet, "/v1/auth/state", nil, cookie)
+	var st struct {
+		SetupRequired bool `json:"setup_required"`
+		SignedIn      bool `json:"signed_in"`
+	}
+	if err := json.Unmarshal(body, &st); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/auth/state: status %d, body %q (%v)", resp.StatusCode, body, err)
+	}
+	return st.SetupRequired, st.SignedIn
+}
+
+// setupCodeOf is the code in <data>/state/setup.code.
+func setupCodeOf(t *testing.T, data string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(data, "state", "setup.code"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// serve makes the setup code at its first start and says where to get it, and
+// never says the code: not on its stderr, which a supervisor keeps in a log.
+func TestServeMakesSetupCode(t *testing.T) {
+	vars, data := serveEnv(t)
+	state := filepath.Join(data, "state")
+
+	r := startServe(t, vars)
+	// The hint comes before the startup line, so that it is there when the
+	// startup line is.
+	code := setupCodeOf(t, data)
+	if !setupCodeForm.MatchString(code) {
+		t.Fatalf("setup.code does not hold a setup code (%d bytes)", len(code))
+	}
+	for name, mode := range map[string]os.FileMode{"setup.code": 0o600, "auth.json": 0o600, ".": 0o700} {
+		fi, err := os.Stat(filepath.Join(state, name))
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+		} else if fi.Mode().Perm() != mode {
+			t.Errorf("%s has mode %v, want %v", name, fi.Mode().Perm(), mode)
+		}
+	}
+	stderr := r.stderr.String()
+	if n := strings.Count(stderr, noAdminHint); n != 1 {
+		t.Errorf("stderr has the hint %d times, want once", n)
+	}
+	for _, shown := range []string{code, strings.ReplaceAll(code, "-", "")} {
+		if strings.Contains(stderr, shown) {
+			t.Error("stderr shows the setup code")
+		}
+	}
+
+	// A restart before the claim keeps the code, and says the same.
+	if c := r.stop(t); c != 0 {
+		t.Fatalf("exit %d", c)
+	}
+	r = startServe(t, vars)
+	if again := setupCodeOf(t, data); again != code {
+		t.Error("a restart with no admin changed the setup code")
+	}
+	if n := strings.Count(r.stderr.String(), noAdminHint); n != 1 {
+		t.Errorf("the restart said the hint %d times, want once", n)
+	}
+	if strings.Contains(r.stderr.String(), code) {
+		t.Error("the restart's stderr shows the setup code")
+	}
+
+	// The code claims the admin, and with it the file is gone.
+	cookie := r.claimAdmin(t, code)
+	if _, err := os.Stat(filepath.Join(state, "setup.code")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("setup.code after the claim: %v, want it gone", err)
+	}
+	if need, in := r.authState(t, cookie); need || !in {
+		t.Errorf("after the claim setup_required is %v and signed_in %v, want false and true", need, in)
+	}
+
+	// With an admin there is nothing to hint at, and no code is made again.
+	if c := r.stop(t); c != 0 {
+		t.Fatalf("exit %d", c)
+	}
+	r = startServe(t, vars)
+	if strings.Contains(r.stderr.String(), "no admin yet") {
+		t.Errorf("serve hints at a setup with an admin:\n%s", r.stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(state, "setup.code")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("setup.code after a restart with an admin: %v, want none", err)
+	}
+	if need, _ := r.authState(t, nil); need {
+		t.Error("the admin was lost in the restart")
+	}
 }
 
 func TestServeStartsAndStops(t *testing.T) {

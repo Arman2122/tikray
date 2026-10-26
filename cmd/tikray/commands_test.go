@@ -6,17 +6,20 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Arman2122/tikray/internal/api"
+	"github.com/Arman2122/tikray/internal/apiclient"
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/health"
 	"github.com/Arman2122/tikray/internal/runnerapi"
@@ -509,6 +512,11 @@ func TestEveryAPICommandNeedsTheDaemon(t *testing.T) {
 		{"policy", "default", "smart"},
 		{"status"},
 		{"events"},
+		{"token", "create", "ci"},
+		{"token", "create", "ci", "--expires", "720h"},
+		{"token", "list"},
+		{"token", "list", "--json"},
+		{"token", "rm", "3fa9c1d2"},
 	} {
 		vars := noDaemonEnv(t)
 		code, stdout, stderr := runCLI(t, vars, args...)
@@ -808,7 +816,7 @@ func TestAnUntrustedDaemonIsNotBypassed(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			for _, args := range [][]string{{"apply"}, {"core", "update", "26.10.21"}, {"core", "rollback"}, {"server", "list"}, {"status"}} {
+			for _, args := range [][]string{{"apply"}, {"core", "update", "26.10.21"}, {"core", "rollback"}, {"server", "list"}, {"status"}, {"admin", "reset"}, {"token", "list"}} {
 				code, _, stderr := runFast(t, vars, args...)
 				if code != 1 || !strings.Contains(stderr, tc.want) {
 					t.Errorf("tikray %q: exit %d, stderr %q; want 1 and %q", args, code, stderr, tc.want)
@@ -822,6 +830,13 @@ func TestAnUntrustedDaemonIsNotBypassed(t *testing.T) {
 			}
 			if after, err := os.ReadFile(stateFile); err != nil || !bytes.Equal(after, before) {
 				t.Errorf("the state file changed (%v)", err)
+			}
+			// admin reset's direct path would open the auth store, which makes
+			// these.
+			for _, name := range []string{"auth.json", "setup.code"} {
+				if _, err := os.Stat(filepath.Join(data, "state", name)); err == nil {
+					t.Errorf("%s was made: the direct path of admin reset ran beside a daemon", name)
+				}
 			}
 			if got := fake.mutations(); len(got) != 0 {
 				t.Errorf("the daemon was asked to %v", got)
@@ -918,6 +933,304 @@ func TestTokenAndFingerprintFromTheStateDirectory(t *testing.T) {
 	}
 }
 
+// --- sign-in: the setup code, the admin and the tokens
+
+// stateSnapshot is the content and the time of the files of the state
+// directory that sign-in keeps, for a test that a command left them as they
+// were. A file that is not there is not in it.
+func stateSnapshot(t *testing.T, data string) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	for _, name := range []string{"auth.json", "setup.code"} {
+		path := filepath.Join(data, "state", name)
+		fi, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		b, rerr := os.ReadFile(path)
+		if err != nil || rerr != nil {
+			t.Fatal(err, rerr)
+		}
+		got[name] = fi.ModTime().String() + " " + string(b)
+	}
+	return got
+}
+
+// setup-code shows the code from the file. It is a read: it works while serve
+// runs, with no token and no lock, and it makes nothing.
+func TestSetupCodeCommand(t *testing.T) {
+	const claimed = "the admin has been claimed\n"
+
+	t.Run("before serve has run", func(t *testing.T) {
+		vars := noDaemonEnv(t)
+		code, stdout, stderr := runCLI(t, vars, "setup-code")
+		if code != 1 || stdout != "" || stderr != "tikray: no setup code yet: start tikray serve\n" {
+			t.Errorf("exit %d, stdout %q, stderr %q; want 1 and \"no setup code yet: start tikray serve\" on stderr", code, stdout, stderr)
+		}
+		if strings.Contains(stdout+stderr, "claimed") {
+			t.Error("setup-code says the admin is claimed when there is none")
+		}
+		// Not even the state directory, or the lock: a read makes nothing.
+		if ents, _ := os.ReadDir(vars["TIKRAY_DATA"]); len(ents) != 0 {
+			t.Errorf("setup-code created %v in the data root", dirNamesOf(ents))
+		}
+	})
+
+	t.Run("while serve runs, and after the claim", func(t *testing.T) {
+		vars, data := serveEnv(t)
+		r := startServe(t, vars)
+		// Nothing but the data root: no daemon to reach, and no token.
+		cli := map[string]string{"TIKRAY_DATA": data}
+		want := setupCodeOf(t, data)
+		before := stateSnapshot(t, data)
+
+		code, stdout, stderr := runCLI(t, cli, "setup-code")
+		if code != 0 || stdout != want+"\n" || stderr != "" {
+			t.Errorf("exit %d, stderr %q; want 0, the code in setup.code and one line", code, stderr)
+		}
+		if after := stateSnapshot(t, data); !reflect.DeepEqual(before, after) {
+			t.Error("setup-code changed auth.json or setup.code")
+		}
+
+		r.claimAdmin(t, want)
+		code, stdout, stderr = runCLI(t, cli, "setup-code")
+		if code != 0 || stdout != claimed || stderr != "" {
+			t.Errorf("after the claim: exit %d, stdout %q, stderr %q; want 0 and %q", code, stdout, stderr, claimed)
+		}
+		if _, err := os.Stat(filepath.Join(data, "state", "setup.code")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("setup-code made setup.code beside the admin: %v", err)
+		}
+
+		// Without serve, the same.
+		if c := r.stop(t); c != 0 {
+			t.Fatalf("exit %d", c)
+		}
+		if code, stdout, _ := runCLI(t, cli, "setup-code"); code != 0 || stdout != claimed {
+			t.Errorf("serve stopped: exit %d, stdout %q; want 0 and %q", code, stdout, claimed)
+		}
+
+		// A code that a claim that died left beside the admin is not shown.
+		if err := os.WriteFile(filepath.Join(data, "state", "setup.code"), []byte(want), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		code, stdout, _ = runCLI(t, cli, "setup-code")
+		if code != 0 || stdout != claimed || strings.Contains(stdout, want) {
+			t.Errorf("with a stale code beside the admin: exit %d, stdout %q; want 0 and %q", code, stdout, claimed)
+		}
+	})
+}
+
+// admin reset goes through serve when it answers, and takes the lock and does
+// it itself when nothing does, and then it is the same reset.
+func TestAdminResetViaDaemonAndDirect(t *testing.T) {
+	const done = "the admin was reset: run \"tikray setup-code\" for the new setup code\n"
+	vars, data := serveEnv(t)
+	r := startServe(t, vars)
+	cli := map[string]string{"TIKRAY_DATA": data, "TIKRAY_API": "https://" + r.addr}
+	state := filepath.Join(data, "state")
+
+	first := setupCodeOf(t, data)
+	cookie := r.claimAdmin(t, first)
+	if _, in := r.authState(t, cookie); !in {
+		t.Fatal("the admin is not signed in after its claim")
+	}
+
+	// Through the daemon: it is the one that resets, and it says so in its
+	// events (the direct path has no service to tell).
+	if out := ok2(t, cli, "admin", "reset"); out != done {
+		t.Errorf("admin reset printed %q, want %q", out, done)
+	}
+	if events := ok2(t, cli, "events"); !strings.Contains(events, "auth  admin reset from 127.0.0.1") {
+		t.Errorf("serve recorded no reset:\n%s", events)
+	}
+	if need, in := r.authState(t, cookie); !need || in {
+		t.Errorf("after the reset setup_required is %v and signed_in %v, want true and false", need, in)
+	}
+	second := strings.TrimSpace(ok2(t, cli, "setup-code"))
+	if !setupCodeForm.MatchString(second) || second == first || second != setupCodeOf(t, data) {
+		t.Errorf("after the reset setup-code shows %q: want the new code that is in setup.code", second)
+	}
+	if resp, _ := r.call(t, http.MethodPost, "/v1/auth/login", map[string]string{"username": "alice", "password": adminPassword}, nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("the old admin signed in after the reset: status %d", resp.StatusCode)
+	}
+	if resp, _ := r.call(t, http.MethodPost, "/v1/auth/setup", map[string]string{"code": first, "username": "alice", "password": adminPassword}, nil); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("the old setup code claimed after the reset: status %d", resp.StatusCode)
+	}
+	r.claimAdmin(t, second) // the new one does
+
+	// Without a daemon: it takes serve.lock, and does it itself.
+	if c := r.stop(t); c != 0 {
+		t.Fatalf("exit %d", c)
+	}
+	// A serve that the probe can't see still owns the state, and the reset
+	// leaves it alone.
+	unlock, err := lockServe(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := stateSnapshot(t, data)
+	code, stdout, stderr := runCLI(t, cli, "admin", "reset")
+	if want := "tikray: tikray serve is running (it holds " + filepath.Join(state, "serve.lock") + ")\n"; code != 1 || stdout != "" || stderr != want {
+		t.Errorf("with the lock held: exit %d, stdout %q, stderr %q; want 1 and %q", code, stdout, stderr, want)
+	}
+	if after := stateSnapshot(t, data); !reflect.DeepEqual(before, after) {
+		t.Error("a reset beside a serve that holds the lock changed auth.json or setup.code")
+	}
+	unlock()
+
+	if out := ok2(t, cli, "admin", "reset"); out != done {
+		t.Errorf("the direct admin reset printed %q, want %q", out, done)
+	}
+	b, err := os.ReadFile(filepath.Join(state, "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file struct {
+		Admin *json.RawMessage `json:"admin"`
+	}
+	if err := json.Unmarshal(b, &file); err != nil || file.Admin != nil {
+		t.Errorf("auth.json after the direct reset still has an admin (%v)", err)
+	}
+	third := setupCodeOf(t, data)
+	if !setupCodeForm.MatchString(third) || third == second {
+		t.Error("the direct reset made no new setup code")
+	}
+	if fi, err := os.Stat(filepath.Join(state, "setup.code")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("setup.code after the direct reset: %v, %v; want mode 600", fi, err)
+	}
+	// The lock was let go of, and serve starts on what the reset left.
+	unlock, err = lockServe(data)
+	if err != nil {
+		t.Fatalf("the direct reset kept the lock: %v", err)
+	}
+	unlock()
+	again := startServe(t, vars)
+	if need, _ := again.authState(t, nil); !need {
+		t.Error("serve after the direct reset has an admin")
+	}
+	if got := setupCodeOf(t, data); got != third {
+		t.Error("serve changed the setup code the direct reset made")
+	}
+}
+
+// An admin reset is the root token's. A named token is refused by the daemon
+// and its refusal is reported as the daemon's own.
+func TestAdminResetNeedsTheRootToken(t *testing.T) {
+	vars, data := serveEnv(t)
+	r := startServe(t, vars)
+	cli := map[string]string{"TIKRAY_DATA": data, "TIKRAY_API": "https://" + r.addr}
+	named := strings.Split(ok2(t, cli, "token", "create", "script"), "\n")[0]
+
+	asToken := maps.Clone(cli)
+	asToken["TIKRAY_API_TOKEN"] = named
+	code, stdout, stderr := runCLI(t, asToken, "admin", "reset")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "forbidden") || strings.Contains(stderr, named) {
+		t.Errorf("a named token's reset: exit %d, stdout %q, stderr %q; want 1 and forbidden", code, stdout, stderr)
+	}
+}
+
+// token create shows the token once, token list never shows a secret, and
+// token rm ends one.
+func TestTokenCommands(t *testing.T) {
+	d := startDaemon(t, newFake())
+	vars := d.env(t)
+	form := regexp.MustCompile(`^tkr_([0-9a-f]{8})_([A-Za-z0-9_-]{43})$`)
+
+	// The token is on a line of its own, and the line after says it is the only
+	// time.
+	out := ok(t, vars, "token", "create", "ci-runner", "--expires", "720h")
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 2 || lines[1] != "this token is shown only once" {
+		t.Fatalf("token create printed %d lines, want the token and \"this token is shown only once\"", len(lines))
+	}
+	m := form.FindStringSubmatch(lines[0])
+	if m == nil {
+		t.Fatal("the first line of token create is no token")
+	}
+	token, id, secret := m[0], m[1], m[2]
+	// Another token that does not expire.
+	other := strings.Split(ok(t, vars, "token", "create", "backup"), "\n")[0]
+	otherID := form.FindStringSubmatch(other)[1]
+
+	// The list has the ids, the names and the times, and no secret: not the
+	// token, not the part of it that is one, and (in the JSON) no token at all.
+	table := ok(t, vars, "token", "list")
+	if got := rows(table)[0]; !reflect.DeepEqual(got, []string{"ID", "NAME", "CREATED", "EXPIRES", "LAST", "USED"}) {
+		t.Errorf("the header is %q", got)
+	}
+	rowOf := func(table, id string) []string {
+		for _, row := range rows(table) {
+			if row[0] == id {
+				return row
+			}
+		}
+		return nil
+	}
+	// id, name, created, expires, last used
+	if row := rowOf(table, id); len(row) != 5 || row[1] != "ci-runner" || row[3] == "never" || row[4] != "never" {
+		t.Errorf("the row of the token with an expiry is %q, want its name, a time to expire at and never used", row)
+	} else if _, err := time.Parse(time.RFC3339, row[3]); err != nil {
+		t.Errorf("the expiry %q is no time: %v", row[3], err)
+	}
+	if row := rowOf(table, otherID); len(row) != 5 || row[1] != "backup" || row[3] != "never" || row[4] != "never" {
+		t.Errorf("the row of the token that does not expire is %q, want its name and never, never", row)
+	}
+	jsonOut := ok(t, vars, "token", "list", "--json")
+	var listed []apiclient.TokenInfo
+	if err := json.Unmarshal([]byte(jsonOut), &listed); err != nil || len(listed) != 2 {
+		t.Fatalf("token list --json: %v, %d tokens, want 2", err, len(listed))
+	}
+	if got := time.Until(listed[0].Expires); got < 719*time.Hour || got > 721*time.Hour {
+		t.Errorf("--expires 720h gave a token that expires in %v", got)
+	}
+	if !listed[1].Expires.IsZero() {
+		t.Errorf("a token made with no --expires expires at %v", listed[1].Expires)
+	}
+	for name, shown := range map[string]string{"the table": table, "the JSON": jsonOut} {
+		for what, s := range map[string]string{"the token": token, "its secret": secret, "the prefix of a token": "tkr_"} {
+			if strings.Contains(shown, s) {
+				t.Errorf("%s shows %s", name, what)
+			}
+		}
+	}
+
+	// The token works, and its use is noted.
+	use := maps.Clone(vars)
+	use["TIKRAY_API_TOKEN"] = token
+	if code, stdout, stderr := runCLI(t, use, "token", "list"); code != 0 || strings.Contains(stdout+stderr, secret) {
+		t.Errorf("token list with the new token: exit %d, stderr %q", code, stderr)
+	}
+	if err := json.Unmarshal([]byte(ok(t, vars, "token", "list", "--json")), &listed); err != nil || listed[0].LastUsed.IsZero() {
+		t.Errorf("the list does not show that the token was used (%v)", err)
+	}
+
+	// Revoking one ends it, and only it.
+	if got := ok(t, vars, "token", "rm", id); got != "revoked token "+id+"\n" {
+		t.Errorf("token rm printed %q", got)
+	}
+	if table := ok(t, vars, "token", "list"); strings.Contains(table, id) || !strings.Contains(table, otherID) {
+		t.Errorf("after the revoke the list is:\n%s", table)
+	}
+	if code, _, stderr := runCLI(t, use, "token", "list"); code != 1 || !strings.Contains(stderr, "unauthorized") {
+		t.Errorf("a revoked token: exit %d, stderr %q; want 1 and unauthorized", code, stderr)
+	}
+	// What the API refuses is printed as it says it.
+	if code, stdout, stderr := runAPI(t, vars, "token", "rm", id); code != 1 || stdout != "" || !strings.HasPrefix(stderr, "tikray: not_found: ") {
+		t.Errorf("revoking it again: exit %d, stdout %q, stderr %q; want 1 and \"tikray: not_found: ...\"", code, stdout, stderr)
+	}
+	if code, stdout, stderr := runAPI(t, vars, "token", "create", ""); code != 1 || stdout != "" || !strings.HasPrefix(stderr, "tikray: bad_request: ") {
+		t.Errorf("a token with no name: exit %d, stdout %q, stderr %q; want 1 and \"tikray: bad_request: ...\"", code, stdout, stderr)
+	}
+	// An empty list is its header.
+	ok(t, vars, "token", "rm", otherID)
+	if got := rows(ok(t, vars, "token", "list")); len(got) != 1 {
+		t.Errorf("the list of no tokens is %q, want the header alone", got)
+	}
+	if got := strings.TrimSpace(ok(t, vars, "token", "list", "--json")); got != "[]" {
+		t.Errorf("token list --json of no tokens is %q, want []", got)
+	}
+}
+
 // --- usage
 
 func TestAPICommandsUsage(t *testing.T) {
@@ -967,6 +1280,23 @@ func TestAPICommandsUsage(t *testing.T) {
 		{"events", "--after", "-1"},
 		{"serve", "extra"},
 		{"serve", "--bogus"},
+		{"setup-code", "extra"},
+		{"setup-code", "--bogus"},
+		{"admin"},
+		{"admin", "bogus"},
+		{"admin", "reset", "extra"},
+		{"admin", "reset", "--bogus"},
+		{"token"},
+		{"token", "bogus"},
+		{"token", "create"},
+		{"token", "create", "a", "b"},
+		{"token", "create", "ci", "--expires", "soon"},
+		{"token", "create", "ci", "--expires", "0"},
+		{"token", "create", "ci", "--expires", "-1h"},
+		{"token", "list", "extra"},
+		{"token", "list", "--bogus"},
+		{"token", "rm"},
+		{"token", "rm", "a", "b"},
 	} {
 		code, stdout, stderr := runCLI(t, vars, args...)
 		if code != 2 || stdout != "" || !strings.Contains(stderr, "usage") {
@@ -980,6 +1310,7 @@ func TestAPICommandsUsage(t *testing.T) {
 	for _, args := range [][]string{
 		{"server", "help"}, {"server", "add", "-h"}, {"sub", "add", "--help"}, {"device", "set", "-h"},
 		{"policy", "default", "-h"}, {"status", "-h"}, {"events", "-h"}, {"serve", "-h"},
+		{"setup-code", "-h"}, {"admin", "help"}, {"admin", "reset", "-h"}, {"token", "help"}, {"token", "create", "-h"}, {"token", "list", "--help"}, {"token", "rm", "-h"},
 	} {
 		code, stdout, stderr := runCLI(t, vars, args...)
 		if code != 0 || !strings.Contains(stdout+stderr, "usage") {
@@ -997,6 +1328,7 @@ func TestUsageTextListsTheAPICommands(t *testing.T) {
 		"serve", "server add", "server list", "server rm", "server enable", "server disable",
 		"sub add", "sub list", "sub rm", "sub refresh",
 		"device set", "device rm", "device list", "policy default", "status", "events",
+		"setup-code", "admin reset", "token create", "token list", "token rm", "--expires",
 		"TIKRAY_LISTEN", "TIKRAY_API", "TIKRAY_API_TOKEN", "TIKRAY_API_FINGERPRINT",
 	} {
 		if !strings.Contains(stdout, want) {

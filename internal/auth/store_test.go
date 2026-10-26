@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -811,4 +812,155 @@ func TestUsername(t *testing.T) {
 	if SessionLife != 7*24*time.Hour {
 		t.Errorf("SessionLife = %v, want 7 days", SessionLife)
 	}
+}
+
+// stateFiles is what the files of a state directory hold and when they were
+// written, for a test that a read changed none of them and made none.
+func stateFiles(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, e := range ents {
+		fi, err := e.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[e.Name()] = fi.Mode().String() + " " + fi.ModTime().String() + " " + readFile(t, filepath.Join(dir, e.Name()))
+	}
+	return got
+}
+
+// ReadSetupCode is the CLI's way to the code while serve owns the directory:
+// it reads, and it never writes or makes anything.
+func TestReadSetupCode(t *testing.T) {
+	t.Run("nothing yet", func(t *testing.T) {
+		// serve has never run here: no directory, no files. It says so, which
+		// is not "claimed", and it makes nothing.
+		dir := filepath.Join(t.TempDir(), "state")
+		code, claimed, err := ReadSetupCode(dir)
+		if !errors.Is(err, ErrNoSetupCode) || code != "" || claimed {
+			t.Errorf("ReadSetupCode = (%q, %v, %v), want no code, not claimed, ErrNoSetupCode", code, claimed, err)
+		}
+		if exists(dir) {
+			t.Error("ReadSetupCode made the state directory")
+		}
+	})
+
+	t.Run("a code", func(t *testing.T) {
+		_, dir := openTest(t)
+		before := stateFiles(t, dir)
+		code, claimed, err := ReadSetupCode(dir)
+		if err != nil || claimed || code != readFile(t, filepath.Join(dir, "setup.code")) || !codeForm.MatchString(code) {
+			t.Errorf("ReadSetupCode = (%v, %v, %v), want the code in setup.code, not claimed", codeForm.MatchString(code), claimed, err)
+		}
+		if after := stateFiles(t, dir); !reflect.DeepEqual(before, after) {
+			t.Errorf("ReadSetupCode changed the directory:\nbefore %v\nafter  %v", before, after)
+		}
+	})
+
+	t.Run("the file as a person left it", func(t *testing.T) {
+		// Lower case, spaces and a newline, as an editor leaves a pasted code:
+		// it is shown in the form claims take.
+		_, dir := openTest(t)
+		if err := os.WriteFile(filepath.Join(dir, "setup.code"), []byte(" 7f3k-9q2m xx4t \n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if code, claimed, err := ReadSetupCode(dir); err != nil || claimed || code != "7F3K-9Q2M-XX4T" {
+			t.Errorf("ReadSetupCode = (%v, %v, %v), want 7F3K-9Q2M-XX4T", code == "7F3K-9Q2M-XX4T", claimed, err)
+		}
+	})
+
+	t.Run("claimed", func(t *testing.T) {
+		s, dir := openTest(t)
+		claim(t, s, dir, "alice", testPassword)
+		before := stateFiles(t, dir)
+		code, claimed, err := ReadSetupCode(dir)
+		if err != nil || !claimed || code != "" {
+			t.Errorf("ReadSetupCode = (%q, %v, %v), want no code, claimed", code, claimed, err)
+		}
+		if exists(filepath.Join(dir, "setup.code")) {
+			t.Error("ReadSetupCode made a setup.code beside the admin")
+		}
+		if after := stateFiles(t, dir); !reflect.DeepEqual(before, after) {
+			t.Errorf("ReadSetupCode changed the directory:\nbefore %v\nafter  %v", before, after)
+		}
+	})
+
+	t.Run("a code left beside an admin is no code", func(t *testing.T) {
+		// A claim that died between saving the admin and removing the file:
+		// the admin is what counts, and the stale code is not shown.
+		s, dir := openTest(t)
+		stale := readFile(t, filepath.Join(dir, "setup.code"))
+		claim(t, s, dir, "alice", testPassword)
+		if err := os.WriteFile(filepath.Join(dir, "setup.code"), []byte(stale), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		code, claimed, err := ReadSetupCode(dir)
+		if err != nil || !claimed || code != "" {
+			t.Errorf("ReadSetupCode = (%q, %v, %v), want no code, claimed", code, claimed, err)
+		}
+		if !exists(filepath.Join(dir, "setup.code")) {
+			t.Error("ReadSetupCode removed a file: it only reads")
+		}
+	})
+
+	t.Run("no admin and no file", func(t *testing.T) {
+		// The file was removed by hand: there is no admin, so it is not
+		// "claimed", and the read does not make a new code (the store's
+		// SetupCode does).
+		_, dir := openTest(t)
+		if err := os.Remove(filepath.Join(dir, "setup.code")); err != nil {
+			t.Fatal(err)
+		}
+		code, claimed, err := ReadSetupCode(dir)
+		if !errors.Is(err, ErrNoSetupCode) || code != "" || claimed {
+			t.Errorf("ReadSetupCode = (%q, %v, %v), want no code, not claimed, ErrNoSetupCode", code, claimed, err)
+		}
+		if exists(filepath.Join(dir, "setup.code")) {
+			t.Error("ReadSetupCode made a setup.code")
+		}
+	})
+
+	t.Run("after a reset", func(t *testing.T) {
+		s, dir := openTest(t)
+		claim(t, s, dir, "alice", testPassword)
+		if err := s.Reset(); err != nil {
+			t.Fatal(err)
+		}
+		if code, claimed, err := ReadSetupCode(dir); err != nil || claimed || code != readFile(t, filepath.Join(dir, "setup.code")) {
+			t.Errorf("ReadSetupCode = (%v, %v, %v), want the new code, not claimed", code != "", claimed, err)
+		}
+	})
+
+	t.Run("what it can't use", func(t *testing.T) {
+		// None of these is "claimed", none shows what the file held, and a
+		// code that can't be told to be the right one is not shown.
+		const junk = "SECRETJUNK-not-a-code"
+		for name, tc := range map[string]struct {
+			file, content string
+		}{
+			"a setup.code that holds no code":       {"setup.code", junk},
+			"an empty setup.code":                   {"setup.code", ""},
+			"an auth.json that is not JSON":         {"auth.json", "{" + junk},
+			"an auth.json of another version":       {"auth.json", `{"version": 99}`},
+			"an auth.json with a hash it can't use": {"auth.json", `{"version":1,"admin":{"username":"alice","hash":"` + junk + `"}}`},
+		} {
+			t.Run(name, func(t *testing.T) {
+				_, dir := openTest(t)
+				if err := os.WriteFile(filepath.Join(dir, tc.file), []byte(tc.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				code, claimed, err := ReadSetupCode(dir)
+				if err == nil || errors.Is(err, ErrNoSetupCode) || claimed || code != "" {
+					t.Fatalf("ReadSetupCode = (%q, %v, %v), want an error and nothing else", code, claimed, err)
+				}
+				if strings.Contains(err.Error(), "SECRETJUNK") || !strings.HasPrefix(err.Error(), "auth: ") {
+					t.Errorf("the error %q shows the file's content or lacks the package prefix", err)
+				}
+			})
+		}
+	})
 }

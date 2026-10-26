@@ -34,7 +34,10 @@ import (
 // runner may start after it (see runnerToken): the API comes up, and the
 // status says what it waits for. It prints one line on stderr, with the
 // address and the fingerprint of its certificate, which is what a client pins;
-// the token is in no output, only in <data>/state/api.token.
+// the token is in no output, only in <data>/state/api.token. While there is no
+// admin it prints a line before that, which says to run `tikray setup-code`:
+// the setup code itself is in no output either, only in
+// <data>/state/setup.code and in what that command prints.
 func (c *cli) serve(ctx context.Context, args []string) int {
 	fs := c.newFlagSet("serve", "serve")
 	if _, code, ok := c.parse(fs, args, 0); !ok {
@@ -96,6 +99,13 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 	ln, err := net.Listen("tcp", env.Listen)
 	if err != nil {
 		return c.fail(err)
+	}
+	// Until the admin is made, say where the setup code is, never what it is:
+	// stderr goes to a log, and the code is shown by `tikray setup-code` and in
+	// setup.code alone. This comes before the startup line, which is what a
+	// reader takes for "up", so that the hint is there when that is.
+	if people.NeedsSetup() {
+		fmt.Fprintln(c.stderr, `tikray: no admin yet: run "tikray setup-code" in this container to get the setup code`)
 	}
 	fmt.Fprintf(c.stderr, "tikray: serving on %s, certificate sha256 %s\n", ln.Addr(), fingerprint)
 
