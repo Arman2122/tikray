@@ -168,8 +168,12 @@ func (s *Service) retryable(ctx context.Context, res artifacts.Result, err error
 
 // ApplyNow applies the state as it is now, as the loop would, but at once and
 // even when the runner runs it already: the result is then noop. It fails
-// with ErrRunnerUnavailable when the runner can't be reached; artifacts.ErrLocked
-// comes back as it is. A rejected or unhealthy apply is not retried.
+// with ErrRunnerUnavailable when the runner can't be reached before the apply
+// starts. The error of an apply that ran comes with the result's outcome, and
+// is the apply's own, redacted and wrapped in nothing: a proxy probe that
+// fails through the candidate is a *url.Error too, as a call to a runner that
+// can't be reached is. artifacts.ErrLocked comes back as it is. A rejected or
+// unhealthy apply is not retried.
 func (s *Service) ApplyNow(ctx context.Context) (artifacts.Result, error) {
 	if err := s.acquire(ctx); err != nil {
 		return artifacts.Result{}, err
@@ -184,13 +188,14 @@ func (s *Service) ApplyNow(ctx context.Context) (artifacts.Result, error) {
 	}
 	res, err := s.updater(st, rev).Apply(ctx)
 	s.noteApply(rev, res, err, 0)
-	return res, s.runnerError(ctx, err)
+	return res, s.redactError(err)
 }
 
 // CoreUpdate switches the runner to xray-core version ("latest" or a release)
 // with the config rendered from the state as it is now (see
 // artifacts.CoreUpdater.Update). It fails with ErrRunnerUnavailable when the
-// runner can't be reached.
+// runner can't be reached before the update starts; the error of one that
+// ran is its own, as ApplyNow's.
 func (s *Service) CoreUpdate(ctx context.Context, version string, o artifacts.UpdateOptions) (artifacts.Result, error) {
 	return s.coreOp(ctx, "xray-core update to "+version, func(u *artifacts.CoreUpdater) (artifacts.Result, error) {
 		return u.Update(ctx, version, o)
@@ -200,7 +205,8 @@ func (s *Service) CoreUpdate(ctx context.Context, version string, o artifacts.Up
 // CoreRollback switches the runner back to the core committed before the
 // active one, with the config rendered from the state as it is now (see
 // artifacts.CoreUpdater.Rollback). It fails with ErrRunnerUnavailable when the
-// runner can't be reached.
+// runner can't be reached before the rollback starts; the error of one that
+// ran is its own, as ApplyNow's.
 func (s *Service) CoreRollback(ctx context.Context) (artifacts.Result, error) {
 	return s.coreOp(ctx, "rollback", func(u *artifacts.CoreUpdater) (artifacts.Result, error) {
 		return u.Rollback(ctx)
@@ -237,7 +243,7 @@ func (s *Service) coreOp(ctx context.Context, what string, op func(*artifacts.Co
 		}
 		s.record(KindCore, msg)
 	}
-	return res, s.runnerError(ctx, err)
+	return res, s.redactError(err)
 }
 
 // noteApply keeps res as the last apply's and records how the apply of

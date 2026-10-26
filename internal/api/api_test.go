@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -908,6 +909,10 @@ func TestErrorMapping(t *testing.T) {
 		// (xray rejected the config, the proxy did not come up), not a fault.
 		{"rejected", errors.New("rejected: xray run -test failed"), artifacts.Result{Outcome: "rejected"}, ops, 422, "refused", "rejected: xray run -test failed"},
 		{"unhealthy", errors.New("unhealthy: no proxy"), artifacts.Result{Outcome: "unhealthy"}, ops, 422, "refused", "unhealthy: no proxy"},
+		// The service's error when the proxy probe fails through the
+		// candidate, as net/http's calls do, while the runner answers.
+		{"unhealthy, the probe failing", fmt.Errorf("unhealthy: health check failing for 15s: %w", &url.Error{Op: "Get", URL: "http://203.0.113.30/whoami", Err: errors.New("socks connect: general failure")}),
+			artifacts.Result{Outcome: "unhealthy"}, ops, 422, "refused", "socks connect: general failure"},
 		{"aborted by a cancelled request", wrap(context.Canceled), artifacts.Result{Outcome: "aborted"}, ops, 503, "unavailable", ""},
 		{"an outcome with the lock held", wrap(artifacts.ErrLocked), artifacts.Result{Outcome: "refused"}, ops, 409, "busy", ""},
 		{"an outcome with a trial open", wrap(runnerapi.ErrBusy), artifacts.Result{Outcome: "refused"}, ops, 409, "busy", ""},

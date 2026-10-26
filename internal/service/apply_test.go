@@ -568,6 +568,44 @@ func TestRunnerUnavailable(t *testing.T) {
 	}
 }
 
+// A candidate that fails the proxy probe, which fails as net/http's calls do
+// (a *url.Error), is unhealthy while the runner answers throughout: the
+// operation's own failure, which the API answers 422 with its result, and not
+// ErrRunnerUnavailable, which it answers 503.
+func TestUnhealthyProbeIsNotRunnerUnavailable(t *testing.T) {
+	e := newEnv(t)
+	installCore(t, e.data, "26.3.27")
+	installCore(t, e.data, testCore)
+	e.edit()
+	e.inSync()
+	e.start()
+	// The rollback goes back to the core this update replaces.
+	if _, err := e.s.CoreUpdate(bg, "26.3.27", artifacts.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	e.edit() // a render that ApplyNow puts on trial
+	e.health.fail(&url.Error{Op: "Get", URL: "http://203.0.113.30/whoami", Err: errors.New("socks connect: general failure")})
+	for _, op := range []struct {
+		name string
+		do   func() (artifacts.Result, error)
+	}{
+		{"ApplyNow", func() (artifacts.Result, error) { return e.s.ApplyNow(bg) }},
+		{"CoreUpdate", func() (artifacts.Result, error) { return e.s.CoreUpdate(bg, testCore, artifacts.UpdateOptions{}) }},
+		{"CoreRollback", func() (artifacts.Result, error) { return e.s.CoreRollback(bg) }},
+	} {
+		res, err := op.do()
+		if res.Outcome != artifacts.OutcomeUnhealthy || err == nil {
+			t.Errorf("%s = %+v, %v; want unhealthy, with its error", op.name, res, err)
+		}
+		if errors.Is(err, ErrRunnerUnavailable) {
+			t.Errorf("%s's error wraps ErrRunnerUnavailable though the runner answered: %v", op.name, err)
+		}
+	}
+	if _, err := e.runner.client().Status(bg); err != nil {
+		t.Fatalf("the runner's status: %v", err)
+	}
+}
+
 // holdArtifactsLock takes the artifacts lock as another update would, until
 // the returned function is called.
 func holdArtifactsLock(t *testing.T, data string) func() {
