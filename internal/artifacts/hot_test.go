@@ -747,17 +747,22 @@ func TestHotRejectedTouchesNothing(t *testing.T) {
 }
 
 // A tikray that died between the hot calls and the adopt left xray with the
-// change while the active config is the old one. The next apply's hot change
-// fails on what xray has already, and the trial heals it.
+// change, or a part of it, while the active config is the old one. The next
+// apply's hot change either fails on what xray has already, and the trial heals
+// it, or brings xray to the candidate itself. The ado fails for a tag xray
+// has: the trial heals that. The rmo does not fail for a tag xray lacks (real
+// xray exits 0, whether or not it had the tag), so after an rmo that went
+// through, the next hot change removes nothing, adds the changed outbound and
+// is done.
 func TestHotInterruptedHeals(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
 		active, candidate store.State
 		live              store.State // what xray runs: the change, or part of it
-		why               string
+		why               string      // the hot change fails with this, and the trial applies the candidate; empty: it goes through
 	}{
 		{"the ado went through", withServers(srvA), withServers(srvA, srvB), withServers(srvA, srvB), "existing tag found: " + tagB},
-		{"the rmo went through", withServers(srvA), withServers(srvA2), withServers(), "failed to remove outbound " + tagA},
+		{"the rmo went through", withServers(srvA), withServers(srvA2), withServers(), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			candidate := rendered(t, tc.candidate)
@@ -767,6 +772,16 @@ func TestHotInterruptedHeals(t *testing.T) {
 
 			res, err := e.u.Apply(bg)
 			wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+			if tc.why == "" {
+				// The rmo of the tag xray lacks succeeds and the ado adds it.
+				if !res.Hot || res.Detail != "applied without restarting xray: added 0, removed 0, changed 1" {
+					t.Errorf("Result = %+v, want the hot change, changing one", res)
+				}
+				wantActions(t, e.runner, "test", "xray-api", "xray-api", "adopt")
+				wantLive(t, e, candidate)
+				wantPending(t, e, false)
+				return
+			}
 			wantDetail(t, res, "the hot change failed (")
 			wantDetail(t, res, tc.why)
 			if res.Hot {

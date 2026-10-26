@@ -256,10 +256,12 @@ func (f *fakeRunner) handleXrayAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 // liveAPI answers "xray api <args>" as xray does: rmo removes the outbounds
-// it names and ado adds those of the files it names, refusing a tag that is
-// missing or already there. The files ado names are read from the runner's
-// path as it is, and recorded. Unless the test models the live outbounds
-// (f.live), every call exits 0. mu must be held.
+// it names and ado adds those of the files it names. Real xray's rmo exits 0
+// for a tag it lacks as for one it has, printing "removing: <tag>" and {} for
+// each; its ado refuses a tag that is already there and goes no further. The
+// files ado names are read from the runner's path as it is, and recorded.
+// Unless the test models the live outbounds (f.live), every call exits 0. mu
+// must be held.
 func (f *fakeRunner) liveAPI(args []string) runnerapi.XrayAPIResponse {
 	if len(args) == 0 {
 		return runnerapi.XrayAPIResponse{}
@@ -275,16 +277,14 @@ func (f *fakeRunner) liveAPI(args []string) runnerapi.XrayAPIResponse {
 	}
 	switch args[0] {
 	case "rmo":
+		var stdout string
 		for _, tag := range operands {
-			if f.live == nil {
-				continue
+			stdout += "removing: " + tag + "\n{}\n\n"
+			if i := slices.Index(f.live, tag); i >= 0 {
+				f.live = slices.Delete(f.live, i, i+1)
 			}
-			i := slices.Index(f.live, tag)
-			if i < 0 {
-				return failed("failed to remove outbound " + tag + ": not found")
-			}
-			f.live = slices.Delete(f.live, i, i+1)
 		}
+		return runnerapi.XrayAPIResponse{Stdout: stdout}
 	case "ado":
 		for _, p := range operands {
 			raw, err := os.ReadFile(p)
