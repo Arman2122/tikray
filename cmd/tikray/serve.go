@@ -20,8 +20,9 @@ import (
 )
 
 // serve runs the service until ctx ends, which main ties to SIGINT and
-// SIGTERM, and then stops gracefully: the API stops accepting and waits up to
-// 10 s for the requests it serves (api.Serve), and the service's loops stop.
+// SIGTERM, and then stops gracefully: the API stops accepting, ends the
+// operations it runs, whose trials are then aborted, and waits up to 10 s for
+// the requests it serves (api.Serve), and the service's loops stop.
 // It returns 0 for that, and 1 for a failure to start or to go on.
 //
 // The service owns the state from here on: it holds serve.lock for as long as

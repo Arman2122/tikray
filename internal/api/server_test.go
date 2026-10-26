@@ -220,12 +220,81 @@ func TestServeCutsOffARequestThatOutlastsTheShutdown(t *testing.T) {
 	}
 }
 
+// An operation detached from its request outlives the client, and ends with
+// the server: when Serve's context ends (tikray serve stops), the operation's
+// does, so that the updater aborts its trial within the shutdown's time
+// rather than die with the process.
+func TestServeEndsTheOperationsItServes(t *testing.T) {
+	for _, c := range []struct{ name, path, body, call string }{
+		{"apply", "/v1/apply", "", "ApplyNow"},
+		{"core update", "/v1/core/update", `{"version":"latest"}`, "CoreUpdate"},
+		{"core rollback", "/v1/core/rollback", "", "CoreRollback"},
+		{"refresh", "/v1/subscriptions/9be8f7a6/refresh", "", "RefreshSubscription"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFake()
+			got, release := make(chan context.Context, 1), make(chan struct{})
+			f.gate = func(method string, ctx context.Context) {
+				if method == c.call {
+					got <- ctx
+					select { // the operation runs until its context ends
+					case <-ctx.Done():
+					case <-release:
+					}
+				}
+			}
+			r := start(t, NewHandler(f, testToken))
+			t.Cleanup(func() { close(release) }) // before start's, which waits for Serve
+
+			reqCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req, err := http.NewRequestWithContext(reqCtx, "POST", r.url+c.path, strings.NewReader(c.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+testToken)
+			go func() {
+				if resp, err := pinnedClient(r.fp).Do(req); err == nil {
+					resp.Body.Close()
+				}
+			}()
+			var ctx context.Context
+			select {
+			case ctx = <-got:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the backend was not called")
+			}
+			cancel() // the client goes away
+			time.Sleep(300 * time.Millisecond)
+			if err := ctx.Err(); err != nil {
+				t.Fatalf("the operation's context ended with the request: %v", err)
+			}
+
+			r.stop() // the service stops
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatal("the operation's context did not end with the server's")
+			}
+			select {
+			case err := <-r.done:
+				if err != nil {
+					t.Errorf("Serve returned %v, want nil: the operation ended in time", err)
+				}
+				r.done <- nil // for the cleanup
+			case <-time.After(5 * time.Second):
+				t.Fatal("Serve did not return once the operation ended")
+			}
+		})
+	}
+}
+
 func TestServerSettings(t *testing.T) {
 	cert, _, err := LoadOrCreateCert(t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := newServer(NewHandler(newFake(), testToken), cert)
+	s := newServer(context.Background(), NewHandler(newFake(), testToken), cert)
 	if s.ReadHeaderTimeout != 10*time.Second || s.IdleTimeout != 60*time.Second {
 		t.Errorf("ReadHeaderTimeout = %v, IdleTimeout = %v; want 10s and 60s", s.ReadHeaderTimeout, s.IdleTimeout)
 	}

@@ -10,7 +10,8 @@
 // has moved on; without the header it is made on the state as it is. The
 // routes that do not change the state on a revision a caller read (apply, core
 // update and rollback, refresh) take none and ignore the header, and run
-// detached from the request: a caller that disconnects does not stop them.
+// detached from the request: a caller that disconnects does not stop them,
+// and the end of Serve does.
 //
 // An error is {"error": code, "detail": text}, the text redacted of every
 // secret of the state. An apply, an update or a rollback that failed with an
@@ -294,17 +295,27 @@ func (h *handler) patchSubscription(w http.ResponseWriter, r *http.Request) {
 // detached is the context of an operation that must run to its end whether
 // or not the caller waits: an apply, an update or a rollback has a trial open
 // on the router, and a caller that is interrupted would stop it half way. It
-// has the request's values and none of its cancellation; the operation is
-// bounded by the service's own lifetime and the updater's deadlines.
-func detached(r *http.Request) context.Context {
-	return context.WithoutCancel(r.Context())
+// has the request's values and none of its cancellation. It ends with the
+// server that serves the request (ServeListener's ctx, which is tikray
+// serve's lifetime), so that the updater aborts the trial in the shutdown's
+// time rather than die with the process, and otherwise when the updater's
+// deadlines say. done releases it once the operation has returned.
+func detached(r *http.Request) (ctx context.Context, done func()) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
+	if life, ok := r.Context().Value(lifetimeKey{}).(context.Context); ok {
+		unhook := context.AfterFunc(life, cancel)
+		return ctx, func() { unhook(); cancel() }
+	}
+	return ctx, cancel
 }
 
 // refreshSubscription fetches the subscription now, detached from the
 // request. It is no change a caller makes on a revision: the refresh merges
 // into the state as it is.
 func (h *handler) refreshSubscription(w http.ResponseWriter, r *http.Request) {
-	res, err := h.b.RefreshSubscription(detached(r), r.PathValue("id"))
+	ctx, done := detached(r)
+	defer done()
+	res, err := h.b.RefreshSubscription(ctx, r.PathValue("id"))
 	if err != nil {
 		h.fail(w, err)
 		return
@@ -423,7 +434,9 @@ func remove(h *handler, do func(ctx context.Context, rev uint64, id string) (uin
 // --- the operations on the core
 
 func (h *handler) apply(w http.ResponseWriter, r *http.Request) {
-	res, err := h.b.ApplyNow(detached(r))
+	ctx, done := detached(r)
+	defer done()
+	res, err := h.b.ApplyNow(ctx)
 	h.outcome(w, res, err)
 }
 
@@ -436,12 +449,16 @@ func (h *handler) coreUpdate(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, codeBadRequest, `version is required: "latest" or a release such as "26.10.21"`)
 		return
 	}
-	res, err := h.b.CoreUpdate(detached(r), in.Version, artifacts.UpdateOptions{AllowUnverified: in.AllowUnverified})
+	ctx, done := detached(r)
+	defer done()
+	res, err := h.b.CoreUpdate(ctx, in.Version, artifacts.UpdateOptions{AllowUnverified: in.AllowUnverified})
 	h.outcome(w, res, err)
 }
 
 func (h *handler) coreRollback(w http.ResponseWriter, r *http.Request) {
-	res, err := h.b.CoreRollback(detached(r))
+	ctx, done := detached(r)
+	defer done()
+	res, err := h.b.CoreRollback(ctx)
 	h.outcome(w, res, err)
 }
 
