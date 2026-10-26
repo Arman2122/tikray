@@ -170,6 +170,79 @@ func TestClientPostRoutes(t *testing.T) {
 	}
 }
 
+func TestClientAdopt(t *testing.T) {
+	var gotMethod, gotPath, gotAuth, gotType, gotBody string
+	status, answer := http.StatusNoContent, ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		gotAuth, gotType = r.Header.Get("Authorization"), r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(status)
+		w.Write([]byte(answer))
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "tok", HTTP: srv.Client()}
+	config := "config/" + strings.Repeat("ab", 32) + ".json"
+
+	if err := c.Adopt(context.Background(), config); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/v1/adopt" || gotAuth != "Bearer tok" || gotType != "application/json" {
+		t.Errorf("request was %s %s with Authorization %q, Content-Type %q", gotMethod, gotPath, gotAuth, gotType)
+	}
+	if want := `{"config":"` + config + `"}`; gotBody != want {
+		t.Errorf("body = %s, want %s", gotBody, want)
+	}
+
+	// Every answer the runner gives: only the 409s are sentinels.
+	for _, tc := range []struct {
+		name     string
+		status   int
+		body     string
+		busy     bool
+		noCore   bool
+		inError  string
+		wantNone bool
+	}{
+		{name: "204 with no body", status: 204, wantNone: true},
+		{name: "200 is tolerated", status: 200, body: `{}`, wantNone: true},
+		{name: "busy", status: 409, body: `{"error":"busy"}`, busy: true},
+		{name: "busy with detail", status: 409, body: `{"error":"busy","detail":"a trial is open"}`, busy: true, inError: "a trial is open"},
+		{name: "no_core", status: 409, body: `{"error":"no_core"}`, noCore: true},
+		{name: "no_core with detail", status: 409, body: `{"error":"no_core","detail":"no xray is running"}`, noCore: true, inError: "no xray is running"},
+		{name: "a 409 with another code", status: 409, body: `{"error":"other"}`, inError: "409"},
+		{name: "a 409 that is not JSON", status: 409, body: `conflict`, inError: "conflict"},
+		{name: "bad_request", status: 400, body: `{"error":"bad_request","detail":"runner: invalid config: no such file"}`, inError: "400"},
+		{name: "bad_request detail", status: 400, body: `{"error":"bad_request","detail":"runner: invalid config: no such file"}`, inError: "no such file"},
+		{name: "unauthorized", status: 401, body: `{"error":"unauthorized"}`, inError: "401"},
+		{name: "internal", status: 500, body: `{"error":"internal","detail":"runner: adopt: disk full"}`, inError: "disk full"},
+	} {
+		status, answer = tc.status, tc.body
+		err := c.Adopt(context.Background(), config)
+		switch {
+		case tc.wantNone:
+			if err != nil {
+				t.Errorf("%s: Adopt = %v, want nil", tc.name, err)
+			}
+			continue
+		case err == nil:
+			t.Errorf("%s: Adopt = nil, want an error", tc.name)
+			continue
+		}
+		if errors.Is(err, ErrBusy) != tc.busy || errors.Is(err, ErrNoCore) != tc.noCore {
+			t.Errorf("%s: Adopt error %v; errors.Is ErrBusy = %v, ErrNoCore = %v; want %v, %v",
+				tc.name, err, errors.Is(err, ErrBusy), errors.Is(err, ErrNoCore), tc.busy, tc.noCore)
+		}
+		if !strings.Contains(err.Error(), tc.inError) {
+			t.Errorf("%s: Adopt error %q, want it to contain %q", tc.name, err, tc.inError)
+		}
+		if !strings.HasPrefix(err.Error(), "runnerapi:") {
+			t.Errorf("%s: Adopt error %q lacks the runnerapi prefix", tc.name, err)
+		}
+	}
+}
+
 func TestClientXrayAPI(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req XrayAPIRequest

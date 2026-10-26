@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"sync"
@@ -25,6 +26,11 @@ const (
 // ErrInvalidCandidate is wrapped around every reason Trial refuses
 // candidate.json before testing it.
 var ErrInvalidCandidate = errors.New("runner: invalid candidate")
+
+// ErrInvalidConfig is wrapped around every reason Adopt refuses the config it
+// is given: a name that is not config/<64 hex>.json, or a file that is not
+// there.
+var ErrInvalidConfig = errors.New("runner: invalid config")
 
 var errClosed = errors.New("runner: closed")
 
@@ -191,6 +197,22 @@ func (r *Runner) Reload(ctx context.Context) error {
 		r.backoff = 0
 		return r.startActive()
 	})
+}
+
+// Adopt records config, a file under the run directory, as the config of the
+// active selection without restarting xray. The caller has already put that
+// config into the running xray another way (xray api), and Adopt makes a
+// later restart or crash recovery give the same xray: active.json then names
+// the running xray's core and geo and config. Neither the process nor
+// last-trial.json changes.
+//
+// It acts only while xray runs from the active selection. During a trial or a
+// restart it returns ErrBusy, with no xray runnerapi.ErrNoCore, and for a name
+// that is not config/<64 hex>.json, or a file that does not exist,
+// ErrInvalidConfig, whatever the state. Like Commit, it runs on the runner's
+// goroutine, so it never interleaves with a trial.
+func (r *Runner) Adopt(ctx context.Context, config string) error {
+	return r.do(ctx, func() error { return r.adopt(config) })
 }
 
 // Status reports the runner's state. It never waits for the runner's
@@ -428,6 +450,45 @@ func (r *Runner) commit() error {
 	}
 	r.record(cand, runnerapi.OutcomeCommitted, "")
 	r.cleanStage()
+	return nil
+}
+
+func (r *Runner) adopt(config string) error {
+	if err := runnerapi.ValidateConfig(config); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+	}
+	fi, err := os.Stat(r.dirs().ConfigPath(config))
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("%w: %s does not exist", ErrInvalidConfig, config)
+	case err != nil:
+		return fmt.Errorf("runner: adopt: %w", err)
+	case !fi.Mode().IsRegular():
+		return fmt.Errorf("%w: %s is not a regular file", ErrInvalidConfig, config)
+	}
+	switch r.v.state {
+	case runnerapi.StateRunning:
+	case runnerapi.StateEmpty:
+		return runnerapi.ErrNoCore
+	default: // a trial or a restart
+		return runnerapi.ErrBusy
+	}
+	if r.v.running == nil || r.sup.PID() == 0 {
+		// xray has died and its exit has not been read yet: a restart is
+		// coming, and no running xray has this config.
+		return runnerapi.ErrBusy
+	}
+	// A new selection, never a change to *r.v.active, which Status may be
+	// cloning. r.v.running stays what the process was started with: its exit,
+	// which reports that selection, must still match it, or a crash would go
+	// unnoticed. The restart after a crash then starts r.v.active.
+	sel := *r.v.running
+	sel.Config = config
+	if err := WriteActive(r.dirs(), sel); err != nil {
+		return fmt.Errorf("runner: adopt: %w", err)
+	}
+	r.v.active = &sel
+	log.Printf("runner: adopted config %s for core %s", config, sel.Core)
 	return nil
 }
 

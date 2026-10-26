@@ -1,6 +1,7 @@
 package runnerapi
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -49,5 +50,36 @@ func TestSelectionValidateConfig(t *testing.T) {
 	}
 	if (Selection{Config: "config/" + good + ".json"}).Validate() == nil {
 		t.Error("empty core accepted")
+	}
+}
+
+// ValidateConfig is what Selection.Config must satisfy, by itself: Adopt names
+// a config with no selection around it.
+func TestValidateConfig(t *testing.T) {
+	good := strings.Repeat("0123456789abcdef", 4)
+	if err := ValidateConfig("config/" + good + ".json"); err != nil {
+		t.Errorf("a good name refused: %v", err)
+	}
+	for _, cfg := range []string{
+		"", "config/" + good, "config/" + good + ".json\n", "/config/" + good + ".json", "config/" + good + ".json/",
+		"config/" + strings.ToUpper(good) + ".json", "config/" + good[1:] + ".json", "config/" + good + "0.json",
+		"config/../" + good + ".json", "config//" + good + ".json", "run/config/" + good + ".json",
+	} {
+		err := ValidateConfig(cfg)
+		if err == nil {
+			t.Errorf("config %q accepted", cfg)
+		} else if !strings.HasPrefix(err.Error(), "runnerapi: invalid config") {
+			t.Errorf("config %q: error %q, want the runnerapi prefix and \"invalid config\"", cfg, err)
+		}
+	}
+}
+
+func TestAdoptRequestWireName(t *testing.T) {
+	b, err := json.Marshal(AdoptRequest{Config: "config/x.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"config":"config/x.json"}`; string(b) != want {
+		t.Errorf("AdoptRequest JSON = %s, want %s", b, want)
 	}
 }

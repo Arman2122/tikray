@@ -87,6 +87,16 @@ func (c *Client) Reload(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/v1/reload", nil, nil)
 }
 
+// Adopt makes config, a file under the runner's run directory named like
+// Selection.Config, the active one without restarting xray: the running xray
+// must already run it, as after a change made through XrayAPI. The core and
+// geo stay those of the running xray. It returns ErrBusy during a trial or a
+// restart and ErrNoCore when no xray runs; a name that is invalid, or a file
+// that does not exist, is a 400 error.
+func (c *Client) Adopt(ctx context.Context, config string) error {
+	return c.do(ctx, http.MethodPost, "/v1/adopt", AdoptRequest{Config: config}, nil)
+}
+
 // XrayAPI runs "xray api <args>" in the runner and returns its output.
 func (c *Client) XrayAPI(ctx context.Context, args ...string) (XrayAPIResponse, error) {
 	if args == nil {

@@ -30,6 +30,7 @@ var routes = []struct{ method, path string }{
 	{http.MethodPost, "/v1/reload"},
 	{http.MethodPost, "/v1/xray-api"},
 	{http.MethodPost, "/v1/test"},
+	{http.MethodPost, "/v1/adopt"},
 }
 
 // api is the server over a rig's runner, with a client for it and the number
@@ -290,6 +291,56 @@ func TestServerRestartReload(t *testing.T) {
 	g.wantState(t, runnerapi.StateRunning, newCore)
 	if st, err := a.c.Status(ctx); err != nil || st.Active == nil || *st.Active != sel {
 		t.Errorf("Status after Reload = %+v, %v; want active %+v", st, err, sel)
+	}
+}
+
+func TestServerAdopt(t *testing.T) {
+	g := runningRig(t)
+	a := newAPI(t, g, nil)
+	ctx := t.Context()
+	before, err := a.c.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	next := g.config(t, "adopted")
+	if err := a.c.Adopt(ctx, next); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	st, err := a.c.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (runnerapi.Selection{Core: oldCore, Config: next}); st.Active == nil || *st.Active != want {
+		t.Errorf("Status().Active after Adopt = %+v; want %+v", st.Active, want)
+	}
+	if st.State != runnerapi.StateRunning || st.XrayPID != before.XrayPID || st.LastTrial != nil {
+		t.Errorf("Status after Adopt = %+v; want the running xray %d untouched and no trial", st, before.XrayPID)
+	}
+	if err := a.c.Adopt(ctx, "config/notes.json"); err == nil || errors.Is(err, runnerapi.ErrBusy) || errors.Is(err, runnerapi.ErrNoCore) ||
+		!strings.Contains(err.Error(), "400") || !strings.Contains(err.Error(), "invalid config") {
+		t.Errorf("Adopt of a bad name = %v; want a 400 error that says so", err)
+	}
+
+	g.candidate(t, "ok", 10*time.Second)
+	if err := a.c.Trial(ctx); err != nil {
+		t.Fatalf("Trial: %v", err)
+	}
+	if err := a.c.Adopt(ctx, next); !errors.Is(err, runnerapi.ErrBusy) {
+		t.Errorf("Adopt during a trial = %v; want ErrBusy", err)
+	}
+	if err := a.c.Abort(ctx); err != nil {
+		t.Fatal(err)
+	}
+	g.wantActive(t, runnerapi.Selection{Core: oldCore, Config: next})
+}
+
+func TestServerAdoptNoCore(t *testing.T) {
+	g := newRig(t, nil)
+	g.boot(t)
+	a := newAPI(t, g, nil)
+	if err := a.c.Adopt(t.Context(), g.config(t, "adopted")); !errors.Is(err, runnerapi.ErrNoCore) {
+		t.Errorf("Adopt with no xray = %v; want ErrNoCore", err)
 	}
 }
 
@@ -571,6 +622,10 @@ func TestServerStatusCodes(t *testing.T) {
 		g.trial(t)
 	}
 	candidate := func(t *testing.T, g *rig) { g.candidate(t, "ok", 10*time.Second) }
+	// adoptable is a config the runner may adopt, written by setup.
+	adoptable := "config/" + strings.Repeat("ab", 32) + ".json"
+	adoptBody := `{"config":"` + adoptable + `"}`
+	writeAdoptable := func(t *testing.T, g *rig) { writeFile(t, g.d.ConfigPath(adoptable), "{}") }
 
 	tests := []struct {
 		name         string
@@ -588,6 +643,21 @@ func TestServerStatusCodes(t *testing.T) {
 		{name: "abort", setup: trialOpen, method: "POST", path: "/v1/abort", status: 204},
 		{name: "restart", method: "POST", path: "/v1/restart", status: 204},
 		{name: "reload", method: "POST", path: "/v1/reload", status: 204},
+		{name: "adopt", setup: writeAdoptable, method: "POST", path: "/v1/adopt", body: adoptBody, status: 204},
+
+		{name: "adopt of a bad name", method: "POST", path: "/v1/adopt", body: `{"config":"config/x.json"}`, status: 400, code: "bad_request", detail: "invalid config"},
+		{name: "adopt of a name that leaves run", method: "POST", path: "/v1/adopt", body: `{"config":"config/../active.json"}`, status: 400, code: "bad_request", detail: "invalid config"},
+		{name: "adopt of a missing file", method: "POST", path: "/v1/adopt", body: adoptBody, status: 400, code: "bad_request", detail: "does not exist"},
+		{name: "adopt with no config", method: "POST", path: "/v1/adopt", body: `{}`, status: 400, code: "bad_request", detail: "invalid config"},
+		{name: "adopt with an empty body", method: "POST", path: "/v1/adopt", status: 400, code: "bad_request", detail: "invalid JSON"},
+		{name: "adopt with malformed JSON", method: "POST", path: "/v1/adopt", body: `{"config":`, status: 400, code: "bad_request", detail: "invalid JSON"},
+		{name: "adopt with a config of the wrong type", method: "POST", path: "/v1/adopt", body: `{"config":7}`, status: 400, code: "bad_request", detail: "invalid JSON"},
+		{name: "adopt with a body over the cap", method: "POST", path: "/v1/adopt",
+			body: `{"config":"` + strings.Repeat("x", 64<<10) + `"}`, status: 400, code: "bad_request", detail: "too large"},
+		{name: "adopt during a trial", setup: func(t *testing.T, g *rig) { writeAdoptable(t, g); trialOpen(t, g) },
+			method: "POST", path: "/v1/adopt", body: adoptBody, status: 409, code: "busy"},
+		{name: "adopt with no xray", noActive: true, setup: writeAdoptable, method: "POST", path: "/v1/adopt", body: adoptBody, status: 409, code: "no_core"},
+		{name: "GET on adopt", method: "GET", path: "/v1/adopt", status: 405},
 
 		{name: "trial without a candidate", method: "POST", path: "/v1/trial", status: 400, code: "bad_request", detail: "invalid candidate"},
 		{name: "trial of an expired candidate", setup: func(t *testing.T, g *rig) { g.candidate(t, "ok", -time.Second) },

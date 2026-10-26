@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1119,4 +1120,265 @@ func TestBootRemovesTestLeftovers(t *testing.T) {
 			t.Errorf("Boot removed %s: %v", keep, err)
 		}
 	}
+}
+
+// config writes a config file for the runner to adopt and returns its name. A
+// seed makes a name of its own, as the control plane's content hash does.
+func (g *rig) config(t *testing.T, seed string) string {
+	t.Helper()
+	name := fmt.Sprintf("config/%x.json", sha256.Sum256([]byte(seed)))
+	writeFile(t, g.d.ConfigPath(name), "{}")
+	return name
+}
+
+// wantActive checks the active selection, on disk and in Status.
+func (g *rig) wantActive(t *testing.T, want runnerapi.Selection) {
+	t.Helper()
+	if a, err := ReadActive(g.d); err != nil || a == nil || *a != want {
+		t.Errorf("active.json = %+v, %v; want %+v", a, err, want)
+	}
+	if st := g.r.Status(); st.Active == nil || *st.Active != want {
+		t.Errorf("Status().Active = %+v; want %+v", st.Active, want)
+	}
+}
+
+// TestAdoptOnlyWhileRunning: a hot change has already put a config into the
+// running xray, and Adopt makes it the active one without touching the
+// process. It does so only while an xray runs from the active selection, and
+// not while a trial or a restart is under way.
+func TestAdoptOnlyWhileRunning(t *testing.T) {
+	t.Run("running", func(t *testing.T) {
+		t.Parallel()
+		log := &syncBuffer{}
+		g := newRig(t, func(c *Config) { c.Supervisor.Log = log })
+		sel := g.core(t, oldCore, "ok")
+		sel.Geo = "g1"
+		if err := WriteActive(g.d, sel); err != nil {
+			t.Fatal(err)
+		}
+		g.boot(t)
+		// A finished trial leaves last-trial.json, which Adopt must not touch.
+		cand := g.candidate(t, "ok", 5*time.Second)
+		g.trial(t)
+		if err := g.r.Abort(); err != nil {
+			t.Fatal(err)
+		}
+		g.wantLastTrial(t, runnerapi.OutcomeAborted, cand)
+		g.wantState(t, runnerapi.StateRunning, oldCore)
+		before := g.r.Status()
+		lastTrial, err := os.ReadFile(g.d.LastTrial())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		next := g.config(t, "adopted")
+		if err := g.r.Adopt(t.Context(), next); err != nil {
+			t.Fatalf("Adopt: %v", err)
+		}
+		want := runnerapi.Selection{Core: oldCore, Geo: "g1", Config: next}
+		g.wantActive(t, want)
+		after := g.r.Status()
+		if after.State != runnerapi.StateRunning || after.XrayPID != before.XrayPID || after.XrayVersion != before.XrayVersion {
+			t.Errorf("status after Adopt = %+v; want the same running xray as before, %+v", after, before)
+		}
+		if !reflect.DeepEqual(after.LastTrial, before.LastTrial) {
+			t.Errorf("LastTrial = %+v after Adopt, was %+v", after.LastTrial, before.LastTrial)
+		}
+		if got, err := os.ReadFile(g.d.LastTrial()); err != nil || string(got) != string(lastTrial) {
+			t.Errorf("last-trial.json changed by Adopt (err %v)", err)
+		}
+		g.wantNoCandidate(t)
+		if gone(before.XrayPID) {
+			t.Fatalf("xray %d is gone after Adopt", before.XrayPID)
+		}
+
+		// A crash restarts from the adopted config: the exit of the process,
+		// which was started with the old one, must still be recognised.
+		if err := syscall.Kill(before.XrayPID, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+		waitLog(t, log, "config "+g.d.ConfigPath(next))
+		waitFor(t, 5*time.Second, "xray running again", func() bool {
+			st := g.r.Status()
+			return st.State == runnerapi.StateRunning && st.XrayPID > 0 && st.XrayPID != before.XrayPID
+		})
+		g.wantActive(t, want)
+
+		// And so does a restart.
+		if err := g.r.Restart(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		g.wantState(t, runnerapi.StateRunning, oldCore)
+		g.wantActive(t, want)
+	})
+
+	t.Run("trial", func(t *testing.T) {
+		t.Parallel()
+		g := newRig(t, nil)
+		sel := g.active(t, "ok")
+		g.boot(t)
+		cand := g.candidate(t, "ok", 5*time.Second)
+		g.trial(t)
+		pid := g.r.Status().XrayPID
+		next := g.config(t, "adopted")
+
+		if err := g.r.Adopt(t.Context(), next); !errors.Is(err, runnerapi.ErrBusy) {
+			t.Fatalf("Adopt during a trial = %v, want ErrBusy", err)
+		}
+		g.wantState(t, runnerapi.StateTrial, newCore)
+		if st := g.r.Status(); st.XrayPID != pid || st.Candidate == nil || st.Candidate.Selection != cand.Selection {
+			t.Errorf("status after the refused Adopt = %+v; want the trial of %+v on %d", st, cand.Selection, pid)
+		}
+		g.wantActive(t, sel)
+		g.wantNoLastTrial(t)
+		if _, err := os.Stat(g.d.CandidateFile()); err != nil {
+			t.Errorf("candidate.json of the open trial is gone: %v", err)
+		}
+
+		// The trial ends, and then Adopt may.
+		if err := g.r.Abort(); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.r.Adopt(t.Context(), next); err != nil {
+			t.Fatalf("Adopt after the trial: %v", err)
+		}
+		g.wantActive(t, runnerapi.Selection{Core: oldCore, Config: next})
+	})
+
+	// Adopt goes through the runner's goroutine, so it waits for a trial that
+	// is under way, which has not made its candidate the running xray yet,
+	// and then finds the trial open. It must not slip in and write active.json
+	// between the trial's test and its start.
+	t.Run("queued behind a trial", func(t *testing.T) {
+		t.Parallel()
+		g := newRig(t, nil)
+		sel := g.active(t, "ok")
+		g.boot(t)
+		g.candidate(t, "slowtest", 10*time.Second) // its xray run -test takes a second
+		next := g.config(t, "adopted")
+		errc := make(chan error, 1)
+		go func() { errc <- g.r.Trial(t.Context()) }()
+		// The trial stages the candidate's core right before it tests it.
+		waitFor(t, 5*time.Second, "the candidate's core to be staged", func() bool {
+			_, err := os.Stat(filepath.Join(g.stage, newCore, "xray"))
+			return err == nil
+		})
+
+		if err := g.r.Adopt(t.Context(), next); !errors.Is(err, runnerapi.ErrBusy) {
+			t.Errorf("Adopt while the trial tests its candidate = %v, want ErrBusy", err)
+		}
+		if err := <-errc; err != nil {
+			t.Fatalf("Trial: %v", err)
+		}
+		g.wantState(t, runnerapi.StateTrial, newCore)
+		g.wantActive(t, sel)
+	})
+
+	t.Run("restarting", func(t *testing.T) {
+		t.Parallel()
+		// A backoff that outlasts the test keeps the runner restarting.
+		g := newRig(t, func(c *Config) { c.BackoffMin, c.BackoffMax = time.Hour, time.Hour })
+		sel := g.active(t, "ok")
+		g.boot(t)
+		if err := syscall.Kill(g.r.Status().XrayPID, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, 5*time.Second, "the runner to be restarting", func() bool {
+			return g.r.Status().State == runnerapi.StateRestarting
+		})
+
+		if err := g.r.Adopt(t.Context(), g.config(t, "adopted")); !errors.Is(err, runnerapi.ErrBusy) {
+			t.Fatalf("Adopt while restarting = %v, want ErrBusy", err)
+		}
+		g.wantActive(t, sel)
+		if st := g.r.Status(); st.State != runnerapi.StateRestarting || st.XrayPID != 0 {
+			t.Errorf("status after the refused Adopt = %+v; want restarting with no xray", st)
+		}
+	})
+
+	t.Run("no core", func(t *testing.T) {
+		t.Parallel()
+		g := newRig(t, nil)
+		g.boot(t) // no active.json: the runner stays empty
+		if err := g.r.Adopt(t.Context(), g.config(t, "adopted")); !errors.Is(err, runnerapi.ErrNoCore) {
+			t.Fatalf("Adopt with no xray = %v, want ErrNoCore", err)
+		}
+		if _, err := os.Stat(g.d.Active()); !os.IsNotExist(err) {
+			t.Errorf("active.json exists after the refused Adopt (stat err %v)", err)
+		}
+		if st := g.r.Status(); st.State != runnerapi.StateEmpty || st.Active != nil {
+			t.Errorf("status after the refused Adopt = %+v; want empty", st)
+		}
+	})
+
+	t.Run("bad config", func(t *testing.T) {
+		t.Parallel()
+		g := newRig(t, nil)
+		sel := g.active(t, "ok")
+		g.boot(t)
+		pid := g.r.Status().XrayPID
+		good := g.config(t, "adopted")
+		writeFile(t, g.d.ConfigPath("config/notes.json"), "{}")
+		dirName := fmt.Sprintf("config/%x.json", sha256.Sum256([]byte("a directory")))
+		if err := os.MkdirAll(g.d.ConfigPath(dirName), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		bad := map[string]string{
+			"empty":              "",
+			"not a hash":         "config/notes.json",
+			"short hash":         "config/" + good[len("config/"):len("config/")+63] + ".json",
+			"upper-case hash":    strings.ToUpper(good),
+			"no directory":       strings.TrimPrefix(good, "config/"),
+			"absolute":           g.d.ConfigPath(good),
+			"leaves the run dir": "config/../active.json",
+			"trailing slash":     good + "/",
+			"missing file":       fmt.Sprintf("config/%x.json", sha256.Sum256([]byte("never written"))),
+			"a directory":        dirName,
+		}
+		for name, config := range bad {
+			err := g.r.Adopt(t.Context(), config)
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Errorf("%s: Adopt(%q) = %v, want ErrInvalidConfig", name, config, err)
+			}
+		}
+		g.wantActive(t, sel)
+		g.wantState(t, runnerapi.StateRunning, oldCore)
+		if got := g.r.Status().XrayPID; got != pid {
+			t.Errorf("PID %d after the refused Adopts, want %d", got, pid)
+		}
+
+		// The config is checked before the state: a bad one is the caller's
+		// mistake whatever the runner is doing.
+		g.candidate(t, "ok", 5*time.Second)
+		g.trial(t)
+		if err := g.r.Adopt(t.Context(), "config/notes.json"); !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("Adopt of a bad name during a trial = %v, want ErrInvalidConfig", err)
+		}
+		if err := g.r.Adopt(t.Context(), good); !errors.Is(err, runnerapi.ErrBusy) {
+			t.Errorf("Adopt of a good name during a trial = %v, want ErrBusy", err)
+		}
+	})
+
+	t.Run("write fails", func(t *testing.T) {
+		t.Parallel()
+		g := newRig(t, nil)
+		sel := g.active(t, "ok")
+		g.boot(t)
+		next := g.config(t, "adopted")
+		// A directory with active.json's name makes the rename fail.
+		if err := os.Remove(g.d.Active()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(g.d.Active(), "x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		err := g.r.Adopt(t.Context(), next)
+		if err == nil || errors.Is(err, ErrInvalidConfig) || errors.Is(err, runnerapi.ErrBusy) || errors.Is(err, runnerapi.ErrNoCore) {
+			t.Fatalf("Adopt with an unwritable active.json = %v; want a plain error", err)
+		}
+		// The runner's view stays what xray runs.
+		if st := g.r.Status(); st.Active == nil || *st.Active != sel || st.State != runnerapi.StateRunning {
+			t.Errorf("status after the failed Adopt = %+v; want running %+v", st, sel)
+		}
+	})
 }

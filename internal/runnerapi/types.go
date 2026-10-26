@@ -5,10 +5,12 @@
 //	GET  /v1/status
 //	POST /v1/trial, /v1/commit, /v1/abort, /v1/restart, /v1/reload, /v1/xray-api
 //	POST /v1/test (the body is an xray config, at most 1 MiB)
+//	POST /v1/adopt (the body is {"config": "config/<64 hex>.json"})
 //
 // Errors are JSON bodies {"error": "<code>", "detail": "<text>"} with the
 // codes busy, no_trial and no_core (409), test_failed (422), too_large (413),
-// bad_request and unauthorized.
+// bad_request and unauthorized. Adopt answers 400 bad_request for a config
+// name that is invalid or a file that does not exist.
 package runnerapi
 
 import (
@@ -48,8 +50,15 @@ func (s Selection) Validate() error {
 	if s.Geo != "" && (!geoRE.MatchString(s.Geo) || strings.Contains(s.Geo, "..")) {
 		return fmt.Errorf("runnerapi: invalid geo %q", s.Geo)
 	}
-	if !configRE.MatchString(s.Config) {
-		return fmt.Errorf("runnerapi: invalid config %q: want config/<64 hex>.json", s.Config)
+	return ValidateConfig(s.Config)
+}
+
+// ValidateConfig refuses a config name that is not config/<64 lowercase
+// hex>.json, the only form Selection.Config takes, so that it can name nothing
+// but a content-addressed file under the runner's run directory.
+func ValidateConfig(config string) error {
+	if !configRE.MatchString(config) {
+		return fmt.Errorf("runnerapi: invalid config %q: want config/<64 hex>.json", config)
 	}
 	return nil
 }
@@ -101,6 +110,12 @@ type Status struct {
 // XrayAPIRequest is the body of POST /v1/xray-api: arguments for "xray api".
 type XrayAPIRequest struct {
 	Args []string `json:"args"`
+}
+
+// AdoptRequest is the body of POST /v1/adopt: the config, in the form of
+// Selection.Config, that the running xray already runs.
+type AdoptRequest struct {
+	Config string `json:"config"`
 }
 
 // XrayAPIResponse is the result of running "xray api" in the runner.

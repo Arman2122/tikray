@@ -52,6 +52,7 @@ func NewServer(r *Runner, token string, xrayAPI func(ctx context.Context, args [
 	mux.HandleFunc("POST /v1/reload", act(r.Reload))
 	mux.HandleFunc("POST /v1/xray-api", s.xrayAPIRoute)
 	mux.HandleFunc("POST /v1/test", s.test)
+	mux.HandleFunc("POST /v1/adopt", s.adopt)
 	return s.authenticated(mux)
 }
 
@@ -98,15 +99,24 @@ func act(fn func(context.Context) error) http.HandlerFunc {
 	}
 }
 
-func (s *server) xrayAPIRoute(w http.ResponseWriter, req *http.Request) {
-	var in runnerapi.XrayAPIRequest
-	if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+// decodeBody decodes the request's JSON body into v. When it cannot, it
+// answers 400 and returns false.
+func decodeBody(w http.ResponseWriter, req *http.Request, v any) bool {
+	if err := json.NewDecoder(req.Body).Decode(v); err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
 			writeError(w, http.StatusBadRequest, "bad_request", "request body too large")
-			return
+			return false
 		}
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body: "+err.Error())
+		return false
+	}
+	return true
+}
+
+func (s *server) xrayAPIRoute(w http.ResponseWriter, req *http.Request) {
+	var in runnerapi.XrayAPIRequest
+	if !decodeBody(w, req, &in) {
 		return
 	}
 	if len(in.Args) == 0 {
@@ -120,6 +130,20 @@ func (s *server) xrayAPIRoute(w http.ResponseWriter, req *http.Request) {
 	ctx, cancel := context.WithTimeout(req.Context(), xrayAPITimeout)
 	defer cancel()
 	reply(w, http.StatusOK, s.xrayAPI(ctx, in.Args))
+}
+
+// adopt serves POST /v1/adopt: the body names the config to adopt, see
+// Runner.Adopt.
+func (s *server) adopt(w http.ResponseWriter, req *http.Request) {
+	var in runnerapi.AdoptRequest
+	if !decodeBody(w, req, &in) {
+		return
+	}
+	if err := s.r.Adopt(req.Context(), in.Config); err != nil {
+		writeFailure(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // test serves POST /v1/test: the body is the config to test, see
@@ -153,7 +177,7 @@ func writeFailure(w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &tf):
 		writeError(w, http.StatusUnprocessableEntity, "test_failed", tf.Output)
-	case errors.Is(err, ErrInvalidCandidate):
+	case errors.Is(err, ErrInvalidCandidate), errors.Is(err, ErrInvalidConfig):
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 	case errors.Is(err, runnerapi.ErrBusy):
 		writeError(w, http.StatusConflict, "busy", "")
