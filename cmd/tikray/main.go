@@ -92,9 +92,11 @@
 //
 // Environment (see Config): TIKRAY_DATA, TIKRAY_ARCH, TIKRAY_RUNNER_URL,
 // TIKRAY_SOCKS, TIKRAY_XRAY_API, TIKRAY_UPSTREAM, TIKRAY_MIRRORS,
-// TIKRAY_INDEX_URLS, TIKRAY_INDEX_PUBKEY_FILE, TIKRAY_PROBE_URL. The runner's
-// three addresses default to its address on the state's private subnet, and
-// the probe URL to the state's health.probe_url. serve listens on
+// TIKRAY_INDEX_URLS, TIKRAY_INDEX_PUBKEY_FILE, TIKRAY_PROBE_URL, TIKRAY_HOT. The
+// runner's three addresses default to its address on the state's private
+// subnet, and the probe URL to the state's health.probe_url. An apply that
+// changes only the servers goes live through xray api without restarting
+// xray, unless TIKRAY_HOT is off: then every apply is a trial. serve listens on
 // TIKRAY_LISTEN (default :443); the commands reach it at TIKRAY_API, which
 // defaults to the address serve listens on (its IP if TIKRAY_LISTEN names a
 // specific one, else 127.0.0.1, and its port) with TIKRAY_API_TOKEN and
@@ -217,9 +219,12 @@ serve" makes at its first start and does not print, since its output is logged:
 
 Configuration comes from the environment: TIKRAY_DATA, TIKRAY_ARCH,
 TIKRAY_RUNNER_URL, TIKRAY_SOCKS, TIKRAY_XRAY_API, TIKRAY_UPSTREAM,
-TIKRAY_MIRRORS, TIKRAY_INDEX_URLS, TIKRAY_INDEX_PUBKEY_FILE and
-TIKRAY_PROBE_URL. The runner's addresses default to the one the state's
-private subnet gives it, and the probe URL to the state's.
+TIKRAY_MIRRORS, TIKRAY_INDEX_URLS, TIKRAY_INDEX_PUBKEY_FILE,
+TIKRAY_PROBE_URL and TIKRAY_HOT. The runner's addresses default to the one
+the state's private subnet gives it, and the probe URL to the state's. An
+apply that adds, removes or changes servers and nothing else goes live
+through xray api without restarting xray, and falls back to a trial if that
+fails; TIKRAY_HOT=off makes every apply a trial.
 
 serve listens on TIKRAY_LISTEN (default :443). The commands reach it at
 TIKRAY_API, by default the address it listens on (https://127.0.0.1:443, or
@@ -821,7 +826,8 @@ func healthChecks(cfg Config, runner *runnerapi.Client) (health, proxy artifacts
 // only ever comes from upstream (§4.3), and a health check that needs the
 // proxy to carry traffic (ProxyHealth, if socks) and xray's API to answer
 // (Health). rend renders the config of an update, rollback or apply; nil leaves
-// an update to its --config file.
+// an update to its --config file. An apply that changes only the servers goes
+// live through xray api without a restart unless TIKRAY_HOT is off (Hot).
 func newUpdater(cfg Config, runner *runnerapi.Client, log io.Writer, rend artifacts.Renderer, socks bool) (*artifacts.CoreUpdater, error) {
 	pub, err := indexKey(cfg)
 	if err != nil {
@@ -861,16 +867,20 @@ func buildUpdater(cfg Config, pub []byte, runner *runnerapi.Client, log io.Write
 	if !socks {
 		proxy = nil
 	}
+	// RunnerRun keeps its default, /data/run, the runner image's mount of the
+	// run directory that both containers share.
 	return &artifacts.CoreUpdater{
-		Data:        cfg.Data,
-		Arch:        cfg.Arch,
-		Fetch:       artifacts.Chain{Sources: fetch},
-		Verify:      artifacts.Verifier{Upstream: artifacts.Chain{Sources: upstream}, IndexURLs: slices.Clone(cfg.IndexURLs), IndexPub: slices.Clone(pub)},
-		Runner:      runner,
-		Render:      rend,
-		Health:      health,
-		ProxyHealth: proxy,
-		Log:         log,
+		Data:          cfg.Data,
+		Arch:          cfg.Arch,
+		Fetch:         artifacts.Chain{Sources: fetch},
+		Verify:        artifacts.Verifier{Upstream: artifacts.Chain{Sources: upstream}, IndexURLs: slices.Clone(cfg.IndexURLs), IndexPub: slices.Clone(pub)},
+		Runner:        runner,
+		Render:        rend,
+		Health:        health,
+		ProxyHealth:   proxy,
+		Hot:           cfg.Hot,
+		XrayAPIServer: cfg.XrayAPI,
+		Log:           log,
 	}
 }
 

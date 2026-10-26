@@ -136,6 +136,10 @@ func TestApplyCommits(t *testing.T) {
 	if len(lines) != 1 || !strings.Contains(lines[0], `"kind":"config"`) {
 		t.Fatalf("history = %q, want one line with \"kind\":\"config\"", lines)
 	}
+	// A trial is no hot change, and its line does not say hot at all.
+	if strings.Contains(lines[0], `"hot"`) {
+		t.Errorf("history = %q, want no \"hot\" in a trial's line", lines)
+	}
 	h := e.history(t)
 	wantResult(t, h[0], want)
 	if got := e.slots(t); !reflect.DeepEqual(got, []string{"26.10.21"}) {

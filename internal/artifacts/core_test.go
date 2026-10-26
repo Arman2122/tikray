@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,12 +43,33 @@ type fakeRunner struct {
 	calls []string
 	cands []runnerapi.Candidate // candidate.json as each trial request found it
 	delay map[string]time.Duration
+	// tested are the bodies of the test calls, apiArgs the arguments of each
+	// xray-api call, adoFiles the files each ado read, and adopted the configs
+	// each adopt named, in order.
+	tested   [][]byte
+	apiArgs  [][]string
+	adoFiles []adoFile
+	adopted  []string
+	// live is the tags of the outbounds the fake's xray runs, when the test
+	// models them; nil when it does not, and every xray-api call then exits 0.
+	// See liveAPI.
+	live []string
 	// Hooks run with mu held, before the route's own behaviour; a hook that
-	// returns true has answered the request.
+	// returns true has answered the request. onXrayAPI always answers.
 	onTrial   func(w http.ResponseWriter, c runnerapi.Candidate) bool
 	onCommit  func(w http.ResponseWriter) bool
 	onStatus  func()
 	onXrayAPI func(w http.ResponseWriter, args []string)
+	onTest    func(w http.ResponseWriter, config []byte) bool
+	onAdopt   func(w http.ResponseWriter, config string) bool
+	onRestart func(w http.ResponseWriter) bool
+}
+
+// adoFile is a file that an ado call read, as the runner found it.
+type adoFile struct {
+	path          string
+	body          string
+	mode, dirMode os.FileMode
 }
 
 func newFakeRunner(t *testing.T, run string, active *runnerapi.Selection) *fakeRunner {
@@ -63,6 +86,9 @@ func newFakeRunner(t *testing.T, run string, active *runnerapi.Selection) *fakeR
 	mux.HandleFunc("POST /v1/commit", f.handleCommit)
 	mux.HandleFunc("POST /v1/abort", f.handleAbort)
 	mux.HandleFunc("POST /v1/xray-api", f.handleXrayAPI)
+	mux.HandleFunc("POST /v1/test", f.handleTest)
+	mux.HandleFunc("POST /v1/adopt", f.handleAdopt)
+	mux.HandleFunc("POST /v1/restart", f.handleRestart)
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+runnerToken {
 			fakeError(w, http.StatusUnauthorized, "unauthorized", "")
@@ -142,6 +168,39 @@ func (f *fakeRunner) startTrial(c runnerapi.Candidate) {
 	f.st.State, f.st.Candidate = runnerapi.StateTrial, &c
 	f.st.XrayPID, f.st.XrayVersion = 43, fakeXrayVersion(c.Core)
 	f.st.RoutesOK, f.st.GatewayUp = true, true
+	f.restartLive(c.Config)
+}
+
+// restartLive is what xray's outbounds become when it starts from config,
+// when the test models them. mu must be held.
+func (f *fakeRunner) restartLive(config string) {
+	if f.live == nil {
+		return
+	}
+	raw, err := os.ReadFile(filepath.Join(f.run, config))
+	if err != nil {
+		f.t.Errorf("starting xray: %v", err)
+		return
+	}
+	f.live = configTags(f.t, string(raw))
+}
+
+// configTags are the tags of the outbounds of an xray config, in order.
+func configTags(t *testing.T, config string) []string {
+	t.Helper()
+	var c struct {
+		Outbounds []struct {
+			Tag string `json:"tag"`
+		} `json:"outbounds"`
+	}
+	if err := json.Unmarshal([]byte(config), &c); err != nil {
+		t.Errorf("config: %v", err)
+	}
+	tags := []string{}
+	for _, o := range c.Outbounds {
+		tags = append(tags, o.Tag)
+	}
+	return tags
 }
 
 // fakeXrayVersion is the first line of "xray version" for a core.
@@ -183,11 +242,148 @@ func (f *fakeRunner) handleXrayAPI(w http.ResponseWriter, r *http.Request) {
 		fakeError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	f.apiArgs = append(f.apiArgs, in.Args)
 	if f.onXrayAPI != nil {
 		f.onXrayAPI(w, in.Args)
 		return
 	}
-	writeJSONReply(w, http.StatusOK, runnerapi.XrayAPIResponse{})
+	writeJSONReply(w, http.StatusOK, f.liveAPI(in.Args))
+}
+
+// liveAPI answers "xray api <args>" as xray does: rmo removes the outbounds
+// it names and ado adds those of the files it names, refusing a tag that is
+// missing or already there. The files ado names are read from the runner's
+// path as it is, and recorded. Unless the test models the live outbounds
+// (f.live), every call exits 0. mu must be held.
+func (f *fakeRunner) liveAPI(args []string) runnerapi.XrayAPIResponse {
+	if len(args) == 0 {
+		return runnerapi.XrayAPIResponse{}
+	}
+	var operands []string
+	for _, a := range args[1:] {
+		if !strings.HasPrefix(a, "--server=") {
+			operands = append(operands, a)
+		}
+	}
+	failed := func(stderr string) runnerapi.XrayAPIResponse {
+		return runnerapi.XrayAPIResponse{ExitCode: 1, Stderr: stderr + "\n"}
+	}
+	switch args[0] {
+	case "rmo":
+		for _, tag := range operands {
+			if f.live == nil {
+				continue
+			}
+			i := slices.Index(f.live, tag)
+			if i < 0 {
+				return failed("failed to remove outbound " + tag + ": not found")
+			}
+			f.live = slices.Delete(f.live, i, i+1)
+		}
+	case "ado":
+		for _, p := range operands {
+			raw, err := os.ReadFile(p)
+			if err != nil {
+				return failed(err.Error())
+			}
+			file := adoFile{path: p, body: string(raw)}
+			if fi, err := os.Stat(p); err == nil {
+				file.mode = fi.Mode().Perm()
+			}
+			if fi, err := os.Stat(filepath.Dir(p)); err == nil {
+				file.dirMode = fi.Mode().Perm()
+			}
+			f.adoFiles = append(f.adoFiles, file)
+			if f.live == nil {
+				continue
+			}
+			for _, tag := range configTags(f.t, string(raw)) {
+				if slices.Contains(f.live, tag) {
+					return failed("failed to add outbound: existing tag found: " + tag)
+				}
+				f.live = append(f.live, tag)
+			}
+		}
+	}
+	return runnerapi.XrayAPIResponse{}
+}
+
+// handleTest answers as the runner's xray run -test does when it accepts
+// the config, unless a hook says otherwise; without an xray it is no_core.
+func (f *fakeRunner) handleTest(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	f.enter("test")
+	defer f.mu.Unlock()
+	if err != nil {
+		fakeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	f.tested = append(f.tested, body)
+	if f.onTest != nil && f.onTest(w, body) {
+		return
+	}
+	if f.st.State == runnerapi.StateEmpty {
+		fakeError(w, http.StatusConflict, "no_core", "")
+		return
+	}
+	writeJSONReply(w, http.StatusOK, runnerapi.TestResult{OK: true})
+}
+
+// handleAdopt makes the config active without a restart, as the runner does:
+// only while xray runs from the active selection, and only a config file that
+// is there.
+func (f *fakeRunner) handleAdopt(w http.ResponseWriter, r *http.Request) {
+	var in runnerapi.AdoptRequest
+	err := json.NewDecoder(r.Body).Decode(&in)
+	f.enter("adopt")
+	defer f.mu.Unlock()
+	if err == nil {
+		err = runnerapi.ValidateConfig(in.Config)
+	}
+	if err == nil {
+		_, err = os.Stat(filepath.Join(f.run, in.Config))
+	}
+	if err != nil {
+		fakeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	f.adopted = append(f.adopted, in.Config)
+	if f.onAdopt != nil && f.onAdopt(w, in.Config) {
+		return
+	}
+	switch f.st.State {
+	case runnerapi.StateRunning:
+	case runnerapi.StateEmpty:
+		fakeError(w, http.StatusConflict, "no_core", "")
+		return
+	default:
+		fakeError(w, http.StatusConflict, "busy", "")
+		return
+	}
+	sel := *f.st.Active
+	sel.Config = in.Config
+	f.st.Active = &sel
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRestart restarts xray from the active selection.
+func (f *fakeRunner) handleRestart(w http.ResponseWriter, r *http.Request) {
+	f.enter("restart")
+	defer f.mu.Unlock()
+	if f.onRestart != nil && f.onRestart(w) {
+		return
+	}
+	switch {
+	case f.st.State == runnerapi.StateTrial:
+		fakeError(w, http.StatusConflict, "busy", "")
+		return
+	case f.st.Active == nil:
+		fakeError(w, http.StatusInternalServerError, "internal", "no active selection")
+		return
+	}
+	f.st.State, f.st.XrayPID = runnerapi.StateRunning, f.st.XrayPID+1
+	f.restartLive(f.st.Active.Config)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // end closes the open trial with outcome as the runner does: a commit makes
@@ -201,6 +397,9 @@ func (f *fakeRunner) end(outcome, detail string) {
 	f.st.State, f.st.Candidate = runnerapi.StateRunning, nil
 	if f.st.Active != nil {
 		f.st.XrayVersion = fakeXrayVersion(f.st.Active.Core)
+		if outcome != runnerapi.OutcomeCommitted {
+			f.restartLive(f.st.Active.Config)
+		}
 	}
 	f.st.LastTrial = &runnerapi.TrialResult{Candidate: c, Outcome: outcome, Detail: detail, At: t0}
 	os.Remove(filepath.Join(f.run, "candidate.json"))

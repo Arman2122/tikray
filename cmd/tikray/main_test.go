@@ -650,6 +650,16 @@ func TestNewUpdater(t *testing.T) {
 	if u.Data != data || u.Arch != "arm64" || u.Runner != runner || u.Health == nil {
 		t.Errorf("updater %+v", u)
 	}
+	// Hot changes follow TIKRAY_HOT (Config.Hot), name xray's API as the
+	// health check does, and find run/ where the runner's image mounts it.
+	if u.Hot || u.XrayAPIServer != "" || u.RunnerRun != "" {
+		t.Errorf("Hot %v, XrayAPIServer %q, RunnerRun %q; want off, as cfg.Hot is, and the defaults", u.Hot, u.XrayAPIServer, u.RunnerRun)
+	}
+	hotCfg := cfg
+	hotCfg.Hot, hotCfg.XrayAPI = true, "10.0.0.3:10085"
+	if u, err := newUpdater(hotCfg, runner, io.Discard, nil, true); err != nil || !u.Hot || u.XrayAPIServer != "10.0.0.3:10085" {
+		t.Errorf("with Hot: %v, Hot %v, XrayAPIServer %q", err, u.Hot, u.XrayAPIServer)
+	}
 
 	// With no key file the index stays unused.
 	cfg.IndexURLs, cfg.IndexPubKeyFile = nil, ""

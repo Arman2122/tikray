@@ -108,7 +108,18 @@ type CoreUpdater struct {
 	// line before it is recorded, logged or returned: xray's output can name a
 	// server's credentials. The error is wrapped, so errors.Is and As still
 	// reach what was wrapped; Result.Detail and Error() are the safe text.
-	Redact        func(string) string
+	Redact func(string) string
+	// Hot lets Apply put a change of the servers' outbounds alone into the
+	// running xray through xray api, without a restart, and fall back to the
+	// trial when it can't (see hot.go). An update or a rollback never does.
+	Hot bool
+	// XrayAPIServer is the address of xray's API, for xray api --server=;
+	// empty means 127.0.0.1:10085.
+	XrayAPIServer string
+	// RunnerRun is the runner's own path of the run directory, where xray api
+	// ado reads the outbounds that a hot change adds: tikray writes them under
+	// its run/hot/. Empty means /data/run, where the runner's image mounts it.
+	RunnerRun     string
 	Keep          int           // committed versions whose slots a commit keeps (2)
 	TrialDeadline time.Duration // how long the runner waits for the commit (120 s)
 	EarlyExit     time.Duration // wait after the candidate starts, before checking on it (10 s)
@@ -141,6 +152,7 @@ type Result struct {
 	Source   string    `json:"source,omitempty"`
 	Verified string    `json:"verified,omitempty"`
 	Detail   string    `json:"detail,omitempty"`
+	Hot      bool      `json:"hot,omitempty"` // an Apply that went live without restarting xray (CoreUpdater.Hot)
 	At       time.Time `json:"at"`
 }
 
@@ -324,10 +336,11 @@ func (u *CoreUpdater) apply(ctx context.Context, res *Result) error {
 	if u.Render == nil {
 		return refuse(res, errors.New("artifacts: CoreUpdater.Render is not set"))
 	}
-	active, err := u.active(ctx)
+	st, err := u.status(ctx)
 	if err != nil {
 		return refuse(res, err)
 	}
+	active := st.Active
 	if active == nil {
 		return refuse(res, errors.New("no active core: install one with tikray core update"))
 	}
@@ -347,29 +360,35 @@ func (u *CoreUpdater) apply(ctx context.Context, res *Result) error {
 	if err := u.unsaved(active, cfg, "create a state first"); err != nil {
 		return refuse(res, err)
 	}
-	// The baseline: does the proxy carry traffic on the active config? If not,
-	// the candidate is not asked to either.
-	var proxy HealthChecker
-	skipped := false
-	if u.ProxyHealth != nil {
-		berr := u.baseline(ctx)
-		switch {
-		case berr == nil:
-			proxy = u.ProxyHealth
-		case ctx.Err() != nil:
-			// The caller gave up: that says nothing about the proxy.
-			return refuse(res, ctx.Err())
-		default:
-			skipped = true
-			u.logf("xray-core %s: the proxy probe fails on the active config: %v", active.Core, berr)
+	var h hotAttempt
+	if u.Hot {
+		if h = u.hot(ctx, st, cfg, res); h.done {
+			return h.err
 		}
+	}
+	err = u.applyTrial(ctx, *active, cfg, res, h.gate)
+	if h.failed != nil {
+		u.fellBack(ctx, h, res)
+	}
+	return err
+}
+
+// applyTrial puts cfg on trial with the active core and geo. g is the
+// baseline's verdict, taken now when it is nil.
+func (u *CoreUpdater) applyTrial(ctx context.Context, active runnerapi.Selection, cfg *config, res *Result, g *gate) error {
+	if g == nil {
+		b, err := u.baselineGate(ctx, active.Core)
+		if err != nil {
+			return refuse(res, err)
+		}
+		g = &b
 	}
 	if err := cfg.write(u.runDir()); err != nil {
 		return refuse(res, err)
 	}
-	err = u.trial(ctx, runnerapi.Selection{Core: active.Core, Geo: active.Geo, Config: cfg.rel}, res, proxy)
+	err := u.trial(ctx, runnerapi.Selection{Core: active.Core, Geo: active.Geo, Config: cfg.rel}, res, g.proxy)
 	// The note matters where the health check decided the outcome.
-	if skipped && (res.Outcome == runnerapi.OutcomeCommitted || res.Outcome == OutcomeUnhealthy) {
+	if g.skipped && (res.Outcome == runnerapi.OutcomeCommitted || res.Outcome == OutcomeUnhealthy) {
 		note(res, baselineSkipped)
 	}
 	return err
@@ -378,6 +397,33 @@ func (u *CoreUpdater) apply(ctx context.Context, res *Result) error {
 // baselineSkipped is what Result.Detail of an Apply says when the proxy probe
 // failed on the active config, and so was not asked of the candidate.
 const baselineSkipped = "the proxy probe fails on the active config too, so it was not required"
+
+// gate is what the baseline decided: the proxy probe that a config Apply puts
+// in place must pass, nil for none, and whether that probe was skipped
+// because it fails on the active config.
+type gate struct {
+	proxy   HealthChecker
+	skipped bool
+}
+
+// baselineGate takes the baseline of Apply on the active core: does the proxy
+// carry traffic on the active config? If not, the candidate is not asked to
+// either. It fails only when ctx has ended.
+func (u *CoreUpdater) baselineGate(ctx context.Context, core string) (gate, error) {
+	if u.ProxyHealth == nil {
+		return gate{}, nil
+	}
+	err := u.baseline(ctx)
+	switch {
+	case err == nil:
+		return gate{proxy: u.ProxyHealth}, nil
+	case ctx.Err() != nil:
+		// The caller gave up: that says nothing about the proxy.
+		return gate{}, ctx.Err()
+	}
+	u.logf("xray-core %s: the proxy probe fails on the active config: %v", core, err)
+	return gate{skipped: true}, nil
+}
 
 // baseline runs ProxyHealth once, against the active config through the running
 // core, and returns what it said. It is one check, bounded by the probe's own
@@ -435,22 +481,29 @@ func (u *CoreUpdater) ready() error {
 	return nil
 }
 
-// active returns the runner's active selection, nil when it has none. An open
-// trial is refused: under the lock it is none of ours, and candidate.json is
-// its file until it ends, by its deadline at the latest.
+// active returns the runner's active selection, nil when it has none (see
+// status).
 func (u *CoreUpdater) active(ctx context.Context) (*runnerapi.Selection, error) {
+	st, err := u.status(ctx)
+	return st.Active, err
+}
+
+// status returns the runner's status. An open trial is refused: under the
+// lock it is none of ours, and candidate.json is its file until it ends, by
+// its deadline at the latest.
+func (u *CoreUpdater) status(ctx context.Context) (runnerapi.Status, error) {
 	st, err := u.Runner.Status(ctx)
 	if err != nil {
-		return nil, err
+		return runnerapi.Status{}, err
 	}
 	if st.State == runnerapi.StateTrial {
 		core := "?"
 		if st.Candidate != nil {
 			core = st.Candidate.Core
 		}
-		return nil, fmt.Errorf("%w: a trial of core %s is open", runnerapi.ErrBusy, core)
+		return runnerapi.Status{}, fmt.Errorf("%w: a trial of core %s is open", runnerapi.ErrBusy, core)
 	}
-	return st.Active, nil
+	return st, nil
 }
 
 // slotFor returns the installed slot of v (see installed). Without one it
@@ -698,18 +751,27 @@ func (u *CoreUpdater) abort(ctx context.Context, cand runnerapi.Candidate, outco
 // ends, and returns the last failure. The check is the runner's data path
 // (see dataPath), then proxy if there is one, then Health.
 func (u *CoreUpdater) healthy(ctx context.Context, cand runnerapi.Candidate, proxy HealthChecker) error {
+	return u.within(ctx, func(ctx context.Context) error {
+		err := u.dataPath(ctx, cand)
+		if err == nil && proxy != nil {
+			err = proxy.Check(ctx)
+		}
+		if err == nil {
+			err = u.Health.Check(ctx)
+		}
+		return err
+	})
+}
+
+// within retries check until it passes or HealthWindow ends, and returns the
+// last failure.
+func (u *CoreUpdater) within(ctx context.Context, check func(context.Context) error) error {
 	window := u.healthWindow()
 	hctx, cancel := context.WithTimeout(ctx, window)
 	defer cancel()
 	retry := min(time.Second, window/10)
 	for {
-		err := u.dataPath(hctx, cand)
-		if err == nil && proxy != nil {
-			err = proxy.Check(hctx)
-		}
-		if err == nil {
-			err = u.Health.Check(hctx)
-		}
+		err := check(hctx)
 		if err == nil {
 			return nil
 		}
