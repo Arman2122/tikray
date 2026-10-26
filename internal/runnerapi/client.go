@@ -19,13 +19,30 @@ const (
 	maxErrText = 1024
 )
 
-var defaultHTTP = &http.Client{Timeout: 10 * time.Second}
+var (
+	defaultHTTP = &http.Client{Timeout: 10 * time.Second}
+	// testHTTP is Test's default: the runner gives xray run -test 20 s.
+	testHTTP = &http.Client{Timeout: 30 * time.Second}
+)
 
 // Client calls the runner's control API.
 type Client struct {
 	BaseURL string // such as http://192.168.88.2:8080
 	Token   string
-	HTTP    *http.Client // nil means a client with a 10 s timeout
+	// TokenFunc, if set, makes the token of each request, and Token is not
+	// used. A call whose token can't be had (it returns an error) fails with
+	// that error before anything is sent. It lets a client wait for a runner
+	// that has not made its token yet, for which it returns ErrNoToken. It is
+	// called from whatever goroutine calls the client, and a copy of the
+	// client keeps it.
+	TokenFunc func(ctx context.Context) (string, error)
+	// Unauthorized, if set, is called with the token of each request that the
+	// runner answers 401: it is not the runner's token, as when the runner
+	// has made a new one since TokenFunc read it. A TokenFunc that keeps its
+	// token can drop it then, to read it again for the next call. It is
+	// called as TokenFunc is.
+	Unauthorized func(token string)
+	HTTP         *http.Client // nil means a client with a 10 s timeout
 }
 
 // errBody is the runner's JSON error body.
@@ -80,28 +97,57 @@ func (c *Client) XrayAPI(ctx context.Context, args ...string) (XrayAPIResponse, 
 	return resp, err
 }
 
-// do sends one request. A 2xx answer is decoded into out when out is non-nil;
-// anything else becomes an error, see statusError.
+// Test has the runner run "xray run -test" on config, an xray config in JSON,
+// with the core that runs now. A config xray rejects is a TestResult with OK
+// false, not an error. It returns ErrNoCore when no xray runs. The runner
+// takes up to 20 s; with HTTP nil the client waits 30 s, and an HTTP of its
+// own must allow as much.
+func (c *Client) Test(ctx context.Context, config []byte) (TestResult, error) {
+	var res TestResult
+	err := c.send(ctx, testHTTP, http.MethodPost, "/v1/test", config, &res)
+	return res, err
+}
+
+// do sends one request, see send.
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
+	return c.send(ctx, defaultHTTP, method, path, in, out)
+}
+
+// send sends one request with c.HTTP, or with def when that is nil. in is
+// encoded as JSON, except that a []byte is sent as it is. A 2xx answer is
+// decoded into out when out is non-nil; anything else becomes an error, see
+// statusError.
+func (c *Client) send(ctx context.Context, def *http.Client, method, path string, in, out any) error {
 	var body io.Reader
-	if in != nil {
+	switch in := in.(type) {
+	case nil:
+	case []byte:
+		body = bytes.NewReader(in)
+	default:
 		b, err := json.Marshal(in)
 		if err != nil {
 			return fmt.Errorf("runnerapi: %s %s: %w", method, path, err)
 		}
 		body = bytes.NewReader(b)
 	}
+	token := c.Token
+	if c.TokenFunc != nil {
+		var err error
+		if token, err = c.TokenFunc(ctx); err != nil {
+			return fmt.Errorf("runnerapi: %s %s: %w", method, path, err)
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.BaseURL, "/")+path, body)
 	if err != nil {
 		return fmt.Errorf("runnerapi: %s %s: %w", method, path, err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	hc := c.HTTP
 	if hc == nil {
-		hc = defaultHTTP
+		hc = def
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -113,6 +159,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return fmt.Errorf("runnerapi: %s %s: reading response: %w", method, path, err)
 	}
 	if resp.StatusCode/100 != 2 {
+		if resp.StatusCode == http.StatusUnauthorized && c.Unauthorized != nil {
+			c.Unauthorized(token)
+		}
 		return statusError(method, path, resp, raw)
 	}
 	if out == nil {
@@ -133,6 +182,8 @@ func statusError(method, path string, resp *http.Response, raw []byte) error {
 		return wrapDetail(ErrBusy, eb.Detail)
 	case resp.StatusCode == http.StatusConflict && eb.Error == "no_trial":
 		return wrapDetail(ErrNoTrial, eb.Detail)
+	case resp.StatusCode == http.StatusConflict && eb.Error == "no_core":
+		return wrapDetail(ErrNoCore, eb.Detail)
 	case resp.StatusCode == http.StatusUnprocessableEntity:
 		out := eb.Detail
 		if out == "" {

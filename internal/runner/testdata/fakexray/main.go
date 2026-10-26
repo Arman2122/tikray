@@ -6,15 +6,19 @@
 // Modes: ok (serves until SIGTERM, then exits 0), badconfig (rejects "run
 // -test"), exit2s and exit15s (exit 1 after 2 s or 15 s), stubborn (ignores
 // SIGTERM, so only SIGKILL stops it), slowtest (takes 1 s to accept "run
-// -test"). A "run -test" that accepts the config prints "config <path>" and
-// the file's contents first. In every mode "api <args>" echoes its arguments,
-// and the first argument "fail" or "hang" makes it fail or never return.
+// -test"), noisytest (rejects "run -test" after 20 KiB of output). A "run
+// -test" that accepts the config prints "config <path>" and the file's
+// contents first, then the permissions of the file and its directory and the
+// XRAY_LOCATION_ASSET it runs with. In every mode "api <args>" echoes its
+// arguments, and the first argument "fail" or "hang" makes it fail or never
+// return.
 package main
 
 import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -35,6 +39,12 @@ func main() {
 		case "badconfig":
 			fmt.Println("Failed to start: failed to load config")
 			os.Exit(23)
+		case "noisytest":
+			fmt.Println("Failed to start: failed to load config")
+			for range 400 {
+				fmt.Println(strings.Repeat("x", 49)) // 50 bytes a line
+			}
+			os.Exit(23)
 		case "slowtest":
 			time.Sleep(time.Second)
 		}
@@ -43,6 +53,12 @@ func main() {
 		if b, err := os.ReadFile(args[3]); err == nil {
 			fmt.Printf("%s\n", b)
 		}
+		if fi, err := os.Stat(args[3]); err == nil {
+			if di, err := os.Stat(filepath.Dir(args[3])); err == nil {
+				fmt.Printf("perm file=%o dir=%o\n", fi.Mode().Perm(), di.Mode().Perm())
+			}
+		}
+		fmt.Printf("env XRAY_LOCATION_ASSET=%s\n", os.Getenv("XRAY_LOCATION_ASSET"))
 		fmt.Println("Configuration OK.")
 	case len(args) >= 2 && args[0] == "api":
 		api(args[1:])

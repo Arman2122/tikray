@@ -1,8 +1,9 @@
 // Package labinet is the lab's fake internet: target web servers that report
 // the caller's IP, a UDP echo, a DNS server that answers differently
-// depending on whether the query came through the VLESS proxy, and a
-// stand-in for XTLS's GitHub releases with a mirror of them. The source IP a
-// fixture sees tells a test which path a request took.
+// depending on whether the query came through the VLESS proxy, a stand-in for
+// XTLS's GitHub releases with a mirror of them, and subscription files a test
+// can change. The source IP a fixture sees tells a test which path a request
+// took.
 package labinet
 
 import (
@@ -20,6 +21,7 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -86,8 +88,10 @@ func callerIP(remoteAddr string) string {
 	return remoteAddr
 }
 
-// HTTPHandler serves /whoami (the caller's IP) and /blob2m.
-func HTTPHandler() http.Handler {
+// HTTPHandler serves /whoami (the caller's IP), /blob2m, and the files of
+// subsDir at /sub/<name> (see serveSub): a subscription, whose content a test
+// can change while labinet runs. When subsDir is empty, /sub/ serves nothing.
+func HTTPHandler(subsDir string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/whoami", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(callerIP(r.RemoteAddr)))
@@ -95,7 +99,16 @@ func HTTPHandler() http.Handler {
 	mux.HandleFunc("/blob2m", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(w, r, "blob2m", startTime, bytes.NewReader(blob()))
 	})
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Not through the mux, which answers a path with a "." or ".." in it
+		// by redirecting to the cleaned one: a name that is not a plain file
+		// name is a 404 here.
+		if strings.HasPrefix(r.URL.Path, subPrefix) {
+			serveSub(w, r, subsDir)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 // ServeUDPEcho answers every datagram with the sender's IP until pc closes.

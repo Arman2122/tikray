@@ -22,13 +22,14 @@ func main() {
 	releases := flag.String("releases", "", "releases root directory; when set, serve the fake GitHub and the mirror from it")
 	githubAddrs := flag.String("github", "203.0.113.40:80", "fake GitHub listen addresses (with -releases)")
 	mirrorAddrs := flag.String("mirror", "203.0.113.41:80", "release mirror listen addresses (with -releases)")
+	subs := flag.String("subs", "", "subscriptions directory; when set, /sub/<name> on the web addresses serves its files")
 	flag.Parse()
 
 	cert, err := labinet.SelfSignedCert("domestic.test", "foreign.test")
 	if err != nil {
 		log.Fatal(err)
 	}
-	h := labinet.HTTPHandler()
+	h := labinet.HTTPHandler(*subs)
 	errs := make(chan error)
 	for _, a := range strings.Split(*httpAddrs, ",") {
 		go func() { errs <- http.ListenAndServe(a, h) }()

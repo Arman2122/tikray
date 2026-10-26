@@ -106,8 +106,8 @@ func TestCoreLifecycle(t *testing.T) {
 		statssys(t, note, oldestXray)
 		lanProxied(t, note)
 		// How RouterOS ran the one-shot container: cmd on top of the
-		// image's ENTRYPOINT ["/tikray"] (no entrypoint of its own), as
-		// root (no user), which reads the runner's 0600 token.
+		// image's ENTRYPOINT ["/usr/local/bin/tikray"] (no entrypoint of its
+		// own), as root (no user), which reads the runner's 0600 token.
 		cmd, _ := c.Get(ctx, "/container/get [find name=tikray] cmd")
 		ep, _ := c.Get(ctx, "/container/get [find name=tikray] entrypoint")
 		def, _ := c.Get(ctx, "/container/get [find name=tikray] default-entrypoint")

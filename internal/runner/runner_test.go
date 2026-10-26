@@ -955,3 +955,168 @@ func TestVersionFollowsReinstalledCore(t *testing.T) {
 		t.Errorf("xray_version of the reinstalled %s = %q, want %q", newCore, got, want)
 	}
 }
+
+// testLeftovers lists the directories TestConfig left in the run directory.
+func testLeftovers(t *testing.T, d Dirs) []string {
+	t.Helper()
+	left, err := filepath.Glob(filepath.Join(d.Run(), ".test-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return left
+}
+
+// testedPath is the path of the file the fake xray tested, which it prints
+// first.
+func testedPath(out string) string {
+	path, _, _ := strings.Cut(strings.TrimPrefix(out, "config "), "\n")
+	return path
+}
+
+func TestTestConfigNoCore(t *testing.T) {
+	g := newRig(t, nil)
+	if res, err := g.r.TestConfig(t.Context(), []byte(`{}`)); !errors.Is(err, runnerapi.ErrNoCore) {
+		t.Errorf("TestConfig before Boot = %+v, %v; want ErrNoCore", res, err)
+	}
+	g.boot(t) // no active.json: nothing runs
+	if res, err := g.r.TestConfig(t.Context(), []byte(`{}`)); !errors.Is(err, runnerapi.ErrNoCore) {
+		t.Errorf("TestConfig with no xray = %+v, %v; want ErrNoCore", res, err)
+	}
+	if left := testLeftovers(t, g.d); len(left) != 0 {
+		t.Errorf("TestConfig with no xray left %v", left)
+	}
+}
+
+// TestTestConfigFile checks where the config is tested: a file of its own,
+// 0600 in a fresh 0700 directory under the run directory, gone afterwards.
+func TestTestConfigFile(t *testing.T) {
+	g := runningRig(t)
+	config := `{"outbounds":[{"protocol":"freedom","tag":"direct"}]}`
+	res, err := g.r.TestConfig(t.Context(), []byte(config))
+	if err != nil || !res.OK {
+		t.Fatalf("TestConfig = %+v, %v; want OK", res, err)
+	}
+	path := testedPath(res.Output)
+	if dir := filepath.Dir(path); filepath.Dir(dir) != g.d.Run() || !strings.HasPrefix(filepath.Base(dir), ".test-") {
+		t.Errorf("xray tested %s, want a file in a .test-* directory of %s", path, g.d.Run())
+	}
+	if !strings.Contains(res.Output, "\n"+config+"\n") {
+		t.Errorf("xray tested\n%s\nwant the config as it was sent", res.Output)
+	}
+	if !strings.Contains(res.Output, "perm file=600 dir=700\n") {
+		t.Errorf("xray tested\n%s\nwant a file with mode 0600 in a directory with mode 0700", res.Output)
+	}
+	if left := testLeftovers(t, g.d); len(left) != 0 {
+		t.Errorf("TestConfig left %v", left)
+	}
+}
+
+func TestTestConfigRenamesTunDevice(t *testing.T) {
+	g := runningRig(t)
+	res, err := g.r.TestConfig(t.Context(), []byte(`{"inbounds":[{"tag":"tun-in","protocol":"tun","settings":{"name":"xray0","MTU":1500}}]}`))
+	if err != nil || !res.OK {
+		t.Fatalf("TestConfig = %+v, %v; want OK", res, err)
+	}
+	if !strings.Contains(res.Output, `"name":"xray-test0"`) || strings.Contains(res.Output, "xray0") {
+		t.Errorf("xray tested\n%s\nwant the TUN device named xray-test0", res.Output)
+	}
+}
+
+func TestTestConfigAssetEnv(t *testing.T) {
+	t.Setenv("XRAY_LOCATION_ASSET", "/elsewhere") // the runner's own never reaches xray
+	t.Run("geo", func(t *testing.T) {
+		g := newRig(t, nil)
+		sel := g.core(t, oldCore, "ok")
+		sel.Geo = "g1"
+		if err := WriteActive(g.d, sel); err != nil {
+			t.Fatal(err)
+		}
+		g.boot(t)
+		res, err := g.r.TestConfig(t.Context(), []byte(`{}`))
+		if want := "env XRAY_LOCATION_ASSET=" + g.d.GeoDir("g1") + "\n"; err != nil || !strings.Contains(res.Output, want) {
+			t.Errorf("TestConfig = %+v, %v; want xray run with %q", res, err, want)
+		}
+	})
+	t.Run("no geo", func(t *testing.T) {
+		g := runningRig(t)
+		res, err := g.r.TestConfig(t.Context(), []byte(`{}`))
+		if want := "env XRAY_LOCATION_ASSET=\n"; err != nil || !strings.Contains(res.Output, want) {
+			t.Errorf("TestConfig = %+v, %v; want xray run with %q", res, err, want)
+		}
+	})
+}
+
+func TestTestConfigCapsOutput(t *testing.T) {
+	g := newRig(t, nil)
+	g.active(t, "noisytest") // rejects after 20 KiB of output
+	g.boot(t)
+	res, err := g.r.TestConfig(t.Context(), []byte(`{}`))
+	if err != nil || res.OK {
+		t.Fatalf("TestConfig = %+v, %v; want a rejection", res, err)
+	}
+	if len(res.Output) > 8<<10 {
+		t.Errorf("output is %d bytes, want at most 8 KiB", len(res.Output))
+	}
+	// xray says why first: the start is kept.
+	if !strings.HasPrefix(res.Output, "Failed to start: failed to load config\n") || !strings.HasSuffix(res.Output, truncatedMark) {
+		t.Errorf("output starts %.60q and ends %q; want xray's first line kept and %q at the end",
+			res.Output, res.Output[max(0, len(res.Output)-40):], truncatedMark)
+	}
+}
+
+func TestTestConfigTimeout(t *testing.T) {
+	if d := newRig(t, nil).r.testTimeout; d != 20*time.Second {
+		t.Errorf("the default bound of TestConfig is %v, want 20s", d)
+	}
+	g := newRig(t, nil)
+	g.active(t, "slowtest") // takes a second to accept
+	g.boot(t)
+	g.r.testTimeout = 100 * time.Millisecond
+	pid := g.r.Status().XrayPID
+	start := time.Now()
+	res, err := g.r.TestConfig(t.Context(), []byte(`{}`))
+	if err != nil || res.OK || !strings.Contains(res.Output, "did not finish within 100ms") {
+		t.Errorf("TestConfig = %+v, %v; want a rejection that says it did not finish within 100ms", res, err)
+	}
+	if d := time.Since(start); d > 800*time.Millisecond {
+		t.Errorf("TestConfig took %v, want it cut off after 100ms", d)
+	}
+	if left := testLeftovers(t, g.d); len(left) != 0 {
+		t.Errorf("TestConfig left %v", left)
+	}
+	if got := g.r.Status().XrayPID; got != pid {
+		t.Errorf("PID %d, want the running xray %d untouched", got, pid)
+	}
+}
+
+func TestTestConfigCanceled(t *testing.T) {
+	g := newRig(t, nil)
+	g.active(t, "slowtest")
+	g.boot(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	if res, err := g.r.TestConfig(ctx, []byte(`{}`)); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("TestConfig after its caller gave up = %+v, %v; want context.DeadlineExceeded", res, err)
+	}
+	if left := testLeftovers(t, g.d); len(left) != 0 {
+		t.Errorf("TestConfig left %v", left)
+	}
+}
+
+// TestBootRemovesTestLeftovers: a runner stopped during TestConfig leaves
+// the config, which may hold credentials, until the next Boot.
+func TestBootRemovesTestLeftovers(t *testing.T) {
+	g := newRig(t, nil)
+	sel := g.active(t, "ok")
+	writeFile(t, filepath.Join(g.d.Run(), ".test-123", "config.json"), `{"outbounds":[]}`)
+	writeFile(t, filepath.Join(g.d.Run(), "other.json"), "{}")
+	g.boot(t)
+	if left := testLeftovers(t, g.d); len(left) != 0 {
+		t.Errorf("Boot left %v", left)
+	}
+	for _, keep := range []string{filepath.Join(g.d.Run(), "other.json"), g.d.Active(), g.d.ConfigPath(sel.Config)} {
+		if _, err := os.Stat(keep); err != nil {
+			t.Errorf("Boot removed %s: %v", keep, err)
+		}
+	}
+}

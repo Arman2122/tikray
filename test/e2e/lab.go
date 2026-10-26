@@ -20,12 +20,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Arman2122/tikray/internal/apiclient"
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/sharelink"
@@ -39,6 +41,11 @@ import (
 // route to the tikray bridge.
 const runnerURL = "http://172.31.255.3:8080"
 
+// apiURL is the tikray service's API, which the host reaches the same way. The
+// service listens on TIKRAY_LISTEN's default, :443, and the lab does not set
+// it.
+const apiURL = "https://172.31.255.2:443"
+
 // xrayAPI is where xray's gRPC API listens, on the runner's address: the
 // "api" block of config/xray-client.json says so (JSON cannot refer to this
 // constant, so the two must agree), and so does the state-derived default of
@@ -51,6 +58,8 @@ const (
 	lastResult    = dataRoot + "/state/last-result.json"
 	indexKey      = dataRoot + "/state/index.pub"
 	runnerToken   = dataRoot + "/run/runner.token"
+	apiToken      = dataRoot + "/state/api.token"
+	apiCert       = dataRoot + "/state/tls.crt"
 	candidateFile = dataRoot + "/run/candidate.json"
 	coresDir      = dataRoot + "/cores"
 	inboxDir      = dataRoot + "/inbox"
@@ -83,7 +92,8 @@ var serverEgress = map[string]string{"a": "203.0.113.10", "b": "203.0.113.11"}
 // Lab is a CHR with tikray deployed: the tikray-runner and tikray containers
 // from the real images, the RouterOS objects of routeros/m1-setup.rsc, and
 // the fake internet with its two VLESS servers, a fake GitHub (203.0.113.40)
-// and a mirror with a signed hash index (203.0.113.41) serving Releases.
+// and a mirror with a signed hash index (203.0.113.41) serving Releases, and
+// subscriptions (http://203.0.113.30/sub/<name>) serving Subs.
 type Lab struct {
 	Net *lab.Network
 	// Inet is the fake internet, whose VLESS servers a test can stop and
@@ -97,6 +107,9 @@ type Lab struct {
 	// Releases is the root the fake GitHub and the mirror serve. Flag files
 	// in it switch them (see labinet.ReleasesHandler).
 	Releases string
+	// Subs is the root the fake internet serves at http://203.0.113.30/sub/:
+	// the file Subs/<name> is the subscription <name>. setSub changes them.
+	Subs string
 	// Zips holds every zip the test built, by version, including the one
 	// kept out of Releases.
 	Zips map[string]string
@@ -173,7 +186,11 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { l.Net.Teardown() })
-	if l.Inet, err = lab.StartInetLab(ctx, l.Net, lab.InetOptions{ReleasesDir: l.Releases}); err != nil {
+	l.Subs = filepath.Join(wd, "subs")
+	if err := os.MkdirAll(l.Subs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if l.Inet, err = lab.StartInetLab(ctx, l.Net, lab.InetOptions{ReleasesDir: l.Releases, SubsDir: l.Subs}); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(l.Inet.Stop)
@@ -410,10 +427,10 @@ func runnerStatus(ctx context.Context) (runnerapi.Status, error) {
 }
 
 // runTikray runs the tikray CLI once: it sets the tikray container's cmd to
-// args (the image's ENTRYPOINT is /tikray), starts it, waits for it to stop,
-// and returns the result it saved in state/last-result.json. The CLI removes
-// that file before it does anything else and writes it last, so a missing
-// file after the container stopped means the run did not finish.
+// args (the image's ENTRYPOINT is /usr/local/bin/tikray), starts it, waits for
+// it to stop, and returns the result it saved in state/last-result.json. The
+// CLI removes that file before it does anything else and writes it last, so a
+// missing file after the container stopped means the run did not finish.
 func runTikray(ctx context.Context, c *lab.CHR, args string) (artifacts.Result, error) {
 	var res artifacts.Result
 	d := 5 * time.Minute
@@ -461,6 +478,97 @@ func runTikray(ctx context.Context, c *lab.CHR, args string) (artifacts.Result, 
 			return res, fmt.Errorf("tikray %s: %w; container log:\n%s", args, err, containerLog(c, 30))
 		}
 	}
+}
+
+// serveWithin is how long the tikray container may take to start or to stop:
+// RouterOS starts it in seconds, and tikray serve stops in 10 s at most (the
+// API's graceful stop), but under emulation both are slower.
+func serveWithin() time.Duration {
+	if labArch() == lab.ArchARM64 {
+		return 5 * time.Minute
+	}
+	return 2 * time.Minute
+}
+
+// startServe starts the tikray container with the image's own command, CMD
+// ["serve"], which runs tikray serve. RouterOS keeps the image's ENTRYPOINT
+// and CMD as the container's default-entrypoint and default-cmd, and runs
+// default-cmd while the container's cmd is unset. A cmd set to "" is not
+// unset: the container then runs the ENTRYPOINT without serve (7.25 x86_64:
+// tikray printed its usage and exited 2). So the cmd that a one-shot
+// run of the CLI (runTikray) sets is unset here. startServe waits for the
+// container to be stopped first (an image being extracted, or a CLI run, is
+// not over yet), and then until it runs.
+func (l *Lab) startServe(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, serveWithin())
+	defer cancel()
+	c := l.CHR
+	if err := waitContainer(ctx, c, "tikray", "stopped"); err != nil {
+		return err
+	}
+	if _, err := c.Run(ctx, "/container/unset [find name=tikray] cmd"); err != nil {
+		return err
+	}
+	if _, err := c.Run(ctx, "/container/start [find name=tikray]"); err != nil {
+		return err
+	}
+	if err := waitContainer(ctx, c, "tikray", "running"); err != nil {
+		return fmt.Errorf("tikray serve: %w; container log:\n%s", err, containerLog(c, 30))
+	}
+	return nil
+}
+
+// stopServe stops the tikray container, and tikray serve in it, and waits
+// until it has stopped.
+func (l *Lab) stopServe(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, serveWithin())
+	defer cancel()
+	if _, err := l.CHR.Run(ctx, "/container/stop [find name=tikray]"); err != nil {
+		return err
+	}
+	return waitContainer(ctx, l.CHR, "tikray", "stopped")
+}
+
+// serveFingerprintRE finds the fingerprint in the line tikray serve prints on
+// stderr when it starts ("tikray: serving on <addr>, certificate sha256
+// <fingerprint>"), which RouterOS logs under the container topic.
+var serveFingerprintRE = regexp.MustCompile(`certificate sha256 ([0-9a-f]{64})`)
+
+// serveFingerprints are the certificate fingerprints that tikray serve
+// printed in the container log, oldest first: one for each start that the log
+// still holds.
+func serveFingerprints(c *lab.CHR) []string {
+	var fps []string
+	for _, m := range serveFingerprintRE.FindAllStringSubmatch(containerLog(c, 1000), -1) {
+		fps = append(fps, m[1])
+	}
+	return fps
+}
+
+// cmdParamRE finds a cmd parameter in the console's syntax of a command.
+var cmdParamRE = regexp.MustCompile(`\bcmd\b`)
+
+// shellCLI runs `tikray status` in the tikray container through
+// /container/shell, which runs it with the container's own PATH, and returns
+// what it printed, or why it could not run it. RouterOS passes the shell a
+// command only in versions whose /container/shell takes cmd=, which the
+// console's syntax tells; without one the shell is interactive only, which an
+// SSH exec can't drive.
+func (l *Lab) shellCLI(ctx context.Context) (out string, ran bool) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	syntax, err := l.CHR.Run(ctx, "/console/inspect request=child path=container,shell")
+	if err != nil {
+		return fmt.Sprintf("reading the syntax of /container/shell: %v", err), false
+	}
+	if !cmdParamRE.MatchString(syntax) {
+		return "/container/shell takes no command (its parameters: " + strings.Join(strings.Fields(syntax), " ") + ")", false
+	}
+	out, err = l.CHR.Run(ctx, `/container/shell [find name=tikray] cmd="tikray status"`)
+	if err != nil {
+		return fmt.Sprintf("/container/shell cmd=\"tikray status\": %v", err), false
+	}
+	return out, true
 }
 
 // tikray runs the tikray CLI with args (see runTikray), notes its result and
@@ -670,6 +778,81 @@ func (l *Lab) setFlag(name string, on bool) error {
 	return nil
 }
 
+// setSub makes http://203.0.113.30/sub/<name> answer with body from now on,
+// as a subscription provider changing its list. name has to be one labinet
+// serves (labinet.CheckSubName), and not one it would answer 404. The file is
+// replaced in one step, so that a fetch never sees half of it.
+func (l *Lab) setSub(name, body string) error {
+	if err := labinet.CheckSubName(name); err != nil {
+		return fmt.Errorf("setSub: %w", err)
+	}
+	if l.Subs == "" {
+		return errors.New("setSub: the lab has no subscriptions directory (Deploy sets Subs)")
+	}
+	// The dot keeps the file under construction out of reach of labinet.
+	tmp := filepath.Join(l.Subs, "."+name+".tmp")
+	if err := os.WriteFile(tmp, []byte(body), 0o644); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, filepath.Join(l.Subs, name)); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// api returns a client for the tikray service's API: the token the service
+// wrote to state/api.token, and the fingerprint of the certificate in
+// state/tls.crt as the one to trust, which the service made when it first
+// started. It reads both from the router (the service owns them, and the host
+// has no other way to them) and waits for the service to have written them,
+// until ctx ends: the files are there a moment after `tikray serve` starts, and
+// never when nothing started it.
+func (l *Lab) api(ctx context.Context) (*apiclient.Client, error) {
+	for {
+		tok, crt, err := l.apiFiles(ctx)
+		if err == nil {
+			return apiClient(tok, crt)
+		}
+		if serr := sleep(ctx, 2*time.Second); serr != nil {
+			return nil, fmt.Errorf("the tikray service has not written its token and certificate: %v (%w)", err, serr)
+		}
+	}
+}
+
+// apiFiles reads the API token and the certificate from the router; an error
+// means one is not there yet.
+func (l *Lab) apiFiles(ctx context.Context) (token, cert string, err error) {
+	if token, err = l.CHR.Get(ctx, fileContents(apiToken)); err != nil {
+		return "", "", err
+	}
+	if cert, err = l.CHR.Get(ctx, fileContents(apiCert)); err != nil {
+		return "", "", err
+	}
+	if token == "" || cert == "" {
+		return "", "", errors.New("a file is empty")
+	}
+	return token, cert, nil
+}
+
+// apiClient is the client of the service at apiURL for the contents of its
+// token and certificate files, as the router gave them. The fingerprint is
+// the one the service prints and the CLI pins (apiclient.FingerprintOfPEM).
+func apiClient(token, certPEM string) (*apiclient.Client, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, errors.New("the API token is empty")
+	}
+	// FingerprintOfPEM takes CRLF line ends, which a console may give the
+	// file's lines back with, as it takes LF.
+	fp, err := apiclient.FingerprintOfPEM([]byte(certPEM))
+	if err != nil {
+		return nil, err
+	}
+	return &apiclient.Client{BaseURL: apiURL, Token: token, Fingerprint: fp}, nil
+}
+
 // toInbox puts the zip of version in the inbox under the release asset's
 // name, as an operator's manual upload.
 func (l *Lab) toInbox(ctx context.Context, version string) error {
@@ -725,7 +908,7 @@ func writeStateFile(dir string, st store.State) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, _, err := s.Update(0, func(next *store.State) error {
+	if _, _, err := s.Update(store.AnyRevision, func(next *store.State) error {
 		*next = st
 		return nil
 	}); err != nil {

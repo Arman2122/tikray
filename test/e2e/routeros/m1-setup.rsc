@@ -11,7 +11,10 @@
 #
 # The runner starts with no xray: the test's first `tikray core update`
 # installs one and writes active.json. The tikray container is a one-shot CLI
-# (start-on-boot=no) that the test runs with `/container/set cmd=`.
+# (start-on-boot=no) that the test runs with `/container/set cmd=`, and
+# TestService runs the image's default command, tikray serve, in it by
+# unsetting cmd (`/container/unset ... cmd`; with `cmd=""` RouterOS runs the
+# entrypoint without serve).
 #
 # Differences found on RouterOS 7.25 vs. the plan (M0):
 #   - container mounts take list= (not name=) and mode=ro|rw; containers use mountlists=

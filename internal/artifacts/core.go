@@ -92,10 +92,23 @@ type CoreUpdater struct {
 	// update ran with --config, which would lose a working config. A runner
 	// with no active selection takes the render, as a fresh install does.
 	NoState bool
-	// Health must pass, through the candidate, before a commit. So must the
-	// runner's data path: its status must show the candidate's routes in
-	// place and its gateway up.
-	Health        HealthChecker
+	// Health must pass, through the candidate, before a commit: the checks
+	// every trial needs, such as xray's API answering. So must the runner's
+	// data path: its status must show the candidate's routes in place and its
+	// gateway up.
+	Health HealthChecker
+	// ProxyHealth is the end-to-end probe, traffic through the proxy. A core
+	// update or rollback must pass it too, through the new core. Apply asks
+	// the same of its config only if the probe passes on the active config
+	// first (the baseline): when nothing carries traffic, as during an outage
+	// of every proxy server, a config change such as a kill switch must still
+	// go through. Nil leaves the probe out.
+	ProxyHealth HealthChecker
+	// Redact, when set, is applied to every Result.Detail, error text and log
+	// line before it is recorded, logged or returned: xray's output can name a
+	// server's credentials. The error is wrapped, so errors.Is and As still
+	// reach what was wrapped; Result.Detail and Error() are the safe text.
+	Redact        func(string) string
 	Keep          int           // committed versions whose slots a commit keeps (2)
 	TrialDeadline time.Duration // how long the runner waits for the commit (120 s)
 	EarlyExit     time.Duration // wait after the candidate starts, before checking on it (10 s)
@@ -163,8 +176,8 @@ func (u *CoreUpdater) Apply(ctx context.Context) (Result, error) {
 func (u *CoreUpdater) locked(res *Result, fn func() error) (Result, error) {
 	if u.Data == "" { // there is nowhere to record anything
 		err := errors.New("artifacts: CoreUpdater.Data is not set")
-		res.Outcome, res.Detail, res.At = OutcomeRefused, err.Error(), u.now()
-		return *res, err
+		res.Outcome, res.Detail, res.At = OutcomeRefused, u.redact(err.Error()), u.now()
+		return *res, u.redactError(err)
 	}
 	// fn must run before *res is read: the order of the two in one call's
 	// arguments is unspecified.
@@ -252,7 +265,7 @@ func (u *CoreUpdater) update(ctx context.Context, version string, o UpdateOption
 			return refuse(res, err)
 		}
 	}
-	return u.trial(ctx, sel, res)
+	return u.trial(ctx, sel, res, u.ProxyHealth)
 }
 
 func (u *CoreUpdater) rollback(ctx context.Context, res *Result) error {
@@ -299,7 +312,7 @@ func (u *CoreUpdater) rollback(ctx context.Context, res *Result) error {
 			}
 			sel.Config = cfg.rel
 		}
-		return u.trial(ctx, sel, res)
+		return u.trial(ctx, sel, res, u.ProxyHealth)
 	}
 	return refuse(res, fmt.Errorf("nothing to roll back to: the history has no committed core other than %s that is still installed", active.Core))
 }
@@ -334,10 +347,46 @@ func (u *CoreUpdater) apply(ctx context.Context, res *Result) error {
 	if err := u.unsaved(active, cfg, "create a state first"); err != nil {
 		return refuse(res, err)
 	}
+	// The baseline: does the proxy carry traffic on the active config? If not,
+	// the candidate is not asked to either.
+	var proxy HealthChecker
+	skipped := false
+	if u.ProxyHealth != nil {
+		berr := u.baseline(ctx)
+		switch {
+		case berr == nil:
+			proxy = u.ProxyHealth
+		case ctx.Err() != nil:
+			// The caller gave up: that says nothing about the proxy.
+			return refuse(res, ctx.Err())
+		default:
+			skipped = true
+			u.logf("xray-core %s: the proxy probe fails on the active config: %v", active.Core, berr)
+		}
+	}
 	if err := cfg.write(u.runDir()); err != nil {
 		return refuse(res, err)
 	}
-	return u.trial(ctx, runnerapi.Selection{Core: active.Core, Geo: active.Geo, Config: cfg.rel}, res)
+	err = u.trial(ctx, runnerapi.Selection{Core: active.Core, Geo: active.Geo, Config: cfg.rel}, res, proxy)
+	// The note matters where the health check decided the outcome.
+	if skipped && (res.Outcome == runnerapi.OutcomeCommitted || res.Outcome == OutcomeUnhealthy) {
+		note(res, baselineSkipped)
+	}
+	return err
+}
+
+// baselineSkipped is what Result.Detail of an Apply says when the proxy probe
+// failed on the active config, and so was not asked of the candidate.
+const baselineSkipped = "the proxy probe fails on the active config too, so it was not required"
+
+// baseline runs ProxyHealth once, against the active config through the running
+// core, and returns what it said. It is one check, bounded by the probe's own
+// timeout (and by HealthWindow, should the probe have none), not a retry loop:
+// a proxy that is down on the active config is no reason to wait.
+func (u *CoreUpdater) baseline(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, u.healthWindow())
+	defer cancel()
+	return u.ProxyHealth.Check(ctx)
 }
 
 // unsaved refuses to put the render cfg in place of the active config, which
@@ -519,8 +568,8 @@ func inboxOnly(c Chain) Chain {
 }
 
 // trial puts sel on trial and drives it to its end. A commit prunes the slots
-// and the configs.
-func (u *CoreUpdater) trial(ctx context.Context, sel runnerapi.Selection, res *Result) error {
+// and the configs. proxy, when not nil, must pass as well as Health.
+func (u *CoreUpdater) trial(ctx context.Context, sel runnerapi.Selection, res *Result, proxy HealthChecker) error {
 	if err := sel.Validate(); err != nil {
 		return refuse(res, err)
 	}
@@ -533,7 +582,7 @@ func (u *CoreUpdater) trial(ctx context.Context, sel runnerapi.Selection, res *R
 	}
 	u.logf("xray-core %s: trial until %s", sel.Core, cand.Deadline.Format(time.RFC3339))
 	var err error
-	res.Outcome, res.Detail, err = u.drive(ctx, cand)
+	res.Outcome, res.Detail, err = u.drive(ctx, cand, proxy)
 	if res.Outcome == runnerapi.OutcomeCommitted {
 		u.prune(res)
 		u.pruneConfigs(ctx, sel, res)
@@ -542,8 +591,9 @@ func (u *CoreUpdater) trial(ctx context.Context, sel runnerapi.Selection, res *R
 }
 
 // drive runs the trial of cand, already in candidate.json, and returns its
-// outcome, the detail and the error behind it, if any.
-func (u *CoreUpdater) drive(ctx context.Context, cand runnerapi.Candidate) (string, string, error) {
+// outcome, the detail and the error behind it, if any. proxy is the end-to-end
+// probe the candidate must pass, if any.
+func (u *CoreUpdater) drive(ctx context.Context, cand runnerapi.Candidate, proxy HealthChecker) (string, string, error) {
 	limit := u.trialDeadline() + trialMargin
 	tctx, cancel := context.WithTimeout(ctx, limit)
 	err := withTimeout(u.Runner, limit).Trial(tctx)
@@ -575,7 +625,7 @@ func (u *CoreUpdater) drive(ctx context.Context, cand runnerapi.Candidate) (stri
 		return u.abort(ctx, cand, OutcomeUnhealthy, err)
 	}
 
-	if err := u.healthy(ctx, cand); err != nil {
+	if err := u.healthy(ctx, cand, proxy); err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return u.abort(ctx, cand, runnerapi.OutcomeAborted, fmt.Errorf("%w during the health check", cerr))
 		}
@@ -646,14 +696,17 @@ func (u *CoreUpdater) abort(ctx context.Context, cand runnerapi.Candidate, outco
 
 // healthy retries the health check of cand until it passes or HealthWindow
 // ends, and returns the last failure. The check is the runner's data path
-// (see dataPath), then Health.
-func (u *CoreUpdater) healthy(ctx context.Context, cand runnerapi.Candidate) error {
+// (see dataPath), then proxy if there is one, then Health.
+func (u *CoreUpdater) healthy(ctx context.Context, cand runnerapi.Candidate, proxy HealthChecker) error {
 	window := u.healthWindow()
 	hctx, cancel := context.WithTimeout(ctx, window)
 	defer cancel()
 	retry := min(time.Second, window/10)
 	for {
 		err := u.dataPath(hctx, cand)
+		if err == nil && proxy != nil {
+			err = proxy.Check(hctx)
+		}
 		if err == nil {
 			err = u.Health.Check(hctx)
 		}
@@ -777,7 +830,9 @@ func note(res *Result, msg string) {
 }
 
 // record stamps res, appends it to the history and gives a failed outcome
-// its error, which wraps cause when there is one.
+// its error, which wraps cause when there is one. Redact is applied to the
+// Detail before it is logged or recorded, and to the error before it is
+// returned.
 func (u *CoreUpdater) record(res Result, cause error) (Result, error) {
 	res.At = u.now()
 	var err error
@@ -790,16 +845,45 @@ func (u *CoreUpdater) record(res Result, cause error) (Result, error) {
 	default:
 		err = errors.New(res.Outcome)
 	}
+	// logf redacts its lines, so the log gets the Detail as it is, once.
 	if res.Detail != "" {
 		u.logf("xray-core %s: %s: %s", res.To, res.Outcome, res.Detail)
 	} else {
 		u.logf("xray-core %s: %s", res.To, res.Outcome)
 	}
+	res.Detail = u.redact(res.Detail)
 	if herr := appendHistory(u.historyPath(), res); herr != nil {
 		err = errors.Join(err, fmt.Errorf("artifacts: recording the result: %w", herr))
 	}
-	return res, err
+	return res, u.redactError(err)
 }
+
+// redact is s with Redact applied, if it is set.
+func (u *CoreUpdater) redact(s string) string {
+	if u.Redact == nil {
+		return s
+	}
+	return u.Redact(s)
+}
+
+// redactError returns err with its text redacted, if Redact is set. The result
+// unwraps to err, so that errors.Is and errors.As still find what err wraps.
+func (u *CoreUpdater) redactError(err error) error {
+	if err == nil || u.Redact == nil {
+		return err
+	}
+	return &redactedError{err: err, text: u.Redact(err.Error())}
+}
+
+// redactedError is an error whose text is redacted: Error is the text, and
+// Unwrap the error it came from.
+type redactedError struct {
+	err  error
+	text string
+}
+
+func (e *redactedError) Error() string { return e.text }
+func (e *redactedError) Unwrap() error { return e.err }
 
 // refuse makes res a refusal because of err, and returns err.
 func refuse(res *Result, err error) error {
@@ -855,8 +939,15 @@ type config struct {
 // newConfig names data by its SHA-256, so that a file and a render with the
 // same bytes are the same config.
 func newConfig(data []byte) *config {
+	return &config{data: data, rel: ConfigName(data)}
+}
+
+// ConfigName is the name under run/ of the config file with data,
+// config/<sha256>.json, as a runner's Selection.Config names it: a config is
+// named by its content.
+func ConfigName(data []byte) string {
 	sum := sha256.Sum256(data)
-	return &config{data: data, rel: "config/" + hex.EncodeToString(sum[:]) + ".json"}
+	return "config/" + hex.EncodeToString(sum[:]) + ".json"
 }
 
 // readConfig reads the config file at path; an empty path gives nil.
@@ -927,7 +1018,7 @@ func sleep(ctx context.Context, d time.Duration) error {
 
 func (u *CoreUpdater) logf(format string, args ...any) {
 	if u.Log != nil {
-		fmt.Fprintf(u.Log, format+"\n", args...)
+		fmt.Fprintln(u.Log, u.redact(fmt.Sprintf(format, args...)))
 	}
 }
 

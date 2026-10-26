@@ -1,6 +1,8 @@
 package artifacts
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -321,6 +323,300 @@ func TestApplyUnhealthy(t *testing.T) {
 	if lines := historyLines(t, e); len(lines) != 1 || !strings.Contains(lines[0], `"kind":"config"`) {
 		t.Errorf("history = %q", lines)
 	}
+}
+
+// baselineNote is what Detail says when the baseline failed, so that the
+// candidate was not asked to pass the proxy probe.
+const baselineNote = "the proxy probe fails on the active config too, so it was not required"
+
+// proxyProbe is a ProxyHealth that answers with fn, which gets the 1-based
+// call number, and notes how many runner actions (trial, commit, abort) had
+// happened at each call: the baseline runs before the trial opens, and the
+// trial's own checks after.
+type proxyProbe struct {
+	runner *fakeRunner
+	fn     func(call int) error
+
+	mu sync.Mutex
+	at []int
+}
+
+func newProxyProbe(e *coreEnv, fn func(call int) error) *proxyProbe {
+	p := &proxyProbe{runner: e.runner, fn: fn}
+	e.u.ProxyHealth = p
+	return p
+}
+
+func (p *proxyProbe) Check(ctx context.Context) error {
+	acted := len(p.runner.actions())
+	p.mu.Lock()
+	p.at = append(p.at, acted)
+	n := len(p.at)
+	p.mu.Unlock()
+	return p.fn(n)
+}
+
+// calls returns, for each call so far, the number of runner actions before it.
+func (p *proxyProbe) calls() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]int(nil), p.at...)
+}
+
+// wantNoBaseline fails if any call came before the trial opened.
+func (p *proxyProbe) wantNoBaseline(t *testing.T) {
+	t.Helper()
+	for i, acted := range p.calls() {
+		if acted == 0 {
+			t.Errorf("proxy probe call %d ran before the trial: a baseline", i+1)
+		}
+	}
+}
+
+func failingProxy(int) error { return errors.New("socks probe: connection refused") }
+
+// The proxy carries traffic on the active config, so the candidate must carry
+// it too: the baseline is the probe's call before the trial, and the trial
+// repeats it.
+func TestApplyBaselinePassesRequiresProxy(t *testing.T) {
+	e, _ := newRenderEnv(t, "26.10.21")
+	p := newProxyProbe(e, func(call int) error {
+		if call == 1 {
+			return nil
+		}
+		return failingProxy(call)
+	})
+
+	res, err := e.u.Apply(bg)
+	wantOutcome(t, res, err, OutcomeUnhealthy)
+	wantDetail(t, res, "socks probe: connection refused")
+	if strings.Contains(res.Detail, baselineNote) {
+		t.Errorf("Detail = %q, want no note: the baseline passed", res.Detail)
+	}
+	wantActions(t, e.runner, "trial", "abort")
+	if at := p.calls(); len(at) < 2 || at[0] != 0 || at[1] == 0 {
+		t.Errorf("the probe saw %v runner actions before each call, want the baseline before the trial, then the trial's checks", at)
+	}
+	if sel := e.runner.activeSelection(); sel != e.activeSel {
+		t.Errorf("the runner's active selection = %+v, want %+v", sel, e.activeSel)
+	}
+
+	// With the proxy up on the candidate too, the config commits, and the
+	// baseline is the only call that came before the trial.
+	e, _ = newRenderEnv(t, "26.10.21")
+	p = newProxyProbe(e, func(int) error { return nil })
+	res, err = e.u.Apply(bg)
+	wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+	if res.Detail != "" {
+		t.Errorf("Detail = %q, want none", res.Detail)
+	}
+	if at := p.calls(); len(at) < 2 || at[0] != 0 || at[1] == 0 {
+		t.Errorf("the probe saw %v runner actions before each call, want the baseline, then the trial's checks", at)
+	}
+}
+
+// During an outage nothing carries traffic, not even the active config: a
+// config change, such as a kill switch, must still go through.
+func TestApplyBaselineFailsSkipsProxy(t *testing.T) {
+	e, _ := newRenderEnv(t, "26.10.21")
+	p := newProxyProbe(e, failingProxy)
+
+	res, err := e.u.Apply(bg)
+	wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+	wantResult(t, res, Result{From: "26.10.21", To: "26.10.21", Outcome: "committed", Kind: "config", Detail: baselineNote, At: t0})
+	wantActions(t, e.runner, "trial", "commit")
+	if at := p.calls(); len(at) != 1 || at[0] != 0 {
+		t.Errorf("the probe saw %v runner actions before each call, want the baseline alone", at)
+	}
+	if e.health.n.Load() == 0 {
+		t.Error("the health check never ran: it is still required")
+	}
+	if h := e.history(t); len(h) != 1 || h[0].Detail != baselineNote {
+		t.Errorf("history = %+v, want the note in the committed line", h)
+	}
+	if got := e.runner.activeSelection().Config; got != configRel(renderedBody) {
+		t.Errorf("active config %s, want the render %s", got, configRel(renderedBody))
+	}
+}
+
+// Skipping the proxy probe does not skip the others.
+func TestApplyBaselineFailsStillRequiresHealth(t *testing.T) {
+	e, _ := newRenderEnv(t, "26.10.21")
+	p := newProxyProbe(e, failingProxy)
+	e.health.fn = func(int) error { return errors.New("xray api probe: connection refused") }
+
+	res, err := e.u.Apply(bg)
+	wantOutcome(t, res, err, OutcomeUnhealthy)
+	wantDetail(t, res, "xray api probe: connection refused")
+	wantDetail(t, res, baselineNote)
+	wantActions(t, e.runner, "trial", "abort")
+	if at := p.calls(); len(at) != 1 {
+		t.Errorf("the probe saw %v runner actions before each call, want the baseline alone", at)
+	}
+	if sel := e.runner.activeSelection(); sel != e.activeSel {
+		t.Errorf("the runner's active selection = %+v, want %+v", sel, e.activeSel)
+	}
+}
+
+// The baseline is for a trial: a config that is already active, or a refusal,
+// probes nothing.
+func TestApplyBaselineOnlyBeforeATrial(t *testing.T) {
+	t.Run("noop", func(t *testing.T) {
+		e, r := newRenderEnv(t, "26.10.21")
+		r.body = activeConfigBody
+		p := newProxyProbe(e, failingProxy)
+
+		res, err := e.u.Apply(bg)
+		wantOutcome(t, res, err, OutcomeNoop)
+		if at := p.calls(); len(at) != 0 {
+			t.Errorf("the probe ran %d times for a noop", len(at))
+		}
+	})
+	t.Run("no state", func(t *testing.T) {
+		e, _ := newRenderEnv(t, "26.10.21")
+		e.u.NoState = true
+		p := newProxyProbe(e, failingProxy)
+
+		res, err := e.u.Apply(bg)
+		wantOutcome(t, res, err, OutcomeRefused)
+		if at := p.calls(); len(at) != 0 {
+			t.Errorf("the probe ran %d times for a refusal", len(at))
+		}
+	})
+	t.Run("a cancelled context", func(t *testing.T) {
+		// A baseline that failed because the caller gave up says nothing about
+		// the proxy: it must not stand in for an outage.
+		e, _ := newRenderEnv(t, "26.10.21")
+		ctx, cancel := context.WithCancel(bg)
+		newProxyProbe(e, func(int) error {
+			cancel()
+			return context.Canceled
+		})
+
+		res, err := e.u.Apply(ctx)
+		wantOutcome(t, res, err, OutcomeRefused)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("err = %v, want the cancellation", err)
+		}
+		wantActions(t, e.runner)
+		wantNoCandidateFile(t, e)
+	})
+}
+
+// A runner's xray -test output, the render's error and every log line can
+// carry a credential: none of them may reach the Result, the history, the
+// error text or the log once Redact is set, and errors.Is and As still see
+// through the error.
+func TestRedactDetail(t *testing.T) {
+	const secret = "s3cret-id"
+	redact := func(s string) string { return strings.ReplaceAll(s, secret, "‹redacted›") }
+	wantNone := func(t *testing.T, what, s string) {
+		t.Helper()
+		if strings.Contains(s, secret) {
+			t.Errorf("%s holds the secret: %q", what, s)
+		}
+	}
+
+	t.Run("xray output", func(t *testing.T) {
+		e, _ := newRenderEnv(t, "26.10.21")
+		var log bytes.Buffer
+		e.u.Log, e.u.Redact = &log, redact
+		e.runner.script(func(f *fakeRunner) {
+			f.onTrial = func(w http.ResponseWriter, c runnerapi.Candidate) bool {
+				fakeError(w, http.StatusUnprocessableEntity, "test_failed", "Failed to start: unknown user "+secret)
+				return true
+			}
+		})
+
+		res, err := e.u.Apply(bg)
+		wantOutcome(t, res, err, runnerapi.OutcomeRejected)
+		wantDetail(t, res, "Failed to start: unknown user ‹redacted›")
+		wantNone(t, "Detail", res.Detail)
+		wantNone(t, "the error", err.Error())
+		if !strings.Contains(err.Error(), "‹redacted›") {
+			t.Errorf("error = %q, want the redacted text", err)
+		}
+		for _, line := range historyLines(t, e) {
+			wantNone(t, "the history line", line)
+		}
+		if h := e.history(t); len(h) != 1 || !strings.Contains(h[0].Detail, "‹redacted›") {
+			t.Errorf("history = %+v, want the redacted detail", h)
+		}
+		wantNone(t, "the log", log.String())
+		if !strings.Contains(log.String(), "‹redacted›") {
+			t.Errorf("log = %q, want the redacted detail", log.String())
+		}
+		var tf *runnerapi.TestFailedError
+		if !errors.As(err, &tf) {
+			t.Errorf("err = %v, want errors.As to find the *TestFailedError", err)
+		}
+	})
+	t.Run("a wrapped error", func(t *testing.T) {
+		e, r := newRenderEnv(t, "26.10.21")
+		var log bytes.Buffer
+		e.u.Log, e.u.Redact = &log, redact
+		boom := errors.New("render: server " + secret + " has no address")
+		r.err = boom
+
+		res, err := e.u.Apply(bg)
+		wantOutcome(t, res, err, OutcomeRefused)
+		if !errors.Is(err, boom) {
+			t.Errorf("err = %v, want errors.Is to find the render's error", err)
+		}
+		wantDetail(t, res, "render: server ‹redacted› has no address")
+		wantNone(t, "Detail", res.Detail)
+		wantNone(t, "the error", err.Error())
+		for _, line := range historyLines(t, e) {
+			wantNone(t, "the history line", line)
+		}
+		wantNone(t, "the log", log.String())
+	})
+	t.Run("an update", func(t *testing.T) {
+		e, _ := newRenderEnv(t, "26.3.27")
+		e.rel.add(t, "26.10.21")
+		e.u.Redact = redact
+		e.health.fn = func(int) error { return errors.New("xray api probe: unknown user " + secret) }
+
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{})
+		wantOutcome(t, res, err, OutcomeUnhealthy)
+		wantDetail(t, res, "unknown user ‹redacted›")
+		wantNone(t, "Detail", res.Detail)
+		wantNone(t, "the error", err.Error())
+		for _, line := range historyLines(t, e) {
+			wantNone(t, "the history line", line)
+		}
+	})
+	t.Run("the note of a committed result", func(t *testing.T) {
+		// A result that is no failure has no error, but its Detail is recorded.
+		e, _ := newRenderEnv(t, "26.10.21")
+		e.u.Redact = func(s string) string { return strings.ReplaceAll(s, "probe", "‹redacted›") }
+		newProxyProbe(e, failingProxy)
+
+		res, err := e.u.Apply(bg)
+		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+		if want := strings.ReplaceAll(baselineNote, "probe", "‹redacted›"); res.Detail != want {
+			t.Errorf("Detail = %q, want %q", res.Detail, want)
+		}
+		if h := e.history(t); len(h) != 1 || strings.Contains(h[0].Detail, "probe") {
+			t.Errorf("history = %+v, want the redacted note", h)
+		}
+	})
+	t.Run("no Redact keeps the text", func(t *testing.T) {
+		e, _ := newRenderEnv(t, "26.10.21")
+		e.runner.script(func(f *fakeRunner) {
+			f.onTrial = func(w http.ResponseWriter, c runnerapi.Candidate) bool {
+				fakeError(w, http.StatusUnprocessableEntity, "test_failed", "Failed to start: unknown user "+secret)
+				return true
+			}
+		})
+
+		res, err := e.u.Apply(bg)
+		wantOutcome(t, res, err, runnerapi.OutcomeRejected)
+		wantDetail(t, res, secret)
+		if !strings.Contains(err.Error(), secret) {
+			t.Errorf("error = %q, want it as it was", err)
+		}
+	})
 }
 
 func TestUpdateRendersForTarget(t *testing.T) {

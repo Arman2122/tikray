@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -208,13 +209,22 @@ func (s *Supervisor) Test(ctx context.Context, sel runnerapi.Selection) (string,
 		return "", err
 	}
 	defer cleanup()
-	cmd := exec.CommandContext(ctx, path, "run", "-test", "-c", config)
-	cmd.Env = s.env(sel)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("runner: xray run -test: %w", err)
+	var out bytes.Buffer
+	err = runTest(ctx, path, s.env(sel), config, &out)
+	return out.String(), err
+}
+
+// runTest runs "<bin> run -test -c <config>" with env, and writes what xray
+// prints on stdout and stderr to out. A rejected config is an error wrapping
+// the *exec.ExitError. A trial and Runner.TestConfig both test this way.
+func runTest(ctx context.Context, bin string, env []string, config string, out io.Writer) error {
+	cmd := exec.CommandContext(ctx, bin, "run", "-test", "-c", config)
+	cmd.Env = env
+	cmd.Stdout, cmd.Stderr = out, out
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("runner: xray run -test: %w", err)
 	}
-	return string(out), nil
+	return nil
 }
 
 // testConfigFile returns the config file Test hands to xray: a copy of the

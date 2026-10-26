@@ -203,6 +203,8 @@ func TestJSONKeys(t *testing.T) {
 			`{"id":"a1b2c3d4","name":"n","outbound":{"protocol":"vless"}}`},
 		{"server full", Server{ID: "a1b2c3d4", Name: "n", Disabled: true, Link: "vless://x", Subscription: "00ff00ff", Outbound: json.RawMessage(`{"protocol":"vless"}`)},
 			`{"id":"a1b2c3d4","name":"n","disabled":true,"link":"vless://x","subscription":"00ff00ff","outbound":{"protocol":"vless"}}`},
+		{"server degraded", Server{ID: "a1b2c3d4", Name: "n", Disabled: true, Invalid: `"direct" is not a proxy protocol`, Outbound: json.RawMessage(`{"protocol":"direct"}`)},
+			`{"id":"a1b2c3d4","name":"n","disabled":true,"invalid":"\"direct\" is not a proxy protocol","outbound":{"protocol":"direct"}}`},
 		{"subscription minimal", Subscription{ID: "00ff00ff", Name: "n", URL: "https://x/s", Interval: Duration(24 * time.Hour)},
 			`{"id":"00ff00ff","name":"n","url":"https://x/s","interval":"24h0m0s"}`},
 		{"subscription full", Subscription{ID: "00ff00ff", Name: "n", URL: "https://x/s", Disabled: true, Interval: Duration(2 * time.Hour), LastFetch: when, LastError: "boom"},
@@ -322,6 +324,8 @@ func TestValidateRejects(t *testing.T) {
 		{"server name with an escape", func(s *State) { s.Servers[0].Name = "Frank\x1b[2Jfurt" }, "servers[0].name"},
 		{"server name with a newline", func(s *State) { s.Servers[0].Name = "Frank\nfurt" }, "servers[0].name"},
 		{"server name with a right-to-left override", func(s *State) { s.Servers[0].Name = "Frank\u202efurt" }, "servers[0].name"},
+		{"server name with a line separator", func(s *State) { s.Servers[0].Name = "Frank furt" }, "servers[0].name"},
+		{"server name with a paragraph separator", func(s *State) { s.Servers[0].Name = "Frank furt" }, "servers[0].name"},
 		{"server name with DEL", func(s *State) { s.Servers[0].Name = "Frank\x7ffurt" }, "servers[0].name"},
 		{"server name with a C1 control", func(s *State) { s.Servers[0].Name = "Frank\u009bfurt" }, "servers[0].name"},
 		{"server name with a bidi isolate", func(s *State) { s.Servers[0].Name = "Frank\u2066furt\u2069" }, "servers[0].name"},
@@ -375,6 +379,7 @@ func TestValidateRejects(t *testing.T) {
 		{"subscription name with an escape", func(s *State) { s.Subscriptions[0].Name = "Main\x1b]0;owned\x07" }, "subscriptions[0].name"},
 		{"subscription name with a newline", func(s *State) { s.Subscriptions[0].Name = "Main\r\nSecond" }, "subscriptions[0].name"},
 		{"subscription name with a right-to-left override", func(s *State) { s.Subscriptions[0].Name = "Main\u202e" }, "subscriptions[0].name"},
+		{"subscription name with a line separator", func(s *State) { s.Subscriptions[0].Name = "Main\u2028" }, "subscriptions[0].name"},
 		{"subscription url ftp", func(s *State) { s.Subscriptions[0].URL = "ftp://x" }, "subscriptions[0].url"},
 		{"subscription url relative", func(s *State) { s.Subscriptions[0].URL = "/sub/token" }, "subscriptions[0].url"},
 		{"subscription url without scheme", func(s *State) { s.Subscriptions[0].URL = "sub.example.com/token" }, "subscriptions[0].url"},
@@ -484,6 +489,65 @@ func TestValidateRejects(t *testing.T) {
 				t.Errorf("problem %q does not start with %q", ps[0], c.path+": ")
 			}
 		})
+	}
+}
+
+// TestValidateInvalidMustStayDisabled: a server Open disabled because this
+// tikray refuses it (Invalid) stays disabled, and its name and outbound, which
+// are what is wrong with it, are not checked again, until a caller replaces the
+// outbound and clears Invalid.
+func TestValidateInvalidMustStayDisabled(t *testing.T) {
+	const reason = `"direct" is not a proxy protocol`
+	degraded := func() State {
+		s := valid()
+		s.Servers[0].Outbound = json.RawMessage(`{"protocol":"direct"}`)
+		s.Servers[0].Name = ""
+		s.Servers[0].Disabled, s.Servers[0].Invalid = true, reason
+		return s
+	}
+	if err := degraded().Validate(); err != nil {
+		t.Errorf("a disabled server with a reason and a refused outbound and name: %v", err)
+	}
+
+	// Enabled, it is one problem, at the server, and the outbound and the name
+	// are not reported.
+	s := degraded()
+	s.Servers[0].Disabled = false
+	ps := joined(s.Validate())
+	if len(ps) != 1 || !strings.HasPrefix(ps[0].Error(), "servers[0]: ") || !strings.Contains(ps[0].Error(), "stays disabled until its outbound is replaced") {
+		t.Errorf("an enabled server with a reason: %v; want one problem at servers[0]", ps)
+	}
+	if strings.Contains(fmt.Sprint(ps), reason) {
+		t.Errorf("the problem repeats the reason: %v", ps)
+	}
+
+	// The checks that are not the server's own still apply to it.
+	s = degraded()
+	s.Servers[0].Subscription = "ffffffff"
+	s.Servers[0].ID = "A1B2C3D4"
+	if got := len(joined(s.Validate())); got != 2 {
+		t.Errorf("a disabled server with a reason, a bad ID and no subscription gave %d problems, want 2", got)
+	}
+
+	// A caller that replaces the outbound and clears Invalid gets the normal
+	// checks, and passes them.
+	s = degraded()
+	s.Servers[0].Outbound = json.RawMessage(`{"protocol":"vless","settings":{"vnext":[]}}`)
+	s.Servers[0].Name = "Frankfurt"
+	s.Servers[0].Invalid = ""
+	if err := s.Validate(); err != nil {
+		t.Errorf("a replaced outbound with Invalid cleared: %v", err)
+	}
+	s.Servers[0].Disabled = false
+	if err := s.Validate(); err != nil {
+		t.Errorf("a replaced outbound with Invalid cleared and the server enabled: %v", err)
+	}
+
+	// Clearing Invalid without replacing the outbound gives the problem again.
+	s = degraded()
+	s.Servers[0].Invalid = ""
+	if ps := joined(s.Validate()); len(ps) != 2 {
+		t.Errorf("a refused outbound and name with Invalid cleared gave %d problems, want 2: %v", len(ps), ps)
 	}
 }
 

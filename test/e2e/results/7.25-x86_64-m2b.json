@@ -1,0 +1,50 @@
+[
+  {
+    "id": "serve_starts",
+    "pass": true,
+    "detail": "tikray container running 3s after the start (RouterOS imported the busybox-based archive): Flags: R - RUNNING 0 R ;;; tikray:tikray file=disk1/tikray/images/tikray-amd64.tar remote-image=\"\" ignore-remote-image-change=no check-certificate=yes name=\"tikray\" tag=\"amd64\" os=\"linux\" arch=\"amd64\" privileged=no interface=tikray-ctl env-current= HOSTNAME=CHR PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin TIKRAY_INDEX_PUBKEY_FILE=/data/state/index.pub TIKRAY_INDEX_URLS=http://203.0.113.41/index.json TIKRAY_MIRRORS=http://203.0.113.41/m/v{version}/{file} TIKRAY_PROBE_URL=http://203.0.113.30/whoami TIKRAY_UPSTREAM=http://203.0.113.40/XTLS/Xray-core TZ=manual envlists=tikray default-entrypoint=\"/usr/local/bin/tikray\" default-cmd=\"serve\" default-shell=\"/bin/sh -c\" default-stop-signal=15-SIGTERM stop-time=10s root-dir=/disk1/tikray/containers/tikray layer-dir=\"\" mountlists=tikray shm-size=64.0MiB dns=172.31.255.1 default-dns=203.0.113.54 hostname=\"\" domain-name=\"\" default-workdir=\"\" logging=yes start-on-boot=no stop-on-unhealthy=no restart-policy=no restart-count=0 restart-max-count=0 restart-interval=0s default-user=\"\" cpu-list=\"\" memory-high=unlimited memory-max=unlimited swap-max=unlimited memory-current=704.0KiB cpu-usage=0 image-id=\"29a949f5eaf7bfc1d906c73fded0b13c48076b8b5d3eddeb91632d3c30d4caca \" layers=tikray default-healthcheck-cmd=\"\" default-healthcheck-interval=30s default-healthcheck-timeout=30s default-healthcheck-start-period=0ms default-healthcheck-start-interval=5s default-healthcheck-retries=3 (\u003cnil\u003e); GET /healthz with the pinned certificate (sha256 19848f58c411aee24b4872dbd9cfb89351b556799d5e8163d9384c24211a77ce) 4s after the start: true (\u003cnil\u003e); GET /v1/status with the token 4s after the start: revision 0, applied false, pending false, core \"\", level down, runner reachable=true state=\"empty\" gateway_up=false, servers [], selected \"\"; GET /v1/status with another token: apiclient: 401 unauthorized; fingerprints serve printed in the container log: [\"19848f58c411aee24b4872dbd9cfb89351b556799d5e8163d9384c24211a77ce\"]; tikray status in /container/shell (ran: true): \"revision 0 applied no pending no core none health down runner empty, routes down, gateway down\"",
+    "seconds": 4.5
+  },
+  {
+    "id": "bootstrap_core",
+    "pass": true,
+    "detail": "POST /v1/core/update latest: outcome=committed from= to=26.10.21 source=\"direct\" verified=dgst detail=\"\" (114s); runner running, active 26.10.21, xray_version \"Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/amd64)\", gateway_up true; active config config/c8f2ab31dee35e4f98e4f0df90aa0f64b8f89f8b67fc956b952c3f2bbcf05ba1.json, the render for 26.10.21: true; status: revision 0, applied true, pending false, core \"26.10.21\", level idle, runner reachable=true state=\"running\" gateway_up=true, servers [], selected \"\"; LAN direct after 0s: true; whoami \"198.51.100.2\", xray direct downlink +129 bytes",
+    "seconds": 115
+  },
+  {
+    "id": "add_server_applies",
+    "pass": true,
+    "detail": "PUT /v1/health probe_url http://203.0.113.30/whoami: revision 1; POST /v1/servers lab-a's link: server f1861e91 (lab-a), revision 2; PUT /v1/devices/192.168.88.10/32 smart: revision 3; applied, through server a, lab-a alive and selected after 14s: true; revision 3, applied true, pending false, core \"26.10.21\", level ok, runner reachable=true state=\"running\" gateway_up=true, servers [\"f1861e91 alive=true\"], selected \"f1861e91\"; last apply: outcome=committed from=26.10.21 to=26.10.21 source=\"\" verified= detail=\"the proxy probe fails on the active config too, so it was not required\"",
+    "seconds": 14.6
+  },
+  {
+    "id": "subscription_refresh",
+    "pass": true,
+    "detail": "the subscription lists lab-b, base64; POST /v1/subscriptions: 6c64fbdf (lab), revision 4; POST /v1/subscriptions/6c64fbdf/refresh: added 1, updated 0, removed 0, kept 0, skipped 0, via \"direct\" (0s, \u003cnil\u003e); the manual refresh added lab-b; lab-b is server \"f2affbe1\"; applied with lab-a and lab-b alive after 14s: true; revision 5, applied true, pending false, core \"26.10.21\", level ok, runner reachable=true state=\"running\" gateway_up=true, servers [\"f1861e91 alive=true\" \"f2affbe1 alive=true\"], selected \"f1861e91\"; the status names server \"a\" as selected and the LAN goes through \"a\" (0s): true; server a (203.0.113.10) up: false; through server b 9s after a stopped: true; lab-b, the subscription's server, carried the LAN's traffic: true (before the stop: false)",
+    "seconds": 23.8
+  },
+  {
+    "id": "subscription_block_page",
+    "pass": true,
+    "detail": "the proxy healthy through server b after 4s: true; revision 5, applied true, pending false, core \"26.10.21\", level degraded, runner reachable=true state=\"running\" gateway_up=true, servers [\"f1861e91 alive=false\" \"f2affbe1 alive=true\"], selected \"f2affbe1\"; the subscription answers a block page; POST /v1/subscriptions/6c64fbdf/refresh: 502 fetch_failed \"service: the subscription could not be fetched: subscription: direct: body refused: no server in the body; proxy: body refused: no server in the body\" (0s); last_error \"subscription: direct: body refused: no server in the body; proxy: body refused: no server in the body\"; servers: [\"f1861e91 lab-a\" \"f2affbe1 lab-b\"]",
+    "seconds": 4.2
+  },
+  {
+    "id": "outage_apply",
+    "pass": true,
+    "detail": "server a (203.0.113.10) up: false; server b (203.0.113.11) up: false; PUT /v1/devices/192.168.88.10/32 smart with the kill switch: revision 7; applied after 16s: true; revision 7, applied true, pending false, core \"26.10.21\", level outage, runner reachable=true state=\"running\" gateway_up=true, servers [\"f1861e91 alive=false\" \"f2affbe1 alive=false\"], selected \"\"; last apply: outcome=committed from=26.10.21 to=26.10.21 source=\"\" verified= detail=\"the proxy probe fails on the active config too, so it was not required\"; 30 requests in 30 s with both servers down, answers []; runner not running with gateway_up at 0 of them []; server a (203.0.113.10) up: true; proxied 6s after server a started: true",
+    "seconds": 53.4
+  },
+  {
+    "id": "refused_server",
+    "pass": true,
+    "detail": "POST /v1/servers with a raw outbound whose VLESS id is 40 characters: 422 refused \"xray rejected the server: Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/amd64)\\nA unified platform for anti-censorship.\\n2026/10/26 02:45:59.782045 [Info] infra/conf/serial: Reading config: \u0026{Name:/data/run/.test-1757415771/config.json Format:json}\\nFailed to start: main: failed to load config files: [/data/run/.test-1757415771/config.json] \u003e infra/conf: failed to build outbound config with tag srv-8d272b11 \u003e infra/conf: failed to build outbound handler for protocol vless \u003e common/uuid: invalid UUID: ‹redacted›\"; revision 7 before, 7 after (\u003cnil\u003e)",
+    "seconds": 0.3
+  },
+  {
+    "id": "restart_persists",
+    "pass": true,
+    "detail": "before: revision 7, applied true, pending false, core \"26.10.21\", level outage, runner reachable=true state=\"running\" gateway_up=true, servers [\"f1861e91 alive=false\" \"f2affbe1 alive=false\"], selected \"\"; tikray container stopped; GET /healthz pinned to the certificate of before after 0s: true (\u003cnil\u003e); certificate sha256 19848f58c411aee24b4872dbd9cfb89351b556799d5e8163d9384c24211a77ce after the restart, the same: true; the token the same: true; after 4s: revision 7, applied true, pending false, core \"26.10.21\", level degraded, runner reachable=true state=\"running\" gateway_up=true, servers [\"f1861e91 alive=true\" \"f2affbe1 alive=false\"], selected \"f1861e91\"; events since the restart: []; the runner running, candidate \u003cnil\u003e; the runner's active selection and last trial as before: true",
+    "seconds": 27.2
+  }
+]

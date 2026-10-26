@@ -43,7 +43,7 @@ func TestWhoami(t *testing.T) {
 	r := httptest.NewRequest("GET", "/whoami", nil)
 	r.RemoteAddr = "203.0.113.10:5555"
 	w := httptest.NewRecorder()
-	HTTPHandler().ServeHTTP(w, r)
+	HTTPHandler("").ServeHTTP(w, r)
 	if body := w.Body.String(); body != "203.0.113.10" {
 		t.Errorf("whoami body %q, want 203.0.113.10", body)
 	}
@@ -52,7 +52,7 @@ func TestWhoami(t *testing.T) {
 func TestBlob(t *testing.T) {
 	r := httptest.NewRequest("GET", "/blob2m", nil)
 	w := httptest.NewRecorder()
-	HTTPHandler().ServeHTTP(w, r)
+	HTTPHandler("").ServeHTTP(w, r)
 	b := w.Body.Bytes()
 	if len(b) != 2*1024*1024 {
 		t.Fatalf("blob length %d, want %d", len(b), 2*1024*1024)

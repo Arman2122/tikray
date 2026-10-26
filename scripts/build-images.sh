@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Builds tikray's container images for one architecture and exports each with
 # `docker save` to <outdir>/<name>-<arch>.tar, for RouterOS
-# `/container/add file=`. The images are FROM scratch + COPY only, so arm64
-# needs no emulation.
+# `/container/add file=`. tikray-runner is FROM scratch and tikray is on a
+# pinned busybox (for /container/shell's sh); both are COPY only, with no RUN,
+# so arm64 needs no emulation.
 #
 # usage: scripts/build-images.sh <amd64|arm64> [outdir=out]
 set -euo pipefail
@@ -22,8 +23,8 @@ images=(
   "tikray tikray.Dockerfile"
 )
 
-# The scratch images have no certificates of their own; tikray needs them to
-# fetch releases over HTTPS.
+# Neither image has certificates of its own (busybox has none); tikray needs
+# them to fetch releases and subscriptions over HTTPS.
 ca_bundle=/etc/ssl/certs/ca-certificates.crt
 if [[ ! -r $ca_bundle ]]; then
   echo "build-images.sh: the CA bundle $ca_bundle is missing; the tikray image copies it from the build host." >&2

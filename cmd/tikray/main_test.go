@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,9 +15,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -65,7 +68,9 @@ func testEnv(t *testing.T, st runnerapi.Status) (vars map[string]string, data st
 	}
 	t.Setenv("TMPDIR", t.TempDir())
 	srv := fakeRunner(t, st)
-	return map[string]string{"TIKRAY_DATA": data, "TIKRAY_RUNNER_URL": srv.URL}, data
+	// Nothing listens on the API's address: apply, update and rollback take
+	// their direct paths, whatever else listens on this machine's port 443.
+	return map[string]string{"TIKRAY_DATA": data, "TIKRAY_RUNNER_URL": srv.URL, "TIKRAY_API": "https://" + closedAddr(t)}, data
 }
 
 func runCLI(t *testing.T, vars map[string]string, args ...string) (code int, stdout, stderr string) {
@@ -691,7 +696,7 @@ func writeState(t *testing.T, data string, change func(*store.State)) store.Stat
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, _, err := s.Update(0, func(st *store.State) error {
+	st, _, err := s.Update(store.AnyRevision, func(st *store.State) error {
 		change(st)
 		return nil
 	})
@@ -770,16 +775,42 @@ func installSlot(t *testing.T, data, version string) {
 	}
 }
 
-// closedAddr is a loopback address that nothing listens on.
+// closedAddr is a loopback address that nothing listens on until the test
+// ends. A socket is bound to its port and never listens: a connection is
+// refused, and no other test, as they run in parallel, can listen there or
+// dial out from it meanwhile, as one could on a port that was only free.
 func closedAddr(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// No SO_REUSEADDR, which a listener sets: the port is the socket's alone.
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := ln.Addr().String()
-	ln.Close()
-	return addr
+	t.Cleanup(func() { syscall.Close(fd) })
+	if err := syscall.Bind(fd, &syscall.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+		t.Fatal(err)
+	}
+	sa, err := syscall.Getsockname(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(sa.(*syscall.SockaddrInet4).Port))
+}
+
+// The port of closedAddr can't be taken by another test while this one runs
+// (the tests run in parallel), and a connection to it is refused.
+func TestClosedAddrStaysClosed(t *testing.T) {
+	addr := closedAddr(t)
+	if ln, err := net.Listen("tcp", addr); err == nil {
+		ln.Close()
+		t.Fatalf("listening on %s worked: another test could take the port", addr)
+	}
+	if c, err := net.DialTimeout("tcp", addr, 5*time.Second); !errors.Is(err, syscall.ECONNREFUSED) {
+		if err == nil {
+			c.Close()
+		}
+		t.Errorf("dialling %s: %v, want connection refused", addr, err)
+	}
 }
 
 // trialRunner is a fake runner that takes a trial as far as an update, a
@@ -794,6 +825,7 @@ type trialRunner struct {
 	mu       sync.Mutex
 	st       runnerapi.Status
 	reject   bool                  // trial answers 422, as it does for a config xray run -test refuses
+	rejected string                // what xray said then; "xray says no" if empty
 	cands    []runnerapi.Candidate // as each trial found candidate.json
 	apiCalls [][]string            // the arguments of each call to the xray API
 }
@@ -871,7 +903,7 @@ func (r *trialRunner) trial(w http.ResponseWriter) {
 	switch {
 	case r.reject:
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		io.WriteString(w, `{"error":"test_failed","detail":"xray says no"}`)
+		json.NewEncoder(w).Encode(map[string]string{"error": "test_failed", "detail": cmp.Or(r.rejected, "xray says no")})
 	case r.st.State == runnerapi.StateTrial:
 		w.WriteHeader(http.StatusConflict)
 		io.WriteString(w, `{"error":"busy"}`)
@@ -1265,13 +1297,31 @@ func TestHealthFollowsServers(t *testing.T) {
 	wantAPI := artifacts.XrayAPIProbe{Runner: runner, Server: "10.9.8.3:10085"}
 	wantSOCKS := artifacts.SOCKSProbe{Addr: "10.9.8.3:1080", URL: "https://probe.example/204", Timeout: probeTimeout}
 
-	// With no server, socks-in goes to block and its probe could only fail.
-	if got := healthChecks(cfg, runner, false); !reflect.DeepEqual(got, []artifacts.HealthChecker{wantAPI}) {
-		t.Errorf("without the SOCKS probe: %#v, want the xray API probe alone", got)
+	// The pair: the checks every trial needs, and the end-to-end proxy probe.
+	health, proxy := healthChecks(cfg, runner)
+	if !reflect.DeepEqual(health, wantAPI) {
+		t.Errorf("health: %#v, want the xray API probe alone", health)
 	}
-	// M1's order: the proxy first, then xray's API.
-	if got := healthChecks(cfg, runner, true); !reflect.DeepEqual(got, []artifacts.HealthChecker{wantSOCKS, wantAPI}) {
-		t.Errorf("with the SOCKS probe: %#v, want both", got)
+	if !reflect.DeepEqual(proxy, wantSOCKS) {
+		t.Errorf("proxy: %#v, want the SOCKS probe", proxy)
+	}
+
+	// With no server, socks-in goes to block and its probe could only fail:
+	// the updater has no proxy probe.
+	u, err := newUpdater(cfg, runner, io.Discard, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(u.Health, wantAPI) || u.ProxyHealth != nil {
+		t.Errorf("without the SOCKS probe: Health %#v, ProxyHealth %#v; want the xray API probe alone", u.Health, u.ProxyHealth)
+	}
+	// With a server both are set, and Health no longer holds the SOCKS probe.
+	u, err = newUpdater(cfg, runner, io.Discard, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(u.Health, wantAPI) || !reflect.DeepEqual(u.ProxyHealth, wantSOCKS) {
+		t.Errorf("with the SOCKS probe: Health %#v, ProxyHealth %#v; want the xray API probe and the SOCKS probe", u.Health, u.ProxyHealth)
 	}
 }
 
@@ -1294,15 +1344,19 @@ func TestHealthProbesOfACommand(t *testing.T) {
 
 	t.Run("no server, no SOCKS probe", func(t *testing.T) {
 		code, res, _ := run(t, noServer, "apply")
-		if code != 0 || res.Outcome != runnerapi.OutcomeCommitted {
-			t.Errorf("exit %d, result %+v; want a commit without the SOCKS probe", code, res)
+		if code != 0 || res.Outcome != runnerapi.OutcomeCommitted || res.Detail != "" {
+			t.Errorf("exit %d, result %+v; want a commit without the SOCKS probe, and nothing to note", code, res)
 		}
 	})
 
-	t.Run("a server, the SOCKS probe", func(t *testing.T) {
+	// The SOCKS probe is there, and nothing listens: it fails on the active
+	// config as well, so an apply, such as a kill switch, goes through all the
+	// same. (That an apply is unhealthy where the probe passes on the active
+	// config and fails on the candidate is artifacts' test.)
+	t.Run("a server, an outage", func(t *testing.T) {
 		code, res, _ := run(t, withServer, "apply")
-		if code != 1 || res.Outcome != artifacts.OutcomeUnhealthy || !strings.Contains(res.Detail, "socks probe") {
-			t.Errorf("exit %d, result %+v; want unhealthy through the SOCKS probe", code, res)
+		if code != 0 || res.Outcome != runnerapi.OutcomeCommitted || !strings.Contains(res.Detail, "the proxy probe fails on the active config too") {
+			t.Errorf("exit %d, result %+v; want a commit that notes the failed baseline", code, res)
 		}
 	})
 

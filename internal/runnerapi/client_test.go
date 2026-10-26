@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -234,5 +235,196 @@ func TestClientHonoursContext(t *testing.T) {
 	defer cancel()
 	if _, err := c.Status(ctx); err == nil {
 		t.Error("Status returned no error on an expired context")
+	}
+}
+
+func TestClientTest(t *testing.T) {
+	var gotMethod, gotPath, gotAuth, gotType, gotBody string
+	answer := `{"ok":true,"output":"Configuration OK.\n"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		gotAuth, gotType = r.Header.Get("Authorization"), r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Write([]byte(answer))
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "tok", HTTP: srv.Client()}
+
+	// The config goes as it is, not re-encoded.
+	config := "{ \"outbounds\": [ {\"protocol\": \"freedom\"} ] }\n"
+	got, err := c.Test(context.Background(), []byte(config))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (TestResult{OK: true, Output: "Configuration OK.\n"}); got != want {
+		t.Errorf("Test = %+v, want %+v", got, want)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/v1/test" || gotAuth != "Bearer tok" || gotType != "application/json" {
+		t.Errorf("request was %s %s with Authorization %q, Content-Type %q", gotMethod, gotPath, gotAuth, gotType)
+	}
+	if gotBody != config {
+		t.Errorf("body = %q, want the config %q as it is", gotBody, config)
+	}
+
+	// A rejection is an answer, not an error.
+	answer = `{"ok":false,"output":"Failed to start: failed to load config"}`
+	got, err = c.Test(context.Background(), []byte(`{}`))
+	if err != nil {
+		t.Fatalf("Test of a rejected config: %v", err)
+	}
+	if want := (TestResult{OK: false, Output: "Failed to start: failed to load config"}); got != want {
+		t.Errorf("Test = %+v, want %+v", got, want)
+	}
+}
+
+func TestClientTestErrors(t *testing.T) {
+	answers := map[string]struct {
+		status int
+		body   string
+	}{
+		"/no_core":        {409, `{"error":"no_core"}`},
+		"/no_core-detail": {409, `{"error":"no_core","detail":"no xray is running"}`},
+		"/too_large":      {413, `{"error":"too_large","detail":"the config is over 1 MiB"}`},
+		"/bad_request":    {400, `{"error":"bad_request","detail":"the config is not JSON"}`},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The case is the base URL's path, before /v1/test.
+		a := answers[strings.TrimSuffix(r.URL.Path, "/v1/test")]
+		w.WriteHeader(a.status)
+		w.Write([]byte(a.body))
+	}))
+	defer srv.Close()
+	for _, tc := range []struct {
+		name    string
+		noCore  bool
+		inError string
+	}{
+		{name: "no_core", noCore: true},
+		{name: "no_core-detail", noCore: true, inError: "no xray is running"},
+		{name: "too_large", inError: "413"},
+		{name: "bad_request", inError: "400"},
+	} {
+		c := &Client{BaseURL: srv.URL + "/" + tc.name, Token: "tok", HTTP: srv.Client()}
+		res, err := c.Test(context.Background(), []byte(`{}`))
+		if err == nil {
+			t.Errorf("%s: Test = %+v, nil; want an error", tc.name, res)
+			continue
+		}
+		if errors.Is(err, ErrNoCore) != tc.noCore || errors.Is(err, ErrBusy) || errors.Is(err, ErrNoTrial) {
+			t.Errorf("%s: Test error %v; errors.Is ErrNoCore = %v, want %v", tc.name, err, errors.Is(err, ErrNoCore), tc.noCore)
+		}
+		if !strings.Contains(err.Error(), tc.inError) {
+			t.Errorf("%s: Test error %q, want it to contain %q", tc.name, err, tc.inError)
+		}
+	}
+}
+
+func TestClientTestDefaultHTTP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true,"output":""}`))
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "tok"}
+	if res, err := c.Test(context.Background(), []byte(`{}`)); err != nil || !res.OK {
+		t.Fatalf("Test with the default HTTP client = %+v, %v", res, err)
+	}
+	// The runner bounds xray run -test at 20 s; the default client must
+	// wait for it.
+	if testHTTP.Timeout <= 20*time.Second {
+		t.Errorf("the default client for Test times out after %v, before the runner's 20 s bound", testHTTP.Timeout)
+	}
+}
+
+func TestTestResultWireNames(t *testing.T) {
+	b, err := json.Marshal(TestResult{OK: true, Output: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"ok":true,"output":"x"}`; string(b) != want {
+		t.Errorf("TestResult JSON = %s, want %s", b, want)
+	}
+}
+
+// A TokenFunc makes the token of each request, so that a client can wait for a
+// runner that has not made its token yet, and a copy of the client keeps it.
+func TestClientTokenFunc(t *testing.T) {
+	var auths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auths = append(auths, r.Header.Get("Authorization"))
+		io.WriteString(w, `{"state":"empty"}`)
+	}))
+	defer srv.Close()
+
+	token, failure := "first", error(nil)
+	c := &Client{BaseURL: srv.URL, Token: "ignored", TokenFunc: func(ctx context.Context) (string, error) { return token, failure }}
+	ctx := context.Background()
+	if _, err := c.Status(ctx); err != nil {
+		t.Fatal(err)
+	}
+	token = "second"
+	cc := *c // a copy, as artifacts' withTimeout makes
+	cc.HTTP = &http.Client{Timeout: time.Minute}
+	if _, err := cc.Status(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"Bearer first", "Bearer second"}; !reflect.DeepEqual(auths, want) {
+		t.Errorf("Authorization headers %q, want %q", auths, want)
+	}
+
+	// A token that can't be had ends the call before it is sent, with the cause.
+	failure = errors.New("waiting for the runner token")
+	if _, err := c.Status(ctx); !errors.Is(err, failure) || !strings.Contains(err.Error(), "GET /v1/status") {
+		t.Errorf("error %v, want one that wraps the token's and names the call", err)
+	}
+	for _, call := range []func() error{
+		func() error { return c.Trial(ctx) },
+		func() error { _, err := c.Test(ctx, []byte("{}")); return err },
+		func() error { _, err := c.XrayAPI(ctx, "statssys"); return err },
+	} {
+		if err := call(); !errors.Is(err, failure) {
+			t.Errorf("error %v, want the token's", err)
+		}
+	}
+	if len(auths) != 2 {
+		t.Errorf("%d requests reached the runner, want the two with a token", len(auths))
+	}
+}
+
+// Unauthorized hears of every 401, with the token the refused request sent,
+// so that a TokenFunc that keeps its token can drop it. Other answers, and a
+// call that sent nothing, are not its business.
+func TestClientUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer good" {
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, `{"error":"unauthorized"}`)
+			return
+		}
+		io.WriteString(w, `{"state":"empty"}`)
+	}))
+	defer srv.Close()
+
+	var refused []string
+	token, failure := "good", error(nil)
+	c := &Client{BaseURL: srv.URL, TokenFunc: func(ctx context.Context) (string, error) { return token, failure },
+		Unauthorized: func(tok string) { refused = append(refused, tok) }}
+	ctx := context.Background()
+	if _, err := c.Status(ctx); err != nil {
+		t.Fatal(err)
+	}
+	token = "stale"
+	if _, err := c.Status(ctx); err == nil {
+		t.Fatal("Status with a token the runner refuses: no error")
+	}
+	if err := c.Trial(ctx); err == nil {
+		t.Fatal("Trial with a token the runner refuses: no error")
+	}
+	failure = errors.New("no token")
+	if _, err := c.Status(ctx); err == nil {
+		t.Fatal("Status without a token: no error")
+	}
+	if want := []string{"stale", "stale"}; !reflect.DeepEqual(refused, want) {
+		t.Errorf("Unauthorized heard of %q, want %q", refused, want)
 	}
 }
