@@ -257,11 +257,9 @@ func TestServeAndTheCLIAgree(t *testing.T) {
 // run in the command's own process beside it.
 func TestCLIFindsServeAtItsListenAddress(t *testing.T) {
 	vars, data := serveEnv(t)
-	addr := closedAddr(t)
-	vars["TIKRAY_LISTEN"] = addr
-	startServe(t, vars)
+	r := startServe(t, vars) // on a port of its own, which no other test can take
 
-	cli := map[string]string{"TIKRAY_DATA": data, "TIKRAY_LISTEN": addr}
+	cli := map[string]string{"TIKRAY_DATA": data, "TIKRAY_LISTEN": r.addr}
 	if out := ok2(t, cli, "server", "list"); !strings.Contains(out, "ID") {
 		t.Errorf("server list printed %q", out)
 	}

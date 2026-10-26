@@ -15,9 +15,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -773,16 +775,42 @@ func installSlot(t *testing.T, data, version string) {
 	}
 }
 
-// closedAddr is a loopback address that nothing listens on.
+// closedAddr is a loopback address that nothing listens on until the test
+// ends. A socket is bound to its port and never listens: a connection is
+// refused, and no other test, as they run in parallel, can listen there or
+// dial out from it meanwhile, as one could on a port that was only free.
 func closedAddr(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// No SO_REUSEADDR, which a listener sets: the port is the socket's alone.
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := ln.Addr().String()
-	ln.Close()
-	return addr
+	t.Cleanup(func() { syscall.Close(fd) })
+	if err := syscall.Bind(fd, &syscall.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+		t.Fatal(err)
+	}
+	sa, err := syscall.Getsockname(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(sa.(*syscall.SockaddrInet4).Port))
+}
+
+// The port of closedAddr can't be taken by another test while this one runs
+// (the tests run in parallel), and a connection to it is refused.
+func TestClosedAddrStaysClosed(t *testing.T) {
+	addr := closedAddr(t)
+	if ln, err := net.Listen("tcp", addr); err == nil {
+		ln.Close()
+		t.Fatalf("listening on %s worked: another test could take the port", addr)
+	}
+	if c, err := net.DialTimeout("tcp", addr, 5*time.Second); !errors.Is(err, syscall.ECONNREFUSED) {
+		if err == nil {
+			c.Close()
+		}
+		t.Errorf("dialling %s: %v, want connection refused", addr, err)
+	}
 }
 
 // trialRunner is a fake runner that takes a trial as far as an update, a
