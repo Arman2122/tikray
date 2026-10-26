@@ -96,6 +96,7 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 	if s.acquire(ctx) != nil {
 		return false
 	}
+	defer s.pokeMonitor() // after the release
 	defer s.release()
 	// The kicks counted now are served by this pass, which reads the state
 	// after them.
@@ -173,6 +174,7 @@ func (s *Service) ApplyNow(ctx context.Context) (artifacts.Result, error) {
 	if err := s.acquire(ctx); err != nil {
 		return artifacts.Result{}, err
 	}
+	defer s.pokeMonitor()
 	defer s.release()
 	st, rev := s.store.State()
 	if _, err := s.runner.Status(ctx); err != nil {
@@ -211,6 +213,7 @@ func (s *Service) coreOp(ctx context.Context, what string, op func(*artifacts.Co
 	if err := s.acquire(ctx); err != nil {
 		return artifacts.Result{}, err
 	}
+	defer s.pokeMonitor()
 	defer s.release()
 	st, rev := s.store.State()
 	if _, err := s.runner.Status(ctx); err != nil {
@@ -331,3 +334,15 @@ func (s *Service) acquire(ctx context.Context) error {
 }
 
 func (s *Service) release() { <-s.lock }
+
+// pokeMonitor asks the monitor, if there is one, for a check now. A pass of
+// the loop, an ApplyNow, a core update and a rollback end with it: each may
+// have put the runner on trial and back, and until the monitor's next check,
+// up to an Interval later, its snapshot says what the runner was before. The
+// status would show that, and ProxyHealthy, which decides whether a
+// subscription's fetch may fall back to the proxy, would read it.
+func (s *Service) pokeMonitor() {
+	if s.monitor != nil {
+		s.monitor.Poke()
+	}
+}

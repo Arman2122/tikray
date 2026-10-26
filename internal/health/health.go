@@ -124,6 +124,9 @@ type Monitor struct {
 
 	mu   sync.Mutex
 	snap Snapshot // the last check's, under mu
+	// pokes holds a token while a Poke waits for Run; made on first use,
+	// under mu.
+	pokes chan struct{}
 
 	// The rest belongs to the goroutine that runs checks (see tick).
 	// pollFails counts the observatory polls that failed in a row. lastObs
@@ -157,9 +160,16 @@ func (m *Monitor) now() time.Time {
 	return time.Now()
 }
 
-// Run checks once, then every Interval, until ctx is done. One check takes
-// at most a few call timeouts (5 s each) plus a probe (10 s).
+// Run checks once, then every Interval, and once more as soon as it can
+// after a Poke, until ctx is done. One check takes at most a few call
+// timeouts (5 s each) plus a probe (10 s), and checks never overlap.
 func (m *Monitor) Run(ctx context.Context) {
+	pokes := m.pokeChan()
+	// The first check serves a poke made before it.
+	select {
+	case <-pokes:
+	default:
+	}
 	m.tick(ctx)
 	t := time.NewTicker(m.interval())
 	defer t.Stop()
@@ -168,9 +178,33 @@ func (m *Monitor) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			m.tick(ctx)
+		case <-pokes:
 		}
+		m.tick(ctx)
 	}
+}
+
+// Poke asks Run for a check now rather than at the next Interval: the caller
+// has changed what the last check saw, as an apply or a core update does,
+// which puts the runner on trial and back. It never blocks. Pokes that come
+// before Run takes the first of them count as one, so any number of pokes
+// during a check lead to one check after it. A poke before Run starts is
+// served by Run's first check, and one after Run has returned by none.
+func (m *Monitor) Poke() {
+	select {
+	case m.pokeChan() <- struct{}{}:
+	default:
+	}
+}
+
+// pokeChan returns pokes, made the first time.
+func (m *Monitor) pokeChan() chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pokes == nil {
+		m.pokes = make(chan struct{}, 1)
+	}
+	return m.pokes
 }
 
 // Snapshot returns the last check's result, without any I/O.

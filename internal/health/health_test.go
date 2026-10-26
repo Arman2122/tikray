@@ -67,18 +67,25 @@ type fakeRunner struct {
 	calls    int
 	deadline time.Duration
 	called   chan struct{} // when set, each call sends on it
+	gate     chan struct{} // when set, each call waits for it to close
 }
 
 func (f *fakeRunner) Status(ctx context.Context) (runnerapi.Status, error) {
 	f.mu.Lock()
 	f.calls++
 	f.deadline = deadlineIn(ctx)
-	st, err, called := f.st, f.err, f.called
+	st, err, called, gate := f.st, f.err, f.called, f.gate
 	f.mu.Unlock()
 	if called != nil {
 		select {
 		case called <- struct{}{}:
 		default:
+		}
+	}
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -810,5 +817,111 @@ func TestRunChecksEveryInterval(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after its context was cancelled")
+	}
+}
+
+// runMonitor runs r's monitor until the returned stop is called, which waits
+// for Run to return.
+func (r *rig) runMonitor() (stop func()) {
+	r.t.Helper()
+	ctx, cancel := context.WithCancel(bg)
+	done := make(chan struct{})
+	go func() { r.m.Run(ctx); close(done) }()
+	return func() {
+		r.t.Helper()
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			r.t.Fatal("Run did not return after its context was cancelled")
+		}
+	}
+}
+
+// nextCheck waits for the runner to be asked once more: a check started.
+func (r *rig) nextCheck(what string) {
+	r.t.Helper()
+	select {
+	case <-r.runner.called:
+	case <-time.After(5 * time.Second):
+		r.t.Fatalf("no check %s", what)
+	}
+}
+
+func (f *fakeRunner) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// A poke has Run check at once, and not at the next Interval, an hour away.
+func TestPokeChecksAtOnce(t *testing.T) {
+	r := newRig(t, stateOf(srv(idA)))
+	r.m.Interval = time.Hour
+	r.runner.called = make(chan struct{}, 8)
+	stop := r.runMonitor()
+	r.nextCheck("at the start")
+	r.m.Poke()
+	r.nextCheck("after the poke")
+	stop()
+	if n := r.runner.callCount(); n != 2 {
+		t.Errorf("the runner was asked %d times, want twice: at the start and after the poke", n)
+	}
+}
+
+// Pokes while a check runs lead to one check after it, not one each, and
+// checks never overlap.
+func TestPokesCoalesce(t *testing.T) {
+	r := newRig(t, stateOf(srv(idA)))
+	r.m.Interval = time.Hour
+	r.runner.called = make(chan struct{}, 8)
+	gate := make(chan struct{})
+	r.runner.gate = gate
+	stop := r.runMonitor()
+	r.nextCheck("at the start") // and it waits for the gate
+	for range 5 {
+		r.m.Poke() // never blocks
+	}
+	if n := len(r.m.pokeChan()); n != 1 {
+		t.Errorf("%d pokes are waiting, want 1", n)
+	}
+	if n := r.runner.callCount(); n != 1 {
+		t.Errorf("the runner was asked %d times while the first check ran, want once: checks overlap", n)
+	}
+	close(gate)
+	r.nextCheck("after the pokes")
+	// Run took the one poke before it started that check, and has nothing
+	// left to do for an hour.
+	if n := len(r.m.pokeChan()); n != 0 {
+		t.Errorf("%d pokes still wait after the check they led to, want none", n)
+	}
+	stop()
+	if n := r.runner.callCount(); n != 2 {
+		t.Errorf("the runner was asked %d times, want twice: at the start and once for the five pokes", n)
+	}
+}
+
+// Poke never blocks or panics: on a monitor that never ran, before Run
+// starts (Run's first check serves it), and after Run has returned.
+func TestPokeWithoutRun(t *testing.T) {
+	var zero Monitor
+	zero.Poke()
+	zero.Poke()
+
+	r := newRig(t, stateOf(srv(idA)))
+	r.m.Interval = time.Hour
+	r.runner.called = make(chan struct{}, 8)
+	r.m.Poke()
+	stop := r.runMonitor()
+	r.nextCheck("at the start")
+	stop()
+	if n := r.runner.callCount(); n != 1 {
+		t.Errorf("the runner was asked %d times, want once: the first check serves a poke made before Run", n)
+	}
+	for range 3 {
+		r.m.Poke()
+	}
+	if n := r.runner.callCount(); n != 1 {
+		t.Errorf("the runner was asked %d times after Run returned, want no more checks", n)
 	}
 }

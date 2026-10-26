@@ -727,3 +727,49 @@ func TestStatusHealth(t *testing.T) {
 	}
 	e.shutdown()
 }
+
+// checkCounter is a monitor's runner that sends on checks at each call: the
+// monitor asks the runner once per check.
+type checkCounter struct {
+	health.RunnerStatus
+	checks chan struct{}
+}
+
+func (c checkCounter) Status(ctx context.Context) (runnerapi.Status, error) {
+	c.checks <- struct{}{}
+	return c.RunnerStatus.Status(ctx)
+}
+
+// A pass of the loop, ApplyNow and a core operation each end by asking the
+// monitor for a check at once, which nothing else would make for an hour:
+// until then its snapshot would say what the runner was before.
+func TestPassesAndOperationsPokeTheMonitor(t *testing.T) {
+	e := newEnv(t)
+	checks := make(chan struct{}, 64)
+	m := &health.Monitor{
+		Runner:   checkCounter{e.runner.client(), checks},
+		Xray:     fakeXray{},
+		Interval: time.Hour,
+		Now:      e.clock.Now,
+	}
+	e.s = e.newService(Config{Monitor: m})
+	e.edit()
+	e.inSync()
+	e.start()
+	within(t, "the monitor's first check", checks)
+
+	e.edit()
+	e.kick()
+	e.advance(defaultDebounce) // the loop's pass applies the edit
+	wantStatus(t, e.s, true, false)
+	within(t, "a check after the loop's pass", checks)
+
+	// What the operations return does not matter here: each ends with the
+	// poke, a rollback with nothing to roll back to too. CoreUpdate and
+	// CoreRollback share coreOp.
+	e.s.ApplyNow(bg)
+	within(t, "a check after ApplyNow", checks)
+	e.s.CoreRollback(bg)
+	within(t, "a check after a rollback", checks)
+	e.shutdown()
+}
