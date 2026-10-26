@@ -312,6 +312,14 @@ func (f *fakeRunner) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 		return f.test(req), nil
+	case "POST restart":
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.st.State == runnerapi.StateTrial {
+			return reply(http.StatusConflict, map[string]string{"error": "busy"}), nil
+		}
+		f.st.XrayPID++
+		return reply(http.StatusNoContent, nil), nil
 	}
 	return reply(http.StatusNotFound, map[string]string{"error": "bad_request"}), nil
 }

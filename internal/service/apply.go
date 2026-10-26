@@ -72,14 +72,16 @@ func (s *Service) loop(ctx context.Context) {
 }
 
 // catchUp kicks once at the start when the state was saved (its revision is
-// above 0) and is not the runner's config, or the runner can't tell.
+// above 0) and is not the runner's config, or the runner can't tell, or a hot
+// change did not finish (artifacts.HotPending): xray may then run outbounds
+// that the runner's config lacks, and an Apply heals it.
 func (s *Service) catchUp(ctx context.Context) {
 	st, rev := s.store.State()
 	if rev == 0 {
 		return
 	}
 	rs, err := s.runner.Status(ctx)
-	if err == nil && rs.Active != nil {
+	if err == nil && rs.Active != nil && !artifacts.HotPending(s.data) {
 		name, err := configName(s.updater(st, rev), rs.Active)
 		if err == nil && name == rs.Active.Config {
 			return
@@ -88,10 +90,11 @@ func (s *Service) catchUp(ctx context.Context) {
 	s.Kick()
 }
 
-// pass applies the newest state once, unless the runner runs it already, and
-// records how that went. It reports whether to try again later: when the
-// runner can't be reached, or another update or trial is in the way. retry is
-// how long the loop waits then, for the event to say.
+// pass applies the newest state once, unless the runner runs it already and no
+// hot change is unfinished (artifacts.HotPending), and records how that went.
+// It reports whether to try again later: when the runner can't be reached, or
+// another update or trial is in the way. retry is how long the loop waits
+// then, for the event to say.
 func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 	if s.acquire(ctx) != nil {
 		return false
@@ -129,7 +132,7 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 			// Apply would refuse with the same error.
 			s.noteRender(rev, err, true)
 			return false
-		case name == rs.Active.Config:
+		case name == rs.Active.Config && !artifacts.HotPending(s.data):
 			s.record(KindApply, fmt.Sprintf("revision %d is applied already", rev))
 			return false
 		}

@@ -377,6 +377,61 @@ func TestKickInSyncAppliesNothing(t *testing.T) {
 	wantStatus(t, e.s, true, false)
 }
 
+// leaveHotPending puts in the env's data root the marker of a hot change that
+// tikray did not finish.
+func (e *env) leaveHotPending() {
+	e.t.Helper()
+	dir := filepath.Join(e.data, "run", "hot")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pending"), []byte(artifacts.ConfigName([]byte("{}\n"))+"\n"), 0o600); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// wantHealed fails unless one apply restarted xray from the active config, as
+// an apply does while the marker of an unfinished hot change is there, and
+// removed the marker.
+func wantHealed(t *testing.T, e *env) {
+	t.Helper()
+	wantTrials(t, e)
+	if calls := e.runner.gotCalls(); !slices.Contains(calls, "restart") {
+		t.Errorf("runner calls %v, want a restart", calls)
+	}
+	if artifacts.HotPending(e.data) {
+		t.Error("the marker is still there")
+	}
+	if got := e.eventsOf(KindApply); len(got) != 1 || !strings.Contains(got[0], "a hot change had not finished, so xray was restarted from the active config") {
+		t.Errorf("apply events %q, want one that says xray was restarted", got)
+	}
+}
+
+// A tikray that died during a hot change left xray with outbounds that the
+// active config lacks, which the marker says: the start applies even though
+// the runner's config is the state's render.
+func TestStartHotPendingApplies(t *testing.T) {
+	e := newEnv(t)
+	e.edit()
+	e.inSync()
+	e.leaveHotPending()
+	e.start()
+	e.advance(2 * time.Second)
+	wantHealed(t, e)
+}
+
+// So does a pass.
+func TestKickHotPendingApplies(t *testing.T) {
+	e := newEnv(t)
+	e.edit()
+	e.inSync()
+	e.start()
+	e.leaveHotPending()
+	e.kick()
+	e.advance(2 * time.Second)
+	wantHealed(t, e)
+}
+
 // A state that does not render is not applied. Status records the failure
 // once, not at every call, and a pass records it as why it applied nothing.
 func TestRenderErrorRecordedOnce(t *testing.T) {
