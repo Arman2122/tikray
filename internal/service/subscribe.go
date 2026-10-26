@@ -201,7 +201,9 @@ type RefreshResult struct {
 // state is written once, if it is still the one the refresh began with. When
 // it is not, the merge is done again on the new state, once, with the
 // entries already fetched and tested; a second change in the meantime ends
-// the refresh with store.ErrConflict. Refreshes run one at a time.
+// the refresh with store.ErrConflict. A merge that the store's checks refuse,
+// or whose write fails, sets LastError and holds the subscription off as a
+// failed fetch does (see refreshFailed). Refreshes run one at a time.
 //
 // A kept server that has a reason in Invalid and gets a new outbound that
 // passes the checks loses the reason, and stays Disabled, as with
@@ -266,10 +268,20 @@ func (s *Service) RefreshSubscription(ctx context.Context, id string) (RefreshRe
 		_, rev = s.store.State()
 		_, _, err = s.change(rev, merge, extra...)
 	}
-	if err != nil {
-		if !errors.Is(err, ErrNotFound) {
-			s.record(KindError, fmt.Sprintf("subscription %s (%s): the refresh was not stored: %v", sub.ID, sub.Name, err))
-		}
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrConflict):
+		// The state changed twice meanwhile: no fault of the subscription's,
+		// and the next look tries again.
+		s.record(KindError, fmt.Sprintf("subscription %s (%s): the refresh was not stored: %v", sub.ID, sub.Name, err))
+		return RefreshResult{}, err
+	case errors.Is(err, ErrNotFound):
+		return RefreshResult{}, err
+	default:
+		// A merge that the checks refuse, or a write that fails, as on a full
+		// disk, would fail again at the next look, after another fetch and
+		// another test of each new server: it waits as a failed fetch does.
+		s.refreshFailed(sub, "the refresh was not stored: "+s.redact(err.Error()))
 		return RefreshResult{}, err
 	}
 	s.lift(id)

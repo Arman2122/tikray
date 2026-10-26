@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -242,6 +244,57 @@ func TestScheduleRecordsARefreshThatCouldNotBeStored(t *testing.T) {
 	e.tick(time.Minute)
 	if got := e.subOf(sub.ID); got.LastFetch.IsZero() {
 		t.Error("the next look did not refresh: a conflict is no failure to wait out")
+	}
+}
+
+// breakStore makes every write of the env's store fail, as a full disk does:
+// each state file is now a directory, which a rename can't replace.
+func (e *env) breakStore() {
+	e.t.Helper()
+	files, err := filepath.Glob(filepath.Join(e.data, "state", "state.v*.json"))
+	if err != nil || len(files) == 0 {
+		e.t.Fatalf("no state file to break (%v)", err)
+	}
+	for _, f := range files {
+		if err := os.Remove(f); err != nil {
+			e.t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(f, "in-the-way"), 0o755); err != nil {
+			e.t.Fatal(err)
+		}
+	}
+}
+
+// A refresh that fetched and tested its list and could not store the merge,
+// as on a full disk, waits out min(1 h, Interval) as a failed fetch does,
+// with an error event: the scheduler does not fetch the list and have the
+// runner test it again at every look.
+func TestScheduleHoldsARefreshThatCouldNotBeWritten(t *testing.T) {
+	e, feed := newSubEnv(t)
+	sub := schedSub("full", 0, false)
+	e.putSub(sub)
+	feed.setDirect(okFeed(feedBody(feedLink(11, "a"))))
+	e.breakStore()
+	e.startScheduler()
+	e.tick(30 * time.Second)
+	if got := feed.requests(); len(got) != 1 {
+		t.Fatalf("fetched %q at 30 s, want once", got)
+	}
+	got := e.eventsOf(KindError)
+	if len(got) != 1 || !strings.Contains(got[0], sub.ID) || !strings.Contains(got[0], "not stored") {
+		t.Fatalf("error events %q, want one that names the subscription and says the refresh was not stored", got)
+	}
+	wantNoURL(t, "the event", got[0])
+
+	for at := 90 * time.Second; at < time.Hour+30*time.Second; at += time.Minute {
+		e.tick(time.Minute)
+		if got := feed.requests(); len(got) != 1 {
+			t.Fatalf("fetched %q by %s, want no more before the hour is up", got, at)
+		}
+	}
+	e.tick(time.Minute) // 60 min 30 s
+	if got := feed.requests(); len(got) != 2 {
+		t.Errorf("fetched %q at 60 min 30 s, want the second try", got)
 	}
 }
 
