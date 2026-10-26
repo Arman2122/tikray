@@ -876,7 +876,7 @@ func TestTokenAndFingerprintFromTheStateDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := newFake()
-	srv := httptest.NewUnstartedServer(api.NewHandler(fake, token))
+	srv := httptest.NewUnstartedServer(apiHandler(t, fake, token))
 	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
 	srv.Config.ErrorLog = discardLog()
 	srv.StartTLS()

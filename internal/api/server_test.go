@@ -89,7 +89,7 @@ func get(t *testing.T, c *http.Client, url, token string) (int, string) {
 }
 
 func TestServeTLS(t *testing.T) {
-	r := start(t, NewHandler(newFake(), testToken))
+	r := start(t, newHandler(t, newFake()))
 	good := pinnedClient(r.fp)
 
 	if code, body := get(t, good, r.url+"/healthz", ""); code != 200 || strings.TrimSpace(body) != `{"ok":true}` {
@@ -142,7 +142,7 @@ func TestServeLetsARequestInFlightFinish(t *testing.T) {
 		close(entered)
 		<-release
 	}
-	r := start(t, NewHandler(f, testToken))
+	r := start(t, newHandler(t, f))
 	client := pinnedClient(r.fp)
 
 	type reply struct {
@@ -196,7 +196,7 @@ func TestServeCutsOffARequestThatOutlastsTheShutdown(t *testing.T) {
 		close(entered)
 		<-release
 	}
-	r := start(t, NewHandler(f, testToken))
+	r := start(t, newHandler(t, f))
 	t.Cleanup(func() { close(release) })
 	client := pinnedClient(r.fp)
 	go func() {
@@ -243,7 +243,7 @@ func TestServeEndsTheOperationsItServes(t *testing.T) {
 					}
 				}
 			}
-			r := start(t, NewHandler(f, testToken))
+			r := start(t, newHandler(t, f))
 			t.Cleanup(func() { close(release) }) // before start's, which waits for Serve
 
 			reqCtx, cancel := context.WithCancel(context.Background())
@@ -294,7 +294,7 @@ func TestServerSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := newServer(context.Background(), NewHandler(newFake(), testToken), cert)
+	s := newServer(context.Background(), newHandler(t, newFake()), cert)
 	if s.ReadHeaderTimeout != 10*time.Second || s.IdleTimeout != 60*time.Second {
 		t.Errorf("ReadHeaderTimeout = %v, IdleTimeout = %v; want 10s and 60s", s.ReadHeaderTimeout, s.IdleTimeout)
 	}
@@ -320,7 +320,7 @@ func TestServeFailsToListen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := NewHandler(newFake(), testToken)
+	h := newHandler(t, newFake())
 
 	if err := Serve(context.Background(), "127.0.0.1:notaport", h, cert); err == nil || !strings.HasPrefix(err.Error(), "api: ") {
 		t.Errorf("a bad address gave %v, want an api: error", err)
@@ -352,7 +352,7 @@ func TestServeStopsWithItsContext(t *testing.T) {
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, addr, NewHandler(newFake(), testToken), cert) }()
+	go func() { done <- Serve(ctx, addr, newHandler(t, newFake()), cert) }()
 
 	client := pinnedClient(fp)
 	deadline := time.Now().Add(5 * time.Second)
@@ -390,7 +390,7 @@ func TestServeBoundsABodyThatNeverComes(t *testing.T) {
 	old := readTimeout
 	readTimeout = 300 * time.Millisecond
 	defer func() { readTimeout = old }()
-	r := start(t, NewHandler(newFake(), testToken))
+	r := start(t, newHandler(t, newFake()))
 	host := strings.TrimPrefix(r.url, "https://")
 	auth := "Authorization: Bearer " + testToken + "\r\n"
 
@@ -431,7 +431,7 @@ func TestServeAnOperationMayOutlastTheReadTimeout(t *testing.T) {
 	f := newFake()
 	f.onStatus = func() { time.Sleep(900 * time.Millisecond) }
 	f.gate = func(string, context.Context) { time.Sleep(900 * time.Millisecond) }
-	r := start(t, NewHandler(f, testToken))
+	r := start(t, newHandler(t, f))
 	client := pinnedClient(r.fp)
 
 	if code, body := get(t, client, r.url+"/v1/status", testToken); code != 200 {

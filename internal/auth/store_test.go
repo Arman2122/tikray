@@ -789,3 +789,23 @@ func TestStoreConcurrentUse(t *testing.T) {
 		t.Error("setup.code is not a code after the race")
 	}
 }
+
+func TestUsername(t *testing.T) {
+	s, dir := openTest(t)
+	if got := s.Username(); got != "" {
+		t.Errorf("Username with no admin = %q, want empty", got)
+	}
+	claim(t, s, dir, "alice", "correct horse battery")
+	if got := s.Username(); got != "alice" {
+		t.Errorf("Username = %q, want alice", got)
+	}
+	if err := s.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Username(); got != "" {
+		t.Errorf("Username after a reset = %q, want empty", got)
+	}
+	if SessionLife != 7*24*time.Hour {
+		t.Errorf("SessionLife = %v, want 7 days", SessionLife)
+	}
+}

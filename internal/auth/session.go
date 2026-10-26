@@ -20,6 +20,10 @@ const (
 	sessionLife = 7 * 24 * time.Hour // since the sign-in, however much it is used
 	maxSessions = 20                 // the oldest to start is dropped for a 21st
 
+	// SessionLife is the longest a session lasts, however much it is used: the
+	// Max-Age of its cookie.
+	SessionLife = sessionLife
+
 	// A slide of the idle limit (the use of a session) is noted in memory at
 	// once, and saved when the saved one is more than this stale, so that a
 	// busy page does not rewrite auth.json with every request. A restart

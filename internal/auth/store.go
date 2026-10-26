@@ -268,6 +268,12 @@ func (s *Store) admin() (admin, bool) {
 	return *s.d.Admin, true
 }
 
+// Username returns the admin's username, or "" when there is no admin yet.
+func (s *Store) Username() string {
+	a, _ := s.admin()
+	return a.Username
+}
+
 // NeedsSetup reports whether there is no admin yet: the first one is to be
 // claimed with the setup code.
 func (s *Store) NeedsSetup() bool {

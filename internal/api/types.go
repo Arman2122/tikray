@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -53,6 +54,78 @@ type subscriptionPatchRequest struct {
 type coreUpdateRequest struct {
 	Version         string `json:"version"`
 	AllowUnverified bool   `json:"allow_unverified"`
+}
+
+// setupRequest is the body of POST /v1/auth/setup: the setup code, and the
+// username and password of the admin it makes.
+type setupRequest struct {
+	Code     string `json:"code"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// loginRequest is the body of POST /v1/auth/login.
+type loginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// passwordRequest is the body of PUT /v1/auth/password.
+type passwordRequest struct {
+	Current string `json:"current"`
+	New     string `json:"new"`
+}
+
+// authStateResponse is the answer of GET /v1/auth/state, which anyone may
+// ask: whether the admin is yet to be made with the setup code, and whether
+// this request is from a caller that is signed in.
+type authStateResponse struct {
+	SetupRequired bool `json:"setup_required"`
+	SignedIn      bool `json:"signed_in"`
+}
+
+// sessionResponse is what setup and login answer with (the session itself
+// is the cookie): the CSRF token its mutations carry, and when it ends if it
+// is not used.
+type sessionResponse struct {
+	CSRFToken string    `json:"csrf_token"`
+	Expires   time.Time `json:"expires"`
+}
+
+// whoamiResponse is the answer of GET /v1/auth/session: sessionResponse and
+// the admin's username.
+type whoamiResponse struct {
+	Username  string    `json:"username"`
+	CSRFToken string    `json:"csrf_token"`
+	Expires   time.Time `json:"expires"`
+}
+
+// newTokenRequest is the body of POST /v1/tokens: a name, and ExpiresIn as
+// text such as "720h" (left out, the token does not expire).
+type newTokenRequest struct {
+	Name      string `json:"name"`
+	ExpiresIn string `json:"expires_in"`
+}
+
+// newTokenResponse is the answer to a new token: the token, which is shown
+// this once, and what is known of it.
+type newTokenResponse struct {
+	Token string    `json:"token"`
+	Info  tokenInfo `json:"info"`
+}
+
+// tokenInfo is an API token as the list shows it: never its secret. Expires
+// and LastUsed are left out when the token never expires or was never used.
+type tokenInfo struct {
+	ID       string    `json:"id"`
+	Name     string    `json:"name"`
+	Created  time.Time `json:"created"`
+	Expires  time.Time `json:"expires,omitzero"`
+	LastUsed time.Time `json:"last_used,omitzero"`
+}
+
+func newTokenInfo(t auth.TokenInfo) tokenInfo {
+	return tokenInfo{ID: t.ID, Name: t.Name, Created: t.Created, Expires: t.Expires, LastUsed: t.LastUsed}
 }
 
 // refreshResponse is service.RefreshResult on the wire.

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Arman2122/tikray/internal/api"
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/health"
 	"github.com/Arman2122/tikray/internal/render"
 	"github.com/Arman2122/tikray/internal/runnerapi"
@@ -57,6 +58,12 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 	}
 	defer unlock()
 	s, err := store.Open(stateDir(env.Data))
+	if err != nil {
+		return c.fail(err)
+	}
+	// The admin, the sessions and the API tokens: one Store, opened here under
+	// the lock like the state.
+	people, err := auth.OpenStore(stateDir(env.Data))
 	if err != nil {
 		return c.fail(err)
 	}
@@ -112,7 +119,9 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 	}
 	ended := make(chan error, 2)
 	go func() { ended <- svc.Run(ctx) }()
-	go func() { ended <- api.ServeListener(ctx, ln, api.NewHandler(svc, token), cert) }()
+	go func() {
+		ended <- api.ServeListener(ctx, ln, api.NewHandler(svc, token, people, auth.NewLimiter(nil)), cert)
+	}()
 	var first error
 	for range 2 {
 		if err := <-ended; err != nil && first == nil {

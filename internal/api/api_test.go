@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/health"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/service"
@@ -75,6 +76,9 @@ type fakeBackend struct {
 	events []service.Event
 	core   service.CoreInfo
 
+	// logs are the events the handlers recorded through Record.
+	logs []loggedEvent
+
 	// onStatus, if set, runs inside Status.
 	onStatus func()
 	// gate, if set, runs inside ApplyNow, CoreUpdate, CoreRollback,
@@ -131,6 +135,23 @@ func (f *fakeBackend) change(method string, rev uint64, args ...any) (uint64, er
 		return 0, store.ErrConflict
 	}
 	return f.newRev, nil
+}
+
+// loggedEvent is an event that a handler recorded.
+type loggedEvent struct{ Kind, Message string }
+
+// Record keeps the event for the tests to read (loggedEvents). Like State
+// and Redactor it is no call to check.
+func (f *fakeBackend) Record(kind, msg string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logs = append(f.logs, loggedEvent{kind, msg})
+}
+
+func (f *fakeBackend) loggedEvents() []loggedEvent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]loggedEvent(nil), f.logs...)
 }
 
 func (f *fakeBackend) State() (store.State, uint64) { return f.state.Clone(), f.rev }
@@ -287,9 +308,25 @@ func authed(extra ...string) http.Header {
 
 func serve(t *testing.T, f *fakeBackend) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(NewHandler(f, testToken))
+	srv := httptest.NewServer(newHandler(t, f))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// newHandler is the API over b with the root token testToken, a store in a
+// directory of its own (no admin yet) and a limiter.
+func newHandler(t testing.TB, b Backend) http.Handler {
+	t.Helper()
+	return newHandlerWithRoot(t, b, testToken)
+}
+
+func newHandlerWithRoot(t testing.TB, b Backend, root string) http.Handler {
+	t.Helper()
+	a, err := auth.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewHandler(b, root, a, auth.NewLimiter(nil))
 }
 
 func mustJSON(t testing.TB, v any) string {
@@ -500,7 +537,7 @@ func TestTokenRequired(t *testing.T) {
 	})
 
 	t.Run("an empty token admits nobody", func(t *testing.T) {
-		srv := httptest.NewServer(NewHandler(newFake(), ""))
+		srv := httptest.NewServer(newHandlerWithRoot(t, newFake(), ""))
 		defer srv.Close()
 		for _, h := range []http.Header{{}, {"Authorization": {"Bearer "}}, {"Authorization": {"Bearer"}}} {
 			if r := request(t, srv, "GET", "/v1/status", "", h); r.status != 401 {
@@ -572,7 +609,7 @@ func TestListsAreNeverNull(t *testing.T) {
 	sameJSON(t, r.body, `{"active":"","slots":[],"history":[]}`)
 
 	// A refresh that skipped nothing says so with a list, too.
-	srv2 := httptest.NewServer(NewHandler(&withSkips{newFake(), nil}, testToken))
+	srv2 := httptest.NewServer(newHandler(t, &withSkips{newFake(), nil}))
 	defer srv2.Close()
 	r = request(t, srv2, "POST", "/v1/subscriptions/9be8f7a6/refresh", "", authed())
 	sameJSON(t, r.body, `{"added":0,"updated":0,"removed":0,"kept":0,"skipped":[],"via":"direct"}`)
@@ -612,7 +649,7 @@ func TestSkippedLinesCarryNoCredential(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			skipped := []subscription.Skipped{{Line: c.line, Err: "bad port"}}
-			srv := httptest.NewServer(NewHandler(&withSkips{newFake(), skipped}, testToken))
+			srv := httptest.NewServer(newHandler(t, &withSkips{newFake(), skipped}))
 			defer srv.Close()
 			r := request(t, srv, "POST", "/v1/subscriptions/9be8f7a6/refresh", "", authed())
 			if r.status != 200 {
@@ -635,7 +672,7 @@ func TestSkippedLinesCarryNoCredential(t *testing.T) {
 
 	t.Run("the reason is redacted", func(t *testing.T) {
 		skipped := []subscription.Skipped{{Line: "trojan://x@h", Err: "xray rejects id " + secretID}}
-		srv := httptest.NewServer(NewHandler(&withSkips{newFake(), skipped}, testToken))
+		srv := httptest.NewServer(newHandler(t, &withSkips{newFake(), skipped}))
 		defer srv.Close()
 		r := request(t, srv, "POST", "/v1/subscriptions/9be8f7a6/refresh", "", authed())
 		if strings.Contains(string(r.body), secretID) || !strings.Contains(string(r.body), "‹redacted›") {

@@ -59,6 +59,27 @@ func TestEventsAreRedacted(t *testing.T) {
 	}
 }
 
+// Record is the API's way to an event: the same ring, redactor and log as the
+// service's own.
+func TestRecordKeepsTheAPIsEvents(t *testing.T) {
+	e := newEnv(t)
+	e.addServer("v", vlessOutbound)
+	var log strings.Builder
+	e.s = e.newService(Config{Log: &log})
+	e.s.Record(KindAuth, `signed in as "alice" from 203.0.113.5 (`+vlessID+`)`)
+	evs := e.s.Events(0)
+	if len(evs) != 1 || evs[0].Kind != "auth" {
+		t.Fatalf("events = %+v, want one of kind auth", evs)
+	}
+	want := `signed in as "alice" from 203.0.113.5 (` + redacted + `)`
+	if evs[0].Message != want {
+		t.Errorf("the event holds %q, want the state's secret redacted", strings.ReplaceAll(evs[0].Message, vlessID, "<the id>"))
+	}
+	if got := log.String(); got != "auth: "+want+"\n" {
+		t.Errorf("the log has %q, want the redacted event", strings.ReplaceAll(got, vlessID, "<the id>"))
+	}
+}
+
 // What Open disabled becomes one degraded event per server; Status lists
 // every server that carries a reason, the ones an earlier start disabled
 // too.
