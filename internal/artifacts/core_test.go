@@ -50,6 +50,9 @@ type fakeRunner struct {
 	apiArgs  [][]string
 	adoFiles []adoFile
 	adopted  []string
+	// pendingAt is what run/hot/pending held at each xray-api call, "" for
+	// no file.
+	pendingAt []string
 	// live is the tags of the outbounds the fake's xray runs, when the test
 	// models them; nil when it does not, and every xray-api call then exits 0.
 	// See liveAPI.
@@ -243,6 +246,8 @@ func (f *fakeRunner) handleXrayAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.apiArgs = append(f.apiArgs, in.Args)
+	pending, _ := os.ReadFile(filepath.Join(f.run, "hot", "pending"))
+	f.pendingAt = append(f.pendingAt, string(pending))
 	if f.onXrayAPI != nil {
 		f.onXrayAPI(w, in.Args)
 		return

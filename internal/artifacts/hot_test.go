@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -82,22 +83,97 @@ func newHotEnv(t *testing.T, active, candidate string) (*coreEnv, *fakeRender) {
 
 // fakeState is what the tests read of the fake runner at once.
 type fakeState struct {
-	tested   [][]byte
-	apiArgs  [][]string
-	adoFiles []adoFile
-	adopted  []string
-	live     []string
+	tested    [][]byte
+	apiArgs   [][]string
+	adoFiles  []adoFile
+	adopted   []string
+	live      []string
+	pendingAt []string
 }
 
 func (f *fakeRunner) state() fakeState {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return fakeState{
-		tested:   slices.Clone(f.tested),
-		apiArgs:  slices.Clone(f.apiArgs),
-		adoFiles: slices.Clone(f.adoFiles),
-		adopted:  slices.Clone(f.adopted),
-		live:     slices.Clone(f.live),
+		tested:    slices.Clone(f.tested),
+		apiArgs:   slices.Clone(f.apiArgs),
+		adoFiles:  slices.Clone(f.adoFiles),
+		adopted:   slices.Clone(f.adopted),
+		live:      slices.Clone(f.live),
+		pendingAt: slices.Clone(f.pendingAt),
+	}
+}
+
+// pendingFile is the marker of a hot change that did not end in a known
+// state.
+func pendingFile(e *coreEnv) string { return filepath.Join(e.data, "run", "hot", "pending") }
+
+// leavePending puts the marker in place as a hot change towards the config
+// named rel leaves it when tikray dies before the change ends.
+func leavePending(t *testing.T, e *coreEnv, rel string) {
+	t.Helper()
+	writeTestFile(t, pendingFile(e), rel+"\n")
+}
+
+// wantPending fails unless the marker is there exactly when want is, as
+// HotPending tells.
+func wantPending(t *testing.T, e *coreEnv, want bool) {
+	t.Helper()
+	if got := HotPending(e.data); got != want {
+		t.Errorf("HotPending = %v, want %v", got, want)
+	}
+}
+
+// failingRoute is a transport that fails every request for a path ending in
+// path, as a broken connection does, and passes the others to base.
+type failingRoute struct {
+	base http.RoundTripper
+	path string
+}
+
+func (f failingRoute) RoundTrip(r *http.Request) (*http.Response, error) {
+	if strings.HasSuffix(r.URL.Path, f.path) {
+		return nil, errors.New("connection reset by peer")
+	}
+	return f.base.RoundTrip(r)
+}
+
+// statusFailsAfterAdopt is a transport that fails the status call that
+// follows an adopt, once.
+type statusFailsAfterAdopt struct {
+	base    http.RoundTripper
+	mu      sync.Mutex
+	adopted bool
+}
+
+func (s *statusFailsAfterAdopt) RoundTrip(r *http.Request) (*http.Response, error) {
+	s.mu.Lock()
+	fail := s.adopted && strings.HasSuffix(r.URL.Path, "/v1/status")
+	if fail {
+		s.adopted = false
+	}
+	s.mu.Unlock()
+	if fail {
+		return nil, errors.New("connection refused")
+	}
+	resp, err := s.base.RoundTrip(r)
+	if err == nil && strings.HasSuffix(r.URL.Path, "/v1/adopt") {
+		s.mu.Lock()
+		s.adopted = true
+		s.mu.Unlock()
+	}
+	return resp, err
+}
+
+// failAdo makes the fake's ado fail with xray's message boom, while the other
+// xray api calls work.
+func failAdo(f *fakeRunner) {
+	f.onXrayAPI = func(w http.ResponseWriter, args []string) {
+		if args[0] == "ado" {
+			writeJSONReply(w, http.StatusOK, runnerapi.XrayAPIResponse{ExitCode: 1, Stderr: "boom\n"})
+			return
+		}
+		writeJSONReply(w, http.StatusOK, f.liveAPI(args))
 	}
 }
 
@@ -279,6 +355,12 @@ func TestHotApply(t *testing.T) {
 		t.Errorf("the file ado read adds %v, want the new a and b", got)
 	}
 	rel := configRel(candidate)
+	// While xray api changes xray, the marker names the candidate, so that a
+	// tikray that dies meanwhile heals at the next apply; the end leaves none.
+	if want := []string{rel + "\n", rel + "\n"}; !reflect.DeepEqual(fs.pendingAt, want) {
+		t.Errorf("run/hot/pending held %q at the xray api calls, want %q", fs.pendingAt, want)
+	}
+	wantPending(t, e, false)
 	if !reflect.DeepEqual(fs.adopted, []string{rel}) {
 		t.Errorf("adopted %q, want %q", fs.adopted, rel)
 	}
@@ -422,7 +504,7 @@ func TestHotFallsBackToTrial(t *testing.T) {
 			if res.Hot {
 				t.Error("Result.Hot is set for a trial")
 			}
-			if !strings.HasPrefix(res.Detail, "the hot change failed (") || !strings.Contains(res.Detail, "), so it was applied with a trial") {
+			if !strings.HasPrefix(res.Detail, "the hot change failed (") || !strings.HasSuffix(res.Detail, "), so a trial was tried") {
 				t.Errorf("Detail = %q, want the note that the hot change failed", res.Detail)
 			}
 			wantDetail(t, res, tc.why)
@@ -443,9 +525,10 @@ func TestHotFallsBackToTrial(t *testing.T) {
 	}
 }
 
-// When the trial that a failed hot change falls back to never restarts xray,
-// as when it is refused, xray is restarted from the active config: it must
-// not keep half of the change.
+// When the trial that a failed hot change falls back to never restarted xray
+// (its PID is the last one the hot change saw), whatever outcome the trial
+// reports, xray is restarted from the active config: it must not keep half of
+// the change. The marker goes once xray is known to run the active config.
 func TestHotFallbackRestoresXray(t *testing.T) {
 	active, candidate := rendered(t, withServers(srvA)), rendered(t, withServers(srvA2, srvB))
 	refuseTrials := func(f *fakeRunner) {
@@ -458,18 +541,13 @@ func TestHotFallbackRestoresXray(t *testing.T) {
 		e, _ := newHotEnv(t, active, candidate)
 		e.runner.script(func(f *fakeRunner) {
 			refuseTrials(f)
-			f.onXrayAPI = func(w http.ResponseWriter, args []string) {
-				if args[0] == "ado" {
-					writeJSONReply(w, http.StatusOK, runnerapi.XrayAPIResponse{ExitCode: 1, Stderr: "boom\n"})
-					return
-				}
-				writeJSONReply(w, http.StatusOK, f.liveAPI(args))
-			}
+			failAdo(f)
 		})
 
 		res, err := e.u.Apply(bg)
 		wantOutcome(t, res, err, OutcomeRefused)
 		wantDetail(t, res, "the hot change failed (")
+		wantDetail(t, res, "), so a trial was tried: ")
 		wantDetail(t, res, "disk full")
 		wantDetail(t, res, "xray was restarted from the active config")
 		wantActions(t, e.runner, "test", "xray-api", "xray-api", "trial", "restart")
@@ -477,6 +555,71 @@ func TestHotFallbackRestoresXray(t *testing.T) {
 		if sel := e.runner.activeSelection(); sel != e.activeSel {
 			t.Errorf("the runner's active selection = %+v, want %+v", sel, e.activeSel)
 		}
+		wantPending(t, e, false)
+	})
+	t.Run("a trial rejected by xray run -test", func(t *testing.T) {
+		e, _ := newHotEnv(t, active, candidate)
+		e.runner.script(func(f *fakeRunner) {
+			failAdo(f)
+			f.onTrial = func(w http.ResponseWriter, c runnerapi.Candidate) bool {
+				fakeError(w, http.StatusUnprocessableEntity, "test_failed", "Failed to start: out of memory")
+				return true
+			}
+		})
+
+		res, err := e.u.Apply(bg)
+		wantOutcome(t, res, err, runnerapi.OutcomeRejected)
+		wantDetail(t, res, "), so a trial was tried: Failed to start: out of memory")
+		wantDetail(t, res, "xray was restarted from the active config")
+		wantActions(t, e.runner, "test", "xray-api", "xray-api", "trial", "restart")
+		wantLive(t, e, active)
+		wantPending(t, e, false)
+	})
+	t.Run("the status after the adopt fails", func(t *testing.T) {
+		// The adopt took, but no xray was seen after it: whatever the trial
+		// did, xray is restarted from the active config, now the candidate.
+		e, _ := newHotEnv(t, active, candidate)
+		e.u.Runner.HTTP = &http.Client{Transport: &statusFailsAfterAdopt{base: e.runner.srv.Client().Transport}}
+
+		res, err := e.u.Apply(bg)
+		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+		wantDetail(t, res, "the hot change failed (checking on xray after the adopt: ")
+		wantDetail(t, res, "xray was restarted from the active config")
+		wantActions(t, e.runner, "test", "xray-api", "xray-api", "adopt", "trial", "commit", "restart")
+		wantCandidate(t, e.runner, runnerapi.Candidate{
+			Selection: runnerapi.Selection{Core: "26.10.21", Geo: "g1", Config: configRel(candidate)},
+			Deadline:  t0.Add(120 * time.Second),
+		})
+		wantLive(t, e, candidate)
+		wantPending(t, e, false)
+	})
+	t.Run("xray restarted before the adopt, and the trial never reached the runner", func(t *testing.T) {
+		// The double fault: the runner started xray again from the old config
+		// between the ado and the adopt, so the PID check fails; the adopt
+		// made the candidate the active config, and the trial is lost on the
+		// way. The runner's record says committed, as the candidate is
+		// active, but nothing restarted xray since the hot change last saw
+		// it: it runs the old outbounds, and is restarted.
+		e, _ := newHotEnv(t, active, candidate)
+		e.runner.script(func(f *fakeRunner) {
+			f.onAdopt = func(w http.ResponseWriter, config string) bool {
+				f.st.XrayPID = 99
+				f.restartLive(f.st.Active.Config)
+				return false
+			}
+		})
+		e.u.Runner.HTTP = &http.Client{Transport: failingRoute{base: e.runner.srv.Client().Transport, path: "/v1/trial"}}
+
+		res, err := e.u.Apply(bg)
+		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+		wantDetail(t, res, "the hot change failed (xray restarted during the change")
+		wantDetail(t, res, "xray was restarted from the active config")
+		wantActions(t, e.runner, "test", "xray-api", "xray-api", "adopt", "restart")
+		if sel := e.runner.activeSelection(); sel.Config != configRel(candidate) {
+			t.Errorf("the runner's active config = %s, want the candidate", sel.Config)
+		}
+		wantLive(t, e, candidate)
+		wantPending(t, e, false)
 	})
 	t.Run("the restart fails", func(t *testing.T) {
 		e, _ := newHotEnv(t, active, candidate)
@@ -493,6 +636,14 @@ func TestHotFallbackRestoresXray(t *testing.T) {
 		wantOutcome(t, res, err, OutcomeRefused)
 		wantDetail(t, res, "restarting xray from the active config failed")
 		wantDetail(t, res, "no xray binary")
+		// xray may still run the change: the next apply must heal it.
+		wantPending(t, e, true)
+		if b, err := os.ReadFile(pendingFile(e)); err != nil || string(b) != configRel(candidate)+"\n" {
+			t.Errorf("run/hot/pending = %q, %v; want the candidate's name", b, err)
+		}
+		if fi, err := os.Stat(pendingFile(e)); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("run/hot/pending: %v, %v; want mode 0600", fi, err)
+		}
 	})
 	t.Run("an xray that was not changed is not restarted", func(t *testing.T) {
 		e, _ := newHotEnv(t, active, candidate)
@@ -741,4 +892,165 @@ func TestHotRedactsTheReason(t *testing.T) {
 			t.Errorf("%s holds the secret", what)
 		}
 	}
+}
+
+// A tikray that died during a hot change left the marker, and xray with
+// outbounds the active config lacks. Whatever Hot is, the next Apply heals
+// it: with no noop and no hot change, a render that is the active config has
+// xray restarted from it, and any other goes on trial, which restarts xray;
+// a trial that never starts is followed by a restart.
+func TestHotPendingHeals(t *testing.T) {
+	one, two := rendered(t, withServers(srvA)), rendered(t, withServers(srvA, srvB))
+	for _, tc := range []struct {
+		name      string
+		candidate string
+		hotOff    bool
+		script    func(f *fakeRunner)
+		outcome   string
+		detail    string
+		actions   []string
+		live      string // the config whose outbounds xray runs after
+	}{
+		{
+			// The ado went through, tikray died, and then the added server
+			// was removed again: the render is the active config.
+			name: "the render is the active config", candidate: one,
+			outcome: runnerapi.OutcomeCommitted,
+			detail:  "a hot change had not finished, so xray was restarted from the active config",
+			actions: []string{"restart"}, live: one,
+		},
+		{
+			name: "the same with hot changes off", candidate: one, hotOff: true,
+			outcome: runnerapi.OutcomeCommitted,
+			detail:  "a hot change had not finished, so xray was restarted from the active config",
+			actions: []string{"restart"}, live: one,
+		},
+		{
+			name: "the render is another config", candidate: two,
+			outcome: runnerapi.OutcomeCommitted,
+			detail:  "a hot change had not finished, so a trial was tried",
+			actions: []string{"trial", "commit"}, live: two,
+		},
+		{
+			name: "the trial is refused", candidate: two,
+			script: func(f *fakeRunner) {
+				f.onTrial = func(w http.ResponseWriter, c runnerapi.Candidate) bool {
+					fakeError(w, http.StatusInternalServerError, "internal", "disk full")
+					return true
+				}
+			},
+			outcome: OutcomeRefused,
+			detail:  "a hot change had not finished, so a trial was tried: ",
+			actions: []string{"trial", "restart"}, live: one,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _ := newHotEnv(t, one, tc.candidate)
+			e.u.Hot = !tc.hotOff
+			leavePending(t, e, configRel(two))
+			stray := withServers(srvA, srvB)
+			stray.Servers[1].ID = "cccccccc"
+			e.runner.script(func(f *fakeRunner) {
+				f.live = configTags(t, rendered(t, stray))
+				if tc.script != nil {
+					tc.script(f)
+				}
+			})
+
+			res, err := e.u.Apply(bg)
+			wantOutcome(t, res, err, tc.outcome)
+			wantDetail(t, res, tc.detail)
+			if res.Hot {
+				t.Error("Result.Hot is set")
+			}
+			wantActions(t, e.runner, tc.actions...)
+			if fs := e.runner.state(); len(fs.tested) != 0 || len(fs.apiArgs) != 0 {
+				t.Errorf("tested %d, xray api %q; want no hot change", len(fs.tested), fs.apiArgs)
+			}
+			if got, want := e.runner.state().live, configTags(t, tc.live); !reflect.DeepEqual(got, want) {
+				t.Errorf("xray runs the outbounds %v, want those of the active config, %v", got, want)
+			}
+			wantPending(t, e, false)
+			wantHotDirEmpty(t, e)
+		})
+	}
+}
+
+// A restart that fails keeps the marker, and so does the next apply's, until
+// one works: the change that tikray could not finish is healed even though
+// the state went back to the active config meanwhile.
+func TestHotPendingSurvivesUntilHealed(t *testing.T) {
+	one, two := rendered(t, withServers(srvA)), rendered(t, withServers(srvA, srvB))
+	e, r := newHotEnv(t, one, two)
+	newProxyProbe(e, failsUntilTrial(e))
+	restarts := errors.New("no xray binary")
+	e.runner.script(func(f *fakeRunner) {
+		// The ado works and the probe fails after it; the trial is refused,
+		// and so is the restart: xray keeps server b.
+		f.onTrial = func(w http.ResponseWriter, c runnerapi.Candidate) bool {
+			fakeError(w, http.StatusInternalServerError, "internal", "disk full")
+			return true
+		}
+		f.onRestart = func(w http.ResponseWriter) bool {
+			if restarts != nil {
+				fakeError(w, http.StatusInternalServerError, "internal", restarts.Error())
+				return true
+			}
+			return false
+		}
+	})
+	res, err := e.u.Apply(bg)
+	wantOutcome(t, res, err, OutcomeRefused)
+	wantPending(t, e, true)
+	wantLive(t, e, two)
+
+	// Server b is removed: the render is the active config again. The restart
+	// still fails, and the marker stays.
+	r.body = one
+	res, err = e.u.Apply(bg)
+	wantOutcome(t, res, err, OutcomeRefused)
+	wantDetail(t, res, "a hot change had not finished, and restarting xray from the active config failed: ")
+	wantDetail(t, res, "no xray binary")
+	wantPending(t, e, true)
+
+	e.runner.script(func(*fakeRunner) { restarts = nil })
+	res, err = e.u.Apply(bg)
+	wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+	wantPending(t, e, false)
+	if got, want := e.runner.state().live, configTags(t, one); !reflect.DeepEqual(got, want) {
+		t.Errorf("xray runs the outbounds %v, want the active config's, %v", got, want)
+	}
+	if res, err := e.u.Apply(bg); err != nil || res.Outcome != OutcomeNoop {
+		t.Errorf("the apply after = %+v, %v; want noop", res, err)
+	}
+}
+
+// What a killed hot change left in run/hot/ holds credentials: every update,
+// rollback or apply removes it under the lock, hot or not, but never the
+// marker, which only an apply ends.
+func TestHotSweepsLeftovers(t *testing.T) {
+	one, two := rendered(t, withServers(srvA)), rendered(t, withServers(srvA, srvB))
+	left := func(t *testing.T, e *coreEnv) {
+		t.Helper()
+		writeTestFile(t, filepath.Join(e.data, "run", "hot", shaOf("left")+".json"), `{"outbounds":[]}`)
+		writeTestFile(t, filepath.Join(e.data, "run", "hot", "."+shaOf("left")+".json.tmp-1"), `{"outbounds":[]}`)
+	}
+	t.Run("an apply that is a trial", func(t *testing.T) {
+		e, _ := newHotEnv(t, one, two)
+		e.u.Hot = false
+		left(t, e)
+		res, err := e.u.Apply(bg)
+		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+		wantHotDirEmpty(t, e)
+	})
+	t.Run("an update keeps the marker", func(t *testing.T) {
+		e, _ := newHotEnv(t, one, two)
+		left(t, e)
+		leavePending(t, e, configRel(two))
+		res, err := e.u.Update(bg, "26.10.21", UpdateOptions{})
+		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+		if got := dirNames(t, filepath.Join(e.data, "run", "hot")); !reflect.DeepEqual(got, []string{"pending"}) {
+			t.Errorf("run/hot holds %v, want the marker alone", got)
+		}
+	})
 }

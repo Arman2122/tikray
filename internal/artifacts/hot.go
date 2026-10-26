@@ -6,6 +6,10 @@ package artifacts
 // those that came or changed, and the runner then adopts the config as the
 // active one, so that a restart gives the same xray. Anything else, and any
 // hot change that fails, goes through the trial.
+//
+// From its first xray api call until xray is known to run the active config
+// again, a hot change keeps a marker, run/hot/pending. A tikray that dies
+// meanwhile leaves it, and the next Apply heals xray (see HotPending, heal).
 
 import (
 	"bytes"
@@ -29,8 +33,72 @@ import (
 	"github.com/Arman2122/tikray/internal/store"
 )
 
-// defaultRunnerRun is where the runner's image mounts the run directory.
-const defaultRunnerRun = "/data/run"
+const (
+	// defaultRunnerRun is where the runner's image mounts the run directory.
+	defaultRunnerRun = "/data/run"
+	// pendingName is the marker's name in run/hot/.
+	pendingName = "pending"
+	// hotUnfinished starts the Detail of an Apply that found the marker.
+	hotUnfinished = "a hot change had not finished"
+)
+
+// HotPending reports whether the data root holds the marker of a hot change
+// that did not end in a known state: xray may run outbounds that the runner's
+// active config lacks, so the next Apply must run even when the state's
+// render is the active config, and it then restarts xray or puts the config
+// on trial. A marker that can't be looked at counts as there.
+func HotPending(data string) bool {
+	_, err := os.Lstat(pendingPath(data))
+	return !errors.Is(err, fs.ErrNotExist)
+}
+
+func pendingPath(data string) string { return filepath.Join(data, "run", "hot", pendingName) }
+
+func (u *CoreUpdater) hotDir() string { return filepath.Join(u.runDir(), "hot") }
+
+// makeHotDir makes run/hot/, with mode 0700 even if it was there.
+func (u *CoreUpdater) makeHotDir() error {
+	if err := os.MkdirAll(u.hotDir(), 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(u.hotDir(), 0o700)
+}
+
+// markPending writes the marker, naming the config the hot change is for,
+// before the change's first xray api call.
+func (u *CoreUpdater) markPending(config string) error {
+	if err := u.makeHotDir(); err != nil {
+		return err
+	}
+	return atomicfile.WriteFile(pendingPath(u.Data), []byte(config+"\n"), 0o600)
+}
+
+// clearPending removes the marker, once xray is known to run the active
+// config. A marker that stays only costs the next Apply a restart or a
+// trial, and res says so.
+func (u *CoreUpdater) clearPending(res *Result) {
+	if err := removeSynced(pendingPath(u.Data)); err != nil {
+		note(res, "the mark of the hot change was not removed: "+err.Error())
+	}
+}
+
+// sweepHot removes from run/hot/ every file but the marker: the outbounds
+// file of a hot change that a killed run left there holds credentials. It
+// runs under the lock, as sweepTemp does, so no hot change is using it.
+func (u *CoreUpdater) sweepHot() {
+	ents, err := os.ReadDir(u.hotDir())
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		u.logf("artifacts: %v", err)
+	}
+	for _, e := range ents {
+		if e.IsDir() || e.Name() == pendingName {
+			continue
+		}
+		if err := os.Remove(filepath.Join(u.hotDir(), e.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			u.logf("artifacts: %v", err)
+		}
+	}
+}
 
 // plan is what a hot change does to the running xray: remove the outbounds
 // tagged remove, then add the outbounds add. A changed outbound is in both.
@@ -190,8 +258,13 @@ type hotAttempt struct {
 	// instead, and says so. With done false and failed nil, the change was
 	// not one for a hot change, and the trial applies it with no note.
 	failed error
-	// touched says that a call may have changed the running xray.
+	// touched says that the marker is there: a call may have changed the
+	// running xray.
 	touched bool
+	// pid is the PID of the last xray the hot change saw that runs what the
+	// runner records as active, -1 for none since the adopt: an xray with
+	// another PID was started after it, from the active config.
+	pid int
 	// gate is the baseline's verdict once the hot path has taken it. The
 	// trial keeps it: by then xray may run a part of the change, which says
 	// nothing about the active config.
@@ -243,8 +316,8 @@ func (u *CoreUpdater) hot(ctx context.Context, st runnerapi.Status, cfg *config,
 	if err != nil {
 		return hotAttempt{done: true, err: refuse(res, err)}
 	}
-	h := hotAttempt{gate: &g}
-	if h.failed = u.change(ctx, st, cfg, p, g, &h.touched); h.failed != nil {
+	h := hotAttempt{gate: &g, pid: st.XrayPID}
+	if h.failed = u.change(ctx, st, cfg, p, g, &h); h.failed != nil {
 		return h
 	}
 	res.Outcome, res.Hot = runnerapi.OutcomeCommitted, true
@@ -252,29 +325,37 @@ func (u *CoreUpdater) hot(ctx context.Context, st runnerapi.Status, cfg *config,
 	if g.skipped {
 		note(res, baselineSkipped)
 	}
+	if h.touched {
+		u.clearPending(res)
+	}
 	u.prune(res)
 	u.pruneConfigs(ctx, runnerapi.Selection{Core: active.Core, Geo: active.Geo, Config: cfg.rel}, res)
 	return hotAttempt{done: true}
 }
 
-// change makes the change p in the running xray, the one st shows: each rmo,
-// the ado, the proxy probe when the baseline passed (g), and then the
-// runner's adopt of cfg. The xray that took the change must still run after
-// the adopt: one the runner restarted meanwhile, from the config that was
-// active, lacks a part of it. touched is set before the first call that can
-// change xray.
-func (u *CoreUpdater) change(ctx context.Context, st runnerapi.Status, cfg *config, p plan, g gate, touched *bool) error {
+// change makes the change p in the running xray, the one st shows: the
+// marker, each rmo, the ado, the proxy probe when the baseline passed (g),
+// and then the runner's adopt of cfg. The xray that took the change must
+// still run after the adopt: one the runner restarted meanwhile, from the
+// config that was active, lacks a part of it. h.touched is set once the
+// marker is written, before the first xray api call, and h.pid follows the
+// xray that the change saw.
+func (u *CoreUpdater) change(ctx context.Context, st runnerapi.Status, cfg *config, p plan, g gate, h *hotAttempt) error {
+	if len(p.remove) > 0 || len(p.add) > 0 {
+		if err := u.markPending(cfg.rel); err != nil {
+			return fmt.Errorf("marking the hot change: %w", err)
+		}
+		h.touched = true
+	}
 	u.logf("xray-core %s: changing xray's outbounds without a restart", st.Active.Core)
 	api := withTimeout(u.Runner, xrayAPIProbeTimeout)
 	server := "--server=" + cmp.Or(u.XrayAPIServer, defaultStatsServer)
 	for _, tag := range p.remove {
-		*touched = true
 		if err := xrayAPI(ctx, api, "rmo", server, tag); err != nil {
 			return err
 		}
 	}
 	if len(p.add) > 0 {
-		*touched = true
 		if err := u.addOutbounds(ctx, api, server, p.add); err != nil {
 			return err
 		}
@@ -284,13 +365,22 @@ func (u *CoreUpdater) change(ctx context.Context, st runnerapi.Status, cfg *conf
 			return fmt.Errorf("the proxy probe after the change: %w", err)
 		}
 	}
-	if err := u.Runner.Adopt(ctx, cfg.rel); err != nil {
-		return fmt.Errorf("adopting the config: %w", err)
+	aerr := u.Runner.Adopt(ctx, cfg.rel)
+	// Taken or not (an answer can be lost), the adopt may have made cfg the
+	// active config: only an xray seen after it is known to run what the
+	// runner records.
+	h.pid = -1
+	cctx, cancel := cleanupContext(ctx)
+	after, serr := u.Runner.Status(cctx)
+	cancel()
+	if serr == nil {
+		h.pid = after.XrayPID
 	}
-	after, err := u.Runner.Status(ctx)
 	switch {
-	case err != nil:
-		return fmt.Errorf("checking on xray after the adopt: %w", err)
+	case aerr != nil:
+		return fmt.Errorf("adopting the config: %w", aerr)
+	case serr != nil:
+		return fmt.Errorf("checking on xray after the adopt: %w", serr)
 	case after.State != runnerapi.StateRunning || after.XrayPID != st.XrayPID:
 		return fmt.Errorf("xray restarted during the change (pid %d, then %d, %s), so it may lack a part of it", st.XrayPID, after.XrayPID, after.State)
 	}
@@ -299,9 +389,9 @@ func (u *CoreUpdater) change(ctx context.Context, st runnerapi.Status, cfg *conf
 
 // addOutbounds has xray api ado add the outbounds add, from a file in
 // run/hot/ that the runner reads at its own path of it (RunnerRun). The file
-// holds the servers' credentials: it is 0600 in the 0700 run/hot/, which is
-// emptied first, as a run killed during a hot change can leave a file there,
-// and it is removed once ado is done, whatever ado said.
+// holds the servers' credentials: it is 0600 in the 0700 run/hot/, which the
+// lock's sweep (sweepHot) emptied of what a killed run left, and it is
+// removed once ado is done, whatever ado said.
 func (u *CoreUpdater) addOutbounds(ctx context.Context, api *runnerapi.Client, server string, add []json.RawMessage) error {
 	body, err := json.Marshal(struct {
 		Outbounds []json.RawMessage `json:"outbounds"`
@@ -309,13 +399,12 @@ func (u *CoreUpdater) addOutbounds(ctx context.Context, api *runnerapi.Client, s
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(u.runDir(), "hot")
-	if err := emptyHotDir(dir); err != nil {
+	if err := u.makeHotDir(); err != nil {
 		return err
 	}
 	sum := sha256.Sum256(body)
 	name := hex.EncodeToString(sum[:]) + ".json"
-	file := filepath.Join(dir, name)
+	file := filepath.Join(u.hotDir(), name)
 	if err := atomicfile.WriteFile(file, body, 0o600); err != nil {
 		return err
 	}
@@ -325,30 +414,6 @@ func (u *CoreUpdater) addOutbounds(ctx context.Context, api *runnerapi.Client, s
 		}
 	}()
 	return xrayAPI(ctx, api, "ado", server, path.Join(cmp.Or(u.RunnerRun, defaultRunnerRun), "hot", name))
-}
-
-// emptyHotDir makes dir, run/hot/, with mode 0700, and removes every file in
-// it.
-func emptyHotDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return err
-	}
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	for _, e := range ents {
-		if e.IsDir() {
-			continue
-		}
-		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-	}
-	return nil
 }
 
 // xrayAPI runs "xray api <args>" in the runner. Anything but exit 0 is an
@@ -366,24 +431,72 @@ func xrayAPI(ctx context.Context, c *runnerapi.Client, args ...string) error {
 }
 
 // fellBack completes res, the outcome of the trial that applied the config
-// after the hot change h failed: its Detail starts with why. When a call may
-// have changed xray and the trial never restarted it, being refused, or
-// rejected by xray run -test, xray is restarted from the active config, so
-// that it runs nothing the runner does not record.
+// after the hot change h failed: its Detail starts with why. When the change
+// may have reached xray (the marker is there), xray is brought back to what
+// the runner records (see resync).
 func (u *CoreUpdater) fellBack(ctx context.Context, h hotAttempt, res *Result) {
-	msg := "the hot change failed (" + u.redact(h.failed.Error()) + "), so it was applied with a trial"
-	if res.Detail != "" {
-		msg += ": " + res.Detail
+	lead(res, "the hot change failed ("+u.redact(h.failed.Error())+"), so a trial was tried")
+	if h.touched {
+		u.resync(ctx, h.pid, res)
 	}
-	res.Detail = msg
-	if !h.touched || (res.Outcome != OutcomeRefused && res.Outcome != runnerapi.OutcomeRejected) {
-		return
+}
+
+// heal is Apply while the marker of an unfinished hot change is there, which
+// st, the runner's status, and cfg, the render, are for: xray may run
+// outbounds that the active config lacks. There is no noop and no hot
+// change. A render that is the active config has xray restarted from it; any
+// other goes on trial, after which xray is brought back to the active config
+// if nothing restarted it (resync). The marker stays until xray is known to
+// run the active config.
+func (u *CoreUpdater) heal(ctx context.Context, st runnerapi.Status, cfg *config, res *Result) error {
+	active := st.Active
+	if cfg.rel == active.Config {
+		if err := u.Runner.Restart(ctx); err != nil {
+			return refuse(res, fmt.Errorf("%s, and restarting xray from the active config failed: %w", hotUnfinished, err))
+		}
+		res.Outcome, res.Detail = runnerapi.OutcomeCommitted, hotUnfinished+", so xray was restarted from the active config"
+		u.clearPending(res)
+		return nil
 	}
+	var err error
+	if err = u.unsaved(active, cfg, "create a state first"); err != nil {
+		err = refuse(res, err)
+		lead(res, hotUnfinished)
+	} else {
+		err = u.applyTrial(ctx, *active, cfg, res, nil)
+		lead(res, hotUnfinished+", so a trial was tried")
+	}
+	u.resync(ctx, st.XrayPID, res)
+	return err
+}
+
+// resync makes sure that xray runs what the runner records as active, after a
+// hot change that may have reached it: unless an xray other than the one
+// with pid (-1: none) runs now, which was started since from the active
+// config, or from a trial's candidate, xray is restarted. The marker goes
+// once that is known; a restart that fails keeps it, for the next Apply.
+func (u *CoreUpdater) resync(ctx context.Context, pid int, res *Result) {
 	cctx, cancel := cleanupContext(ctx)
 	defer cancel()
+	if pid >= 0 {
+		if st, err := u.Runner.Status(cctx); err == nil && st.XrayPID != pid {
+			u.clearPending(res)
+			return
+		}
+	}
 	if err := u.Runner.Restart(cctx); err != nil {
 		note(res, "restarting xray from the active config failed: "+err.Error())
 		return
 	}
 	note(res, "xray was restarted from the active config")
+	u.clearPending(res)
+}
+
+// lead puts msg before what res.Detail holds, with ": " between them when it
+// holds anything.
+func lead(res *Result, msg string) {
+	if res.Detail != "" {
+		msg += ": " + res.Detail
+	}
+	res.Detail = msg
 }

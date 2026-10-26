@@ -657,8 +657,12 @@ func TestNewUpdater(t *testing.T) {
 	}
 	hotCfg := cfg
 	hotCfg.Hot, hotCfg.XrayAPI = true, "10.0.0.3:10085"
-	if u, err := newUpdater(hotCfg, runner, io.Discard, nil, true); err != nil || !u.Hot || u.XrayAPIServer != "10.0.0.3:10085" {
-		t.Errorf("with Hot: %v, Hot %v, XrayAPIServer %q", err, u.Hot, u.XrayAPIServer)
+	hu, err := newUpdater(hotCfg, runner, io.Discard, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hu.Hot || hu.XrayAPIServer != "10.0.0.3:10085" {
+		t.Errorf("with Hot: Hot %v, XrayAPIServer %q", hu.Hot, hu.XrayAPIServer)
 	}
 
 	// With no key file the index stays unused.

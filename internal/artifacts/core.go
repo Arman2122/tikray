@@ -199,6 +199,7 @@ func (u *CoreUpdater) locked(res *Result, fn func() error) (Result, error) {
 	} else {
 		defer unlock() // after record, so the history line is written under the lock
 		u.sweepTemp()
+		u.sweepHot()
 		err = fn()
 	}
 	return u.record(*res, err)
@@ -352,6 +353,11 @@ func (u *CoreUpdater) apply(ctx context.Context, res *Result) error {
 	cfg, err := u.render(v, active.Geo)
 	if err != nil {
 		return refuse(res, err)
+	}
+	// A hot change that did not finish may have left xray with outbounds the
+	// active config lacks, whatever Hot is now.
+	if HotPending(u.Data) {
+		return u.heal(ctx, st, cfg, res)
 	}
 	if cfg.rel == active.Config {
 		res.Outcome, res.Detail = OutcomeNoop, "already active"
