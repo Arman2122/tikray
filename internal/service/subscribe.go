@@ -271,8 +271,9 @@ func (s *Service) RefreshSubscription(ctx context.Context, id string) (RefreshRe
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrConflict):
-		// The state changed twice meanwhile: no fault of the subscription's,
-		// and the next look tries again.
+		// The state changed twice meanwhile, or the subscription points
+		// elsewhere now: no failure of its list, and the next look tries
+		// again.
 		s.record(KindError, fmt.Sprintf("subscription %s (%s): the refresh was not stored: %v", sub.ID, sub.Name, err))
 		return RefreshResult{}, err
 	case errors.Is(err, ErrNotFound):
