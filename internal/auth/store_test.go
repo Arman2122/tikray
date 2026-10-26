@@ -310,19 +310,10 @@ func TestResetMakesNewCode(t *testing.T) {
 	claim(t, s, dir, "alice", testPassword)
 	key := slices.Clone(s.d.CSRFKey)
 
-	// Tasks 2 and 3 keep tokens and sessions in the file: a reset ends the
-	// sessions and leaves the tokens alone.
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(readFile(t, filepath.Join(dir, "auth.json"))), &raw); err != nil {
-		t.Fatal(err)
-	}
-	raw["tokens"] = json.RawMessage(`[{"id":"t1","note":"kept"}]`)
-	raw["sessions"] = json.RawMessage(`[{"id":"s1"},{"id":"s2"}]`)
-	b, err := json.Marshal(raw)
+	// A reset ends the sessions and leaves the API tokens alone.
+	sess1, sess2 := newSessionT(t, s), newSessionT(t, s)
+	info, secret, err := s.CreateToken("kept", time.Time{})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "auth.json"), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	s, err = OpenStore(dir)
@@ -348,11 +339,11 @@ func TestResetMakesNewCode(t *testing.T) {
 	}
 
 	var file struct {
-		Version  int                 `json:"version"`
-		Admin    *json.RawMessage    `json:"admin"`
-		CSRFKey  []byte              `json:"csrf_key"`
-		Tokens   []map[string]string `json:"tokens"`
-		Sessions json.RawMessage     `json:"sessions"`
+		Version  int              `json:"version"`
+		Admin    *json.RawMessage `json:"admin"`
+		CSRFKey  []byte           `json:"csrf_key"`
+		Tokens   []struct{ ID, Name string }
+		Sessions json.RawMessage `json:"sessions"`
 	}
 	if err := json.Unmarshal([]byte(readFile(t, filepath.Join(dir, "auth.json"))), &file); err != nil {
 		t.Fatal(err)
@@ -363,11 +354,19 @@ func TestResetMakesNewCode(t *testing.T) {
 	if !bytes.Equal(file.CSRFKey, key) {
 		t.Error("a reset changed the CSRF key")
 	}
-	if len(file.Tokens) != 1 || file.Tokens[0]["id"] != "t1" || file.Tokens[0]["note"] != "kept" {
+	if len(file.Tokens) != 1 || file.Tokens[0].ID != info.ID || file.Tokens[0].Name != "kept" {
 		t.Errorf("a reset changed the tokens: %v", file.Tokens)
+	}
+	if _, ok := s.CheckToken(secret); !ok {
+		t.Error("a reset ended an API token")
 	}
 	if got := string(bytes.TrimSpace(file.Sessions)); got != "[]" {
 		t.Errorf("a reset left the sessions as %s, want []", got)
+	}
+	for _, sess := range []Session{sess1, sess2} {
+		if _, ok := s.Session(sess.ID); ok {
+			t.Error("a reset left a session")
+		}
 	}
 
 	// The old code is dead, the new one makes an admin, and it all survives
@@ -413,7 +412,7 @@ func TestFileHasNoSecretsInClear(t *testing.T) {
 
 	const pass, next = "the first password", "the second password"
 	claim(t, s, dir, "alice", pass)
-	if err := s.ChangePassword(ctx, pass, next); err != nil {
+	if err := s.ChangePassword(ctx, "", pass, next); err != nil {
 		t.Fatal(err)
 	}
 	auth := readFile(t, filepath.Join(dir, "auth.json"))
@@ -481,6 +480,14 @@ func TestOpenRefusesAFileItCannotUse(t *testing.T) {
 		"CSRF key not base64":   `{"version":1,"csrf_key":"SECRETMARKER!"}`,
 		"CSRF key of a number":  `{"version":1,"csrf_key":7}`,
 		"tokens of another typ": `{"version":1,"tokens":"SECRETMARKER"}`,
+		// A username that was edited in by hand is held to the rules of
+		// ValidUsername, so that it is never shown with a control character or a
+		// bidi mark in it.
+		"username with a control": `{"version":1,"admin":{"username":"SECRETMARKER\u0007","hash":"` + good + `"},` + key + `}`,
+		"username with a newline": `{"version":1,"admin":{"username":"SECRETMARKER\n","hash":"` + good + `"},` + key + `}`,
+		"username with a bidi":    `{"version":1,"admin":{"username":"SECRETMARKER‮","hash":"` + good + `"},` + key + `}`,
+		"username with a C1":      `{"version":1,"admin":{"username":"SECRETMARKER\u0085","hash":"` + good + `"},` + key + `}`,
+		"username too long":       `{"version":1,"admin":{"username":"` + strings.Repeat("a", 65) + `","hash":"` + good + `"},` + key + `}`,
 	}
 	for name, content := range cases {
 		dir := t.TempDir()
@@ -506,6 +513,48 @@ func TestOpenRefusesAFileItCannotUse(t *testing.T) {
 	if _, err := OpenStore(dir); err == nil {
 		t.Error("OpenStore took a directory for auth.json")
 	}
+
+	// A name that passes the rules, in any script, is taken.
+	dir = t.TempDir()
+	ok := `{"version":1,"admin":{"username":"管理者","hash":"` + good + `"},` + key + `}`
+	if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(ok), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("OpenStore refused a file with a username that passes the rules: %v", err)
+	}
+	if got := adminOf(t, s).Username; got != "管理者" {
+		t.Error("the admin's username was not read as it was written")
+	}
+}
+
+func TestResetRemovesTheOldCodeBeforeItCommits(t *testing.T) {
+	// A crash between the commit of "no admin" and the new code must not leave
+	// the old code beside no admin, where it would claim the admin again. So
+	// the old file goes first: a Reset whose commit fails (auth.json here is a
+	// directory) has already removed it, and no crash point has it.
+	s, dir := openTest(t)
+	old := readFile(t, filepath.Join(dir, "setup.code"))
+	authPath := filepath.Join(dir, "auth.json")
+	if err := os.Remove(authPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(authPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reset(); err == nil {
+		t.Fatal("Reset saved to a directory")
+	}
+	if exists(filepath.Join(dir, "setup.code")) {
+		t.Error("the old setup code was still on disk when the commit of the reset was made")
+	}
+	// What is left is what OpenStore and SetupCode already mend: no admin, no
+	// code, and a new one on the next ask, never the old one.
+	got, err := s.SetupCode()
+	if err != nil || got == old || !codeForm.MatchString(got) {
+		t.Errorf("SetupCode after a failed reset: (%v), want a new code", err)
+	}
 }
 
 func TestChangePassword(t *testing.T) {
@@ -521,24 +570,24 @@ func TestChangePassword(t *testing.T) {
 	s.now = func() time.Time { return t1 }
 
 	// Nothing that fails changes the admin.
-	if err := s.ChangePassword(ctx, testPassword+"x", next); !errors.Is(err, ErrBadPassword) {
+	if err := s.ChangePassword(ctx, "", testPassword+"x", next); !errors.Is(err, ErrBadPassword) {
 		t.Errorf("a wrong current password: %v, want ErrBadPassword", err)
 	}
 	for name, bad := range map[string]string{"short": "short", "the username": "alice", "long": strings.Repeat("a", 257)} {
-		if err := s.ChangePassword(ctx, testPassword, bad); !errors.Is(err, ErrInvalid) {
+		if err := s.ChangePassword(ctx, "", testPassword, bad); !errors.Is(err, ErrInvalid) {
 			t.Errorf("a new password that is %s: %v, want a validation error", name, err)
 		}
 	}
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if err := s.ChangePassword(cancelled, testPassword, next); !errors.Is(err, context.Canceled) {
+	if err := s.ChangePassword(cancelled, "", testPassword, next); !errors.Is(err, context.Canceled) {
 		t.Errorf("a change with a cancelled context: %v, want context.Canceled", err)
 	}
 	if got := adminOf(t, s); got != before {
 		t.Error("a change that failed altered the admin")
 	}
 
-	if err := s.ChangePassword(ctx, testPassword, next); err != nil {
+	if err := s.ChangePassword(ctx, "", testPassword, next); err != nil {
 		t.Fatal(err)
 	}
 	after := adminOf(t, s)
@@ -552,7 +601,7 @@ func TestChangePassword(t *testing.T) {
 		t.Errorf("the old password still checks (%v, %v)", ok, err)
 	}
 	// The old one is not the current one any more.
-	if err := s.ChangePassword(ctx, testPassword, "yet another long password"); !errors.Is(err, ErrBadPassword) {
+	if err := s.ChangePassword(ctx, "", testPassword, "yet another long password"); !errors.Is(err, ErrBadPassword) {
 		t.Errorf("the old password as the current one: %v, want ErrBadPassword", err)
 	}
 
@@ -572,7 +621,7 @@ func TestChangePassword(t *testing.T) {
 	if err := s2.Reset(); err != nil {
 		t.Fatal(err)
 	}
-	if err := s2.ChangePassword(ctx, next, "yet another long password"); err == nil {
+	if err := s2.ChangePassword(ctx, "", next, "yet another long password"); err == nil {
 		t.Error("a password was changed with no admin")
 	} else {
 		noSecrets(t, "no admin", err, next, "yet another long password")
@@ -592,7 +641,7 @@ func TestChangePasswordRacing(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[i] = s.ChangePassword(ctx, testPassword, pw)
+			errs[i] = s.ChangePassword(ctx, "", testPassword, pw)
 		}()
 	}
 	wg.Wait()
@@ -627,8 +676,8 @@ func TestErrorsCarryNoSecrets(t *testing.T) {
 	hash := adminOf(t, s).Hash
 	secrets = append(secrets, hash)
 	noSecrets(t, "claimed", s.Claim(ctx, code, "alice", long), secrets...)
-	noSecrets(t, "wrong current", s.ChangePassword(ctx, wrong, long+"!"), secrets...)
-	noSecrets(t, "short new", s.ChangePassword(ctx, long, pw), secrets...)
+	noSecrets(t, "wrong current", s.ChangePassword(ctx, "", wrong, long+"!"), secrets...)
+	noSecrets(t, "short new", s.ChangePassword(ctx, "", long, pw), secrets...)
 	_, err := s.SetupCode()
 	noSecrets(t, "setup code of a claimed store", err, secrets...)
 	_, err = CheckPassword(ctx, "$argon2id$v=19$m=1,t=2,p=1$"+hash, long)

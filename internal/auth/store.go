@@ -1,12 +1,15 @@
 // Package auth keeps who may use the API: the admin account and its argon2id
-// password, the one-time setup code that claims it and the file they are
-// saved in (auth.json, beside setup.code, in the state directory). Sessions,
-// API tokens, CSRF and the limit on failed sign-ins are built on its Store.
+// password, the one-time setup code that claims it, the sessions that signing
+// in starts, the named API tokens for scripts, the key of the CSRF tokens and
+// the file they are saved in (auth.json, beside setup.code, in the state
+// directory). The Limiter, which holds no state in the file, limits failed
+// sign-ins by client.
 //
 // No error of this package shows anything secret: not a password, not a hash
-// string, not a setup code, not a piece of auth.json. The setup code is in
-// setup.code, and shown by `tikray setup-code`; no password is in any file,
-// only its hash.
+// string, not a setup code, not a session id, a CSRF token or an API token, not
+// a piece of auth.json. The setup code is in setup.code, and shown by
+// `tikray setup-code`; no password, session id or token is in any file, only
+// its hash.
 package auth
 
 import (
@@ -61,14 +64,14 @@ type admin struct {
 	ChangedAt time.Time `json:"changed_at"`
 }
 
-// fileData is auth.json. Tokens and Sessions are kept as they are read until
-// the code that owns them takes them over.
+// fileData is auth.json. The sessions and the API tokens are in it only as
+// SHA-256 hashes and times (session.go, token.go).
 type fileData struct {
-	Version  int               `json:"version"`
-	Admin    *admin            `json:"admin,omitempty"`
-	CSRFKey  []byte            `json:"csrf_key"`
-	Tokens   []json.RawMessage `json:"tokens"`
-	Sessions []json.RawMessage `json:"sessions"`
+	Version  int             `json:"version"`
+	Admin    *admin          `json:"admin,omitempty"`
+	CSRFKey  []byte          `json:"csrf_key"`
+	Tokens   []tokenRecord   `json:"tokens"`
+	Sessions []sessionRecord `json:"sessions"`
 }
 
 // Store holds the admin and the secrets kept with it, and saves them to
@@ -77,13 +80,26 @@ type fileData struct {
 //
 // One process owns a state directory (tikray serve holds state/serve.lock):
 // two Stores on one directory would overwrite each other's writes.
+//
+// A write builds the next state beside the current one and saves it before it
+// becomes the state (commit), so that a write that fails changes nothing. The
+// exceptions are told where they are made: the use of a session or a token,
+// which is noted in memory and saved with the next write or when the saved one
+// is stale enough, and the end of a session by SignOut or EndOtherSessions,
+// which holds even when it can't be saved (a sign-out that fails silently would
+// be worse than one that is saved late).
 type Store struct {
-	dir string
-	now func() time.Time
+	dir     string
+	now     func() time.Time
+	csrfKey []byte // the key of the CSRF tokens: set by OpenStore, never changed
 
 	mu sync.Mutex // guards d, and orders the writes of the two files
 	d  fileData
 }
+
+// clock is the time now, in UTC and with no monotonic reading, as it is
+// compared with what auth.json holds.
+func (s *Store) clock() time.Time { return s.now().UTC().Round(0) }
 
 // OpenStore opens the store in dir, which is made (mode 0700) when it is
 // missing. A missing auth.json is no admin. A key for CSRF tokens is made when
@@ -116,6 +132,7 @@ func OpenStore(dir string) (*Store, error) {
 		}
 	}
 	s.d = d
+	s.csrfKey = d.CSRFKey
 
 	if d.Admin != nil {
 		if err := s.removeCode(); err != nil {
@@ -158,13 +175,24 @@ func loadFile(path string) (d fileData, found bool, err error) {
 		return d, false, fmt.Errorf("auth: %s holds a CSRF key of %d bytes, want %d", path, n, csrfKeyLen)
 	}
 	if d.Admin != nil {
-		if d.Admin.Username == "" {
-			return d, false, fmt.Errorf("auth: %s holds an admin with no username", path)
+		// A name edited in by hand is held to the rules of a new one, so that
+		// a control character or a bidi mark is never shown from here. The
+		// error does not quote it.
+		if err := ValidUsername(d.Admin.Username); err != nil {
+			return d, false, fmt.Errorf("auth: %s holds an admin whose username this tikray can't use", path)
 		}
 		if _, _, err := parsePHC(d.Admin.Hash); err != nil {
 			return d, false, fmt.Errorf("auth: %s holds a password hash this tikray can't use", path)
 		}
 	}
+	if !validTokenRecords(d.Tokens) {
+		return d, false, fmt.Errorf("auth: %s holds an API token this tikray can't use", path)
+	}
+	if !validSessionRecords(d.Sessions) {
+		return d, false, fmt.Errorf("auth: %s holds a session this tikray can't use", path)
+	}
+	// What was read is what is saved.
+	d.markSaved()
 	return d, true, nil
 }
 
@@ -188,10 +216,10 @@ func describeJSONError(err error) string {
 // sessions. Callers hold s.mu, or have the store to themselves.
 func (s *Store) save(d fileData) error {
 	if d.Tokens == nil {
-		d.Tokens = []json.RawMessage{}
+		d.Tokens = []tokenRecord{}
 	}
 	if d.Sessions == nil {
-		d.Sessions = []json.RawMessage{}
+		d.Sessions = []sessionRecord{}
 	}
 	b, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {
@@ -206,12 +234,28 @@ func (s *Store) save(d fileData) error {
 // commit saves next and, only when that worked, makes it the state. Callers
 // hold s.mu. They build next without changing s.d, so that a write that fails
 // leaves the state as it was.
+//
+// It saves the use of sessions and tokens that the state holds too (the times
+// they were last used, which are noted in memory as they happen), so every
+// write is also the lazy save of those.
 func (s *Store) commit(next fileData) error {
 	if err := s.save(next); err != nil {
 		return err
 	}
 	s.d = next
+	s.d.markSaved()
 	return nil
+}
+
+// markSaved notes that the last use of every session and token is what
+// auth.json holds now.
+func (d *fileData) markSaved() {
+	for i := range d.Sessions {
+		d.Sessions[i].saved = d.Sessions[i].LastUsed
+	}
+	for i := range d.Tokens {
+		d.Tokens[i].saved = d.Tokens[i].LastUsed
+	}
 }
 
 // admin returns the admin, if there is one.
@@ -361,14 +405,19 @@ func (s *Store) Claim(ctx context.Context, code, username, password string) erro
 func (s *Store) Reset() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// The old code goes first, so that no crash point brings it back: before
+	// the commit there is no code, after it no admin and no code (which
+	// OpenStore and SetupCode mend with a new one), and only then the new code.
+	// There is no point at which the old code is on disk beside "no admin".
+	if err := s.removeCode(); err != nil {
+		return err
+	}
 	next := s.d
 	next.Admin = nil
 	next.Sessions = nil
 	if err := s.commit(next); err != nil {
 		return err
 	}
-	// In this order, so that a crash between the two leaves no admin and no
-	// code, which OpenStore mends, and not a code beside an admin.
 	_, err := s.newCode()
 	return err
 }
@@ -378,7 +427,13 @@ func (s *Store) Reset() error {
 // is an ErrInvalid. Both passwords are checked and hashed outside the lock;
 // when the admin's password changed in between (another change), current is
 // no longer the current password, and it is ErrBadPassword too.
-func (s *Store) ChangePassword(ctx context.Context, current, next string) error {
+//
+// With the new password every session but keep, the id of the one that asks
+// for the change, ends: in the very write that saves the password, so that
+// there is no state with the new password and a session that was made with
+// the old. An empty keep (or the id of no session) ends them all. The API
+// tokens stay.
+func (s *Store) ChangePassword(ctx context.Context, keep, current, next string) error {
 	a, ok := s.admin()
 	if !ok {
 		return errNoAdmin
@@ -405,5 +460,6 @@ func (s *Store) ChangePassword(ctx context.Context, current, next string) error 
 	}
 	d := s.d
 	d.Admin = &admin{Username: a.Username, Hash: hash, ChangedAt: s.now().UTC()}
+	d.Sessions = onlySession(d.Sessions, keep)
 	return s.commit(d)
 }
