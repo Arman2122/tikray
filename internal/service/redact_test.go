@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -96,6 +97,41 @@ func TestRedactorFindsSecretsAnywhere(t *testing.T) {
 		secret{"a listed password", "list-pass-5"},
 		secret{"another", "list-pass-6"},
 	)
+}
+
+// The other protocols' credentials, as xray's config names them: SOCKS's and
+// HTTP's user and pass, MASQUE's pass, Hysteria 2's auth, a TLS client
+// certificate's key (its PEM lines) and XDrive's secrets, in any case.
+func TestRedactorCoversOtherCredentials(t *testing.T) {
+	for _, c := range []struct {
+		name, outbound string
+		secrets        []string
+	}{
+		{"socks", `{"protocol":"socks","settings":{"servers":[{"address":"192.0.2.7","port":1080,"users":[{"user":"socks-user-1","pass":"socks-pass-2"}]}]}}`,
+			[]string{"socks-user-1", "socks-pass-2"}},
+		{"http", `{"protocol":"http","settings":{"servers":[{"address":"192.0.2.7","port":8080,"users":[{"User":"http-user-3","PASS":"http-pass-4"}]}]}}`,
+			[]string{"http-user-3", "http-pass-4"}},
+		{"masque", `{"protocol":"masque","settings":{"address":"192.0.2.7","port":443,"pass":"masque-pass-5"}}`,
+			[]string{"masque-pass-5"}},
+		{"hysteria2", `{"protocol":"hysteria","settings":{"version":2,"address":"192.0.2.7","port":443},"streamSettings":{"network":"hysteria","hysteriaSettings":{"version":2,"Auth":"hy2-auth-6"}}}`,
+			[]string{"hy2-auth-6"}},
+		{"a client certificate's key", `{"protocol":"vless","streamSettings":{"security":"tls","tlsSettings":{"certificates":[{"usage":"encipherment","certificate":["cert-line-7"],"key":["key-line-8","key-line-9"]}]}}}`,
+			[]string{"key-line-8", "key-line-9"}},
+		{"xdrive", `{"protocol":"vless","streamSettings":{"network":"xdrive","xdriveSettings":{"service":"gdrive","Secrets":["drive-secret-10","drive-secret-11"]}}}`,
+			[]string{"drive-secret-10", "drive-secret-11"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			st := store.Default()
+			st.Servers = []store.Server{server("00000001", c.outbound)}
+			text := strings.Join(c.secrets, " ") + " 192.0.2.7 cert-line-7"
+			var secrets []secret
+			for i, s := range c.secrets {
+				secrets = append(secrets, secret{fmt.Sprintf("secret %d", i), s})
+			}
+			want := strings.Repeat(redacted+" ", len(c.secrets)) + "192.0.2.7 cert-line-7"
+			wantText(t, RedactorFor(st)(text), want, secrets...)
+		})
+	}
 }
 
 // A secret that holds another is replaced whole, whichever comes first.

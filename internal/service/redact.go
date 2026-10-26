@@ -20,14 +20,21 @@ const minSecret = 4
 
 // secretKeys are the keys of an outbound whose string values are
 // credentials, in lower case: xray matches its keys without regard to case.
-// secretKey is WireGuard's private key, as xray names it.
-var secretKeys = map[string]bool{"id": true, "password": true, "privatekey": true, "presharedkey": true, "seed": true, "secretkey": true}
+// secretKey is WireGuard's private key, as xray names it; user and pass are
+// SOCKS's and HTTP's (pass MASQUE's too), auth is Hysteria 2's, key a TLS
+// client certificate's, and secrets XDrive's.
+var secretKeys = map[string]bool{
+	"id": true, "password": true, "privatekey": true, "presharedkey": true, "seed": true, "secretkey": true,
+	"user": true, "pass": true, "auth": true, "key": true, "secrets": true,
+}
 
 // RedactorFor returns a function that replaces every secret of st in a text
 // with ‹redacted›. The secrets are:
 //   - in each server's outbound, the strings under the keys id, password,
-//     privateKey, preSharedKey, seed and secretKey (WireGuard's private key),
-//     in any case and at any depth, and the strings of a list under them;
+//     privateKey, preSharedKey, seed, secretKey (WireGuard's private key),
+//     user and pass (SOCKS's, HTTP's and MASQUE's), auth (Hysteria 2's), key
+//     (a TLS client certificate's) and secrets (XDrive's), in any case and at
+//     any depth, and the strings of a list under them;
 //   - each server's share link, which encodes its credentials (an SS link
 //     holds its password in base64);
 //   - each subscription URL, as it is, as its parsed form, with its password
