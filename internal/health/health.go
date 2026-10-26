@@ -134,7 +134,8 @@ type Monitor struct {
 	pollFails int
 	lastObs   []xray.OutboundStatus
 	haveObs   bool
-	// probeRes is the last probe's result, run at probeAt.
+	// probeRes is the last probe's result, run at probeAt. A zero probeAt
+	// has the next check probe.
 	probeRes ProbeHealth
 	probeAt  time.Time
 }
@@ -179,17 +180,21 @@ func (m *Monitor) Run(ctx context.Context) {
 			return
 		case <-t.C:
 		case <-pokes:
+			// The last probe saw what the poke's change may have changed.
+			m.probeAt = time.Time{}
 		}
 		m.tick(ctx)
 	}
 }
 
-// Poke asks Run for a check now rather than at the next Interval: the caller
-// has changed what the last check saw, as an apply or a core update does,
-// which puts the runner on trial and back. It never blocks. Pokes that come
-// before Run takes the first of them count as one, so any number of pokes
-// during a check lead to one check after it. A poke before Run starts is
-// served by Run's first check, and one after Run has returned by none.
+// Poke asks Run for a check now rather than at the next Interval, and one
+// that probes however recent the last probe is: the caller has changed what
+// the last check saw, as an apply or a core update does, which puts the
+// runner on trial and back and may change what the proxy carries. It never
+// blocks. Pokes that come before Run takes the first of them count as one,
+// so any number of pokes during a check lead to one check after it. A poke
+// before Run starts is served by Run's first check, and one after Run has
+// returned by none.
 func (m *Monitor) Poke() {
 	select {
 	case m.pokeChan() <- struct{}{}:

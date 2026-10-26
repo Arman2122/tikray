@@ -869,6 +869,28 @@ func TestPokeChecksAtOnce(t *testing.T) {
 	}
 }
 
+// The check that a poke leads to runs the probe too, though the last one ran
+// well within ProbeEvery: it probed the config before the change the poke
+// follows, and its result would stand for up to ProbeEvery more.
+func TestPokeMakesTheProbeDue(t *testing.T) {
+	r := newRig(t, stateOf(srv(idA)))
+	r.m.Interval, r.m.ProbeEvery = time.Hour, time.Hour
+	r.xray.status = []xray.OutboundStatus{up(idA, time.Millisecond)}
+	r.probe.err = errors.New("socks probe: HTTP 503")
+	stop := r.runMonitor()
+	defer stop()
+	waitFor(t, "the first check", func() bool { return r.m.Snapshot().Level == LevelDegraded })
+
+	// 10 s later, a change fixes what the probe saw, and pokes.
+	r.probe.err = nil
+	r.clock.advance(10 * time.Second)
+	r.m.Poke()
+	waitFor(t, "the check after the poke", func() bool { return r.m.Snapshot().At.Equal(r.clock.Now()) })
+	if snap := r.m.Snapshot(); r.probe.calls != 2 || !snap.Probe.OK || snap.Level != LevelOK {
+		t.Errorf("after the poke: %d probes, Probe %+v, Level %q; want a second probe, which passes", r.probe.calls, snap.Probe, snap.Level)
+	}
+}
+
 // Pokes while a check runs lead to one check after it, not one each, and
 // checks never overlap.
 func TestPokesCoalesce(t *testing.T) {
