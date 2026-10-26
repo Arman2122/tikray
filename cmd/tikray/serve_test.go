@@ -370,6 +370,21 @@ func TestServeWithoutTheRunnerToken(t *testing.T) {
 	if strings.Contains(r.stderr.String(), testToken) {
 		t.Errorf("stderr shows the runner token:\n%s", r.stderr.String())
 	}
+	// Until then the runner can't be reached, which the calls that need it
+	// answer as such (503), not as a fault of the service (500).
+	for name, call := range map[string]apiCall{
+		"GET /v1/core":           (*apiclient.Client).Core,
+		"POST /v1/apply":         (*apiclient.Client).Apply,
+		"POST /v1/core/rollback": (*apiclient.Client).CoreRollback,
+		"POST /v1/core/update": func(cl *apiclient.Client, ctx context.Context) (apiclient.Response, error) {
+			return cl.CoreUpdate(ctx, "26.10.21", false)
+		},
+	} {
+		var e *apiclient.Error
+		if _, err := call(cl, context.Background()); !errors.As(err, &e) || e.Status != 503 || e.Code != "runner_unavailable" {
+			t.Errorf("%s without the runner token: %v, want 503 runner_unavailable", name, err)
+		}
+	}
 
 	// The runner makes its token. An empty file, as a runner that has opened it
 	// but not written it leaves, is not one.

@@ -568,6 +568,29 @@ func TestRunnerUnavailable(t *testing.T) {
 	}
 }
 
+// A runner whose token is not there yet can't be reached, as one that does not
+// answer can't: the calls fail before anything is sent.
+func TestRunnerWithoutItsTokenIsUnavailable(t *testing.T) {
+	e := newEnv(t)
+	e.edit()
+	runner := e.runner.client()
+	runner.TokenFunc = func(context.Context) (string, error) { return "", runnerapi.ErrNoToken }
+	e.s = e.newService(Config{Runner: runner})
+	for name, call := range map[string]func() error{
+		"ApplyNow":     func() error { _, err := e.s.ApplyNow(bg); return err },
+		"CoreUpdate":   func() error { _, err := e.s.CoreUpdate(bg, testCore, artifacts.UpdateOptions{}); return err },
+		"CoreRollback": func() error { _, err := e.s.CoreRollback(bg); return err },
+		"Core":         func() error { _, err := e.s.Core(bg); return err },
+	} {
+		if err := call(); !errors.Is(err, ErrRunnerUnavailable) || !errors.Is(err, runnerapi.ErrNoToken) {
+			t.Errorf("%s = %v, want ErrRunnerUnavailable, for the token it waits for", name, err)
+		}
+	}
+	if calls := e.runner.gotCalls(); len(calls) != 0 {
+		t.Errorf("the runner was called (%v) without a token", calls)
+	}
+}
+
 // A candidate that fails the proxy probe, which fails as net/http's calls do
 // (a *url.Error), is unhealthy while the runner answers throughout: the
 // operation's own failure, which the API answers 422 with its result, and not

@@ -364,7 +364,8 @@ func (s *Service) Core(ctx context.Context) (CoreInfo, error) {
 
 // runnerError is err, from a call to the runner, redacted, and wrapped with
 // ErrRunnerUnavailable when the call failed before the runner answered
-// (net/http's *url.Error) and not because ctx ended.
+// (net/http's *url.Error, or no token to send it with) and not because ctx
+// ended.
 func (s *Service) runnerError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
@@ -377,10 +378,11 @@ func (s *Service) runnerError(ctx context.Context, err error) error {
 }
 
 // unreachable reports whether err is a call that failed before the server
-// answered.
+// answered: net/http's call failed, or the runner's client had no token to
+// send yet (runnerapi.ErrNoToken), which the runner makes when it starts.
 func unreachable(err error) bool {
 	var ue *url.Error
-	return errors.As(err, &ue)
+	return errors.As(err, &ue) || errors.Is(err, runnerapi.ErrNoToken)
 }
 
 // redactError returns err with its text redacted. The result unwraps to err,

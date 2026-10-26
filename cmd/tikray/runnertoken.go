@@ -2,28 +2,26 @@ package main
 
 import (
 	"context"
-	"errors"
 	"os"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/Arman2122/tikray/internal/runnerapi"
 )
 
 // tokenPoll is how often the runner's token file is read again while there is
 // none. It is a variable for the tests.
 var tokenPoll = time.Second
 
-// errNoRunnerToken is what a call to the runner fails with while its token is
-// not there. It shows in the status as the runner's error.
-var errNoRunnerToken = errors.New("waiting for the runner token")
-
 // runnerToken is the token of the runner, from <data>/run/runner.token. The
 // runner makes it when it starts, and RouterOS starts both containers
 // together, so tikray serve may be ready before it: it does not exit for that.
 // The runner client (runnerapi.Client.TokenFunc) fails fast with
-// errNoRunnerToken until the token is there, and reads it again at each call;
-// watch reads it every tokenPoll, so that the service learns of it at once.
-// Once read the token is kept.
+// runnerapi.ErrNoToken until the token is there (the status shows it as the
+// runner's error, and the service takes it for a runner it can't reach), and
+// reads it again at each call; watch reads it every tokenPoll, so that the
+// service learns of it at once. Once read the token is kept.
 type runnerToken struct {
 	path string
 	tok  atomic.Pointer[string]
@@ -58,7 +56,7 @@ func (t *runnerToken) ready() bool {
 // get is the runnerapi.Client.TokenFunc.
 func (t *runnerToken) get(context.Context) (string, error) {
 	if !t.ready() {
-		return "", errNoRunnerToken
+		return "", runnerapi.ErrNoToken
 	}
 	return *t.tok.Load(), nil
 }

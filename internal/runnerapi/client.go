@@ -32,8 +32,9 @@ type Client struct {
 	// TokenFunc, if set, makes the token of each request, and Token is not
 	// used. A call whose token can't be had (it returns an error) fails with
 	// that error before anything is sent. It lets a client wait for a runner
-	// that has not made its token yet. It is called from whatever goroutine
-	// calls the client, and a copy of the client keeps it.
+	// that has not made its token yet, for which it returns ErrNoToken. It is
+	// called from whatever goroutine calls the client, and a copy of the
+	// client keeps it.
 	TokenFunc func(ctx context.Context) (string, error)
 	HTTP      *http.Client // nil means a client with a 10 s timeout
 }

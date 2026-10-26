@@ -128,6 +128,12 @@ var (
 	ErrNoCore = errors.New("runnerapi: no xray is running to test with")
 )
 
+// ErrNoToken is what a Client's TokenFunc returns, or wraps, while it has no
+// token to give: the runner makes its token when it starts. The call fails
+// with it before anything is sent, as a call to a runner that can't be reached
+// fails, and its error, which wraps it, carries "runnerapi:" and the route.
+var ErrNoToken = errors.New("waiting for the runner token")
+
 // TestFailedError is what Trial returns when "xray run -test" rejects the
 // candidate. Output is what xray printed.
 type TestFailedError struct{ Output string }
