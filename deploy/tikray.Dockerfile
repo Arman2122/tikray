@@ -10,6 +10,10 @@
 # entrypoint with other arguments, and the ones that change the state talk to
 # the service over its API. M1 ran it as a one-shot CLI, by `/container/set
 # cmd=`; the entrypoint takes the arguments, and a `cmd` replaces `serve`.
+# RouterOS keeps CMD as the container's default-cmd and runs it while cmd is
+# unset. `cmd=""` is not unset: the entrypoint then runs without `serve`, and
+# tikray prints its usage and exits 2. `/container/unset <container> cmd` goes
+# back to `serve` (CHR 7.25, M2b).
 #
 # The base is pinned by the digest of its multi-arch index, so that the amd64
 # and the arm64 build take their variants of the same release: busybox

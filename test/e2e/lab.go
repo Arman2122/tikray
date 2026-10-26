@@ -490,13 +490,15 @@ func serveWithin() time.Duration {
 	return 2 * time.Minute
 }
 
-// startServe starts the tikray container running tikray serve, the image's
-// default command. RouterOS does not take an image's CMD: a container whose
-// cmd is empty runs the ENTRYPOINT with no arguments (7.25 x86_64, the first
-// TestService run: tikray printed its usage and exited 2). So the container's
-// cmd is set to serve, as a one-shot run of the CLI (runTikray) sets it to its
-// arguments. It waits for the container to be stopped first (an image being
-// extracted, or a CLI run, is not over yet), and then until it runs.
+// startServe starts the tikray container with the image's own command, CMD
+// ["serve"], which runs tikray serve. RouterOS keeps the image's ENTRYPOINT
+// and CMD as the container's default-entrypoint and default-cmd, and runs
+// default-cmd while the container's cmd is unset. A cmd set to "" is not
+// unset: the container then runs the ENTRYPOINT without serve (7.25 x86_64:
+// tikray printed its usage and exited 2). So the cmd that a one-shot
+// run of the CLI (runTikray) sets is unset here. startServe waits for the
+// container to be stopped first (an image being extracted, or a CLI run, is
+// not over yet), and then until it runs.
 func (l *Lab) startServe(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, serveWithin())
 	defer cancel()
@@ -504,7 +506,7 @@ func (l *Lab) startServe(ctx context.Context) error {
 	if err := waitContainer(ctx, c, "tikray", "stopped"); err != nil {
 		return err
 	}
-	if _, err := c.Run(ctx, `/container/set [find name=tikray] cmd="serve"`); err != nil {
+	if _, err := c.Run(ctx, "/container/unset [find name=tikray] cmd"); err != nil {
 		return err
 	}
 	if _, err := c.Run(ctx, "/container/start [find name=tikray]"); err != nil {
