@@ -45,12 +45,13 @@ const baselineSkipped = "the proxy probe fails on the active config too"
 // its default command, tikray serve, and drives the service through its HTTPS
 // API as a client would, in order: the service comes up with its pinned
 // certificate and token, a core update bootstraps xray, a server from a share
-// link and a smart device are applied, a subscription adds a server that takes
-// over when the first stops, a block page fails a refresh without losing the
-// server, a kill switch is applied while every server is down, a server that
-// xray refuses is refused before it is saved, and a restart keeps the
-// revision, the applied config, the certificate and the token. Each check
-// builds on the ones before it. The results file is written either way.
+// link and a smart device are applied, a subscription adds a second server and
+// the other takes over when the one xray picked stops, a block page fails a
+// refresh by both paths without losing the server, a kill switch is applied
+// while every server is down, a server that xray refuses is refused before it
+// is saved, and a restart keeps the revision, the applied config, the
+// certificate and the token, and runs no trial. Each check builds on the ones
+// before it. The results file is written either way.
 func TestService(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Minute)
 	defer cancel()
@@ -70,6 +71,9 @@ func TestService(t *testing.T) {
 	}
 	// The IDs the service gave lab-a, lab-b and the subscription.
 	var serverA, serverB, subID string
+	// stopped is the VLESS server ("a" or "b") that subscription_refresh
+	// stopped: the one xray had picked.
+	var stopped string
 
 	// status is GET /v1/status.
 	status := func(ctx context.Context, api *apiclient.Client) (service.Status, error) {
@@ -186,9 +190,14 @@ func TestService(t *testing.T) {
 			t.Errorf("serve printed the certificate sha256 %s, and Lab.api pinned %s from state/tls.crt", last, api.Fingerprint)
 		}
 
-		// The CLI is on the container's PATH, for /container/shell.
+		// The CLI is on the container's PATH, for /container/shell: what the
+		// shell ran is the status, and not "sh: tikray: not found".
 		out, ran := l.shellCLI(ctx)
-		note("tikray status in /container/shell (ran: %v): %q", ran, strings.Join(strings.Fields(out), " "))
+		line := strings.Join(strings.Fields(out), " ")
+		note("tikray status in /container/shell (ran: %v): %q", ran, line)
+		if ran && !strings.Contains(out, "revision") {
+			t.Errorf("tikray status in /container/shell printed %q, want the status, which starts with its revision", line)
+		}
 	})
 
 	check("bootstrap_core", func(t *testing.T, note func(string, ...any)) {
@@ -290,8 +299,27 @@ func TestService(t *testing.T) {
 		if err != nil {
 			t.Fatalf("refresh: %v; container log:\n%s", err, containerLog(c, 30))
 		}
-		if rr.Added != 1 {
-			t.Errorf("refresh added %d servers, want 1", rr.Added)
+		// A new subscription is due at the scheduler's next look, once a
+		// minute, which can come between the two calls: the manual refresh
+		// then finds lab-b there already, and the event of the scheduler's
+		// refresh says it added it.
+		switch {
+		case rr.Added == 1:
+			note("the manual refresh added lab-b")
+		case rr.Added == 0 && rr.Kept == 1:
+			var evs []service.Event
+			call(t, "GET /v1/events", &evs, func(ctx context.Context) (apiclient.Response, error) { return api.Events(ctx, 0) })
+			added := fmt.Sprintf("subscription %s (%s): added 1,", sub.ID, sub.Name)
+			i := slices.IndexFunc(evs, func(e service.Event) bool {
+				return e.Kind == service.KindRefresh && strings.HasPrefix(e.Message, added)
+			})
+			if i < 0 {
+				t.Errorf("the refresh kept 1 server and added none, and no refresh event says another added it, want added 1")
+			} else {
+				note("the scheduler's refresh added lab-b first: event %q", evs[i].Message)
+			}
+		default:
+			t.Errorf("refresh added %d servers and kept %d, want added 1", rr.Added, rr.Kept)
 		}
 		for _, srv := range servers(t, api) {
 			if srv.Name == "lab-b" {
@@ -311,23 +339,63 @@ func TestService(t *testing.T) {
 		if !ok {
 			t.Fatalf("within 90 s of the refresh: %s; want applied with both servers alive", describeStatus(st, nil))
 		}
-		before, _ := l.proxiedVia(ctx)
-		note("through server %q before a stops", before)
-		setServer(t, note, "a", false)
-		took, ok := poll(ctx, 30*time.Second, time.Second, func() bool {
-			server, _ := l.proxiedVia(ctx)
-			return server == "b"
+		// Stop the server that xray's balancer picked, by the status, while
+		// the LAN's traffic goes through it, so that the other has to take
+		// over. The pick can move between two reads, so the status and whoami
+		// are read until they agree.
+		names := map[string]string{serverA: "a", serverB: "b"}
+		var picked, before string
+		took, ok := poll(ctx, 30*time.Second, 2*time.Second, func() bool {
+			st, err := status(ctx, api)
+			if err != nil {
+				return false
+			}
+			picked = names[st.Health.Selected]
+			before, _ = l.proxiedVia(ctx)
+			return picked != "" && before == picked
 		})
-		note("through server b %.0fs after a stopped: %v", took.Seconds(), ok)
+		note("the status names server %q as selected and the LAN goes through %q (%.0fs): %v", picked, before, took.Seconds(), ok)
 		if !ok {
-			t.Errorf("whoami %q 30 s after server a stopped, want %s (server b)", l.whoami(ctx), serverEgress["b"])
+			t.Fatalf("within 30 s, the LAN's traffic did not go through the server the status names as selected (%q, whoami through %q)", picked, before)
+		}
+		other := map[string]string{"a": "b", "b": "a"}[picked]
+		setServer(t, note, picked, false)
+		stopped = picked
+		took, ok = poll(ctx, 30*time.Second, time.Second, func() bool {
+			server, _ := l.proxiedVia(ctx)
+			return server == other
+		})
+		note("through server %s %.0fs after %s stopped: %v", other, took.Seconds(), picked, ok)
+		if !ok {
+			t.Errorf("whoami %q 30 s after server %s stopped, want %s (server %s)", l.whoami(ctx), picked, serverEgress[other], other)
+		}
+		// The subscription's server carried the LAN's traffic, before the stop
+		// or after it.
+		carried := before == "b" || (ok && other == "b")
+		note("lab-b, the subscription's server, carried the LAN's traffic: %v (before the stop: %v)", carried, before == "b")
+		if !carried {
+			t.Error("lab-b, the subscription's server, carried the LAN's traffic neither before nor after the stop")
 		}
 	})
 
 	check("subscription_block_page", func(t *testing.T, note func(string, ...any)) {
 		api := need(t)
-		if subID == "" || serverB == "" {
-			t.Fatal("no subscription with lab-b from subscription_refresh")
+		if subID == "" || serverB == "" || stopped == "" {
+			t.Fatal("no subscription with lab-b, or no server stopped, from subscription_refresh")
+		}
+		// A refresh falls back to the proxy only while the monitor says the
+		// proxy works (ProxyHealthy): the runner running with its gateway up,
+		// and a server alive. Wait for the status to say so, with the stopped
+		// server found dead, so that both paths are tried and the proxy's goes
+		// through the server that is up.
+		ids := map[string]string{"a": serverA, "b": serverB}
+		up := map[string]string{"a": "b", "b": "a"}[stopped]
+		st, ok := waitStatus(t, note, api, 60*time.Second, "the proxy healthy through server "+up, func(st service.Status) bool {
+			r := st.Health.Runner
+			return r.Reachable && r.State == runnerapi.StateRunning && r.GatewayUp && aliveIn(st.Health, ids[up]) && !aliveIn(st.Health, ids[stopped])
+		})
+		if !ok {
+			t.Fatalf("within 60 s: %s; want the runner running with its gateway up, server %s alive and %s dead", describeStatus(st, nil), up, stopped)
 		}
 		if err := l.setSub("lab", "<html>blocked</html>"); err != nil {
 			t.Fatal(err)
@@ -344,6 +412,13 @@ func TestService(t *testing.T) {
 		note("POST /v1/subscriptions/%s/refresh: %d %s %q (%.0fs)", subID, ae.Status, ae.Code, ae.Detail, time.Since(start).Seconds())
 		if ae.Status != http.StatusBadGateway || ae.Code != "fetch_failed" {
 			t.Errorf("refresh of a block page: %d %s, want 502 fetch_failed", ae.Status, ae.Code)
+		}
+		// Both paths got the page, and refused it: direct, and through the
+		// proxy, which is the one that matters where direct is blocked.
+		for _, path := range []string{"direct", "proxy"} {
+			if !strings.Contains(ae.Detail, path+": body refused") {
+				t.Errorf("the detail does not say the %s fetch got the page and refused it (%q)", path, path+": body refused")
+			}
 		}
 		// The subscription's URL is a secret.
 		if strings.Contains(ae.Detail, "/sub/lab") {
@@ -376,8 +451,9 @@ func TestService(t *testing.T) {
 
 	check("outage_apply", func(t *testing.T, note func(string, ...any)) {
 		api := need(t)
-		setServer(t, note, "b", false) // a is down since subscription_refresh
+		// Both servers down: the one subscription_refresh stopped is already.
 		setServer(t, note, "a", false)
+		setServer(t, note, "b", false)
 		dev := store.Device{Address: lanClient, Name: "lab-client", Policy: store.Policy{Mode: store.ModeSmart, KillSwitch: true}}
 		resp := call(t, "PUT /v1/devices", nil, func(ctx context.Context) (apiclient.Response, error) { return api.SetDevice(ctx, dev) })
 		rev := resp.Revision
@@ -514,8 +590,8 @@ func TestService(t *testing.T) {
 
 		after, err := status(ctx, api)
 		note("after %.0fs: %s", time.Since(start).Seconds(), describeStatus(after, err))
-		if err != nil || after.Revision != before.Revision || !after.Applied {
-			t.Errorf("status %s after the restart, want revision %d applied", describeStatus(after, err), before.Revision)
+		if err != nil || after.Revision != before.Revision || !after.Applied || after.Pending {
+			t.Errorf("status %s after the restart, want revision %d applied, nothing pending", describeStatus(after, err), before.Revision)
 		}
 		// A restart that applied would have done it at the start, after the
 		// loop's 2 s debounce: give it time to show, then read what the new
@@ -537,6 +613,11 @@ func TestService(t *testing.T) {
 		rsAfter, err := runnerStatus(ctx)
 		if err != nil {
 			t.Fatal(err)
+		}
+		// No trial is open, and none ran: the runner runs what it ran before.
+		note("the runner %s, candidate %+v", rsAfter.State, rsAfter.Candidate)
+		if rsAfter.State != runnerapi.StateRunning || rsAfter.Candidate != nil {
+			t.Errorf("the runner is %s with candidate %+v 20 s after the restart, want running with none", rsAfter.State, rsAfter.Candidate)
 		}
 		same := reflect.DeepEqual(rsAfter.LastTrial, rsBefore.LastTrial) && reflect.DeepEqual(rsAfter.Active, rsBefore.Active)
 		note("the runner's active selection and last trial as before: %v", same)
