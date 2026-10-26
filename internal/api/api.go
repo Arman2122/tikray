@@ -232,7 +232,8 @@ func (h *handler) addServer(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	w.Header().Set("Location", "/v1/servers/"+srv.ID)
+	// The collection, where a GET finds it: no route reads one server alone.
+	w.Header().Set("Location", "/v1/servers")
 	h.reply(w, http.StatusCreated, newRev, srv)
 }
 
@@ -270,7 +271,8 @@ func (h *handler) addSubscription(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	w.Header().Set("Location", "/v1/subscriptions/"+sub.ID)
+	// The collection, as for a server.
+	w.Header().Set("Location", "/v1/subscriptions")
 	h.reply(w, http.StatusCreated, newRev, sub)
 }
 

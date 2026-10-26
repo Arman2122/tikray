@@ -543,8 +543,14 @@ func TestRoutes(t *testing.T) {
 				t.Errorf("the body is not JSON: %s", r.body)
 			}
 			if rt.status == 201 {
-				if loc := r.header.Get("Location"); !strings.HasPrefix(loc, rt.path+"/") {
-					t.Errorf("Location = %q, want a path under %s", loc, rt.path)
+				// The collection, where a GET finds what was made: no route
+				// reads one server or subscription alone.
+				loc := r.header.Get("Location")
+				if loc != rt.path {
+					t.Errorf("Location = %q, want %s", loc, rt.path)
+				}
+				if got := request(t, srv, "GET", loc, "", authed()); got.status != 200 {
+					t.Errorf("GET %s, the Location, = %d, want 200", loc, got.status)
 				}
 			}
 		})
