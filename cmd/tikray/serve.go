@@ -150,13 +150,13 @@ type serveWiring struct {
 // a PUT /v1/health takes effect without a restart. cfg.ProbeURL is therefore
 // the environment's alone, never filled in from st.
 //
-// The runner client has the package's timeouts (HTTP nil), and waits for the
-// runner's token (runnerToken).
+// The runner client has the package's timeouts (HTTP nil), waits for the
+// runner's token, and reads it again once the runner refuses it (runnerToken).
 func wireService(env Config, st store.State, pub []byte, log io.Writer) serveWiring {
 	cfg := env.withState(st)
 	cfg.ProbeURL = env.ProbeURL // withState filled it from st, which would freeze it
 	tok := newRunnerToken(filepath.Join(env.Data, "run", "runner.token"))
-	runner := &runnerapi.Client{BaseURL: cfg.RunnerURL, TokenFunc: tok.get}
+	runner := &runnerapi.Client{BaseURL: cfg.RunnerURL, TokenFunc: tok.get, Unauthorized: tok.drop}
 	return serveWiring{
 		cfg:      cfg,
 		token:    tok,

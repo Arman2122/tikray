@@ -21,7 +21,9 @@ var tokenPoll = time.Second
 // runnerapi.ErrNoToken until the token is there (the status shows it as the
 // runner's error, and the service takes it for a runner it can't reach), and
 // reads it again at each call; watch reads it every tokenPoll, so that the
-// service learns of it at once. Once read the token is kept.
+// service learns of it at once. Once read the token is kept, until the runner
+// refuses it (runnerapi.Client.Unauthorized): a runner that restarts may make
+// a new one, and drop has the next call read the file again.
 type runnerToken struct {
 	path string
 	tok  atomic.Pointer[string]
@@ -59,6 +61,14 @@ func (t *runnerToken) get(context.Context) (string, error) {
 		return "", runnerapi.ErrNoToken
 	}
 	return *t.tok.Load(), nil
+}
+
+// drop is the runnerapi.Client.Unauthorized: it forgets the token the runner
+// refused, unless another call has read a new one since.
+func (t *runnerToken) drop(refused string) {
+	if p := t.tok.Load(); p != nil && *p == refused {
+		t.tok.CompareAndSwap(p, nil)
+	}
 }
 
 // watch reads the token file every tokenPoll until the token is there, and

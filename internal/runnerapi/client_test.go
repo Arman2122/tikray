@@ -390,3 +390,41 @@ func TestClientTokenFunc(t *testing.T) {
 		t.Errorf("%d requests reached the runner, want the two with a token", len(auths))
 	}
 }
+
+// Unauthorized hears of every 401, with the token the refused request sent,
+// so that a TokenFunc that keeps its token can drop it. Other answers, and a
+// call that sent nothing, are not its business.
+func TestClientUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer good" {
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, `{"error":"unauthorized"}`)
+			return
+		}
+		io.WriteString(w, `{"state":"empty"}`)
+	}))
+	defer srv.Close()
+
+	var refused []string
+	token, failure := "good", error(nil)
+	c := &Client{BaseURL: srv.URL, TokenFunc: func(ctx context.Context) (string, error) { return token, failure },
+		Unauthorized: func(tok string) { refused = append(refused, tok) }}
+	ctx := context.Background()
+	if _, err := c.Status(ctx); err != nil {
+		t.Fatal(err)
+	}
+	token = "stale"
+	if _, err := c.Status(ctx); err == nil {
+		t.Fatal("Status with a token the runner refuses: no error")
+	}
+	if err := c.Trial(ctx); err == nil {
+		t.Fatal("Trial with a token the runner refuses: no error")
+	}
+	failure = errors.New("no token")
+	if _, err := c.Status(ctx); err == nil {
+		t.Fatal("Status without a token: no error")
+	}
+	if want := []string{"stale", "stale"}; !reflect.DeepEqual(refused, want) {
+		t.Errorf("Unauthorized heard of %q, want %q", refused, want)
+	}
+}

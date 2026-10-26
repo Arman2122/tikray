@@ -36,7 +36,13 @@ type Client struct {
 	// called from whatever goroutine calls the client, and a copy of the
 	// client keeps it.
 	TokenFunc func(ctx context.Context) (string, error)
-	HTTP      *http.Client // nil means a client with a 10 s timeout
+	// Unauthorized, if set, is called with the token of each request that the
+	// runner answers 401: it is not the runner's token, as when the runner
+	// has made a new one since TokenFunc read it. A TokenFunc that keeps its
+	// token can drop it then, to read it again for the next call. It is
+	// called as TokenFunc is.
+	Unauthorized func(token string)
+	HTTP         *http.Client // nil means a client with a 10 s timeout
 }
 
 // errBody is the runner's JSON error body.
@@ -153,6 +159,9 @@ func (c *Client) send(ctx context.Context, def *http.Client, method, path string
 		return fmt.Errorf("runnerapi: %s %s: reading response: %w", method, path, err)
 	}
 	if resp.StatusCode/100 != 2 {
+		if resp.StatusCode == http.StatusUnauthorized && c.Unauthorized != nil {
+			c.Unauthorized(token)
+		}
 		return statusError(method, path, resp, raw)
 	}
 	if out == nil {

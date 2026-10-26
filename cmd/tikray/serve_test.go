@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -477,6 +480,56 @@ func TestRunnerTokenIsWaitedFor(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the watcher did not stop with its context")
+	}
+}
+
+// A runner that makes a new token (it writes run/runner.token again when it
+// restarts) refuses the one read before. One 401 has the client read the file
+// again, and the next call is authorised.
+func TestRunnerTokenIsReadAgainAfterA401(t *testing.T) {
+	var mu sync.Mutex
+	accepted := testToken
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		ok := r.Header.Get("Authorization") == "Bearer "+accepted
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if !ok {
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, `{"error":"unauthorized"}`)
+			return
+		}
+		json.NewEncoder(w).Encode(runnerapi.Status{State: runnerapi.StateRunning})
+	}))
+	t.Cleanup(srv.Close)
+	env := serveTestEnv(t)
+	env.RunnerURL = srv.URL
+	tokenFile := filepath.Join(env.Data, "run", "runner.token")
+	if err := os.MkdirAll(filepath.Dir(tokenFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenFile, []byte(testToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := wireService(env, store.Default(), nil, io.Discard)
+	ctx := context.Background()
+	if _, err := w.runner.Status(ctx); err != nil {
+		t.Fatalf("Status with the runner's token: %v", err)
+	}
+
+	// The runner restarts with a new token.
+	const newToken = "new-runner-token"
+	if err := os.WriteFile(tokenFile, []byte(newToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	accepted = newToken
+	mu.Unlock()
+	if _, err := w.runner.Status(ctx); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("Status with the token read before: %v, want a 401", err)
+	}
+	if _, err := w.runner.Status(ctx); err != nil {
+		t.Errorf("Status after the 401: %v, want the new token read and taken", err)
 	}
 }
 
