@@ -427,9 +427,11 @@ func (c *cli) apply(ctx context.Context, args []string) int {
 // reported like the direct path's. A nil viaAPI is a command the API has no
 // route for, which is refused. Where nothing listens, this process runs the
 // updater, as below; no other failure to reach the daemon does, since two
-// processes would then write the state. The daemon's failure of an operation is
-// reported as a refused result with the daemon's words, since all the command
-// knows is that it failed.
+// processes would then write the state. The daemon's failure of an operation
+// that its updater ran to an outcome is reported with the daemon's result, as
+// the direct path reports its own; a failure without one is reported as a
+// refused result with the daemon's words, since all the command knows is that
+// it failed.
 //
 // A process that runs the updater itself owns the state for as long as it
 // runs: it takes serve.lock (lockServe), and refuses if it is held. That is a

@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/store"
 )
 
@@ -231,6 +232,38 @@ func TestErrorBodiesDecode(t *testing.T) {
 	_, err = rec.client().Status(context.Background())
 	if !errors.As(err, &apiErr) || apiErr.Status != 401 || apiErr.Code != "unauthorized" || apiErr.Detail != "" {
 		t.Errorf("error %v (%+v), want 401 unauthorized with no detail", err, apiErr)
+	}
+}
+
+// The error of an apply, an update or a rollback that ran to an outcome
+// carries the result, which the CLI reports as the direct path's.
+func TestErrorCarriesTheResult(t *testing.T) {
+	rec := newRecorder(t)
+	rec.reply = func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		io.WriteString(w, `{"error":"refused","detail":"rejected: xray says no","result":`+
+			`{"from":"26.3.27","to":"26.10.21","outcome":"rejected","kind":"config","detail":"xray says no","at":"2026-10-25T12:00:00Z"}}`+"\n")
+	}
+	_, err := rec.client().Apply(context.Background())
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error %T %v, want an *Error", err, err)
+	}
+	want := artifacts.Result{From: "26.3.27", To: "26.10.21", Outcome: "rejected", Kind: artifacts.KindConfig, Detail: "xray says no",
+		At: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)}
+	if apiErr.Status != 422 || apiErr.Code != "refused" || apiErr.Detail != "rejected: xray says no" || apiErr.Result == nil || *apiErr.Result != want {
+		t.Errorf("got %+v (result %+v), want 422 refused with the result %+v", *apiErr, apiErr.Result, want)
+	}
+
+	// An error without a result has none.
+	rec.reply = func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		io.WriteString(w, `{"error":"runner_unavailable","detail":"service: the runner can't be reached"}`)
+	}
+	_, err = rec.client().Apply(context.Background())
+	if !errors.As(err, &apiErr) || apiErr.Code != "runner_unavailable" || apiErr.Result != nil {
+		t.Errorf("error %v (%+v), want runner_unavailable with no result", err, apiErr)
 	}
 }
 

@@ -952,6 +952,61 @@ func TestErrorMapping(t *testing.T) {
 	}
 }
 
+// An apply, an update or a rollback that ran to an outcome and failed says how
+// it ended in the error body's "result", as the direct path prints it, with
+// its Detail redacted: the client reports that, not a refusal of its own. An
+// error without an outcome, and every other route, have no result.
+func TestOperationErrorsCarryTheResult(t *testing.T) {
+	unhealthy := artifacts.Result{From: "26.3.27", To: "26.10.21", Outcome: "unhealthy", Kind: artifacts.KindConfig,
+		Source: "github", Verified: "sha256", Detail: "health check failing for 15s: user " + secretID, At: t0}
+	locked := artifacts.Result{Outcome: "refused", Kind: artifacts.KindConfig, Detail: "artifacts: another core update or rollback is running", At: t0}
+	for _, c := range []struct {
+		name   string
+		err    error
+		result artifacts.Result
+		routes []string
+		status int
+		want   *artifacts.Result // the body's result
+	}{
+		{"unhealthy", errors.New("unhealthy: health check failing for 15s: user " + secretID), unhealthy,
+			[]string{"POST /v1/apply", "POST /v1/core/update", "POST /v1/core/rollback"}, 422,
+			&artifacts.Result{From: "26.3.27", To: "26.10.21", Outcome: "unhealthy", Kind: artifacts.KindConfig,
+				Source: "github", Verified: "sha256", Detail: "health check failing for 15s: user ‹redacted›", At: t0}},
+		{"the lock held", fmt.Errorf("refused: %w", artifacts.ErrLocked), locked, []string{"POST /v1/apply"}, 409, &locked},
+		{"no outcome", fmt.Errorf("%w: connection refused", service.ErrRunnerUnavailable), artifacts.Result{}, []string{"POST /v1/apply"}, 503, nil},
+		{"another route", &service.Refused{Reason: "no"}, unhealthy, []string{"PUT /v1/policy", "GET /v1/core"}, 422, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFake()
+			f.err, f.result = c.err, c.result
+			srv := serve(t, f)
+			for _, route := range c.routes {
+				method, path, _ := strings.Cut(route, " ")
+				body := map[string]string{"/v1/core/update": `{"version":"latest"}`, "/v1/policy": `{"mode":"full"}`}[path]
+				r := request(t, srv, method, path, body, authed())
+				if r.status != c.status {
+					t.Errorf("%s: status = %d, want %d", route, r.status, c.status)
+				}
+				errorOf(t, r)
+				var got struct {
+					Result *artifacts.Result `json:"result"`
+				}
+				if err := json.Unmarshal(r.body, &got); err != nil {
+					t.Fatalf("%s: %v", route, err)
+				}
+				if !reflect.DeepEqual(got.Result, c.want) {
+					// The message never shows the secret.
+					shown := strings.ReplaceAll(fmt.Sprintf("%+v", got.Result), secretID, "<the id>")
+					t.Errorf("%s: result = %s, want %+v", route, shown, c.want)
+				}
+				if strings.Contains(string(r.body), secretID) {
+					t.Errorf("%s: the body shows a secret", route)
+				}
+			}
+		})
+	}
+}
+
 func TestErrorsHaveNoSecrets(t *testing.T) {
 	leaky := fmt.Sprintf("fetching %s failed for id %s", secretURL, secretID)
 	cases := []struct {

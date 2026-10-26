@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/store"
 )
 
@@ -83,11 +84,14 @@ func (r Response) Decode(v any) error {
 
 // Error is an answer with an error status: the API's {"error", "detail"}
 // body. The detail is redacted by the service. Code and Detail are empty when
-// the body is not such an error.
+// the body is not such an error. Result is how an apply, an update or a
+// rollback ended when it failed with an outcome (the body's "result"), and
+// nil for every other error.
 type Error struct {
 	Status int
 	Code   string
 	Detail string
+	Result *artifacts.Result
 }
 
 func (e *Error) Error() string {
@@ -228,11 +232,12 @@ func (c *Client) do(ctx context.Context, method, path string, in any, auth bool)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		e := &Error{Status: resp.StatusCode}
 		var body struct {
-			Error  string `json:"error"`
-			Detail string `json:"detail"`
+			Error  string            `json:"error"`
+			Detail string            `json:"detail"`
+			Result *artifacts.Result `json:"result"`
 		}
 		if json.Unmarshal(b, &body) == nil {
-			e.Code, e.Detail = body.Error, body.Detail
+			e.Code, e.Detail, e.Result = body.Error, body.Detail, body.Result
 		}
 		return Response{}, e
 	}

@@ -26,10 +26,13 @@ const (
 )
 
 // errorBody is the JSON body of every error: a code for a program, and the
-// detail for a person. The detail is redacted when it is written.
+// detail for a person. The detail is redacted when it is written. Result is
+// how an apply, an update or a rollback ended when it failed with an outcome,
+// its Detail redacted too: the result the direct path would print.
 type errorBody struct {
-	Error  string `json:"error"`
-	Detail string `json:"detail,omitempty"`
+	Error  string            `json:"error"`
+	Detail string            `json:"detail,omitempty"`
+	Result *artifacts.Result `json:"result,omitempty"`
 }
 
 // classify maps an error from the backend to a status, a code and the

@@ -13,8 +13,10 @@
 // detached from the request: a caller that disconnects does not stop them.
 //
 // An error is {"error": code, "detail": text}, the text redacted of every
-// secret of the state. Neither the token nor the Authorization header is ever
-// in a body, and nothing here logs a request.
+// secret of the state. An apply, an update or a rollback that failed with an
+// outcome adds "result": the artifacts.Result, its detail redacted. Neither
+// the token nor the Authorization header is ever in a body, and nothing here
+// logs a request.
 package api
 
 import (
@@ -447,14 +449,22 @@ func (h *handler) coreRollback(w http.ResponseWriter, r *http.Request) {
 // committed (or found nothing to do), else the error. A result that ended in
 // another outcome, such as a config that xray rejected, comes back with an
 // error that has no other class: it is for the person to fix, not a fault of
-// the service, so it is 422 refused and not 500.
+// the service, so it is 422 refused and not 500. An error that comes with an
+// outcome carries the result in its body, so that the client can report how
+// the operation ended, as the direct path does.
 func (h *handler) outcome(w http.ResponseWriter, res artifacts.Result, err error) {
 	if err != nil {
 		status, code, detail := classify(err)
 		if code == codeInternal && res.Outcome != "" {
 			status, code = http.StatusUnprocessableEntity, codeRefused
 		}
-		h.writeError(w, status, code, detail)
+		body := errorBody{Error: code, Detail: h.redact(detail)}
+		if res.Outcome != "" {
+			r := redactResult(res, h.redact)
+			body.Result = &r
+		}
+		_, rev := h.b.State()
+		h.reply(w, status, rev, body)
 		return
 	}
 	_, rev := h.b.State()

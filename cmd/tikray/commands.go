@@ -85,14 +85,20 @@ func (c *cli) withDaemon(ctx context.Context, do func(cl *apiclient.Client) int)
 }
 
 // viaDaemon has the daemon run an apply, an update or a rollback, and reports
-// its result as the direct path does. The daemon's failure to do it is a
-// refused result with its words (see runUpdater).
+// its result as the direct path does. An operation that failed with an
+// outcome comes back with the result the daemon's updater made, which is
+// reported as it is; a failure without one is a refused result with the
+// daemon's words (see runUpdater).
 func (c *cli) viaDaemon(ctx context.Context, cfg Config, base artifacts.Result, cl *apiclient.Client, call apiCall) int {
 	if call == nil {
 		return c.refused(cfg, base, errors.New("--config can't go through tikray serve, which owns the state and applies it: stop the service to run a core with a config file"))
 	}
 	resp, err := call(cl, ctx)
 	if err != nil {
+		var e *apiclient.Error
+		if errors.As(err, &e) && e.Result != nil {
+			return c.report(cfg, *e.Result, c.apiError(ctx, err))
+		}
 		return c.refused(cfg, base, c.apiError(ctx, err))
 	}
 	var res artifacts.Result

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -623,7 +624,8 @@ func TestDaemonFailureOfAnOperation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newFake()
-			fake.err = tc.err
+			// The daemon's updater did not run, so there is no result.
+			fake.err, fake.result = tc.err, artifacts.Result{}
 			vars := startDaemon(t, fake).env(t)
 			for _, args := range [][]string{{"apply"}, {"core", "update", "26.10.21"}, {"core", "rollback"}} {
 				code, stdout, stderr := runAPI(t, vars, args...)
@@ -631,11 +633,39 @@ func TestDaemonFailureOfAnOperation(t *testing.T) {
 					t.Errorf("tikray %q: exit %d, stderr %q; want 1 and %q", args, code, stderr, tc.want)
 				}
 				// As for the direct path, stdout holds this run's result: the
-				// command could not tell what the updater made of it, so it
-				// is a refusal that carries the daemon's words.
+				// daemon sent none of its updater's, so it is a refusal that
+				// carries the daemon's words.
 				res := decodeResult(t, stdout)
 				if res.Outcome != artifacts.OutcomeRefused || !strings.Contains(res.Detail, tc.want) {
 					t.Errorf("tikray %q: result %+v, want a refused one naming %q", args, res, tc.want)
+				}
+				if saved, err := os.ReadFile(filepath.Join(vars["TIKRAY_DATA"], "state", "last-result.json")); err != nil || string(saved) != stdout {
+					t.Errorf("tikray %q: last-result.json is %q (%v), want the stdout", args, saved, err)
+				}
+			}
+		})
+	}
+}
+
+// An operation that the daemon's updater ran to an outcome and that failed is
+// reported with that result, as the direct path reports it: printed, saved and
+// with its exit code, its outcome and the rest kept.
+func TestDaemonFailureReportsTheDaemonsResult(t *testing.T) {
+	for _, res := range []artifacts.Result{
+		{From: "26.3.27", To: "26.10.21", Outcome: runnerapi.OutcomeRejected, Source: "github", Verified: "sha256", Detail: "xray says no", At: t0},
+		{From: "26.10.21", To: "26.10.21", Outcome: artifacts.OutcomeUnhealthy, Kind: artifacts.KindConfig, Detail: "health check failing for 15s: socks connect: general failure", At: t0},
+	} {
+		t.Run(res.Outcome, func(t *testing.T) {
+			fake := newFake()
+			fake.err, fake.result = errors.New(res.Outcome+": "+res.Detail), res
+			vars := startDaemon(t, fake).env(t)
+			for _, args := range [][]string{{"apply"}, {"core", "update", "26.10.21"}, {"core", "rollback"}} {
+				code, stdout, stderr := runAPI(t, vars, args...)
+				if code != 1 || !strings.Contains(stderr, res.Detail) {
+					t.Errorf("tikray %q: exit %d, stderr %q; want 1 and the daemon's error", args, code, stderr)
+				}
+				if got := decodeResult(t, stdout); got != res {
+					t.Errorf("tikray %q: result %+v, want the daemon's %+v", args, got, res)
 				}
 				if saved, err := os.ReadFile(filepath.Join(vars["TIKRAY_DATA"], "state", "last-result.json")); err != nil || string(saved) != stdout {
 					t.Errorf("tikray %q: last-result.json is %q (%v), want the stdout", args, saved, err)
