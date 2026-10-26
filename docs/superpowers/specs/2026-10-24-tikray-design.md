@@ -192,7 +192,9 @@ M2 builds the control plane in three parts:
   first start and kept; every error, event and history line is redacted of
   the servers' credentials and the subscription URLs. Also in M2b: the `xray`
   gRPC client, the `health` monitor (the runner, the observatory's live
-  servers, the balancer's pick and the SOCKS probe, in the status),
+  servers, the balancer's pick and the SOCKS probe, in the status; checked
+  every 10 s, and again as soon as an apply, a core update or a rollback
+  ends, so that a refresh right after one can fall back to the proxy),
   subscriptions refreshed on their interval (a failed fetch, a block page
   included, keeps the servers and sets `last_error`), and the CLI over the
   API. Hot changes are not in M2b: every change is a full trial.
@@ -730,8 +732,9 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
     `/container/shell`; a bootstrap core update through the API; a server
     from a share link and a smart device, applied within a minute, with the
     server alive and picked in the status; a subscription refresh that adds a
-    second server, which takes over when the first stops; a block page that
-    fails a refresh (502 `fetch_failed`) and keeps the servers; a kill switch
+    second server, and the other server taking over when the one xray picked
+    stops; a block page that the direct and the proxied fetch both get and
+    refuse (502 `fetch_failed`), keeping the servers; a kill switch
     applied while every server is down, the proxy probe waived because it
     fails on the active config too, and blocked by xray while the runner
     stays up; a server that xray refuses, refused (422) before it is saved,
