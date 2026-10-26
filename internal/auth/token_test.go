@@ -246,14 +246,22 @@ func testTokenExpiry(t *testing.T) {
 
 func testTokenCap(t *testing.T) {
 	s, _ := openTest(t)
+	clk := newClock()
+	s.now = clk.Now
+	// The first token expires in an hour; the other 49 never do.
 	var first TokenInfo
+	var firstTok string
 	for i := range 50 {
-		info, _, err := s.CreateToken(fmt.Sprintf("token %d", i), time.Time{})
+		var expires time.Time
+		if i == 0 {
+			expires = clk.Now().Add(time.Hour)
+		}
+		info, tok, err := s.CreateToken(fmt.Sprintf("token %d", i), expires)
 		if err != nil {
 			t.Fatalf("token %d: %v", i, err)
 		}
 		if i == 0 {
-			first = info
+			first, firstTok = info, tok
 		}
 	}
 	_, tok, err := s.CreateToken("one too many", time.Time{})
@@ -264,14 +272,28 @@ func testTokenCap(t *testing.T) {
 	if n := len(s.Tokens()); n != 50 {
 		t.Errorf("%d tokens, want 50", n)
 	}
-	// A revoked one makes room.
+
+	// An expired token counts toward the 50 until it is revoked: it is still
+	// listed, so that it can be seen and removed.
+	clk.Advance(2 * time.Hour)
+	if _, ok := s.CheckToken(firstTok); ok {
+		t.Fatal("the token that was to expire in an hour still checks after two")
+	}
+	_, tok, err = s.CreateToken("one more", time.Time{})
+	if !errors.Is(err, ErrTokenLimit) || tok != "" {
+		t.Errorf("a token with one of the 50 expired: (%q, %v), want ErrTokenLimit and no token", tok, err)
+	}
+	if list := s.Tokens(); len(list) != 50 || list[0].ID != first.ID {
+		t.Errorf("Tokens() lists %d tokens with an expired one, want 50 with it first", len(list))
+	}
+
+	// A revoke (of the expired one, say) makes room.
 	if err := s.RevokeToken(first.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := s.CreateToken("room again", time.Time{}); err != nil {
 		t.Errorf("a token after a revoke at the cap: %v", err)
 	}
-	// Expired ones count: they are still listed.
 	if n := len(s.Tokens()); n != 50 {
 		t.Errorf("%d tokens, want 50", n)
 	}

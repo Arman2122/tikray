@@ -6,17 +6,20 @@ import (
 	"time"
 )
 
-// The limit on failed setups and sign-ins, in two buckets that a failure takes
-// a token from. One is for each client address: it holds 5 and gets one back
-// every 60 s. The other is for all the clients together: it holds 100 and gets
-// one back every 9 s. A request is let in while both have a token.
+// The limit on failed setups and sign-ins, in two buckets. One is for each
+// client address: it holds 5 and gets one back every 60 s. The other is for
+// all the clients together: it holds 100 and gets one back every 9 s. An
+// attempt is let in while both have a token, and the token is taken when it is
+// let in, not when it fails: attempts that come together can't all pass on the
+// strength of one token. It is given back when the attempt turns out to be a
+// success, so that only failures count.
 const (
 	ipBurst      = 5
 	ipRefill     = 60 * time.Second
 	globalBurst  = 100
 	globalRefill = 9 * time.Second
 
-	// A per-address bucket that has seen no failure for this long is dropped.
+	// A per-address bucket that has let in no attempt for this long is dropped.
 	// It has been full again for a good while by then (5 minutes fill it), so
 	// a dropped bucket and a fresh one are the same.
 	limiterIdle = time.Hour
@@ -29,7 +32,7 @@ const (
 // It needs no counting of tokens, and no rounding.
 type bucket struct {
 	full time.Time // when it is full again; not after now means it is full now
-	last time.Time // the last failure
+	last time.Time // the last token taken
 }
 
 // wait is how long until the bucket has a token: zero when it has one.
@@ -48,8 +51,8 @@ func (b *bucket) wait(now time.Time, refill time.Duration, burst int) time.Durat
 	return 0
 }
 
-// take takes a token, and no more than the bucket holds: failures that come
-// after it is empty don't make the wait longer.
+// take takes a token, and no more than the bucket holds (it matters only for a
+// clock that went back: Allow takes from a bucket that has a token).
 func (b *bucket) take(now time.Time, refill time.Duration, burst int) {
 	if b.full.Before(now) {
 		b.full = now
@@ -61,16 +64,26 @@ func (b *bucket) take(now time.Time, refill time.Duration, burst int) {
 	b.last = now
 }
 
+// give puts a token back, the one that take took, and never raises the bucket
+// above what it holds: a bucket that has filled up since is as full as it was.
+func (b *bucket) give(now time.Time, refill time.Duration) {
+	b.full = b.full.Add(-refill)
+	if b.full.Before(now) {
+		b.full = now
+	}
+}
+
 // Limiter limits failed setups and sign-ins by the address of the client and
 // all together. The caller asks Allow before it does anything costly (a hash,
-// above all) and says Fail for each attempt that Allow let in and that failed.
-// Its methods are safe for concurrent use.
+// above all), and when Allow says yes the token is already taken from both
+// buckets, so any number of attempts that ask together get no more tries than
+// the buckets hold. Its methods are safe for concurrent use.
 //
-// The per-address buckets are made by failures only, and a failure makes one
-// only while the global bucket has a token (the failures that Allow let in
-// are that many at most), so no more than 100 are made at once and one more
-// per 9 s (400 an hour). An idle one is dropped after an hour, so the map
-// holds about 500 buckets at the most, however many addresses ask.
+// The per-address buckets are made by an Allow that says yes, which takes a
+// token of the global bucket too, so no more than 100 are made at once and one
+// more per 9 s (400 an hour); one that is full again after a refund is
+// dropped at once, and an idle one after an hour. The map holds about 500
+// buckets at the most, however many addresses ask.
 type Limiter struct {
 	now func() time.Time
 
@@ -95,50 +108,66 @@ func key(ip netip.Addr) netip.Addr {
 	return ip.Unmap().WithZone("")
 }
 
-// Allow reports whether a failed setup or sign-in has left ip, and everybody,
-// with a try to spare. When it has not, retryAfter is how long until it has,
-// for a Retry-After header: the longer of the two waits. It takes nothing and
-// makes nothing: asking is free.
-func (l *Limiter) Allow(ip netip.Addr) (ok bool, retryAfter time.Duration) {
+// Allow asks to make an attempt from ip. When both the bucket of ip and the
+// global one have a token it says ok, and the token is taken from each of them
+// already: the caller makes its attempt and then calls done, exactly once.
+// done(true) says the attempt failed, and the tokens stay taken; done(false)
+// says it did not (a sign-in that worked), and gives them back, so that only
+// failures count. An attempt that never calls done counts as a failure. A
+// second call of done does nothing.
+//
+// When there is no token, done is nil, nothing is taken, and retryAfter is how
+// long until there is one (for a Retry-After header): the longer of the two
+// waits. The caller then answers 429, and does nothing costly.
+func (l *Limiter) Allow(ip netip.Addr) (done func(failed bool), ok bool, retryAfter time.Duration) {
 	now := l.now()
 	ip = key(ip)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.sweepLocked(now)
+	b := l.ips[ip]
 	retryAfter = l.global.wait(now, globalRefill, globalBurst)
-	if b := l.ips[ip]; b != nil {
+	if b != nil {
 		retryAfter = max(retryAfter, b.wait(now, ipRefill, ipBurst))
 	}
-	return retryAfter == 0, retryAfter
-}
-
-// Fail notes a failed setup or sign-in from ip: it takes a token from the
-// bucket of ip and from the global one. Call it for an attempt that Allow let
-// in, and not for one it refused.
-func (l *Limiter) Fail(ip netip.Addr) {
-	now := l.now()
-	ip = key(ip)
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.sweepLocked(now)
-	room := l.global.wait(now, globalRefill, globalBurst) == 0
-	l.global.take(now, globalRefill, globalBurst)
-	b := l.ips[ip]
+	if retryAfter > 0 {
+		return nil, false, retryAfter
+	}
 	if b == nil {
-		if !room {
-			// The global bucket was empty: Allow would have refused this one,
-			// so it is not given a bucket of its own (that would let a flood
-			// of new addresses grow the map).
-			return
-		}
 		b = &bucket{}
 		l.ips[ip] = b
 	}
+	l.global.take(now, globalRefill, globalBurst)
 	b.take(now, ipRefill, ipBurst)
+
+	var once sync.Once
+	return func(failed bool) {
+		once.Do(func() {
+			if !failed {
+				l.refund(ip)
+			}
+		})
+	}, true, 0
 }
 
-// sweepLocked drops the per-address buckets that have had no failure for an
-// hour, at most once a minute. Callers hold l.mu.
+// refund gives back the token that an Allow took for ip from each bucket. The
+// bucket of ip is dropped when that leaves it full: it is then the same as one
+// that was never made.
+func (l *Limiter) refund(ip netip.Addr) {
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.global.give(now, globalRefill)
+	if b := l.ips[ip]; b != nil {
+		b.give(now, ipRefill)
+		if !b.full.After(now) {
+			delete(l.ips, ip)
+		}
+	}
+}
+
+// sweepLocked drops the per-address buckets that have had no attempt let in
+// for an hour, at most once a minute. Callers hold l.mu.
 func (l *Limiter) sweepLocked(now time.Time) {
 	if d := now.Sub(l.swept); d < limiterSweep {
 		if d < 0 { // a clock that went back

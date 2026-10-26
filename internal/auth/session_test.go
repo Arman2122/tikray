@@ -411,6 +411,51 @@ func TestSessionLimits(t *testing.T) {
 		}
 	})
 
+	t.Run("cap with a clock that stepped back", func(t *testing.T) {
+		// The session that is made is never the one dropped for the cap, even
+		// when a clock that stepped back makes it older than all the others.
+		s, dir, clk := setup(t)
+		var ids []string
+		for range 20 {
+			clk.Advance(time.Minute)
+			ids = append(ids, newSessionT(t, s).ID)
+		}
+		clk.Advance(-time.Hour)
+		fresh := newSessionT(t, s)
+		if _, ok := s.Session(fresh.ID); !ok {
+			t.Error("the session just made was dropped for the cap, because the clock had stepped back")
+		}
+		if n := sessionCount(s); n != 20 {
+			t.Errorf("%d sessions are kept, want 20", n)
+		}
+		if _, ok := s.Session(ids[0]); ok {
+			t.Error("the oldest of the others was kept")
+		}
+		for i, id := range ids[1:] {
+			if _, ok := s.Session(id); !ok {
+				t.Errorf("session %d (not the oldest) was dropped", i+1)
+			}
+		}
+		// The same through a real sign-in, and it survives a restart.
+		claim(t, s, dir, "alice", testPassword)
+		clk.Advance(-time.Hour)
+		sess, err := s.SignIn(ctx, "alice", testPassword)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := s.Session(sess.ID); !ok {
+			t.Error("a sign-in with the clock stepped back made a session that is gone")
+		}
+		s2, err := OpenStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s2.now = clk.Now
+		if _, ok := s2.Session(sess.ID); !ok {
+			t.Error("the session made with the clock stepped back is not in auth.json")
+		}
+	})
+
 	t.Run("sign-out", func(t *testing.T) {
 		s, dir, _ := setup(t)
 		a, b := newSessionT(t, s), newSessionT(t, s)

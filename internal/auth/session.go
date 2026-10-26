@@ -196,8 +196,8 @@ func (s *Store) SignIn(ctx context.Context, username, password string) (Session,
 }
 
 // startSessionLocked makes a session that is valid from now, drops the ones
-// that have ended and, beyond maxSessions, the oldest to start, and saves. A
-// write that fails makes no session. Callers hold s.mu.
+// that have ended and, to stay within maxSessions, the oldest to start of the
+// others, and saves. A write that fails makes no session. Callers hold s.mu.
 func (s *Store) startSessionLocked(now time.Time) (Session, error) {
 	raw := make([]byte, sessionIDBytes)
 	if _, err := rand.Read(raw); err != nil {
@@ -212,8 +212,9 @@ func (s *Store) startSessionLocked(now time.Time) (Session, error) {
 			kept = append(kept, r)
 		}
 	}
-	kept = append(kept, rec)
-	for len(kept) > maxSessions {
+	// The oldest of the others goes to make room, and never the new session: a
+	// clock that stepped back can make it older than all of them.
+	for len(kept) >= maxSessions {
 		oldest := 0
 		for i := range kept {
 			if kept[i].Created.Before(kept[oldest].Created) {
@@ -222,6 +223,7 @@ func (s *Store) startSessionLocked(now time.Time) (Session, error) {
 		}
 		kept = slices.Delete(kept, oldest, oldest+1)
 	}
+	kept = append(kept, rec)
 	next := s.d
 	next.Sessions = kept
 	if err := s.commit(next); err != nil {
