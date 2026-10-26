@@ -71,6 +71,8 @@ func classify(err error) (status int, code, detail string) {
 		return http.StatusForbidden, codeBadPassword, err.Error()
 	case errors.Is(err, auth.ErrAlreadyClaimed):
 		return http.StatusConflict, codeAlreadyClaimed, err.Error()
+	case errors.Is(err, auth.ErrNoAdmin):
+		return http.StatusConflict, codeSetupRequired, err.Error()
 	case errors.Is(err, auth.ErrTokenLimit):
 		return http.StatusConflict, codeTokenLimit, err.Error()
 	case errors.Is(err, auth.ErrNoToken):

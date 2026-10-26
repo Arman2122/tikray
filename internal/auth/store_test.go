@@ -624,6 +624,9 @@ func TestChangePassword(t *testing.T) {
 	if err := s2.ChangePassword(ctx, "", next, "yet another long password"); err == nil {
 		t.Error("a password was changed with no admin")
 	} else {
+		if !errors.Is(err, ErrNoAdmin) {
+			t.Errorf("a change with no admin: %v, want ErrNoAdmin", err)
+		}
 		noSecrets(t, "no admin", err, next, "yet another long password")
 	}
 }

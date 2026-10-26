@@ -52,9 +52,9 @@ var (
 	// current password that is not the admin's.
 	ErrBadPassword = errors.New("auth: the current password is not right")
 
-	// errNoAdmin is what an operation that needs the admin gets when there is
-	// none.
-	errNoAdmin = errors.New("auth: there is no admin")
+	// ErrNoAdmin is what a change of password gets when there is no admin
+	// (yet, or any more: a reset came first).
+	ErrNoAdmin = errors.New("auth: there is no admin")
 )
 
 // admin is the one account. The password is kept only as its PHC hash.
@@ -430,7 +430,7 @@ func (s *Store) Reset() error {
 
 // ChangePassword sets the admin's password to next when current is the
 // password now: ErrBadPassword when it is not. A next that breaks the rules
-// is an ErrInvalid. Both passwords are checked and hashed outside the lock;
+// is an ErrInvalid, and with no admin it is ErrNoAdmin. Both passwords are checked and hashed outside the lock;
 // when the admin's password changed in between (another change), current is
 // no longer the current password, and it is ErrBadPassword too.
 //
@@ -442,7 +442,7 @@ func (s *Store) Reset() error {
 func (s *Store) ChangePassword(ctx context.Context, keep, current, next string) error {
 	a, ok := s.admin()
 	if !ok {
-		return errNoAdmin
+		return ErrNoAdmin
 	}
 	if err := ValidPassword(a.Username, next); err != nil {
 		return err

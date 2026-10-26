@@ -327,6 +327,22 @@ func TestAnonymousSeesOnlyThePublicRoutes(t *testing.T) {
 		{"GET", "/v1/auth/login/"},
 		{"GET", "/v1/nope"},
 		{"GET", "/"},
+		// The mux reads a %2F as part of a segment, so these are not the
+		// public routes they look like, and a caller without a credential
+		// must not be answered by the route that is left (the 404 has an
+		// ETag).
+		{"POST", "/v1/auth%2Fsetup"},
+		{"POST", "/v1/auth%2flogin"},
+		{"GET", "/v1/auth%2Fstate"},
+		{"GET", "/v1%2Fauth/state"},
+		{"GET", "/v1%2Fauth%2Fstate"},
+		{"GET", "/%2Fhealthz"},
+		{"GET", "/healthz%2F"},
+		{"POST", "/v1/auth/login%2F"},
+		{"POST", "/v1%2Fauth%2Flogin"},
+		// A path that is not clean is no public route either.
+		{"GET", "/v1//status"},
+		{"GET", "/v1/auth/../status"},
 	} {
 		r := e.do(t, c.method, c.path, "", nil)
 		if r.status != 401 {
@@ -335,6 +351,53 @@ func TestAnonymousSeesOnlyThePublicRoutes(t *testing.T) {
 		}
 		if code, _ := errorOf(t, r); code != "unauthorized" {
 			t.Errorf("%s %s: code = %q, want unauthorized", c.method, c.path, code)
+		}
+		if r.header.Get("ETag") != "" {
+			t.Errorf("%s %s: an anonymous answer carries an ETag", c.method, c.path)
+		}
+	}
+	// What the mux itself matches to a public route is one, however the path is
+	// spelled: the check goes by the route that is served.
+	for _, c := range []struct {
+		method, path string
+		status       int
+		code         string
+	}{
+		{"GET", "/%68ealthz", 200, ""},
+		{"GET", "/v1/auth/%73tate", 200, ""},
+		{"GET", "/v1/%61uth/state", 200, ""},
+		{"POST", "/v1/auth/%6Cogin", 400, "bad_request"},
+		{"POST", "/v1/auth/%73etup", 400, "bad_request"},
+	} {
+		r := e.do(t, c.method, c.path, "", nil)
+		if r.status != c.status {
+			t.Errorf("%s %s: status = %d, want %d", c.method, c.path, r.status, c.status)
+		}
+		if c.code != "" {
+			if code, _ := errorOf(t, r); code != c.code {
+				t.Errorf("%s %s: code = %q, want %s", c.method, c.path, code, c.code)
+			}
+		}
+		if r.header.Get("ETag") != "" {
+			t.Errorf("%s %s: a public answer carries an ETag", c.method, c.path)
+		}
+	}
+	// A path that is not clean is redirected by the mux; for a route that
+	// needs a credential, not before the credential is asked for.
+	for _, c := range []struct {
+		method, path string
+		status       int
+	}{
+		{"GET", "/v1//status", 401},
+		{"GET", "/v1/auth/../status", 401},
+		{"GET", "/v1//auth/state", 301},
+	} {
+		r := serveAs(e.h, "192.0.2.1:1", c.method, c.path, "", nil)
+		if r.status != c.status {
+			t.Errorf("%s %s (the mux's own redirect): status = %d, want %d", c.method, c.path, r.status, c.status)
+		}
+		if r.header.Get("ETag") != "" {
+			t.Errorf("%s %s: an anonymous answer carries an ETag", c.method, c.path)
 		}
 	}
 	// With the root token those are the plain 404 of a wrong method.
@@ -1099,34 +1162,160 @@ func TestPasswordChangeEndsOtherSessions(t *testing.T) {
 		}
 	})
 
-	t.Run("a bearer ends every session", func(t *testing.T) {
+	// Only a session may change the password: a token that leaked would
+	// otherwise be a way to guess it.
+	t.Run("a token may not, the root token either", func(t *testing.T) {
 		c := e.signInAs(t, otherPass)
-		r := change(authed(), otherPass, adminPass)
-		if r.status != 204 {
-			t.Fatalf("status = %d, want 204 (%s)", r.status, r.body)
-		}
-		for who, s := range map[string]auth.Session{"a": a, "c": c} {
-			if r := e.do(t, "GET", "/v1/auth/session", "", cookieOnly(s)); r.status != 401 {
-				t.Errorf("session %s: status = %d, want 401", who, r.status)
+		before := len(e.events())
+		for who, h := range map[string]http.Header{"the root token": authed(), "a named token": bearer(named)} {
+			// The right current password: it is the caller that is refused.
+			r := change(h, otherPass, adminPass)
+			if r.status != 403 {
+				t.Errorf("%s: status = %d, want 403 (%s)", who, r.status, r.body)
+				continue
+			}
+			if code, _ := errorOf(t, r); code != "forbidden" {
+				t.Errorf("%s: code = %q, want forbidden", who, code)
 			}
 		}
-		if r := e.do(t, "POST", "/v1/auth/login", loginBody(t, adminName, adminPass), nil); r.status != 200 {
-			t.Errorf("the new password: status = %d, want 200", r.status)
+		if _, err := e.store.SignIn(context.Background(), adminName, otherPass); err != nil {
+			t.Errorf("the password was changed by a bearer: %v", err)
+		}
+		if _, ok := e.store.Session(c.ID); !ok {
+			t.Error("a refused change ended a session")
+		}
+		if got := len(e.events()); got != before {
+			t.Errorf("%d events after refused changes, want none", got-before)
+		}
+	})
+}
+
+// A wrong current password is a failed sign-in as far as the limiter goes: the
+// same bucket, and nothing is hashed once it is empty.
+func TestPasswordChangeIsLimited(t *testing.T) {
+	change := func(e *authEnv, s auth.Session, current, next string) response {
+		return e.do(t, "PUT", "/v1/auth/password", mustJSON(t, map[string]string{"current": current, "new": next}), withCSRF(s))
+	}
+
+	t.Run("five wrong ones, then 429", func(t *testing.T) {
+		e := newAuthEnv(t, true)
+		s := e.signIn(t)
+		for i := range 5 {
+			r := change(e, s, "wrong password "+fmt.Sprint(i), otherPass)
+			if r.status != 403 {
+				t.Fatalf("failure %d: status = %d, want 403 (%s)", i+1, r.status, r.body)
+			}
+			if code, _ := errorOf(t, r); code != "bad_password" {
+				t.Errorf("failure %d: code = %q, want bad_password", i+1, code)
+			}
+		}
+		// The right current password is turned away before it is checked.
+		r := change(e, s, adminPass, otherPass)
+		if r.status != 429 {
+			t.Fatalf("status = %d, want 429 (%s)", r.status, r.body)
+		}
+		if code, _ := errorOf(t, r); code != "rate_limited" {
+			t.Errorf("code = %q, want rate_limited", code)
+		}
+		if got := r.header.Get("Retry-After"); got != "60" {
+			t.Errorf("Retry-After = %q, want 60", got)
+		}
+		if _, err := e.store.SignIn(context.Background(), adminName, adminPass); err != nil {
+			t.Errorf("the password was changed though the caller was limited: %v", err)
+		}
+		// Sign-in draws on the same bucket.
+		if r := e.do(t, "POST", "/v1/auth/login", loginBody(t, adminName, adminPass), nil); r.status != 429 {
+			t.Errorf("a sign-in after five wrong current passwords: status = %d, want 429", r.status)
+		}
+		want := slices.Repeat([]string{"auth: password change failed from 127.0.0.1"}, 5)
+		if got := e.events(); !slices.Equal(got, want) {
+			t.Errorf("events = %q\nwant %q", got, want)
+		}
+		e.clock.Advance(time.Minute)
+		if r := change(e, s, adminPass, otherPass); r.status != 204 {
+			t.Errorf("once the wait is over: status = %d, want 204 (%s)", r.status, r.body)
 		}
 	})
 
-	t.Run("with no admin there is no password", func(t *testing.T) {
-		if err := e.store.Reset(); err != nil {
-			t.Fatal(err)
+	t.Run("sign-in failures count too", func(t *testing.T) {
+		e := newAuthEnv(t, true)
+		s := e.signIn(t)
+		for range 3 {
+			e.do(t, "POST", "/v1/auth/login", loginBody(t, adminName, "wrong password"), nil)
 		}
-		r := change(authed(), adminPass, otherPass)
-		if r.status != 409 {
-			t.Fatalf("status = %d, want 409 (%s)", r.status, r.body)
+		for i := range 2 {
+			if r := change(e, s, "wrong password", otherPass); r.status != 403 {
+				t.Fatalf("failure %d: status = %d, want 403", i+1, r.status)
+			}
 		}
-		if code, _ := errorOf(t, r); code != "setup_required" {
-			t.Errorf("code = %q, want setup_required", code)
+		if r := change(e, s, adminPass, otherPass); r.status != 429 {
+			t.Errorf("status = %d, want 429", r.status)
 		}
 	})
+
+	t.Run("only the failures count", func(t *testing.T) {
+		e := newAuthEnv(t, true)
+		s := e.signIn(t)
+		const n = 6 // more than the bucket holds
+		// Refused before the current password is looked at.
+		for i := range n {
+			if r := change(e, s, adminPass, "short"); r.status != 400 {
+				t.Fatalf("a short password, try %d: status = %d, want 400", i+1, r.status)
+			}
+			if r := e.do(t, "PUT", "/v1/auth/password", `{"current":`, withCSRF(s)); r.status != 400 {
+				t.Fatalf("a body that breaks, try %d: status = %d, want 400", i+1, r.status)
+			}
+		}
+		// Changes that work give their token back.
+		pass := adminPass
+		for i := range n {
+			next := fmt.Sprintf("a new long password %d", i)
+			if r := change(e, s, pass, next); r.status != 204 {
+				t.Fatalf("change %d: status = %d, want 204 (%s)", i+1, r.status, r.body)
+			}
+			pass = next
+		}
+		// So the sender still has its five failures.
+		for i := range 5 {
+			if r := change(e, s, "wrong password", otherPass); r.status != 403 {
+				t.Fatalf("failure %d: status = %d, want 403", i+1, r.status)
+			}
+		}
+		if r := change(e, s, pass, otherPass); r.status != 429 {
+			t.Errorf("status = %d, want 429", r.status)
+		}
+	})
+
+	t.Run("a token is refused before the limiter is asked", func(t *testing.T) {
+		e := newAuthEnv(t, true)
+		_, named := e.token(t, "ci")
+		for range 8 {
+			r := e.do(t, "PUT", "/v1/auth/password", mustJSON(t, map[string]string{"current": "wrong password", "new": otherPass}), bearer(named))
+			if r.status != 403 {
+				t.Fatalf("status = %d, want 403", r.status)
+			}
+			if code, _ := errorOf(t, r); code != "forbidden" {
+				t.Fatalf("code = %q, want forbidden", code)
+			}
+		}
+		// Nothing was taken from the sender.
+		for i := range 5 {
+			if r := e.do(t, "POST", "/v1/auth/login", loginBody(t, adminName, "wrong"+fmt.Sprint(i)), nil); r.status != 401 {
+				t.Fatalf("failure %d: status = %d, want 401", i+1, r.status)
+			}
+		}
+	})
+}
+
+// An admin that a reset removed between the check of a session and the change
+// is 409, and not the 500 of an error nobody told apart.
+func TestNoAdminIsSetupRequired(t *testing.T) {
+	for _, err := range []error{auth.ErrNoAdmin, fmt.Errorf("while changing it: %w", auth.ErrNoAdmin)} {
+		status, code, _ := classify(err)
+		if status != 409 || code != "setup_required" {
+			t.Errorf("classify(%v) = %d %s, want 409 setup_required", err, status, code)
+		}
+	}
 }
 
 // --- the token routes
@@ -1510,15 +1699,21 @@ func TestAuthEvents(t *testing.T) {
 	expect("sign-in", `auth: signed in: "alice" from `+ip)
 
 	e.do(t, "POST", "/v1/auth/login", loginBody(t, adminName, "wrong password"), nil)
-	expect("a failed sign-in", `auth: sign-in failed: "alice" from `+ip)
+	expect("a failed sign-in", `auth: sign-in failed for "alice" from `+ip)
 
-	long := strings.Repeat("ü", 100)
-	e.do(t, "POST", "/v1/auth/login", loginBody(t, long, "wrong password"), nil)
-	expect("a long name", `auth: sign-in failed: "`+strings.Repeat("ü", 64)+`" from `+ip)
-
-	// A name is quoted, so that it can't make a line of its own in a log.
-	e.do(t, "POST", "/v1/auth/login", loginBody(t, "bob\nauth: signed in: \"alice\"\x1b[31m\u202e", "wrong password"), nil)
-	expect("a name with control characters", `auth: sign-in failed: "bob\nauth: signed in: \"alice\"\x1b[31m\u202e" from `+ip)
+	// Only the admin's own name is in the event of a failed sign-in: any other
+	// is whatever a caller typed, and a person types a password there.
+	for what, name := range map[string]string{
+		"a name that is not the admin's":   "bob",
+		"a long name":                      strings.Repeat("ü", 100),
+		"a name with control characters":   "bob\nauth: signed in: \"alice\"\x1b[31m\xe2\x80\xae",
+		"no name":                          "",
+		"the admin's name in another case": "ALICE",
+	} {
+		e.do(t, "POST", "/v1/auth/login", loginBody(t, name, "wrong password"), nil)
+		expect(what, `auth: sign-in failed for an unknown user from `+ip)
+		e.clock.Advance(time.Hour) // the bucket holds five failures, and these are six
+	}
 
 	// No event for what was refused before a credential was looked at.
 	e.do(t, "POST", "/v1/auth/login", `{`, nil)
@@ -1530,7 +1725,13 @@ func TestAuthEvents(t *testing.T) {
 	expect("a password change", `auth: password changed from `+ip)
 
 	e.do(t, "PUT", "/v1/auth/password", mustJSON(t, map[string]string{"current": "wrong password", "new": adminPass}), withCSRF(sess))
-	expect("a refused password change")
+	expect("a password change that failed", `auth: password change failed from `+ip)
+
+	e.do(t, "PUT", "/v1/auth/password", mustJSON(t, map[string]string{"current": otherPass, "new": "short"}), withCSRF(sess))
+	expect("a password change that broke a rule")
+
+	e.do(t, "PUT", "/v1/auth/password", mustJSON(t, map[string]string{"current": otherPass, "new": adminPass}), bearer(testToken))
+	expect("a password change by the root token")
 
 	r := e.do(t, "POST", "/v1/tokens", `{"name":"ci \"nightly\""}`, authed())
 	made := decodeAs[struct {
@@ -1562,9 +1763,9 @@ func TestAuthEventsNameTheClient(t *testing.T) {
 	serveAs(e.h, "[2001:db8:1:2:3:4:5:6]:1", "POST", "/v1/auth/login", loginBody(t, adminName, "wrong password"), nil)
 	serveAs(e.h, "nonsense", "POST", "/v1/auth/login", loginBody(t, adminName, "wrong password"), nil)
 	want := []string{
-		`auth: sign-in failed: "alice" from 203.0.113.9`,
-		`auth: sign-in failed: "alice" from 2001:db8:1:2:3:4:5:6`,
-		`auth: sign-in failed: "alice" from an address that is not known`,
+		`auth: sign-in failed for "alice" from 203.0.113.9`,
+		`auth: sign-in failed for "alice" from 2001:db8:1:2:3:4:5:6`,
+		`auth: sign-in failed for "alice" from an address that is not known`,
 	}
 	if got := e.events(); !slices.Equal(got, want) {
 		t.Errorf("events = %q\nwant %q", got, want)
@@ -1631,6 +1832,8 @@ func TestAuthEventsHaveNoSecrets(t *testing.T) {
 	call("setup again", nil, "POST", "/v1/auth/setup", setupBody(t, code, adminName, adminPW), nil)
 	call("a wrong password", nil, "POST", "/v1/auth/login", loginBody(t, adminName, wrongPW), nil)
 	call("an unknown user", nil, "POST", "/v1/auth/login", loginBody(t, "nobody", wrongPW), nil)
+	// A password typed into the username field: it is no event's business.
+	call("a password for a username", nil, "POST", "/v1/auth/login", loginBody(t, newPW, wrongPW), nil)
 	call("a body that breaks", nil, "POST", "/v1/auth/login", `{"username":"alice","password":"`+adminPW, nil)
 	call("a body of the wrong type", nil, "POST", "/v1/auth/login", `{"username":"alice","password":["`+adminPW+`"]}`, nil)
 	// The name of the field is shown, as it is of any body that is refused;
@@ -1638,6 +1841,7 @@ func TestAuthEventsHaveNoSecrets(t *testing.T) {
 	call("a field that is not known", nil, "POST", "/v1/auth/login", `{"username":"alice","password":"`+adminPW+`","pasword":"`+wrongPW+`"}`, nil)
 	r = call("login", own("login"), "POST", "/v1/auth/login", loginBody(t, adminName, adminPW), nil)
 	login := learn("login", r)
+	e.clock.Advance(time.Hour) // the failures so far are forgiven
 
 	call("the session", []string{"the CSRF token of login"}, "GET", "/v1/auth/session", "", cookieOnly(login))
 	call("a request without the CSRF token", nil, "PUT", "/v1/policy", `{"mode":"full"}`, cookieOnly(login))
@@ -1658,6 +1862,7 @@ func TestAuthEventsHaveNoSecrets(t *testing.T) {
 	call("a password change that is refused", nil, "PUT", "/v1/auth/password", mustJSON(t, map[string]string{"current": wrongPW, "new": newPW}), withCSRF(login))
 	call("a password that is too short", nil, "PUT", "/v1/auth/password", mustJSON(t, map[string]string{"current": adminPW, "new": "short"}), withCSRF(login))
 	call("a password change that breaks", nil, "PUT", "/v1/auth/password", `{"current":"`+adminPW+`","new":"`+newPW, withCSRF(login))
+	call("a password change by a token", nil, "PUT", "/v1/auth/password", mustJSON(t, map[string]string{"current": adminPW, "new": newPW}), bearer(made.Token))
 	call("a password change", nil, "PUT", "/v1/auth/password", mustJSON(t, map[string]string{"current": adminPW, "new": newPW}), withCSRF(login))
 	call("the other session, ended", nil, "GET", "/v1/auth/session", "", cookieOnly(setup))
 	call("a revoke", nil, "DELETE", "/v1/tokens/"+made.Info.ID, "", withCSRF(login))

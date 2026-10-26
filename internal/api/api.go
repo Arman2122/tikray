@@ -105,7 +105,15 @@ type handler struct {
 func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter) http.Handler {
 	h := &handler{b: b, a: a, lim: lim, root: sha256.Sum256([]byte(root)), hasRoot: root != "", now: time.Now}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", healthz)
+	// The routes that need no credential, by their pattern: the one list. A
+	// request is public when the pattern the mux matches it to is on it, so
+	// that no way of spelling a path makes a public route of another (guard).
+	public := map[string]bool{}
+	handlePublic := func(pattern string, f http.HandlerFunc) {
+		public[pattern] = true
+		mux.HandleFunc(pattern, f)
+	}
+	handlePublic("GET /healthz", healthz)
 
 	mux.HandleFunc("GET /v1/status", h.status)
 	mux.HandleFunc("GET /v1/state", h.state)
@@ -138,10 +146,10 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter) http.H
 	mux.HandleFunc("GET /v1/core", h.core)
 
 	// Who may call them (auth.go). The state of the sign-in, setup and login
-	// are public, see isPublic.
-	mux.HandleFunc("GET /v1/auth/state", h.authState)
-	mux.HandleFunc("POST /v1/auth/setup", h.setup)
-	mux.HandleFunc("POST /v1/auth/login", h.login)
+	// are public.
+	handlePublic("GET /v1/auth/state", h.authState)
+	handlePublic("POST /v1/auth/setup", h.setup)
+	handlePublic("POST /v1/auth/login", h.login)
 	mux.HandleFunc("GET /v1/auth/session", h.session)
 	mux.HandleFunc("POST /v1/auth/logout", h.logout)
 	mux.HandleFunc("PUT /v1/auth/password", h.password)
@@ -155,7 +163,7 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter) http.H
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		h.writeError(w, http.StatusNotFound, codeNotFound, "no such route")
 	})
-	return h.guard(mux)
+	return h.guard(mux, public)
 }
 
 // healthz answers that the service runs: the handler exists only once it does.

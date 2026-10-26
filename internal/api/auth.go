@@ -58,32 +58,25 @@ func callerOf(r *http.Request) caller {
 	return c
 }
 
-// isPublic reports whether a request needs no credential: GET /healthz, the
-// state of the sign-in, and the two routes that start a session, which a
-// Limiter holds. Any other method on those paths is no public route.
-func isPublic(r *http.Request) bool {
-	read := r.Method == http.MethodGet || r.Method == http.MethodHead
-	switch r.URL.Path {
-	case "/healthz", "/v1/auth/state":
-		return read
-	case "/v1/auth/setup", "/v1/auth/login":
-		return r.Method == http.MethodPost
-	}
-	return false
-}
-
 // guard is the check in front of the routes. Every response has the security
-// headers. A request to a public route goes through; any other must have a
-// credential (authenticate), or is 401, and one made with a session's cookie
-// that is not a read must have its CSRF token, or is 403. It checks that the
-// session is there before it looks at the token, so that a request with no
-// session is never a CSRF failure. The body of every request is capped.
-func (h *handler) guard(next http.Handler) http.Handler {
+// headers. A request is public when the pattern the mux matches it to is one
+// of public (GET /healthz, the state of the sign-in, and the two routes that
+// start a session, which the Limiter holds), and goes through. Whether it is
+// is the mux's to say, not a reading of the path: the mux takes a %2F as part
+// of a segment, and a path of its own for the route that is left (the
+// catch-all, whose answer carries an ETag) must not pass for a public one.
+//
+// Any other request must have a credential (authenticate), or is 401, and one
+// made with a session's cookie that is not a read must have its CSRF token, or
+// is 403. It checks that the session is there before it looks at the token, so
+// that a request with no session is never a CSRF failure. The body of every
+// request is capped.
+func (h *handler) guard(mux *http.ServeMux, public map[string]bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setSecurityHeaders(w.Header())
-		if isPublic(r) {
+		if _, pattern := mux.Handler(r); public[pattern] {
 			r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-			next.ServeHTTP(w, r)
+			mux.ServeHTTP(w, r)
 			return
 		}
 		c, ok := h.authenticate(r)
@@ -102,7 +95,7 @@ func (h *handler) guard(next http.Handler) http.Handler {
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey{}, c)))
+		mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey{}, c)))
 	})
 }
 
@@ -340,13 +333,28 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 		failed = false
 		h.record("signed in: %s from %s", quoteName(in.Username), ipText(ip))
 	case errors.Is(err, auth.ErrBadCredentials):
-		h.record("sign-in failed: %s from %s", quoteName(in.Username), ipText(ip))
+		h.record("sign-in failed for %s from %s", h.failedUser(in.Username), ipText(ip))
 	}
 	if err != nil {
 		h.refuseErr(w, err)
 		return
 	}
 	h.startSession(w, s)
+}
+
+// failedUser says who a failed sign-in was for, for an event: the admin when
+// the name given is the admin's, and otherwise "an unknown user", whatever was
+// typed. What is typed in the username field is not always a username (a
+// password lands there), and must never reach an event. It is decided after
+// the answer is (SignIn has returned), and both ways do the same work, so it
+// adds no time to tell one name from another.
+func (h *handler) failedUser(given string) string {
+	admin := h.a.Username()
+	x, y := sha256.Sum256([]byte(admin)), sha256.Sum256([]byte(given))
+	if admin != "" && subtle.ConstantTimeCompare(x[:], y[:]) == 1 {
+		return quoteName(admin)
+	}
+	return "an unknown user"
 }
 
 // --- the session routes
@@ -378,27 +386,48 @@ func (h *handler) logout(w http.ResponseWriter, r *http.Request) {
 	h.noContent(w, rev)
 }
 
-// password changes the admin's. A session keeps itself and ends the others; a
-// token has no session to keep, so every one ends.
+// password changes the admin's, for a session only: the session keeps itself
+// and the others end. A token that leaked must not be a way to guess the
+// admin's password, so neither a named token nor the root token may.
+//
+// A current password that is not right is a failed sign-in as far as the
+// Limiter goes (the same bucket): it is asked before the password is looked
+// at, so that a caller it turns away costs no hash, and done is deferred and
+// called once, as in setup. What is no failed attempt (a body that is no good,
+// a new password that breaks a rule, no admin any more, a success) says so
+// with failed = false.
 func (h *handler) password(w http.ResponseWriter, r *http.Request) {
 	c := callerOf(r)
+	if c.who != bySession {
+		h.forbid(w, "only a signed-in session may change the password")
+		return
+	}
+	ip := clientIP(r)
+	done, ok, wait := h.lim.Allow(limiterKey(ip))
+	if !ok {
+		h.tooMany(w, wait)
+		return
+	}
+	failed := true // unless a path below says it was no failed attempt
+	defer func() { done(failed) }()
+
 	var in passwordRequest
 	if !h.decode(w, r, &in) {
+		failed = false
 		return
 	}
-	if h.a.NeedsSetup() {
-		h.writeError(w, http.StatusConflict, codeSetupRequired, "there is no admin: set it up first")
-		return
+	err := h.a.ChangePassword(r.Context(), c.session.ID, in.Current, in.New)
+	switch {
+	case err == nil, errors.Is(err, auth.ErrInvalid), errors.Is(err, auth.ErrNoAdmin):
+		failed = false
+	case errors.Is(err, auth.ErrBadPassword):
+		h.record("password change failed from %s", ipText(ip))
 	}
-	keep := ""
-	if c.who == bySession {
-		keep = c.session.ID
-	}
-	if err := h.a.ChangePassword(r.Context(), keep, in.Current, in.New); err != nil {
+	if err != nil {
 		h.fail(w, err)
 		return
 	}
-	h.record("password changed from %s", ipText(clientIP(r)))
+	h.record("password changed from %s", ipText(ip))
 	_, rev := h.b.State()
 	h.noContent(w, rev)
 }
