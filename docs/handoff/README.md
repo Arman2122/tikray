@@ -209,7 +209,6 @@ CI (`.github/workflows/ci.yml`) runs `make test`, the compat suite on the oldest
 ## Files in this folder
 
 - `README.md`: this page.
-- `PROMPT.md`: a ready-to-paste first message for the next AI assistant.
 - `m2c/ledger.md`: the M2c execution ledger, holding the pre-flight table, every ruling, deferred minors and progress lines.
 - `m2c/context.md`: M2c global constraints and fixed values.
 - `m2c/reviewer-instructions.md`: what a task reviewer checks and how it reports.
