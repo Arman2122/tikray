@@ -1076,8 +1076,8 @@ func TestTestConfigTimeout(t *testing.T) {
 	pid := g.r.Status().XrayPID
 	start := time.Now()
 	res, err := g.r.TestConfig(t.Context(), []byte(`{}`))
-	if err != nil || res.OK || !strings.Contains(res.Output, "did not finish within 100ms") {
-		t.Errorf("TestConfig = %+v, %v; want a rejection that says it did not finish within 100ms", res, err)
+	if !errors.Is(err, context.DeadlineExceeded) || res != (runnerapi.TestResult{}) {
+		t.Error("a timed-out test must return a deadline error and no config verdict")
 	}
 	if d := time.Since(start); d > 800*time.Millisecond {
 		t.Errorf("TestConfig took %v, want it cut off after 100ms", d)

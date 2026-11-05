@@ -153,6 +153,23 @@ func TestServerTag(t *testing.T) {
 	}
 }
 
+func TestServerUntestedRoundTrip(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		srv := Server{Untested: want}
+		b, err := json.Marshal(srv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(b, []byte(`"untested"`)) != want {
+			t.Errorf("untested key presence = %t, want %t", !want, want)
+		}
+		var saved Server
+		if err := json.Unmarshal(b, &saved); err != nil || saved.Untested != want {
+			t.Errorf("untested after round trip = %t, %v, want %t", saved.Untested, err, want)
+		}
+	}
+}
+
 func TestNewID(t *testing.T) {
 	re := regexp.MustCompile(`^[0-9a-f]{8}$`)
 	seen := map[string]bool{}

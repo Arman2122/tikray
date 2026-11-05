@@ -661,6 +661,47 @@ func TestUpdateServerSavedWithoutARunnerTest(t *testing.T) {
 	}
 }
 
+func TestUntestedMarked(t *testing.T) {
+	e := newEnv(t)
+	e.runner.failTest(true, false)
+	srv, rev, err := e.s.AddServer(bg, 0, NewServer{Link: vlessLink})
+	if err != nil {
+		t.Fatal(show(err))
+	}
+	if !srv.Untested || !e.serverNamed(srv.Name).Untested {
+		t.Error("a server saved before a core runs should be marked untested")
+	}
+	name := "renamed"
+	srv, rev, err = e.s.UpdateServer(bg, rev, srv.ID, ServerPatch{Name: &name})
+	if err != nil || !srv.Untested {
+		t.Fatalf("rename lost the untested flag: %v", show(err))
+	}
+	e.runner.failTest(false, false)
+	srv, rev, err = e.s.UpdateServer(bg, rev, srv.ID, ServerPatch{Outbound: json.RawMessage(trojanOutbound)})
+	if err != nil || srv.Untested || e.serverNamed(name).Untested {
+		t.Fatalf("a replacement that passed its test should clear the flag: %v", show(err))
+	}
+	e.runner.failTest(false, true)
+	srv, _, err = e.s.UpdateServer(bg, rev, srv.ID, ServerPatch{Outbound: json.RawMessage(vlessOutbound)})
+	if err != nil || !srv.Untested || !e.serverNamed(name).Untested {
+		t.Errorf("a replacement saved while the runner cannot test should set the flag: %v", show(err))
+	}
+}
+
+func TestUntestedEventOmitsShortCredential(t *testing.T) {
+	e := newEnv(t)
+	e.runner.failTest(true, false)
+	const short = "qZx"
+	raw := json.RawMessage(strings.Replace(trojanOutbound, trojanPW, short, 1))
+	if _, _, err := e.s.AddServer(bg, 0, NewServer{Name: short, Outbound: raw}); err != nil {
+		t.Fatal("could not save the untested server")
+	}
+	events := e.eventsOf(KindUntested)
+	if len(events) != 1 || strings.Contains(events[0], short) {
+		t.Error("an untested event must omit a display name that contains a short credential")
+	}
+}
+
 func TestUpdateServerNotFound(t *testing.T) {
 	e := newEnv(t)
 	e.addServer("one", vlessOutbound)

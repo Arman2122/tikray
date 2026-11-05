@@ -22,6 +22,12 @@ import (
 	"github.com/Arman2122/tikray/internal/store"
 )
 
+// A skipped line can contain an entire credential. Report only the counts.
+func refreshCounts(res RefreshResult) string {
+	return fmt.Sprintf("%d added, %d updated, %d removed, %d kept, %d skipped via %s",
+		res.Added, res.Updated, res.Removed, res.Kept, len(res.Skipped), res.Via)
+}
+
 func TestRefreshMerges(t *testing.T) {
 	e, feed := newSubEnv(t)
 	a, b, c := feedLink(11, "a"), feedLink(12, "b"), feedLink(13, "c")
@@ -38,10 +44,10 @@ func TestRefreshMerges(t *testing.T) {
 
 	res, err := e.s.RefreshSubscription(bg, sub.ID)
 	if err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	if res.Added != 1 || res.Updated != 1 || res.Removed != 1 || res.Kept != 1 || res.Via != "direct" || len(res.Skipped) != 0 {
-		t.Errorf("result = %+v, want 1 added, 1 updated, 1 removed, 1 kept, none skipped, via direct", res)
+		t.Errorf("result = %s, want 1 added, 1 updated, 1 removed, 1 kept, none skipped, via direct", refreshCounts(res))
 	}
 	st, got := e.store.State()
 	if got != rev+1 {
@@ -63,13 +69,13 @@ func TestRefreshMerges(t *testing.T) {
 		t.Error("a refresh touched a server of no subscription")
 	}
 	if got := e.subOf(sub.ID); !got.LastFetch.Equal(t0) || got.LastError != "" {
-		t.Errorf("LastFetch %v, LastError %q; want %v and none", got.LastFetch, got.LastError, t0)
+		t.Errorf("LastFetch %v, error recorded %t; want %v and no error", got.LastFetch, got.LastError != "", t0)
 	}
 	if n := len(e.runner.gotTests()); n != 1 || e.testedWith("203.0.113.14") != 1 {
 		t.Errorf("the runner tested %d configs, want only the new server's", n)
 	}
 	if got, want := e.eventsOf(KindRefresh), []string{refreshEvent(sub, "added 1, updated 1, removed 1, kept 1, skipped 0", "direct")}; !slices.Equal(got, want) {
-		t.Errorf("refresh events %q, want %q", got, want)
+		t.Errorf("got %d refresh events, want %d matching the expected messages", len(got), len(want))
 	}
 	if got := kicks(e.s); got != 1 {
 		t.Errorf("kicked %d times, want 1", got)
@@ -88,10 +94,10 @@ func TestRefreshOfAnUnchangedListTestsNothing(t *testing.T) {
 
 	res, err := e.s.RefreshSubscription(bg, sub.ID)
 	if err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	if res.Added != 0 || res.Updated != 0 || res.Removed != 0 || res.Kept != 2 {
-		t.Errorf("result = %+v, want 2 kept", res)
+		t.Errorf("result = %s, want 2 kept", refreshCounts(res))
 	}
 	st, _ := e.store.State()
 	if !reflect.DeepEqual(st.Servers, olds) {
@@ -113,7 +119,7 @@ func TestRefreshBlockPageKeepsServers(t *testing.T) {
 		st.Routing.Pinned = olds[0].ID
 		return nil
 	}); err != nil {
-		t.Fatal(err)
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	// The provider's 200 is a block page, and the proxy can't help.
 	feed.setDirect(okFeed(blockPage))
@@ -122,7 +128,7 @@ func TestRefreshBlockPageKeepsServers(t *testing.T) {
 
 	_, err := e.s.RefreshSubscription(bg, sub.ID)
 	if !errors.Is(err, ErrFetchFailed) {
-		t.Fatalf("error = %v, want ErrFetchFailed", err)
+		t.Fatalf("error type %T, want ErrFetchFailed", err)
 	}
 	if got, want := feed.routes(), []string{"direct", "proxy"}; !slices.Equal(got, want) {
 		t.Errorf("fetched by %v, want %v", got, want)
@@ -136,16 +142,16 @@ func TestRefreshBlockPageKeepsServers(t *testing.T) {
 		t.Errorf("LastFetch = %v, want it as it was", got.LastFetch)
 	}
 	if !strings.Contains(got.LastError, "no server") || !strings.Contains(got.LastError, "503") {
-		t.Errorf("LastError = %q, want the two attempts' reasons", got.LastError)
+		t.Error("LastError should include the direct and proxy failures")
 	}
 	if want := ErrFetchFailed.Error() + ": " + got.LastError; err.Error() != want {
-		t.Errorf("error = %q, want %q", err, want)
+		t.Error("fetch error should wrap the recorded LastError")
 	}
 	if want := []string{fmt.Sprintf("subscription %s (provider): %s", sub.ID, got.LastError)}; !slices.Equal(e.eventsOf(KindError), want) {
-		t.Errorf("error events %q, want %q", e.eventsOf(KindError), want)
+		t.Errorf("got %d error events, want one recording the subscription failure", len(e.eventsOf(KindError)))
 	}
 	if got := e.eventsOf(KindRefresh); len(got) != 0 {
-		t.Errorf("refresh events %q, want none", got)
+		t.Errorf("got %d refresh events, want none", len(got))
 	}
 	if k := kicks(e.s); k != 0 {
 		t.Errorf("kicked %d times, want 0: nothing to apply", k)
@@ -163,16 +169,16 @@ func TestRefreshBlockPageFallsThroughToTheProxy(t *testing.T) {
 
 	res, err := e.s.RefreshSubscription(bg, sub.ID)
 	if err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	if res.Via != "proxy" || res.Added != 1 || res.Kept != 1 {
-		t.Errorf("result = %+v, want 1 added and 1 kept via the proxy", res)
+		t.Errorf("result = %s, want 1 added and 1 kept via the proxy", refreshCounts(res))
 	}
 	if st, _ := e.store.State(); len(st.Servers) != 2 || st.Servers[0].ID != olds[0].ID {
 		t.Errorf("servers %s, want the old one kept and a new one", show(st.Servers))
 	}
 	if got, want := e.eventsOf(KindRefresh), []string{refreshEvent(sub, "added 1, updated 0, removed 0, kept 1, skipped 0", "proxy")}; !slices.Equal(got, want) {
-		t.Errorf("refresh events %q, want %q", got, want)
+		t.Errorf("got %d refresh events, want %d matching the expected messages", len(got), len(want))
 	}
 }
 
@@ -192,17 +198,17 @@ func TestRefreshClearsReferences(t *testing.T) {
 		}
 		return nil
 	}); err != nil {
-		t.Fatal(err)
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	// The pinned server, and another that a rule names, leave the list.
 	feed.setDirect(okFeed(feedBody(c)))
 
 	res, err := e.s.RefreshSubscription(bg, sub.ID)
 	if err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	if res.Removed != 2 || res.Kept != 1 {
-		t.Errorf("result = %+v, want 2 removed and 1 kept", res)
+		t.Errorf("result = %s, want 2 removed and 1 kept", refreshCounts(res))
 	}
 	st, _ := e.store.State()
 	if err := st.Validate(); err != nil {
@@ -225,7 +231,7 @@ func TestRefreshClearsReferences(t *testing.T) {
 		t.Errorf("cleanup event %q, want the rule of the second server", cleanup[1])
 	}
 	if got := e.eventsOf(KindRefresh); len(got) != 1 {
-		t.Errorf("refresh events %q, want one", got)
+		t.Errorf("got %d refresh events, want one", len(got))
 	}
 	e.wantEventsClean()
 }
@@ -240,26 +246,26 @@ func TestRefreshSkipsRefused(t *testing.T) {
 
 	res, err := e.s.RefreshSubscription(bg, sub.ID)
 	if err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	if res.Added != 1 || res.Kept != 1 || len(res.Skipped) != 1 {
-		t.Fatalf("result = %+v, want 1 added, 1 kept, 1 skipped", res)
+		t.Fatalf("result = %s, want 1 added, 1 kept, 1 skipped", refreshCounts(res))
 	}
 	sk := res.Skipped[0]
 	if !strings.Contains(sk.Err, "xray rejected") || !strings.Contains(sk.Err, "is not valid") {
-		t.Errorf("skipped reason %q, want xray's words", sk.Err)
+		t.Error("skipped reason should identify the xray rejection and retain its safe explanation")
 	}
 	wantRedacted(t, sk.Err, secret{"the entry's id", otherID})
 	wantNoURL(t, "the skipped reason", sk.Err)
 	if !strings.HasPrefix(bad, sk.Line) || sk.Line == "" {
-		t.Errorf("skipped line %q, want the start of the entry's link", sk.Line)
+		t.Error("skipped line should be a nonempty prefix of the rejected entry")
 	}
 	st, _ := e.store.State()
 	if want := []string{"a", "b"}; !slices.Equal(namesOf(st.Servers), want) {
 		t.Errorf("servers %q, want %q: the refused one is left out", namesOf(st.Servers), want)
 	}
 	if got, want := e.eventsOf(KindRefresh), []string{refreshEvent(sub, "added 1, updated 0, removed 0, kept 1, skipped 1", "direct")}; !slices.Equal(got, want) {
-		t.Errorf("refresh events %q, want %q", got, want)
+		t.Errorf("got %d refresh events, want %d matching the expected messages", len(got), len(want))
 	}
 	e.wantEventsClean()
 }
@@ -271,13 +277,13 @@ func TestRefreshReportsTheListsOwnSkips(t *testing.T) {
 
 	res, err := e.s.RefreshSubscription(bg, sub.ID)
 	if err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	if res.Added != 1 || len(res.Skipped) != 1 || res.Skipped[0].Err == "" {
-		t.Errorf("result = %+v, want 1 added and the unsupported link skipped with a reason", res)
+		t.Errorf("result = %s, want 1 added and the unsupported link skipped with a reason", refreshCounts(res))
 	}
 	if got, want := e.eventsOf(KindRefresh), []string{refreshEvent(sub, "added 1, updated 0, removed 0, kept 0, skipped 1", "direct")}; !slices.Equal(got, want) {
-		t.Errorf("refresh events %q, want %q", got, want)
+		t.Errorf("got %d refresh events, want %d matching the expected messages", len(got), len(want))
 	}
 }
 
@@ -293,7 +299,7 @@ func TestRefreshOfOnlyRefusedServersKeepsTheServers(t *testing.T) {
 	_, err := e.s.RefreshSubscription(bg, sub.ID)
 	r := wantRefused(t, err, vlessSecret)
 	if !strings.Contains(r.Reason, "xray rejected every server") {
-		t.Errorf("reason %q, want it to say xray rejected every server", r.Reason)
+		t.Error("refusal should say xray rejected every server")
 	}
 	st, _ := e.store.State()
 	if !reflect.DeepEqual(st.Servers, before.Servers) {
@@ -301,13 +307,13 @@ func TestRefreshOfOnlyRefusedServersKeepsTheServers(t *testing.T) {
 	}
 	got := e.subOf(sub.ID)
 	if got.LastError != r.Reason || !got.LastFetch.IsZero() {
-		t.Errorf("LastError %q, LastFetch %v; want the reason and no fetch recorded", got.LastError, got.LastFetch)
+		t.Errorf("LastFetch %v, refusal recorded %t; want the refusal and no fetch recorded", got.LastFetch, got.LastError == r.Reason)
 	}
 	if k := kicks(e.s); k != 0 {
 		t.Errorf("kicked %d times, want 0", k)
 	}
 	if got := e.eventsOf(KindError); len(got) != 1 {
-		t.Errorf("error events %q, want one", got)
+		t.Errorf("got %d error events, want one", len(got))
 	}
 	e.wantEventsClean()
 }
@@ -337,10 +343,10 @@ func TestRefreshWithoutRunner(t *testing.T) {
 
 			res, err := e.s.RefreshSubscription(bg, sub.ID)
 			if err != nil {
-				t.Fatal(show(err))
+				t.Fatalf("unexpected error (%T)", err)
 			}
 			if res.Added != 2 || res.Kept != 1 {
-				t.Errorf("result = %+v, want 2 added and 1 kept: the entries merge untested", res)
+				t.Errorf("result = %s, want 2 added and 1 kept: the entries merge untested", refreshCounts(res))
 			}
 			st, _ := e.store.State()
 			if want := []string{"b", "d", "e"}; !slices.Equal(namesOf(st.Servers), want) || st.Servers[0].ID != olds[0].ID {
@@ -348,16 +354,129 @@ func TestRefreshWithoutRunner(t *testing.T) {
 			}
 			want := []string{fmt.Sprintf("subscription %s (provider): 2 servers saved without a runner test", sub.ID)}
 			if got := e.eventsOf(KindUntested); !slices.Equal(got, want) {
-				t.Errorf("untested events %q, want %q", got, want)
+				t.Errorf("got %d untested events, want %d matching the expected messages", len(got), len(want))
 			}
 			if n := len(e.runner.gotTests()); n != c.tests {
 				t.Errorf("the runner got %d configs, want %d: the first failure ends the testing", n, c.tests)
 			}
 			if got := e.eventsOf(KindRefresh); len(got) != 1 {
-				t.Errorf("refresh events %q, want one", got)
+				t.Errorf("got %d refresh events, want one", len(got))
 			}
 			e.wantEventsClean()
 		})
+	}
+}
+
+func TestRefreshRetestsUntested(t *testing.T) {
+	e, feed := newSubEnv(t)
+	a, b, c := feedLink(11, "a"), feedLink(12, "b"), feedLink(13, "c")
+	sub, _ := e.addSub("provider", b)
+	e.runner.failTest(true, false)
+	feed.setDirect(okFeed(feedBody(a, b)))
+	if _, err := e.s.RefreshSubscription(bg, sub.ID); err != nil {
+		t.Fatalf("unexpected error (%T)", err)
+	}
+	st, _ := e.store.State()
+	if len(st.Servers) != 2 || !st.Servers[0].Untested || st.Servers[1].Untested {
+		t.Fatal("only the server saved while the runner was unavailable should be untested")
+	}
+	id := st.Servers[0].ID
+
+	e.runner.failTest(false, false)
+	feed.setDirect(okFeed(feedBody(a, b, c)))
+	if _, err := e.s.RefreshSubscription(bg, sub.ID); err != nil {
+		t.Fatalf("unexpected error (%T)", err)
+	}
+	st, _ = e.store.State()
+	if len(st.Servers) != 3 || st.Servers[0].ID != id || slices.ContainsFunc(st.Servers, func(s store.Server) bool { return s.Untested }) {
+		t.Error("passing the batch should clear the marker and keep the server ID")
+	}
+	if len(e.runner.gotTests()) != 2 || e.testedWith("203.0.113.11") != 2 || e.testedWith("203.0.113.12") != 0 || e.testedWith("203.0.113.13") != 1 {
+		t.Error("the second refresh should send one batch holding only the untested and new servers")
+	}
+}
+
+func TestRefreshKeepsCompletedBatchWhenRunnerGoesDown(t *testing.T) {
+	e, feed := newSubEnv(t)
+	sub, _ := e.addSub("provider")
+	var links []string
+	for i := range 33 {
+		links = append(links, feedLink(20+i, fmt.Sprintf("server-%d", i)))
+	}
+	feed.setDirect(okFeed(feedBody(links...)))
+	client := e.runner.client()
+	calls := 0
+	client.TokenFunc = func(context.Context) (string, error) {
+		calls++
+		if calls == 2 {
+			return "", runnerapi.ErrNoToken
+		}
+		return client.Token, nil
+	}
+	e.s = e.newService(Config{Fetcher: feed.fetcher, Runner: client})
+	if _, err := e.s.RefreshSubscription(bg, sub.ID); err != nil {
+		t.Fatalf("unexpected error (%T)", err)
+	}
+	st, _ := e.store.State()
+	if len(st.Servers) != len(links) {
+		t.Fatalf("saved %d servers, want %d", len(st.Servers), len(links))
+	}
+	pending := 0
+	for i, srv := range st.Servers {
+		if srv.Untested {
+			pending++
+		}
+		tested := e.testedWith(fmt.Sprintf("203.0.113.%d\"", 20+i)) > 0
+		if srv.Untested == tested {
+			t.Errorf("server %d: marker does not match whether the runner tested its outbound", i)
+		}
+	}
+	if calls != 2 || pending != 1 {
+		t.Errorf("%d calls, %d pending; want one passing batch of 32 and one pending server", calls, pending)
+	}
+	want := []string{fmt.Sprintf("subscription %s (provider): 1 servers saved without a runner test", sub.ID)}
+	if got := e.eventsOf(KindUntested); !slices.Equal(got, want) {
+		t.Error("the untested event should count only the unfinished batch")
+	}
+}
+
+func TestRefreshRetryMarksARecreatedServerUntested(t *testing.T) {
+	e, feed := newSubEnv(t)
+	a := feedLink(11, "a")
+	sub, _ := e.addSub("provider", a)
+	feed.setDirect(okFeed(feedBody(a)))
+	feed.onDirect = func(string) {
+		if _, _, err := e.store.Update(store.AnyRevision, func(st *store.State) error {
+			st.Servers = nil
+			return nil
+		}); err != nil {
+			t.Errorf("unexpected error (%T)", err)
+		}
+	}
+	if _, err := e.s.RefreshSubscription(bg, sub.ID); err != nil {
+		t.Fatalf("unexpected error (%T)", err)
+	}
+	st, _ := e.store.State()
+	if len(st.Servers) != 1 || !st.Servers[0].Untested {
+		t.Error("the retry added a server without testing its outbound or marking it untested")
+	}
+}
+
+func TestRefreshEventsOmitShortCredential(t *testing.T) {
+	e, feed := newSubEnv(t)
+	const short = "qZx"
+	sub, _ := e.addSub(short)
+	e.addServer("manual", strings.Replace(trojanOutbound, trojanPW, short, 1))
+	e.runner.failTest(true, false)
+	feed.setDirect(okFeed(feedBody(feedLink(11, "a"))))
+	if _, err := e.s.RefreshSubscription(bg, sub.ID); err != nil {
+		t.Fatal("refresh failed")
+	}
+	for _, kind := range []string{KindRefresh, KindUntested} {
+		events := e.eventsOf(kind)
+		if len(events) != 1 || !strings.Contains(events[0], sub.ID) || strings.Contains(events[0], short) {
+			t.Errorf("%s event must identify the subscription without its sensitive label", kind)
+		}
 	}
 }
 
@@ -368,7 +487,7 @@ func TestRefreshWarningsBecomeEvents(t *testing.T) {
 	feed.setDirect(okFeed(feedBody(feedLink(11, "a"), warnLink)))
 
 	if _, err := e.s.RefreshSubscription(bg, sub.ID); err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	srv := e.serverNamed("example.com:443")
 	var want []string
@@ -376,15 +495,15 @@ func TestRefreshWarningsBecomeEvents(t *testing.T) {
 		want = append(want, fmt.Sprintf("server %s (%s): %s", srv.ID, srv.Name, w))
 	}
 	if got := e.eventsOf(KindWarning); !slices.Equal(got, want) {
-		t.Errorf("warning events %q, want %q", got, want)
+		t.Errorf("got %d warning events, want %d matching the expected messages", len(got), len(want))
 	}
 
 	// The same list again: nothing is new, so nothing is said again.
 	if _, err := e.s.RefreshSubscription(bg, sub.ID); err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	if got := e.eventsOf(KindWarning); !slices.Equal(got, want) {
-		t.Errorf("warning events after a second refresh %q, want the same %q", got, want)
+		t.Errorf("got %d warning events after a second refresh, want the original %d messages", len(got), len(want))
 	}
 }
 
@@ -416,17 +535,17 @@ func TestRefreshConflictRetries(t *testing.T) {
 			return nil
 		})
 		if err != nil {
-			t.Error(show(err))
+			t.Errorf("unexpected error (%T)", err)
 		}
 	}
 	_, rev := e.store.State()
 
 	res, err := e.s.RefreshSubscription(bg, sub.ID)
 	if err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	if res.Added != 1 || res.Removed != 1 || res.Kept != 1 {
-		t.Errorf("result = %+v, want 1 added, 1 removed, 1 kept", res)
+		t.Errorf("result = %s, want 1 added, 1 removed, 1 kept", refreshCounts(res))
 	}
 	st, got := e.store.State()
 	if got != rev+2 {
@@ -455,7 +574,7 @@ func TestRefreshConflictRetries(t *testing.T) {
 		t.Errorf("%d refresh events, want 1", got)
 	}
 	if got := e.eventsOf(KindCleanup); len(got) != 1 || !strings.Contains(got[0], "pin") {
-		t.Errorf("cleanup events %q, want one, for the pin", got)
+		t.Errorf("got %d cleanup events, want one, for the pin", len(got))
 	}
 	if k := kicks(e.s); k != 1 {
 		t.Errorf("kicked %d times, want 1", k)
@@ -478,7 +597,7 @@ func TestRefreshConflictTwiceFails(t *testing.T) {
 		done = true
 		other := "https://other.example.org/list"
 		if _, _, err := e.s.UpdateSubscription(bg, store.AnyRevision, sub.ID, SubscriptionPatch{URL: &other}); err != nil {
-			t.Error(show(err))
+			t.Errorf("unexpected error (%T)", err)
 		}
 	}
 
@@ -491,13 +610,13 @@ func TestRefreshConflictTwiceFails(t *testing.T) {
 		t.Errorf("servers %s, want them as they were", show(st.Servers))
 	}
 	if got := e.eventsOf(KindRefresh); len(got) != 0 {
-		t.Errorf("refresh events %q, want none", got)
+		t.Errorf("got %d refresh events, want none", len(got))
 	}
 	if got := e.eventsOf(KindError); len(got) != 1 || !strings.Contains(got[0], sub.ID) || !strings.Contains(got[0], "not stored") {
-		t.Errorf("error events %q, want one that says the refresh was not stored", got)
+		t.Errorf("got %d error events, want one that says the refresh was not stored", len(got))
 	}
 	if got := e.subOf(sub.ID); got.LastError != "" {
-		t.Errorf("LastError = %q, want none: the fetch did not fail", got.LastError)
+		t.Error("LastError should stay empty when a merge conflicts")
 	}
 }
 
@@ -529,7 +648,7 @@ func TestRefreshFailureOfARepointedSubscriptionIsDropped(t *testing.T) {
 				}
 				done = true
 				if _, _, err := e.s.UpdateSubscription(bg, store.AnyRevision, sub.ID, SubscriptionPatch{URL: &next}); err != nil {
-					t.Error(show(err))
+					t.Errorf("unexpected error (%T)", err)
 				}
 			}
 
@@ -538,10 +657,10 @@ func TestRefreshFailureOfARepointedSubscriptionIsDropped(t *testing.T) {
 			}
 			got := e.subOf(sub.ID)
 			if got.URL != next || got.LastError != "" || !got.LastFetch.IsZero() {
-				t.Errorf("URL %q, LastError %q, LastFetch %v; want the new URL, no error and never fetched", got.URL, got.LastError, got.LastFetch)
+				t.Errorf("new URL %t, error recorded %t, LastFetch %v; want the new URL, no error and never fetched", got.URL == next, got.LastError != "", got.LastFetch)
 			}
 			if events := e.eventsOf(KindError); len(events) != 0 {
-				t.Errorf("error events %q, want none: the new address has not failed", events)
+				t.Errorf("got %d error events, want none: the new address has not failed", len(events))
 			}
 			e.s.mu.Lock()
 			held := len(e.s.holds)
@@ -572,16 +691,16 @@ func TestRefreshClearsInvalidOfAChangedOutbound(t *testing.T) {
 		}
 		return nil
 	}); err != nil {
-		t.Fatal(err)
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	feed.setDirect(okFeed(feedBody(a, b)))
 
 	res, err := e.s.RefreshSubscription(bg, sub.ID)
 	if err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	if res.Updated != 1 || res.Kept != 1 {
-		t.Errorf("result = %+v, want 1 updated (a) and 1 kept (b)", res)
+		t.Errorf("result = %s, want 1 updated (a) and 1 kept (b)", refreshCounts(res))
 	}
 	st, _ := e.store.State()
 	if err := st.Validate(); err != nil {
@@ -626,7 +745,7 @@ func TestRefreshOfAMissingSubscription(t *testing.T) {
 	for name, id := range map[string]string{"an unknown ID": "0000abcd", "a URL": subURL} {
 		_, err := e.s.RefreshSubscription(bg, id)
 		if !errors.Is(err, ErrNotFound) {
-			t.Errorf("refreshing %s: %v, want ErrNotFound", name, show(err))
+			t.Errorf("refreshing %s: error type %T, want ErrNotFound", name, err)
 			continue
 		}
 		wantNoURL(t, "the error", err.Error())
@@ -663,10 +782,10 @@ func TestRefreshStopsWhenTheContextEnds(t *testing.T) {
 		t.Error("the servers changed")
 	}
 	if got := e.subOf(sub.ID); got.LastError != "" {
-		t.Errorf("LastError = %q, want none: the caller gave up, the fetch did not fail", got.LastError)
+		t.Error("LastError should stay empty when the caller gives up")
 	}
 	if got := e.s.Events(0); len(got) != 0 {
-		t.Errorf("events %v, want none", got)
+		t.Errorf("%d events, want none", len(got))
 	}
 }
 
@@ -735,7 +854,7 @@ func TestRefreshesDoNotOverlap(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			if _, err := e.s.RefreshSubscription(bg, id); err != nil {
-				t.Error(show(err))
+				t.Errorf("unexpected error (%T)", err)
 			}
 		}()
 	}
@@ -769,7 +888,7 @@ func TestRefreshWaitStopsWhenTheContextEnds(t *testing.T) {
 	}
 	close(release)
 	if err := within(t, "the first refresh to end", first); err != nil {
-		t.Error(show(err))
+		t.Errorf("unexpected error (%T)", err)
 	}
 }
 
@@ -809,20 +928,20 @@ func TestRefreshByTheDefaultFetcher(t *testing.T) {
 
 	res, err := e.s.RefreshSubscription(bg, sub.ID)
 	if err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	if res.Added != 1 || res.Via != "direct" {
-		t.Errorf("result = %+v, want 1 added via direct", res)
+		t.Errorf("result = %s, want 1 added via direct", refreshCounts(res))
 	}
 
 	// A block page is refused, and there is no proxy to try.
 	body.Store(blockPage)
 	_, err = e.s.RefreshSubscription(bg, sub.ID)
 	if !errors.Is(err, ErrFetchFailed) || !strings.Contains(err.Error(), "no server in the body") {
-		t.Fatalf("error = %v, want ErrFetchFailed for a body with no server", err)
+		t.Fatalf("error type %T, want ErrFetchFailed for a body with no server", err)
 	}
 	if strings.Contains(err.Error(), "proxy") {
-		t.Errorf("error %q mentions a proxy attempt: there is no address for one", err)
+		t.Error("fetch error mentions a proxy attempt without a proxy address")
 	}
 	if st, _ := e.store.State(); len(st.Servers) != 1 {
 		t.Errorf("%d servers, want the one from the first fetch kept", len(st.Servers))
@@ -833,13 +952,13 @@ func TestAddSubscription(t *testing.T) {
 	e, feed := newSubEnv(t)
 	sub, rev, err := e.s.AddSubscription(bg, 0, NewSubscription{Name: "provider", URL: "  " + subURL + "\n"})
 	if err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	if rev != 1 {
 		t.Errorf("revision = %d, want 1", rev)
 	}
 	if !hexID.MatchString(sub.ID) || sub.Name != "provider" || sub.URL != subURL || sub.Disabled || sub.Interval != store.Duration(24*time.Hour) {
-		t.Errorf("subscription = %+v, want an enabled one with a new ID, the URL trimmed and 24 h", sub)
+		t.Errorf("ID valid %t, enabled %t, URL trimmed %t, interval %v; want a new enabled subscription with default interval", hexID.MatchString(sub.ID), !sub.Disabled, sub.URL == subURL, sub.Interval)
 	}
 	if !sub.LastFetch.IsZero() || sub.LastError != "" {
 		t.Errorf("LastFetch %v, LastError %q; want neither: adding does not fetch", sub.LastFetch, sub.LastError)
@@ -856,10 +975,10 @@ func TestAddSubscription(t *testing.T) {
 
 	sub2, _, err := e.s.AddSubscription(bg, rev, NewSubscription{Name: "slow", URL: "https://two.example.org/s", Interval: store.Duration(6 * time.Hour)})
 	if err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	if sub2.Interval != store.Duration(6*time.Hour) || sub2.ID == sub.ID {
-		t.Errorf("second subscription = %+v, want its own interval and ID", sub2)
+		t.Errorf("second subscription: interval %v, distinct ID %t; want 6 h and a distinct ID", sub2.Interval, sub2.ID != sub.ID)
 	}
 }
 
@@ -911,10 +1030,10 @@ func TestUpdateSubscription(t *testing.T) {
 	name, off, every := "renamed", true, store.Duration(12*time.Hour)
 	got, rev2, err := e.s.UpdateSubscription(bg, rev, sub.ID, SubscriptionPatch{Name: &name, Disabled: &off, Interval: &every})
 	if err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	if rev2 != rev+1 || got.Name != "renamed" || !got.Disabled || got.Interval != every || got.URL != subURL {
-		t.Errorf("subscription = %+v at revision %d, want the new name, disabled and 12 h at %d", got, rev2, rev+1)
+		t.Errorf("revision %d, disabled %t, interval %v; want the updated subscription at %d", rev2, got.Disabled, got.Interval, rev+1)
 	}
 	if !got.LastFetch.Equal(fetched) || got.LastError != "an earlier failure" {
 		t.Errorf("LastFetch %v, LastError %q; want them as they were: the URL did not change", got.LastFetch, got.LastError)
@@ -934,10 +1053,10 @@ func TestUpdateSubscription(t *testing.T) {
 	next := "https://other.example.org/list"
 	got, _, err = e.s.UpdateSubscription(bg, store.AnyRevision, sub.ID, SubscriptionPatch{URL: &next})
 	if err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	if got.URL != next || !got.LastFetch.IsZero() || got.LastError != "" {
-		t.Errorf("subscription = %+v, want the new URL, never fetched, no error", got)
+		t.Errorf("new URL %t, LastFetch %v, error recorded %t; want the new URL, never fetched, no error", got.URL == next, got.LastFetch, got.LastError != "")
 	}
 	if st, _ := e.store.State(); len(st.Servers) != 1 {
 		t.Error("a new URL removed the servers: only a refresh may")
@@ -997,13 +1116,13 @@ func TestRemoveSubscriptionRemovesServers(t *testing.T) {
 		}
 		return nil
 	}); err != nil {
-		t.Fatal(err)
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	_, rev := e.store.State()
 
 	next, err := e.s.RemoveSubscription(bg, rev, sub.ID)
 	if err != nil {
-		t.Fatal(show(err))
+		t.Fatalf("unexpected error (%T)", err)
 	}
 	st, got := e.store.State()
 	if got != next || next != rev+1 {
@@ -1013,7 +1132,7 @@ func TestRemoveSubscriptionRemovesServers(t *testing.T) {
 		t.Errorf("servers %q, want %q", namesOf(st.Servers), want)
 	}
 	if len(st.Subscriptions) != 1 || st.Subscriptions[0].ID != other.ID {
-		t.Errorf("subscriptions %+v, want only the other one", st.Subscriptions)
+		t.Errorf("%d subscriptions, want only the other one", len(st.Subscriptions))
 	}
 	if st.Routing.Pinned != "" {
 		t.Errorf("pinned = %q, want it cleared", st.Routing.Pinned)

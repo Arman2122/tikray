@@ -351,6 +351,37 @@ func TestClientTest(t *testing.T) {
 	}
 }
 
+func TestClientTestOlderRunnerTimeout(t *testing.T) {
+	const partial = "untrusted process output"
+	for _, tc := range []struct {
+		name    string
+		result  TestResult
+		timeout bool
+	}{
+		{"timeout", TestResult{Output: "xray run -test did not finish within 20s\n" + partial}, true},
+		{"short timeout", TestResult{Output: "xray run -test did not finish within 100ms\n"}, true},
+		{"empty rejection", TestResult{}, false},
+		{"similar rejection", TestResult{Output: "xray run -test did not finish within this release\n"}, false},
+		{"accepted config", TestResult{OK: true, Output: "xray run -test did not finish within 20s\n"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(tc.result)
+			}))
+			defer srv.Close()
+			c := &Client{BaseURL: srv.URL, Token: "tok", HTTP: srv.Client()}
+			res, err := c.Test(t.Context(), []byte(`{}`))
+			if tc.timeout {
+				if !errors.Is(err, context.DeadlineExceeded) || res != (TestResult{}) || strings.Contains(err.Error(), partial) {
+					t.Error("a legacy timeout should give a deadline error without the incomplete output")
+				}
+			} else if err != nil || res != tc.result {
+				t.Error("the completed verdict should be preserved")
+			}
+		})
+	}
+}
+
 func TestClientTestErrors(t *testing.T) {
 	answers := map[string]struct {
 		status int

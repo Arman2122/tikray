@@ -21,7 +21,7 @@ const (
 	// rejects a config first, so the start is what is kept.
 	maxTestOutput = 8 << 10
 	// truncatedMark ends an output that was cut to maxTestOutput.
-	truncatedMark = "\n[output truncated]"
+	truncatedMark = runnerapi.TestOutputTruncated
 	// testDirPrefix names TestConfig's directories in the run directory.
 	testDirPrefix = ".test-"
 )
@@ -36,10 +36,9 @@ const (
 // directory, never to run/config, whose files an apply may prune at any time,
 // and that directory is gone when TestConfig returns.
 //
-// A config xray rejects, or a test that takes more than 20 s, is a result with
-// OK false. The output is what xray printed, cut to its first 8 KiB. With no
-// xray running TestConfig returns runnerapi.ErrNoCore, and when ctx ends
-// first, its error.
+// A completed test returns xray's verdict and its first 8 KiB of output. A
+// timeout or signal interrupts the test: the caller gets an error so it can
+// retry the same config. With no xray running the error is runnerapi.ErrNoCore.
 func (r *Runner) TestConfig(ctx context.Context, config []byte) (runnerapi.TestResult, error) {
 	sel, ok := r.runningSelection()
 	if !ok {
@@ -67,11 +66,10 @@ func (r *Runner) TestConfig(ctx context.Context, config []byte) (runnerapi.TestR
 	case err == nil:
 		return runnerapi.TestResult{OK: true, Output: capOutput(string(out.buf))}, nil
 	case tctx.Err() != nil:
-		msg := fmt.Sprintf("xray run -test did not finish within %s\n", r.testTimeout)
-		return runnerapi.TestResult{Output: capOutput(msg + string(out.buf))}, nil
-	case errors.As(err, &exit):
+		return runnerapi.TestResult{}, fmt.Errorf("runner: test config exceeded %s: %w", r.testTimeout, tctx.Err())
+	case errors.As(err, &exit) && exit.ExitCode() > 0:
 		return runnerapi.TestResult{Output: capOutput(string(out.buf))}, nil
-	default: // xray did not run at all
+	default: // xray could not start or a signal killed it before it finished
 		return runnerapi.TestResult{}, err
 	}
 }

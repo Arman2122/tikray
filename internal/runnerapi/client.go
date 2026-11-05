@@ -115,7 +115,22 @@ func (c *Client) XrayAPI(ctx context.Context, args ...string) (XrayAPIResponse, 
 func (c *Client) Test(ctx context.Context, config []byte) (TestResult, error) {
 	var res TestResult
 	err := c.send(ctx, testHTTP, http.MethodPost, "/v1/test", config, &res)
+	if err == nil && !res.OK && legacyTestTimeout(res.Output) {
+		return TestResult{}, fmt.Errorf("runnerapi: xray run -test: %w", context.DeadlineExceeded)
+	}
 	return res, err
+}
+
+// The previous runner sent its own timeout as a rejection, with this line
+// before any xray output. Only a completed test can condemn a server.
+func legacyTestTimeout(output string) bool {
+	line, _, ended := strings.Cut(output, "\n")
+	duration, ok := strings.CutPrefix(line, "xray run -test did not finish within ")
+	if !ended || !ok {
+		return false
+	}
+	d, err := time.ParseDuration(duration)
+	return err == nil && d > 0 && d.String() == duration
 }
 
 // do sends one request, see send.

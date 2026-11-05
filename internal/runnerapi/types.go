@@ -125,6 +125,12 @@ type XrayAPIResponse struct {
 	Stderr   string `json:"stderr"`
 }
 
+// MaxTestBody is the largest config accepted by POST /v1/test, in bytes.
+const MaxTestBody = 1 << 20
+
+// TestOutputTruncated marks runner output whose final line may be a partial credential.
+const TestOutputTruncated = "\n[output truncated]"
+
 // TestResult is the answer to POST /v1/test: whether "xray run -test"
 // accepted the config, and what xray printed, at most 8 KiB of it.
 type TestResult struct {

@@ -17,8 +17,6 @@ const (
 	// maxRequestBody bounds what the server reads from a caller; the largest
 	// request is the argument list of xray api.
 	maxRequestBody = 64 << 10
-	// maxTestBody bounds the config of POST /v1/test instead.
-	maxTestBody = 1 << 20
 	// xrayAPITimeout bounds one xray api call.
 	xrayAPITimeout = 10 * time.Second
 )
@@ -67,7 +65,7 @@ func (s *server) authenticated(next http.Handler) http.Handler {
 		}
 		limit := int64(maxRequestBody)
 		if req.URL.Path == "/v1/test" {
-			limit = maxTestBody
+			limit = runnerapi.MaxTestBody
 		}
 		req.Body = http.MaxBytesReader(w, req.Body, limit)
 		next.ServeHTTP(w, req)

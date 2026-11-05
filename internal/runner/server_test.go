@@ -507,6 +507,28 @@ func TestServerTest(t *testing.T) {
 	}
 }
 
+// An interrupted process never gave a verdict on the outbound. The client
+// must see a runner error so that the service can retry it later.
+func TestServerTestInterrupted(t *testing.T) {
+	for _, mode := range []string{"slowtest", "killedtest"} {
+		t.Run(mode, func(t *testing.T) {
+			g := newRig(t, nil)
+			g.active(t, mode)
+			g.boot(t)
+			if mode == "slowtest" {
+				g.r.testTimeout = 100 * time.Millisecond
+			}
+			a := newAPI(t, g, nil)
+			res, err := a.c.Test(t.Context(), []byte(`{}`))
+			if err == nil || res != (runnerapi.TestResult{}) {
+				t.Error("an interrupted test must return an error and no config verdict")
+			} else if strings.Contains(err.Error(), "partial diagnostic") {
+				t.Error("the runner error repeats the interrupted process's output")
+			}
+		})
+	}
+}
+
 func TestServerTestNoCore(t *testing.T) {
 	g := newRig(t, nil)
 	g.boot(t) // no active.json: the runner stays empty

@@ -24,7 +24,7 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M1: runner and artifacts | Done, merged (PR #3) | |
 | M2a: state model and render | Done, merged (PR #4) | |
 | M2b: the service (`tikray serve`, HTTPS API, health, subscriptions) | Done, merged (PR #5) | |
-| **M2c: human sign-in and hot server changes** | **In progress: Tasks 1–7 built, Tasks 8–9 and the final review left** | this branch |
+| **M2c: human sign-in and hot server changes** | **In progress: Tasks 1–8 complete, Task 9 and the final review left** | this branch |
 | M3: RouterOS (installer, reconciler, version adapters, watchdog, uninstall, CHR e2e) | Not started | |
 | M4: web UI | Not started | |
 | M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
@@ -44,23 +44,21 @@ Roughly half of the total effort is done.
 | 4 | `serve` setup hint; `tikray setup-code`, `admin reset`, `token` CLI | e4ef857 | done, reviewed |
 | 5 | Runner `POST /v1/adopt` | 6278b16 | done, reviewed |
 | 6 | Hot server changes through `xray api` (rmo/ado), with a trial fallback and a crash-safe pending marker | fdf5577, 55e3ad1, c103901, 791ce92 | done, reviewed (2 fix rounds) |
-| 7 | Compat test of hot changes against real xray releases | fb76752, 79f8582 | **built, NOT reviewed yet** |
-| 8 | Re-test servers saved untested; batched first-refresh tests | — | not started |
+| 7 | Compat test of hot changes against real xray releases | fb76752, 79f8582, 5a5c2cd | done, reviewed |
+| 8 | Re-test servers saved untested; batched first-refresh tests | see the M2c ledger | done, reviewed |
 | 9 | End-to-end `TestAuth` and `TestHot` on CHR (3 platforms), spec update | — | not started |
 | — | Final whole-branch review, one fix wave, PR to `main` | — | not started |
 
 ### Next steps, in order
 
-1. **Review Task 7.** The diff is `git diff 791ce92..79f8582`. Check it against [`m2c/task-7-brief.md`](m2c/task-7-brief.md), [`m2c/task-7-carries.md`](m2c/task-7-carries.md), the ledger's Task 7 rulings F1 and F2, and the implementer's [report](m2c/task-7-report.md). The two findings were:
-   - **F1:** `xray api rmo` of a missing tag exits 0 on every release. This is benign; the fake runner now matches it.
-   - **F2:** before xray 26.4.13 the observatory keeps a removed outbound's status entry. There is no gate, because health reads by the state's tags. A changed server gets a fresh probe within 1–2 s on all releases.
-2. **Task 8:** [`m2c/task-8-brief.md`](m2c/task-8-brief.md). No carries were written for it yet. Read the ledger for anything that names Task 8, and M2b's carries below.
-3. **Task 9:** [`m2c/task-9-brief.md`](m2c/task-9-brief.md) plus [`m2c/task-9-carries.md`](m2c/task-9-carries.md). The carries amend the brief and are binding: the check order, the results file names, the Task 7 findings and the lab rules. It needs the lab (see "Testing").
-4. **Final whole-branch review** of `main..HEAD`.
+Tasks 7 and 8 are complete. Task 7's reviewed compatibility test passed on six real xray releases from 26.1.18 through 26.10.31. Task 8 persists pending server tests, batches subscription refreshes, and retries when a core is running. The [ledger](m2c/ledger.md) records the evidence and compatibility limits.
+
+1. **Task 9:** [`m2c/task-9-brief.md`](m2c/task-9-brief.md) plus [`m2c/task-9-carries.md`](m2c/task-9-carries.md). The carries amend the brief and are binding: the check order, the results file names, the Task 7 findings and the lab rules. It needs the lab (see "Testing").
+2. **Final whole-branch review** of `main..HEAD`.
    - Use the plan's Review Focus section and the ledger's `Ruling:` lines.
    - Decide each `minor (deferred)` line in the ledger: fix it or keep deferring it.
    - Then do one fix wave, each fix test-first.
-5. **Open the PR** to `main`, get CI green, and ask the owner before merging.
+3. **Update draft PR #6** to `main`, get CI green, and ask the owner before merging.
 
 ### Key M2c facts
 

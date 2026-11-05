@@ -70,9 +70,9 @@ type edit func(st *store.State) ([]note, error)
 // change makes the edit at revision rev (store.AnyRevision skips the check)
 // and returns the new state and revision. What it leaves the state as must
 // pass Validate, or the change is refused (see Refused). After the write it
-// records the events of the edit and extra, in that order, and kicks the
+// records the edit's events and kicks the
 // apply loop. On an error nothing is written, recorded or kicked.
-func (s *Service) change(rev uint64, fn edit, extra ...note) (store.State, uint64, error) {
+func (s *Service) change(rev uint64, fn edit) (store.State, uint64, error) {
 	var notes []note
 	st, next, err := s.store.Update(rev, func(st *store.State) (err error) {
 		if notes, err = fn(st); err != nil {
@@ -85,7 +85,7 @@ func (s *Service) change(rev uint64, fn edit, extra ...note) (store.State, uint6
 	if err != nil {
 		return store.State{}, 0, err
 	}
-	for _, n := range append(notes, extra...) {
+	for _, n := range notes {
 		s.record(n.kind, n.msg)
 	}
 	s.Kick()
