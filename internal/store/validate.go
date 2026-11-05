@@ -35,11 +35,12 @@ func ForbiddenInName(r rune) bool {
 }
 
 // Masked is the placeholder that the API's views and the redactors show in
-// place of a hidden value. No value a view shows may hold it: one that does
-// was copied from a view, and what it stood for would be lost silently.
+// place of a hidden value. A write may not bring it into a value a view
+// shows: one that does was copied from a view, and what it stood for would be
+// lost silently (see checkMasked).
 const Masked = "‹redacted›"
 
-// maskedProblem is what is wrong with a value that holds Masked.
+// maskedProblem is what is wrong with a value that a write brings Masked into.
 const maskedProblem = "holds " + Masked + ", a masked placeholder from a view: send the value itself, not what a GET response showed"
 
 const (
@@ -114,13 +115,62 @@ func (s State) Validate() error {
 	p.routing(s.Routing, servers)
 	p.dns(s.DNS, s.DomesticResolver())
 	p.network(s.Network)
-	switch {
-	case strings.Contains(s.Health.ProbeURL, Masked):
-		p.add("health.probe_url", maskedProblem)
-	case !httpURL(s.Health.ProbeURL):
+	if !httpURL(s.Health.ProbeURL) {
 		p.add("health.probe_url", "must be an absolute http or https URL")
 	}
 	return p.err()
+}
+
+// checkMasked returns what is wrong with next as a write over prev: a value a
+// view shows (a name, a device's name or MAC, a routing value, the probe or
+// the resolver URL) that holds Masked and that prev did not hold. It is no
+// part of Validate, which also checks what Open loads: a state that a copied
+// view reached before tikray refused it must still load and render, and a
+// value it already holds may stay, so that every other change still saves.
+// Each problem starts with the path of the value, as Validate's do.
+func checkMasked(next, prev State) error {
+	held := map[string]bool{}
+	prev.shownValues(func(_, v string) {
+		if strings.Contains(v, Masked) {
+			held[v] = true
+		}
+	})
+	var p problems
+	next.shownValues(func(path, v string) {
+		if strings.Contains(v, Masked) && !held[v] {
+			p.add(path, maskedProblem)
+		}
+	})
+	return p.err()
+}
+
+// shownValues calls fn with the path and the value of each string of s that
+// the API's views show, and so can mask.
+func (s State) shownValues(fn func(path, v string)) {
+	list := func(path string, values []string) {
+		for i, v := range values {
+			fn(fmt.Sprintf("%s[%d]", path, i), v)
+		}
+	}
+	for i, sub := range s.Subscriptions {
+		fn(fmt.Sprintf("subscriptions[%d].name", i), sub.Name)
+	}
+	for i, sv := range s.Servers {
+		fn(fmt.Sprintf("servers[%d].name", i), sv.Name)
+	}
+	for i, d := range s.Devices {
+		fn(fmt.Sprintf("devices[%d].name", i), d.Name)
+		fn(fmt.Sprintf("devices[%d].mac", i), d.MAC)
+	}
+	list("routing.block_list", s.Routing.BlockList)
+	list("routing.domestic.domains", s.Routing.Domestic.Domains)
+	list("routing.domestic.ips", s.Routing.Domestic.IPs)
+	for i, r := range s.Routing.Rules {
+		list(fmt.Sprintf("routing.rules[%d].domains", i), r.Domains)
+		list(fmt.Sprintf("routing.rules[%d].ips", i), r.IPs)
+	}
+	fn("dns.remote", s.DNS.Remote)
+	fn("health.probe_url", s.Health.ProbeURL)
 }
 
 // ids checks the IDs of the entries of a list found at prefix, such as
@@ -147,8 +197,6 @@ func (p *problems) name(path, name string) {
 	switch {
 	case strings.TrimSpace(name) == "":
 		p.add(path, "must not be empty")
-	case strings.Contains(name, Masked):
-		p.add(path, maskedProblem)
 	case strings.ContainsFunc(name, ForbiddenInName):
 		// The name itself is not repeated: the point is to keep it out of
 		// what is shown.
@@ -293,12 +341,6 @@ func (p *problems) devices(devices []Device) {
 				}
 			}
 		}
-		if strings.Contains(d.Name, Masked) {
-			p.add(path+".name", maskedProblem)
-		}
-		if strings.Contains(d.MAC, Masked) {
-			p.add(path+".mac", maskedProblem)
-		}
 		p.policy(path+".policy", d.Policy)
 	}
 }
@@ -369,8 +411,6 @@ func (p *problems) dns(d DNS, domestic netip.Addr) {
 		p.add("dns.domestic", "must be an IPv4 address")
 	}
 	switch a, err := netip.ParseAddr(d.Remote); {
-	case strings.Contains(d.Remote, Masked):
-		p.add("dns.remote", maskedProblem)
 	case !dnsRemote(d.Remote):
 		p.add("dns.remote", "must be an https:// URL or an IPv4 address")
 	case err == nil && a == domestic:
@@ -420,9 +460,6 @@ func checkDomain(m string) string {
 	if m == "" {
 		return "must not be empty"
 	}
-	if strings.Contains(m, Masked) {
-		return maskedProblem
-	}
 	if strings.ContainsFunc(m, unicode.IsSpace) {
 		return "must not contain whitespace"
 	}
@@ -452,9 +489,6 @@ func checkDomain(m string) string {
 func checkIP(m string) string {
 	if m == "" {
 		return "must not be empty"
-	}
-	if strings.Contains(m, Masked) {
-		return maskedProblem
 	}
 	if strings.ContainsFunc(m, unicode.IsSpace) {
 		return "must not contain whitespace"

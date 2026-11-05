@@ -710,10 +710,11 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
   value that holds the root bearer or a credential the auth store issued. A
   refresh response shows each skipped line only as its scheme, with a
   redacted reason. Only a real secret is masked: a name that merely looks
-  like a credential is shown as it is. The store refuses `‹redacted›` in any
-  name, routing value, device field and probe or resolver URL, and the API
-  answers a request that holds it with 400, so that a copied view fails
-  loudly instead of replacing what it stood for.
+  like a credential is shown as it is. A write that brings `‹redacted›` into
+  a name, a routing value, a device field or the probe or resolver URL is
+  refused, and the API answers a request that holds it with 400, so that a
+  copied view fails loudly instead of replacing what it stood for. Loading a
+  state that already holds it never fails.
 - **Secrets:** server credentials and the RouterOS password are kept in the
   `0700` state directory in files with mode `0600`. The rendered xray configs hold the servers'
   credentials too, so they are `0600` in a `0700` `run/config/`; both images
