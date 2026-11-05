@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"math/bits"
 	"slices"
 	"strings"
 
@@ -116,17 +117,26 @@ func (s *Service) testOutboundSet(ctx context.Context, outbounds map[string]json
 // never identifies which member was refused.
 //
 // It costs at most what testing each server alone does, one call per server,
-// and the first round of groups. After that round, a call that may classify
-// nobody is made only while servers that passing groups classified pay for
-// it; once none is left to, the rest are tested alone. Dense refusals would
-// otherwise cost several probes for each refused server.
+// the first round of groups and batchSlack. After that round, a call that may
+// classify nobody is made only while the slack and the servers that passing
+// groups classified pay for it; once nothing is left to, the rest are tested
+// alone. Dense refusals would otherwise cost several probes for each refused
+// server.
 func testBatchGroups(remaining []testOutbound, results map[string]string, test func([]testOutbound) (bool, error)) error {
-	b := &batchSearch{results: results, test: test}
+	b := &batchSearch{results: results, test: test, spare: batchSlack(len(remaining))}
 	err := b.search(remaining)
 	if errors.Is(err, errOverBudget) {
 		err = b.alone(remaining)
 	}
 	return err
+}
+
+// batchSlack is ceil(log2(min(n, maxBatch))) + 1: enough calls to probe a
+// failed group of the largest size for its index, and one more. Without it, a
+// batch of one group, or of groups that all failed, has classified nobody to
+// pay for a probe, and one refused server would cost a test of each.
+func batchSlack(n int) int {
+	return bits.Len(uint(max(min(n, maxBatch), 1)-1)) + 1
 }
 
 // errOverBudget ends a batch search when one more grouped call could make it
@@ -139,9 +149,9 @@ type batchSearch struct {
 	test    func([]testOutbound) (bool, error)
 	// charged is set once the first round of groups is over.
 	charged bool
-	// spare is the servers classified so far less the calls charged: how
-	// many more calls may classify nobody without the charged calls
-	// outnumbering the servers.
+	// spare is batchSlack and the servers classified so far, less the calls
+	// charged: how many more calls may classify nobody without the charged
+	// calls outnumbering the servers and the slack.
 	spare int
 }
 

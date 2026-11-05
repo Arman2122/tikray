@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -234,8 +235,11 @@ func TestRefreshAllRefusedCallCount(t *testing.T) {
 }
 
 // callLimit is what testBatchGroups may spend on n small servers: one call per
-// server, as testing each alone costs, and the first round of groups.
-func callLimit(n int) int { return n + (n+maxBatch-1)/maxBatch }
+// server, as testing each alone costs, the first round of groups and a slack
+// of ceil(log2(min(n, 32))) + 1 calls, which lets a small batch bisect.
+func callLimit(n int) int {
+	return n + (n+maxBatch-1)/maxBatch + int(math.Ceil(math.Log2(float64(min(n, maxBatch))))) + 1
+}
 
 // batchSim runs testBatchGroups on n small servers.
 type batchSim struct {
@@ -333,9 +337,19 @@ func TestBatchCallBound(t *testing.T) {
 	}
 }
 
-// Sparse refusals keep their small cost: one refused server among 200 in at
-// most 17 calls and two, wherever they are, in at most 20.
+// Sparse refusals keep their small cost: one refused server among 32 in at
+// most 12 calls, one among 200 in at most 17 and two, wherever they are, in
+// at most 20.
 func TestBatchSparseRefusalsCost(t *testing.T) {
+	small := newBatchSim(32)
+	for a := range 32 {
+		bad := map[int]bool{a: true}
+		calls, results := small.run(t, bad, nil)
+		small.check(t, bad, results, fmt.Sprintf("bad %d of 32", a))
+		if calls > 12 {
+			t.Fatalf("%d runner calls for server %d refused among 32; want at most 12", calls, a)
+		}
+	}
 	sim := newBatchSim(200)
 	for a := range 200 {
 		bad := map[int]bool{a: true}
