@@ -611,8 +611,8 @@ func TestValidateKeepsSecretsOutOfErrors(t *testing.T) {
 // outbound xray-core refuses says why, and repeats no id, password or key.
 func TestValidateRefusedOutboundsNameTheReason(t *testing.T) {
 	for _, tt := range []struct{ name, outbound, reason string }{
-		{"vless", fmt.Sprintf(vlessPlainTo, "1.2.3.4"), "xray-core refuses VLESS without TLS or encryption to a public address"},
-		{"trojan", fmt.Sprintf(trojanPlain, "1.2.3.4"), "xray-core refuses Trojan without TLS to a public address"},
+		{"vless", fmt.Sprintf(vlessPlainTo, "1.2.3.4"), "xray-core 26.10.31 and later refuse VLESS without TLS or encryption unless the server's IP address is private"},
+		{"trojan", fmt.Sprintf(trojanPlain, "1.2.3.4"), "xray-core 26.10.31 and later refuse Trojan without TLS unless the server's IP address is private"},
 		{"shadowsocks none", fmt.Sprintf(ssMethod, "none", "s3cret-pw"), "xray-core refuses the Shadowsocks methods none and plain"},
 		{"shadowsocks 2022", fmt.Sprintf(ssMethod, "2022-blake3-aes-256-gcm", "s3cret-pw"), "xray-core refuses a Shadowsocks 2022 password"},
 		{"allowInsecure", fmt.Sprintf(vlessInsecure, true), "xray-core refuses allowInsecure"},

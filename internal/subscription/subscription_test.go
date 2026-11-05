@@ -148,7 +148,7 @@ func TestParseSkipsRefusedLines(t *testing.T) {
 	if got.Line != refused {
 		t.Errorf("Line = %q, want the refused link %q", got.Line, refused)
 	}
-	if !strings.Contains(got.Err, "xray-core refuses VLESS") || strings.Contains(got.Err, secret) {
+	if !strings.Contains(got.Err, "refuse VLESS without TLS or encryption") || strings.Contains(got.Err, secret) {
 		t.Errorf("Err = %q, want the reason without the id", got.Err)
 	}
 }

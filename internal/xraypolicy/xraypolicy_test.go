@@ -230,8 +230,8 @@ func TestCheck(t *testing.T) {
 		{name: "vless none/none with security none to a public IP", outbound: vlessNested("1.2.3.4", "none", secNone), reason: "VLESS"},
 		{name: "vless security none in capitals", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"NONE"}`), reason: "VLESS"},
 		{name: "vless with a transport but no security", outbound: vlessNested("1.2.3.4", "none", noSec), reason: "VLESS"},
-		{name: "vless plaintext to TEST-NET", outbound: vlessNested("203.0.113.10", "none", ""), reason: "public address"},
-		{name: "trojan plaintext to TEST-NET", outbound: trojanNested("203.0.113.10", ""), reason: "public address"},
+		{name: "vless plaintext to TEST-NET", outbound: vlessNested("203.0.113.10", "none", ""), reason: "203.0.113.0/24 (documentation)"},
+		{name: "trojan plaintext to TEST-NET", outbound: trojanNested("203.0.113.10", ""), reason: "203.0.113.0/24 (documentation)"},
 		{name: "vless none/none to a private IP", outbound: vlessNested("10.77.113.10", "none", "")},
 		{name: "vless none/none to a domain", outbound: vlessNested("example.com", "none", ""), reason: "VLESS"},
 		{name: "vless none/none to a private domain", outbound: vlessNested("foo.test", "none", "")},
@@ -474,6 +474,51 @@ func TestCheck(t *testing.T) {
 			}
 			if r.Reason == "" || strings.Contains(r.Reason, "xraypolicy") || msg != "xraypolicy: "+r.Reason {
 				t.Errorf("Reason = %q, want the message without its prefix (%q)", r.Reason, msg)
+			}
+		})
+	}
+}
+
+// The refusal of a server without transport security states xray's rule, what
+// the server's address is to it and what to do. An address that the rule
+// does not count as private need not be public: it names the reserved range
+// such an address is in, but never the address or the name itself.
+func TestPlainRefusalReason(t *testing.T) {
+	const (
+		vless  = "xray-core 26.10.31 and later refuse VLESS without TLS or encryption unless the server's "
+		trojan = "xray-core 26.10.31 and later refuse Trojan without TLS unless the server's "
+		ip     = "IP address is private, loopback or link-local, and this one is "
+		name   = "name is local, and this one is not (a local name is one label that starts with a letter, or ends in " +
+			".lan, .localdomain, .example, .invalid, .localhost, .test, .local, .home.arpa or .internal)"
+		todo = ": use TLS or REALITY, or a private address"
+	)
+	for _, tc := range []struct {
+		name, outbound, address, reason string
+	}{
+		{"vless at a CGNAT address", vlessNested("100.101.102.103", "none", ""), "100.101.102.103", vless + ip + "in 100.64.0.0/10 (carrier-grade NAT)" + todo},
+		{"trojan at a CGNAT address", trojanFlat("100.64.0.1", ""), "100.64.0.1", trojan + ip + "in 100.64.0.0/10 (carrier-grade NAT)" + todo},
+		{"vless at a mapped CGNAT address", vlessFlat("::ffff:100.127.255.254", "", secNone), "100.127.255.254", vless + ip + "in 100.64.0.0/10 (carrier-grade NAT)" + todo},
+		{"vless at a benchmarking address", vlessNested("198.18.5.5", "none", noSec), "198.18.5.5", vless + ip + "in 198.18.0.0/15 (benchmarking)" + todo},
+		{"trojan at a benchmarking address", trojanNested("198.19.255.255", ""), "198.19.255.255", trojan + ip + "in 198.18.0.0/15 (benchmarking)" + todo},
+		{"vless at TEST-NET-1", vlessNested("192.0.2.10", "none", ""), "192.0.2.10", vless + ip + "in 192.0.2.0/24 (documentation)" + todo},
+		{"trojan at TEST-NET-2", trojanNested("198.51.100.7", ""), "198.51.100.7", trojan + ip + "in 198.51.100.0/24 (documentation)" + todo},
+		{"vless at an IPv6 documentation address", vlessNested("[2001:db8::1]", "none", ""), "2001:db8::1", vless + ip + "in 2001:db8::/32 (documentation)" + todo},
+		{"vless at a public IP", vlessNested("1.2.3.4", "none", ""), "1.2.3.4", vless + ip + "public" + todo},
+		{"trojan at a public IP", trojanNested("8.8.8.8", secNone), "8.8.8.8", trojan + ip + "public" + todo},
+		{"vless at a public IPv6 address", vlessNested("2a00:1450::1", "none", ""), "2a00:1450::1", vless + ip + "public" + todo},
+		{"vless at a public name", vlessNested("vpn.example.com", "none", ""), "vpn.example.com", vless + name + todo},
+		{"trojan at a public name", trojanNested("Edge.Provider.NET.", ""), "provider", trojan + name + todo},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var r *Refusal
+			if err := Check([]byte(tc.outbound)); !errors.As(err, &r) {
+				t.Fatalf("Check = %v, want a refusal", err)
+			}
+			if r.Reason != tc.reason {
+				t.Errorf("Reason = %q\nwant     %q", r.Reason, tc.reason)
+			}
+			if strings.Contains(strings.ToLower(r.Reason), strings.ToLower(tc.address)) {
+				t.Errorf("Reason %q repeats the server's address", r.Reason)
 			}
 		})
 	}

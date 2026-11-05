@@ -393,7 +393,7 @@ var vlessCases = []parseCase{
 	},
 
 	// xray-core 26.7.11 and newer refuse the whole config for VLESS with no TLS
-	// and no encryption to a public address.
+	// and no encryption to an address that is not private.
 	{
 		name:        "no security to a public IP is refused",
 		link:        "vless://" + vlessID + "@1.2.3.4:443",
@@ -415,7 +415,7 @@ var vlessCases = []parseCase{
 		link:        vlessBase + "?security=none",
 		wantErr:     kindUnsupported,
 		refused:     true,
-		errContains: "public address",
+		errContains: "name is local",
 		secret:      vlessID,
 	},
 	{

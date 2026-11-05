@@ -1054,7 +1054,7 @@ func TestOpenDegradesEachCheckOfAServer(t *testing.T) {
 		{"no protocol", srv("n", `{"settings":{}}`), "is required"},
 		{"a tag", srv("n", `{"protocol":"vless","tag":"x"}`), "must not be set: tikray tags the outbound itself"},
 		{"not an object", srv("n", `"vless"`), "must be a JSON object"},
-		{"refused by xray-core", srv("n", fmt.Sprintf(vlessPlainTo, "1.2.3.4")), "xray-core refuses VLESS without TLS or encryption to a public address"},
+		{"refused by xray-core", srv("n", fmt.Sprintf(vlessPlainTo, "1.2.3.4")), "xray-core 26.10.31 and later refuse VLESS without TLS or encryption unless the server's IP address is private, loopback or link-local, and this one is public: use TLS or REALITY, or a private address"},
 		{"empty name", srv("", `{"protocol":"vless"}`), "must not be empty"},
 		{"name with an escape", srv("Frank\x1b[2Jfurt", `{"protocol":"vless"}`), "must not hold control characters or bidi overrides"},
 		{"name too long", srv(strings.Repeat("a", MaxNameRunes+1), `{"protocol":"vless"}`), fmt.Sprintf("must be at most %d characters", MaxNameRunes)},
@@ -1078,6 +1078,32 @@ func TestOpenDegradesEachCheckOfAServer(t *testing.T) {
 				t.Errorf("the reason repeats a secret: %q", st.Servers[1].Invalid)
 			}
 		})
+	}
+}
+
+// TestOpenDisablesPlainServerAtCGNATAddress: a server that M2b saved, VLESS
+// without TLS at a carrier-grade NAT address, which xray-core before 26.10.31
+// counts as private, is disabled on upgrade, for tikray refuses what the
+// newest core refuses. The reason is the rule that refuses it, what the
+// address is to that rule and what to do, without the address.
+func TestOpenDisablesPlainServerAtCGNATAddress(t *testing.T) {
+	dir := t.TempDir()
+	tailnet := Server{ID: NewID(), Name: "home via tailnet", Outbound: json.RawMessage(
+		`{"protocol":"vless","settings":{"vnext":[{"address":"100.101.102.103","port":8443,"users":[{"id":"00000000-0000-4000-8000-000000000000","encryption":"none"}]}]}}`)}
+	put(t, dir, "state.v1.json", fileJSON(1, 7, stateWith(t, server("good"), tailnet)))
+
+	s := mustOpen(t, dir)
+	st, _ := s.State()
+	want := "xray-core 26.10.31 and later refuse VLESS without TLS or encryption unless the server's IP address is private, " +
+		"loopback or link-local, and this one is in 100.64.0.0/10 (carrier-grade NAT): use TLS or REALITY, or a private address"
+	if got := st.Servers[1]; !got.Disabled || got.Invalid != want {
+		t.Errorf("the server is disabled=%t invalid=%q, want it disabled for %q", got.Disabled, got.Invalid, want)
+	}
+	if strings.Contains(st.Servers[1].Invalid, "100.101.102.103") {
+		t.Errorf("the reason repeats the address: %q", st.Servers[1].Invalid)
+	}
+	if got := s.Degraded(); !slices.Equal(got, []string{tailnet.ID}) {
+		t.Errorf("Degraded() = %v, want [%s]", got, tailnet.ID)
 	}
 }
 

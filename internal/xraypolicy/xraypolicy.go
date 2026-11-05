@@ -12,7 +12,8 @@
 //
 // Errors here never repeat a user id, a password or a key: they end up in
 // logs, in the answers of the API and in the list of lines a subscription
-// skipped.
+// skipped. Nor do they repeat a server's address or name: where an IP
+// address is in a reserved range, they name the range.
 package xraypolicy
 
 import (
@@ -89,21 +90,12 @@ func init() {
 // address, and a name is lower-cased and loses one trailing dot. An address
 // with an IPv6 zone is a name, as it is in xray.
 func PrivateAddress(host string) bool {
-	// net.ParseAddress of xray.
-	if n := len(host); n > 0 && host[0] == '[' && host[n-1] == ']' {
-		host = host[1 : n-1]
-	}
-	if n := len(host); n > 0 && (!alphaNum(host[0]) || !alphaNum(host[n-1])) {
-		host = strings.TrimSpace(host)
-	}
-	if a, err := netip.ParseAddr(host); err == nil && a.Zone() == "" {
-		a = a.Unmap()
+	a, domain := readAddress(host)
+	if a.IsValid() {
 		// Since 26.10.31 the transport check uses Go's IP predicates. The
 		// broader geodata routing list also contains public reserved ranges.
 		return a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast()
 	}
-
-	domain := strings.TrimSuffix(strings.ToLower(host), ".")
 	for _, suffix := range privateSuffixes {
 		if domain == suffix || strings.HasSuffix(domain, "."+suffix) {
 			return true
@@ -115,6 +107,82 @@ func PrivateAddress(host string) bool {
 		}
 	}
 	return false
+}
+
+// readAddress reads host as xray's net.ParseAddress does: it returns the IP
+// address host is, unmapped, or else the name, lower-cased and without one
+// trailing dot.
+func readAddress(host string) (netip.Addr, string) {
+	if n := len(host); n > 0 && host[0] == '[' && host[n-1] == ']' {
+		host = host[1 : n-1]
+	}
+	if n := len(host); n > 0 && (!alphaNum(host[0]) || !alphaNum(host[n-1])) {
+		host = strings.TrimSpace(host)
+	}
+	if a, err := netip.ParseAddr(host); err == nil && a.Zone() == "" {
+		return a.Unmap(), ""
+	}
+	return netip.Addr{}, strings.TrimSuffix(strings.ToLower(host), ".")
+}
+
+// reservedRanges are special-purpose ranges whose addresses are neither
+// private, loopback nor link-local, so xray takes no plain traffic to them,
+// though few are public. A refusal names the range of such an address, and
+// what the range is for, rather than calling it public.
+var reservedRanges = []struct {
+	prefix netip.Prefix
+	use    string
+}{
+	{netip.MustParsePrefix("0.0.0.0/8"), "this network"},
+	{netip.MustParsePrefix("100.64.0.0/10"), "carrier-grade NAT"},
+	{netip.MustParsePrefix("192.0.0.0/24"), "IETF protocol assignments"},
+	{netip.MustParsePrefix("192.0.2.0/24"), "documentation"},
+	{netip.MustParsePrefix("198.18.0.0/15"), "benchmarking"},
+	{netip.MustParsePrefix("198.51.100.0/24"), "documentation"},
+	{netip.MustParsePrefix("203.0.113.0/24"), "documentation"},
+	{netip.MustParsePrefix("224.0.0.0/4"), "multicast"},
+	{netip.MustParsePrefix("240.0.0.0/4"), "reserved"},
+	{netip.MustParsePrefix("::/128"), "unspecified"},
+	{netip.MustParsePrefix("64:ff9b::/96"), "NAT64"},
+	{netip.MustParsePrefix("100::/64"), "discard-only"},
+	{netip.MustParsePrefix("2001:db8::/32"), "documentation"},
+	{netip.MustParsePrefix("fec0::/10"), "deprecated site-local"},
+	{netip.MustParsePrefix("ff00::/8"), "multicast"},
+}
+
+// plainRefusal is the refusal of what, a protocol over a stream with no
+// security, to a server at host, which is not PrivateAddress. xray 26.10.31
+// narrowed the IP addresses that may take plain traffic to Go's private,
+// loopback and link-local ones, so an address older releases took, such as one
+// in carrier-grade NAT's range, need not be public: the reason states the rule
+// and what the address is to it, and then what to do.
+func plainRefusal(what, host string) error {
+	const todo = ": use TLS or REALITY, or a private address"
+	rule := "xray-core 26.10.31 and later refuse " + what + " unless the server's "
+	a, _ := readAddress(host)
+	if !a.IsValid() {
+		return refuse(rule + "name is local, and this one is not (a local name is one label that starts with a letter, " +
+			"or ends in " + localSuffixes() + ")" + todo)
+	}
+	which := "public"
+	for _, r := range reservedRanges {
+		if r.prefix.Contains(a) {
+			which = "in " + r.prefix.String() + " (" + r.use + ")"
+			break
+		}
+	}
+	return refuse(rule + "IP address is private, loopback or link-local, and this one is " + which + todo)
+}
+
+// localSuffixes lists the suffixes of the private domain list, such as
+// ".lan, .local or .internal".
+func localSuffixes() string {
+	list := make([]string, len(privateSuffixes))
+	for i, suffix := range privateSuffixes {
+		list[i] = "." + suffix
+	}
+	last := len(list) - 1
+	return strings.Join(list[:last], ", ") + " or " + list[last]
 }
 
 func alphaNum(c byte) bool {
@@ -266,7 +334,7 @@ func checkVLESS(settings, streamSettings json.RawMessage) error {
 		return nil
 	}
 	if plainStream(streamSettings) && !PrivateAddress(address) {
-		return refuse("xray-core refuses VLESS without TLS or encryption to a public address")
+		return plainRefusal("VLESS without TLS or encryption", address)
 	}
 	return nil
 }
@@ -291,7 +359,7 @@ func checkTrojan(settings, streamSettings json.RawMessage) error {
 		return nil
 	}
 	if plainStream(streamSettings) && !PrivateAddress(address) {
-		return refuse("xray-core refuses Trojan without TLS to a public address")
+		return plainRefusal("Trojan without TLS", address)
 	}
 	return nil
 }
