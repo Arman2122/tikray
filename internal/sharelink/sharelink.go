@@ -297,8 +297,9 @@ func decodeBase64(s string) ([]byte, bool) {
 // name gives the name of a server: the link's fragment, or host:port when
 // nothing is left of the fragment, which is made valid UTF-8, loses what a
 // name may not hold (store.ForbiddenInName: control characters and bidi
-// overrides), and is trimmed. Either one is cut to store.MaxNameRunes runes. An
-// IPv6 host is bracketed.
+// overrides) and the API views' placeholder (store.Masked, which the store
+// refuses to have written into a name), and is trimmed. Either one is cut to
+// store.MaxNameRunes runes. An IPv6 host is bracketed.
 func name(fragment, host string, port int) string {
 	n := strings.TrimSpace(nameText(fragment))
 	if n == "" {
@@ -310,14 +311,20 @@ func name(fragment, host string, port int) string {
 	return n
 }
 
-// nameText is s made valid UTF-8, without the runes a name may not hold.
+// nameText is s made valid UTF-8, without the runes a name may not hold and
+// without the placeholder. Dropping either can join a new placeholder, so it
+// goes until none is left.
 func nameText(s string) string {
-	return strings.Map(func(r rune) rune {
+	s = strings.Map(func(r rune) rune {
 		if store.ForbiddenInName(r) {
 			return -1
 		}
 		return r
 	}, strings.ToValidUTF8(s, string(utf8.RuneError)))
+	for strings.Contains(s, store.Masked) {
+		s = strings.ReplaceAll(s, store.Masked, "")
+	}
+	return s
 }
 
 // buildOutbound marshals an outbound of the given protocol from its settings

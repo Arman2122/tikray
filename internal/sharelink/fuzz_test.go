@@ -84,6 +84,9 @@ func checkServer(t *testing.T, s Server) {
 	if strings.ContainsFunc(s.Name, store.ForbiddenInName) {
 		t.Errorf("Name holds a control character or a bidi override: %q", s.Name)
 	}
+	if strings.Contains(s.Name, store.Masked) {
+		t.Errorf("Name holds the views' placeholder: %q", s.Name)
+	}
 	// The store takes the server as it is.
 	state := store.Default()
 	state.Servers = []store.Server{{ID: "a1b2c3d4", Name: s.Name, Outbound: s.Outbound}}

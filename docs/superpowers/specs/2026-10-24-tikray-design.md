@@ -714,7 +714,8 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
   a name, a routing value, a device field or the probe or resolver URL is
   refused, and the API answers a request that holds it with 400, so that a
   copied view fails loudly instead of replacing what it stood for. Loading a
-  state that already holds it never fails.
+  state that already holds it never fails, and a provider's share-link name
+  loses it as it loses control characters.
 - **Secrets:** server credentials and the RouterOS password are kept in the
   `0700` state directory in files with mode `0600`. The rendered xray configs hold the servers'
   credentials too, so they are `0600` in a `0700` `run/config/`; both images
