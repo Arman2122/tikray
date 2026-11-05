@@ -34,6 +34,14 @@ func ForbiddenInName(r rune) bool {
 	return unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || r >= '\u202a' && r <= '\u202e' || r >= '\u2066' && r <= '\u2069'
 }
 
+// Masked is the placeholder that the API's views and the redactors show in
+// place of a hidden value. No value a view shows may hold it: one that does
+// was copied from a view, and what it stood for would be lost silently.
+const Masked = "‹redacted›"
+
+// maskedProblem is what is wrong with a value that holds Masked.
+const maskedProblem = "holds " + Masked + ", a masked placeholder from a view: send the value itself, not what a GET response showed"
+
 const (
 	// minInterval is the shortest time between two fetches of a subscription.
 	minInterval = time.Hour
@@ -106,7 +114,10 @@ func (s State) Validate() error {
 	p.routing(s.Routing, servers)
 	p.dns(s.DNS, s.DomesticResolver())
 	p.network(s.Network)
-	if !httpURL(s.Health.ProbeURL) {
+	switch {
+	case strings.Contains(s.Health.ProbeURL, Masked):
+		p.add("health.probe_url", maskedProblem)
+	case !httpURL(s.Health.ProbeURL):
 		p.add("health.probe_url", "must be an absolute http or https URL")
 	}
 	return p.err()
@@ -136,6 +147,8 @@ func (p *problems) name(path, name string) {
 	switch {
 	case strings.TrimSpace(name) == "":
 		p.add(path, "must not be empty")
+	case strings.Contains(name, Masked):
+		p.add(path, maskedProblem)
 	case strings.ContainsFunc(name, ForbiddenInName):
 		// The name itself is not repeated: the point is to keep it out of
 		// what is shown.
@@ -280,6 +293,12 @@ func (p *problems) devices(devices []Device) {
 				}
 			}
 		}
+		if strings.Contains(d.Name, Masked) {
+			p.add(path+".name", maskedProblem)
+		}
+		if strings.Contains(d.MAC, Masked) {
+			p.add(path+".mac", maskedProblem)
+		}
 		p.policy(path+".policy", d.Policy)
 	}
 }
@@ -350,6 +369,8 @@ func (p *problems) dns(d DNS, domestic netip.Addr) {
 		p.add("dns.domestic", "must be an IPv4 address")
 	}
 	switch a, err := netip.ParseAddr(d.Remote); {
+	case strings.Contains(d.Remote, Masked):
+		p.add("dns.remote", maskedProblem)
 	case !dnsRemote(d.Remote):
 		p.add("dns.remote", "must be an https:// URL or an IPv4 address")
 	case err == nil && a == domestic:
@@ -399,6 +420,9 @@ func checkDomain(m string) string {
 	if m == "" {
 		return "must not be empty"
 	}
+	if strings.Contains(m, Masked) {
+		return maskedProblem
+	}
 	if strings.ContainsFunc(m, unicode.IsSpace) {
 		return "must not contain whitespace"
 	}
@@ -428,6 +452,9 @@ func checkDomain(m string) string {
 func checkIP(m string) string {
 	if m == "" {
 		return "must not be empty"
+	}
+	if strings.Contains(m, Masked) {
+		return maskedProblem
 	}
 	if strings.ContainsFunc(m, unicode.IsSpace) {
 		return "must not contain whitespace"

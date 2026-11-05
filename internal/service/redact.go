@@ -12,8 +12,9 @@ import (
 	"github.com/Arman2122/tikray/internal/store"
 )
 
-// redacted is what a secret is replaced with.
-const redacted = "‹redacted›"
+// redacted is what a secret is replaced with: the placeholder the API's views
+// show too, which the store refuses to hold.
+const redacted = store.Masked
 
 // minSecret is the length, in bytes, below which a string is not taken for a
 // secret: replacing every "abc" would make a text unreadable without

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -147,5 +148,75 @@ func TestShortQueryValueKeepsDetailsAndViews(t *testing.T) {
 	}
 	if got.Servers[0].Name != "HK 03" || !slices.Equal(got.Routing.BlockList, f.state.Routing.BlockList) || !slices.Equal(got.Routing.Domestic.Domains, f.state.Routing.Domestic.Domains) {
 		t.Errorf("the view masked ordinary values: name %q, block_list %q, domestic %q", got.Servers[0].Name, got.Routing.BlockList, got.Routing.Domestic.Domains)
+	}
+}
+
+// A script reads the state and writes one section back, the usual way to edit
+// a whole-object PUT. A view masks a value that holds a credential, and the
+// placeholder must not replace the rule it stood for: the PUT fails loudly
+// and the backend is never asked to store it.
+func TestRoutingRoundTripRefusesMaskedValues(t *testing.T) {
+	f := newFake()
+	f.state.Subscriptions[0].URL = "https://provider.example/link/4f9a1c7e2b5d6a8c?sub=3"
+	f.state.Routing.BlockList = []string{"domain:ads.example", "domain:tracker3.example", "regexp:" + secretID}
+	f.state.Routing.Domestic.Domains = []string{"domain:163.com"}
+	srv := serve(t, f)
+	var got store.State
+	if err := json.Unmarshal(request(t, srv, "GET", "/v1/state", "", authed()).body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got.Routing.Domestic.Domains, f.state.Routing.Domestic.Domains) || !slices.Equal(got.Routing.BlockList[:2], f.state.Routing.BlockList[:2]) {
+		t.Errorf("the view masked ordinary routing values: %q, %q", got.Routing.BlockList, got.Routing.Domestic.Domains)
+	}
+	r := request(t, srv, "PUT", "/v1/routing", mustJSON(t, got.Routing), authed())
+	code, detail := errorOf(t, r)
+	if r.status != 400 || code != "bad_request" || !strings.Contains(detail, "masked placeholder from a view") {
+		t.Errorf("PUT of the viewed routing: status %d, %s: %q; want 400 that names the placeholder", r.status, code, detail)
+	}
+	for _, c := range f.recorded() {
+		if c.Method == "SetRouting" {
+			t.Error("the masked routing reached the backend")
+		}
+	}
+}
+
+// Only a real secret is masked in a view: a name or a routing value that only
+// looks like a credential label, a link or a setup code is shown as it is.
+func TestViewsShowOrdinaryNames(t *testing.T) {
+	f := newFake()
+	f.state.Servers[0].Name = "VMESS-HTTP-WS01"
+	f.state.Subscriptions[0].Name = "test-test-test"
+	f.state.Devices[0].Name = "https://provider.example"
+	f.state.Routing.BlockList = []string{"keyword:test-test-test", "domain:vmess-http-ws01.example"}
+	f.state.Devices = append(f.state.Devices,
+		store.Device{Address: netip.MustParsePrefix("192.168.88.11/32"), Name: "root " + testToken, Policy: store.Policy{Mode: store.ModeSmart}},
+		store.Device{Address: netip.MustParsePrefix("192.168.88.12/32"), Name: "id " + secretID, Policy: store.Policy{Mode: store.ModeSmart}})
+	srv := serve(t, f)
+	var st store.State
+	r := request(t, srv, "GET", "/v1/state", "", authed())
+	if err := json.Unmarshal(r.body, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Servers[0].Name != "VMESS-HTTP-WS01" || st.Subscriptions[0].Name != "test-test-test" || st.Devices[0].Name != "https://provider.example" ||
+		!slices.Equal(st.Routing.BlockList, f.state.Routing.BlockList) {
+		t.Errorf("the state view masked ordinary values: %q, %q, %q, %q", st.Servers[0].Name, st.Subscriptions[0].Name, st.Devices[0].Name, st.Routing.BlockList)
+	}
+	if st.Devices[1].Name != "‹redacted›" || st.Devices[2].Name != "id ‹redacted›" || strings.Contains(string(r.body), testToken) || strings.Contains(string(r.body), secretID) {
+		t.Errorf("the state view shows a real secret: %q, %q", st.Devices[1].Name, st.Devices[2].Name)
+	}
+	for _, path := range []string{"/v1/servers", "/v1/subscriptions", "/v1/devices"} {
+		r := request(t, srv, "GET", path, "", authed())
+		body := string(r.body)
+		if r.status != 200 || !strings.Contains(body, "VMESS-HTTP-WS01") && !strings.Contains(body, "test-test-test") && !strings.Contains(body, "https://provider.example") {
+			t.Errorf("GET %s masked an ordinary name: %s", path, body)
+		}
+	}
+	r = request(t, srv, "PUT", "/v1/devices/192.168.88.20", `{"name":"test-test-test","policy":{"mode":"smart"}}`, authed())
+	if r.status != 200 || !strings.Contains(string(r.body), `"name":"test-test-test"`) {
+		t.Errorf("PUT of a device: status %d, %s", r.status, r.body)
+	}
+	r = request(t, srv, "PUT", "/v1/routing", mustJSON(t, f.state.Routing), authed())
+	if r.status != 200 || !strings.Contains(string(r.body), "keyword:test-test-test") {
+		t.Errorf("PUT of the routing: status %d, %s", r.status, r.body)
 	}
 }

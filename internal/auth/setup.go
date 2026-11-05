@@ -8,6 +8,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/Arman2122/tikray/internal/store"
 )
 
 // codeAlphabet is Crockford's base32: the digits and the letters but I, L, O
@@ -89,7 +91,7 @@ func validSetupCode(norm string) bool {
 // containing a bearer, a session/CSRF value, a setup code in its display
 // form, or a link must never be used to publish that credential. Match wire
 // formats, without trying passwords or confirming guesses against the store.
-const hiddenName = "‹redacted›"
+const hiddenName = store.Masked
 
 var credentialLabel = regexp.MustCompile(
 	`(?i:(?:https?|vless|vmess|trojan|ss)://|[0-9A-HJKMNP-TV-Z]{4}(?:-[0-9A-HJKMNP-TV-Z]{4}){2})` +
@@ -106,15 +108,16 @@ func PublicName(name string) string {
 	return name
 }
 
-// PublicName also recognizes the actual cookie and CSRF sent by the caller
-// and the hashes of issued session IDs and bearer secrets inside longer names.
+// PublicName applies the label rule of the package's PublicName, which is for
+// the admin's username and the names of tokens, and also hides a name that
+// holds a credential this store knows (see HoldsSecret).
 func (s *Store) PublicName(name string, sess Session) string {
 	// The longest supported display name is 128 runes (a store server).
 	// Bound the work even when the caller has not yet validated its input.
 	if len(name) > 128*utf8.UTFMax {
 		return hiddenName
 	}
-	if (sess.ID != "" && strings.Contains(name, sess.ID)) || (sess.CSRF != "" && strings.Contains(name, sess.CSRF)) {
+	if sess.holds(name) {
 		return hiddenName
 	}
 	s.mu.Lock()
@@ -123,24 +126,64 @@ func (s *Store) PublicName(name string, sess Session) string {
 }
 
 func (s *Store) publicNameLocked(name string) string {
-	if name = PublicName(name); name == hiddenName {
-		return name
-	}
-	if len(name) >= tokenSecretLen && strings.Contains(name, base64.StdEncoding.EncodeToString(s.csrfKey)) {
+	if PublicName(name) == hiddenName || s.holdsSecretLocked(name) {
 		return hiddenName
 	}
+	return name
+}
+
+// HoldsSecret reports whether text holds a credential this store knows: the
+// caller's session ID or CSRF token, the key of the CSRF tokens, or the ID of
+// a session or the secret of a token it issued, found by its hash. Unlike
+// PublicName it applies no label rule, so that text that merely looks like a
+// credential, such as a server named "VMESS-HTTP-WS01", is no secret. It is
+// for what the desired state holds: the names and routing values the API's
+// views show.
+func (s *Store) HoldsSecret(text string, sess Session) bool {
+	if sess.holds(text) {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.holdsSecretLocked(text)
+}
+
+// holds reports whether text holds the session's own ID or CSRF token.
+func (sess Session) holds(text string) bool {
+	return (sess.ID != "" && strings.Contains(text, sess.ID)) || (sess.CSRF != "" && strings.Contains(text, sess.CSRF))
+}
+
+func (s *Store) holdsSecretLocked(text string) bool {
+	if len(text) >= tokenSecretLen && strings.Contains(text, base64.StdEncoding.EncodeToString(s.csrfKey)) {
+		return true
+	}
 	// The IDs and secrets share the same encoded length. Recording a new
-	// plaintext copy to redact names would defeat their hashed storage.
-	for i := 0; i+tokenSecretLen <= len(name); i++ {
-		h := sha256Hex(name[i : i+tokenSecretLen])
+	// plaintext copy to redact names would defeat their hashed storage. Both
+	// are base64url, so only a window of those characters can be one: text
+	// of other characters, however long, costs no hash.
+	run := 0 // the base64url characters that end at text[i]
+	for i := 0; i < len(text); i++ {
+		if !base64URLChar(text[i]) {
+			run = 0
+			continue
+		}
+		if run++; run < tokenSecretLen {
+			continue
+		}
+		h := sha256Hex(text[i+1-tokenSecretLen : i+1])
 		if indexOfSession(s.d.Sessions, h) >= 0 {
-			return hiddenName
+			return true
 		}
 		for _, tok := range s.d.Tokens {
 			if sameHash(tok.Hash, h) {
-				return hiddenName
+				return true
 			}
 		}
 	}
-	return name
+	return false
+}
+
+// base64URLChar reports whether c is in the alphabet of base64url.
+func base64URLChar(c byte) bool {
+	return 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '-' || c == '_'
 }

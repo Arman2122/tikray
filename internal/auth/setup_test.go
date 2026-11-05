@@ -1,9 +1,11 @@
 package auth
 
 import (
+	"encoding/base64"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 var codeForm = regexp.MustCompile(`^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$`)
@@ -74,6 +76,44 @@ func TestSetupCodeAlphabetHasNoLookAlikes(t *testing.T) {
 	for _, r := range "ILOU" {
 		if strings.ContainsRune(codeAlphabet, r) {
 			t.Errorf("the alphabet holds %q", r)
+		}
+	}
+}
+
+// HoldsSecret finds what the store issued, wherever it sits in a text, and
+// nothing that only looks like a credential: it is for values of the state,
+// such as a server's name, which no label rule applies to.
+func TestHoldsSecretFindsOnlyRealSecrets(t *testing.T) {
+	s, dir := openTest(t)
+	claim(t, s, dir, "alice", "correct horse battery")
+	sess, err := s.SignIn(t.Context(), "alice", "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, tok, err := s.CreateToken("ci", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Found by their hashes, with no caller to compare with.
+	for name, text := range map[string]string{
+		"a token":               "ci " + tok,
+		"a token's secret":      "ci-" + secretOf(tok) + ".example",
+		"a session's ID":        "regexp:" + sess.ID,
+		"the CSRF key, as text": "key " + base64.StdEncoding.EncodeToString(s.csrfKey),
+	} {
+		if !s.HoldsSecret(text, Session{}) {
+			t.Errorf("%s was not found", name)
+		}
+	}
+	if !s.HoldsSecret("x"+sess.CSRF, sess) || s.HoldsSecret("x"+sess.CSRF, Session{}) {
+		t.Error("the caller's CSRF token is found only with the caller's session")
+	}
+	for _, text := range []string{
+		"VMESS-HTTP-WS01", "test-test-test", "ABCD-EFGH-JKMN", "https://provider.example",
+		strings.Repeat("a", 64), "tkr_00000000_" + strings.Repeat("A", 43), strings.Repeat("b", 10000),
+	} {
+		if s.HoldsSecret(text, sess) {
+			t.Errorf("%q is taken for a secret", text)
 		}
 	}
 }

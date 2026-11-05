@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"slices"
@@ -17,18 +19,54 @@ import (
 	"github.com/Arman2122/tikray/internal/store"
 )
 
-// publicName also checks the root bearer, which the auth store does not own.
-// Only bounded display fields go through this check. The root itself is not retained.
+// publicName is the auth store's PublicName, for the admin's username and a
+// token's name, with the root bearer checked too: the auth store does not own
+// it. Only bounded display fields go through this check.
 func (h *handler) publicName(name string, session auth.Session) string {
-	if len(name) > 128*utf8.UTFMax {
-		return "‹redacted›"
-	}
-	for i := 0; h.rootLen > 0 && i+h.rootLen <= len(name); i++ {
-		if sha256.Sum256([]byte(name[i:i+h.rootLen])) == h.root {
-			return "‹redacted›"
-		}
+	if len(name) > 128*utf8.UTFMax || h.holdsRoot(name) {
+		return store.Masked
 	}
 	return h.a.PublicName(name, session)
+}
+
+// holdsRoot reports whether text holds the root bearer. The root itself is
+// not retained: each window of its length is compared by its hash.
+func (h *handler) holdsRoot(text string) bool {
+	for i := 0; h.rootLen > 0 && i+h.rootLen <= len(text); i++ {
+		if sha256.Sum256([]byte(text[i:i+h.rootLen])) == h.root {
+			return true
+		}
+	}
+	return false
+}
+
+// shown is a value of the state as a view shows it: with the state's secrets
+// replaced where they occur, and masked whole when it holds the root bearer or
+// a credential the auth store knows. A view hides only a real secret: a name
+// or a routing value that merely looks like a credential, such as
+// "VMESS-HTTP-WS01", is shown as it is, so that what a view shows is the
+// value itself wherever it can be.
+func (h *handler) shown(v string, redact func(string) string, session auth.Session) string {
+	v = redact(v)
+	if h.holdsRoot(v) || h.a.HoldsSecret(v, session) {
+		return store.Masked
+	}
+	return v
+}
+
+// maskedRequest answers 400 when a request holds the placeholder a view shows
+// for a hidden value. A view is for display: a section copied from a GET
+// response and sent back would replace a rule or a name with the placeholder.
+// The store refuses it too; this says so before any work is done, as a fault
+// of the request. Callers give it only what a view shows: a link or an
+// outbound may hold anything.
+func (h *handler) maskedRequest(w http.ResponseWriter, v any) bool {
+	b, err := json.Marshal(v)
+	if err != nil || !bytes.Contains(b, []byte(store.Masked)) {
+		return false
+	}
+	h.writeError(w, http.StatusBadRequest, codeBadRequest, "the request holds "+store.Masked+", a masked placeholder from a view: a GET response is for display; send the values themselves")
+	return true
 }
 
 // The CLI consumes the protocol and first host/port from the outbound field.
@@ -91,13 +129,13 @@ func publicOutbound(raw json.RawMessage, safe func(string) string) json.RawMessa
 // Keep the revision and the shape that existing clients use for display.
 // A state response is a view; private state on disk remains the restore source.
 func (h *handler) visibleServer(s store.Server, redact func(string) string) store.Server {
-	safe := func(v string) string { return h.publicName(redact(v), auth.Session{}) }
+	safe := func(v string) string { return h.shown(v, redact, auth.Session{}) }
 	return store.Server{ID: s.ID, Name: safe(s.Name), Disabled: s.Disabled, Untested: s.Untested,
 		Invalid: redact(s.Invalid), Subscription: s.Subscription, Outbound: publicOutbound(s.Outbound, safe)}
 }
 
 func (h *handler) visibleSub(s store.Subscription, redact func(string) string) store.Subscription {
-	return store.Subscription{ID: s.ID, Name: h.publicName(redact(s.Name), auth.Session{}), Interval: s.Interval,
+	return store.Subscription{ID: s.ID, Name: h.shown(s.Name, redact, auth.Session{}), Interval: s.Interval,
 		Disabled: s.Disabled, LastFetch: s.LastFetch, LastError: redact(s.LastError)}
 }
 
@@ -140,7 +178,7 @@ func (h *handler) visibleSubscriptions(st store.State, redact func(string) strin
 func (h *handler) visibleDevices(st store.State, redact func(string) string) []store.Device {
 	devices := slices.Clone(st.Devices)
 	for i := range devices {
-		devices[i].Name = h.publicName(redact(devices[i].Name), auth.Session{})
+		devices[i].Name = h.shown(devices[i].Name, redact, auth.Session{})
 	}
 	return orEmpty(devices)
 }
@@ -149,7 +187,7 @@ func (h *handler) visibleRouting(r store.Routing, redact func(string) string) st
 	clean := func(values []string) []string {
 		values = slices.Clone(values)
 		for i, v := range values {
-			values[i] = h.publicName(redact(v), auth.Session{})
+			values[i] = h.shown(v, redact, auth.Session{})
 		}
 		return values
 	}

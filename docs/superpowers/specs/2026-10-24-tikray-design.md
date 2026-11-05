@@ -696,6 +696,20 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
   outbound settings and subscription URLs are write-only over the API.
   Probe and resolver responses omit userinfo and queries. Private restore
   data resides in the protected state file.
+- **Views are for display:** a GET response, and the response to a change,
+  which is the same view, cannot be sent back as it is. A PUT of routing, DNS
+  or health, and a name in a POST or PATCH, must be built from the caller's
+  own data. A view drops each server's outbound beyond its protocol and first
+  endpoint, share links, subscription URLs and the userinfo and query of probe
+  and resolver URLs. It replaces a secret of the state inside a name or a
+  routing value with `‹redacted›`, and a whole name or value that holds the
+  root bearer or a credential the auth store issued. A refresh response shows
+  each skipped line only as its scheme, with a redacted reason. Only a real
+  secret is masked: a name that merely looks like a credential is shown as it
+  is. The store refuses `‹redacted›` in any name, routing value, device field
+  and probe or resolver URL, and the API answers a request that holds it with
+  400, so that a copied view fails loudly instead of replacing what it stood
+  for.
 - **Secrets:** server credentials and the RouterOS password are kept in the
   `0700` state directory in files with mode `0600`. The rendered xray configs hold the servers'
   credentials too, so they are `0600` in a `0700` `run/config/`; both images

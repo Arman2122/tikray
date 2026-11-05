@@ -241,7 +241,7 @@ func (h *handler) addServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in newServerRequest
-	if !h.decode(w, r, &in) {
+	if !h.decode(w, r, &in) || h.maskedRequest(w, in.Name) {
 		return
 	}
 	srv, newRev, err := h.b.AddServer(r.Context(), rev, service.NewServer{Link: in.Link, Name: in.Name, Outbound: present(in.Outbound)})
@@ -262,7 +262,7 @@ func (h *handler) patchServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in serverPatchRequest
-	if !h.decode(w, r, &in) {
+	if !h.decode(w, r, &in) || h.maskedRequest(w, in.Name) {
 		return
 	}
 	patch := service.ServerPatch{Name: in.Name, Disabled: in.Disabled, Link: in.Link, Outbound: present(in.Outbound)}
@@ -284,7 +284,7 @@ func (h *handler) addSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in newSubscriptionRequest
-	if !h.decode(w, r, &in) {
+	if !h.decode(w, r, &in) || h.maskedRequest(w, in.Name) {
 		return
 	}
 	sub, newRev, err := h.b.AddSubscription(r.Context(), rev, service.NewSubscription{Name: in.Name, URL: in.URL, Interval: in.Interval})
@@ -305,7 +305,7 @@ func (h *handler) patchSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in subscriptionPatchRequest
-	if !h.decode(w, r, &in) {
+	if !h.decode(w, r, &in) || h.maskedRequest(w, in.Name) {
 		return
 	}
 	patch := service.SubscriptionPatch{Name: in.Name, URL: in.URL, Disabled: in.Disabled, Interval: in.Interval}
@@ -365,7 +365,7 @@ func (h *handler) setDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var d store.Device
-	if !h.decode(w, r, &d) {
+	if !h.decode(w, r, &d) || h.maskedRequest(w, d) {
 		return
 	}
 	if d.Address.IsValid() && d.Address != addr {
@@ -378,7 +378,7 @@ func (h *handler) setDevice(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	d.Name = h.publicName(h.redact(d.Name), callerOf(r).session)
+	d.Name = h.shown(d.Name, h.redact, callerOf(r).session)
 	h.reply(w, http.StatusOK, newRev, d)
 }
 
@@ -431,7 +431,7 @@ func set[T any](h *handler, do func(ctx context.Context, rev uint64, v T) (uint6
 			return
 		}
 		var v T
-		if !h.decode(w, r, &v) {
+		if !h.decode(w, r, &v) || h.maskedRequest(w, v) {
 			return
 		}
 		newRev, err := do(r.Context(), rev, v)

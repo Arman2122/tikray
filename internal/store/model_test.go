@@ -568,6 +568,58 @@ func TestValidateInvalidMustStayDisabled(t *testing.T) {
 	}
 }
 
+// The API's views show ‹redacted› in place of a hidden value. A section
+// copied from a GET response and written back would store the placeholder
+// and lose the value it stood for, silently: a block rule of "‹redacted›" is
+// a substring matcher. Every value a view shows is refused when it holds it.
+func TestValidateRefusesMaskedPlaceholder(t *testing.T) {
+	const mask = "‹redacted›"
+	for _, c := range []struct {
+		name   string
+		mutate func(*State)
+		path   string
+	}{
+		{"server name", func(s *State) { s.Servers[0].Name = mask }, "servers[0].name"},
+		{"server name part", func(s *State) { s.Servers[0].Name = "Frankfurt " + mask }, "servers[0].name"},
+		{"subscription name", func(s *State) { s.Subscriptions[0].Name = mask }, "subscriptions[0].name"},
+		{"device name", func(s *State) { s.Devices[0].Name = "tv " + mask }, "devices[0].name"},
+		{"device MAC", func(s *State) { s.Devices[0].MAC = mask }, "devices[0].mac"},
+		{"block list", func(s *State) { s.Routing.BlockList = []string{"domain:ads.example", mask} }, "routing.block_list[1]"},
+		{"block list regexp", func(s *State) { s.Routing.BlockList = []string{"regexp:" + mask} }, "routing.block_list[0]"},
+		{"domestic domain", func(s *State) { s.Routing.Domestic.Domains = []string{"domain:" + mask} }, "routing.domestic.domains[0]"},
+		{"domestic IP", func(s *State) { s.Routing.Domestic.IPs = []string{mask} }, "routing.domestic.ips[0]"},
+		{"rule domain", withRule(Rule{Domains: []string{"keyword:" + mask}, Action: ActionDirect}), "routing.rules[0].domains[0]"},
+		{"rule IP", withRule(Rule{IPs: []string{mask}, Action: ActionDirect}), "routing.rules[0].ips[0]"},
+		{"probe URL", func(s *State) { s.Health.ProbeURL = "https://probe.example/" + mask }, "health.probe_url"},
+		{"DNS URL", func(s *State) { s.DNS.Remote = "https://dns.example/" + mask }, "dns.remote"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := valid()
+			c.mutate(&s)
+			ps := joined(s.Validate())
+			if len(ps) != 1 || !strings.HasPrefix(ps[0].Error(), c.path+": ") || !strings.Contains(ps[0].Error(), "masked placeholder from a view") {
+				t.Errorf("Validate = %v; want one problem at %s that names the masked placeholder", ps, c.path)
+			}
+		})
+	}
+
+	// Nothing is written.
+	dir := t.TempDir()
+	st := mustOpen(t, dir)
+	if _, _, err := st.Update(AnyRevision, func(s *State) error {
+		s.Routing.BlockList = []string{"domain:ads.example", mask}
+		return nil
+	}); err == nil || !strings.Contains(err.Error(), "masked placeholder") {
+		t.Errorf("Update = %v, want the masked placeholder refused", err)
+	}
+	if got, rev := st.State(); rev != 0 || len(got.Routing.BlockList) != 0 {
+		t.Errorf("the refused routing was stored at revision %d", rev)
+	}
+	if n := names(t, dir); len(n) != 0 {
+		t.Errorf("Update wrote %v", n)
+	}
+}
+
 func TestValidateReportsEveryProblem(t *testing.T) {
 	s := valid()
 	s.Devices[0].Address = netip.MustParsePrefix("192.168.1.5/24")
