@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -146,5 +147,102 @@ func TestTestErrorTexts(t *testing.T) {
 	}
 	if !errors.Is(stageError(stage), syscall.ENOSPC) {
 		t.Error("a test error should unwrap to its cause")
+	}
+}
+
+// On exit status 23 the runner reads xray's refusal itself, and passes on
+// only the srv- tags of the outbounds xray names and a fixed category, in a
+// trial, in its record and in POST /v1/test.
+func TestRefusalNamesTheServerAndCategory(t *testing.T) {
+	const (
+		want    = "xray rejected the config: outbound srv-deadbeef: unsupported flow"
+		private = "fixture-private-value"
+	)
+	config := `{"outbounds":[{"protocol":"vless","tag":"srv-deadbeef","settings":{"vnext":[{"users":[{"id":"` + private + `","flow":"xtls-rprx-direct"}]}]}}]}`
+	g := runningRig(t)
+	cand := g.candidate(t, "flowtest", 10*time.Second)
+	writeFile(t, g.d.ConfigPath(cand.Config), config)
+	a := newAPI(t, g, nil)
+	err := a.c.Trial(t.Context())
+	var tf *runnerapi.TestFailedError
+	if !errors.As(err, &tf) || tf.Output != want {
+		t.Fatalf("Trial = %v; want the refusal %q", err, want)
+	}
+	g.wantLastTrial(t, runnerapi.OutcomeRejected, cand)
+	if st, err := a.c.Status(t.Context()); err != nil || st.LastTrial == nil || st.LastTrial.Detail != want {
+		t.Errorf("Status = %+v, %v; want the last trial's detail %q", st.LastTrial, err, want)
+	}
+	if last, err := ReadLastTrial(g.d); err != nil || last == nil || last.Detail != want {
+		t.Errorf("last-trial.json = %+v, %v; want the detail %q", last, err, want)
+	}
+
+	g = newRig(t, nil)
+	g.active(t, "flowtest")
+	g.boot(t)
+	a = newAPI(t, g, nil)
+	res, err := a.c.Test(t.Context(), []byte(config))
+	if err != nil || res != (runnerapi.TestResult{Output: want}) {
+		t.Errorf("Test = %+v, %v; want the refusal %q", res, err, want)
+	}
+	resp, body := send(t, a.url, http.MethodPost, "/v1/test", "Bearer "+testToken, config)
+	if resp.StatusCode != http.StatusOK || strings.Contains(body, private) || !strings.Contains(body, want) {
+		t.Errorf("POST /v1/test = %d %s; want 200 with the refusal and nothing of the config", resp.StatusCode, body)
+	}
+}
+
+// realRefusals are the refusals of the configs in testdata/refusals, the
+// ones the runnerapi tests' xray output came from.
+var realRefusals = map[string]string{
+	"flow":             "outbound srv-deadbeef: unsupported flow",
+	"plainvless":       "outbound srv-0000beef: transport needs TLS or encryption",
+	"plainvlessdomain": "outbound srv-0000beef: transport needs TLS or encryption",
+	"plaintrojan":      "outbound srv-1234abcd: transport needs TLS or encryption",
+	"insecure":         "outbound srv-0000cafe: allowInsecure refused",
+	"reality":          "outbound srv-00001111: invalid TLS or REALITY settings",
+	"fp":               "outbound srv-00006666: invalid TLS or REALITY settings",
+	"network":          "outbound srv-00002222: unsupported transport or security",
+	"security":         "outbound srv-00003333: unsupported transport or security",
+	"proto":            "outbound srv-00000f0f: unknown protocol",
+	"ssmethod":         "outbound srv-0000bbbb: unsupported cipher",
+	"sspass":           "outbound srv-0000cccc: missing or invalid password",
+	"trojanpass":       "outbound srv-0000eeee: missing or invalid password",
+	"ss2022":           "missing or invalid password",
+	"vlessenc":         "outbound srv-00004444: unsupported VLESS encryption",
+	"port0":            "outbound srv-00000a0a: invalid port or address",
+	"portbig":          "outbound srv-00000b0b: invalid port or address",
+	"portstr":          "outbound srv-00000c0c: invalid port or address",
+	"badaddr":          "outbound srv-00000e0e: invalid port or address",
+	"baduuid":          "outbound srv-0badc0de: invalid user",
+	"json":             "invalid JSON",
+	"jsonsyntax":       "invalid JSON",
+	"jsontype":         "outbound srv-0000aaac: invalid config",
+	"hysteria":         "outbound srv-00005555: invalid config",
+}
+
+// TestRealXrayRefusals has a real xray, $TIKRAY_TEST_XRAY, test the configs
+// in testdata/refusals. A config it refuses must give the refusal above, and
+// one it accepts (a release without the rule) is logged.
+func TestRealXrayRefusals(t *testing.T) {
+	bin := os.Getenv("TIKRAY_TEST_XRAY")
+	if bin == "" {
+		t.Skip("set TIKRAY_TEST_XRAY to an xray binary to test its refusals")
+	}
+	paths, err := filepath.Glob(filepath.Join("testdata", "refusals", "*.json"))
+	if err != nil || len(paths) != len(realRefusals) {
+		t.Fatalf("testdata/refusals has %d configs (%v); want %d", len(paths), err, len(realRefusals))
+	}
+	for _, path := range paths {
+		name := strings.TrimSuffix(filepath.Base(path), ".json")
+		t.Run(name, func(t *testing.T) {
+			res, err := runTest(t.Context(), bin, os.Environ(), path)
+			switch {
+			case err != nil:
+				t.Fatalf("runTest: %v", err)
+			case res.OK:
+				t.Logf("this xray accepts %s", name)
+			case res.Output != "xray rejected the config: "+realRefusals[name]:
+				t.Errorf("refusal %q, want %q", res.Output, "xray rejected the config: "+realRefusals[name])
+			}
+		})
 	}
 }

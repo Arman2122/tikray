@@ -1,0 +1,1 @@
+{"outbounds":[{"protocol":"trojan","tag":"srv-00000a0a","settings":{"servers":[{"address":"example.com","port":0,"password":"fixture-trojan-pass"}]},"streamSettings":{"security":"tls"}}]}

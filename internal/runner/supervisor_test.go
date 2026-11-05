@@ -231,8 +231,8 @@ func TestTestReportsFailure(t *testing.T) {
 	if err != nil || res.OK {
 		t.Fatalf("Test = %+v, %v; want xray's refusal and no error", res, err)
 	}
-	if !strings.Contains(res.Output, "failed to load config") {
-		t.Errorf("output = %q, want it to contain %q", res.Output, "failed to load config")
+	if res.Output != "xray rejected the config: invalid config" {
+		t.Errorf("output = %q, want the fixed refusal", res.Output)
 	}
 }
 

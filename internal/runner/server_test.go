@@ -352,8 +352,8 @@ func TestServerTestFailed(t *testing.T) {
 
 	err := a.c.Trial(t.Context())
 	var tf *runnerapi.TestFailedError
-	if !errors.As(err, &tf) || !strings.Contains(tf.Output, "failed to load config") {
-		t.Fatalf("Trial = %v; want a *TestFailedError containing \"failed to load config\"", err)
+	if !errors.As(err, &tf) || tf.Output != "xray rejected the config: invalid config" {
+		t.Fatalf("Trial = %v; want a *TestFailedError with the refusal", err)
 	}
 	g.wantState(t, runnerapi.StateRunning, oldCore)
 	if got := g.r.Status().XrayPID; got != pid {
@@ -495,7 +495,7 @@ func TestServerTest(t *testing.T) {
 		output string
 	}{
 		{mode: "ok", ok: true, output: "Configuration OK."},
-		{mode: "badconfig", ok: false, output: "failed to load config"},
+		{mode: "badconfig", ok: false, output: "xray rejected the config: invalid config"},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			g := newRig(t, nil)
@@ -752,7 +752,7 @@ func TestServerStatusCodes(t *testing.T) {
 		{name: "reload during a trial", setup: trialOpen, method: "POST", path: "/v1/reload", status: 409, code: "busy"},
 
 		{name: "trial of a rejected config", setup: func(t *testing.T, g *rig) { g.candidate(t, "badconfig", 10*time.Second) },
-			method: "POST", path: "/v1/trial", status: 422, code: "test_failed", detail: "failed to load config"},
+			method: "POST", path: "/v1/trial", status: 422, code: "test_failed", detail: "xray rejected the config: invalid config"},
 
 		{name: "xray-api with no xray", noActive: true, method: "POST", path: "/v1/xray-api", body: `{"args":["adi"]}`, status: 503, code: "no_xray"},
 

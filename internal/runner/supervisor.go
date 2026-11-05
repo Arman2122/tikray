@@ -216,15 +216,18 @@ func (s *Supervisor) Test(ctx context.Context, sel runnerapi.Selection) (runnera
 
 // runTest runs "<bin> run -test -c <config>" with env. Only exit status
 // runnerapi.ExitConfigRefused is xray's refusal of the config, a result with
-// OK false. Any other end is a *testError: xray could not be started, a
-// signal killed it (an OOM kill on a small router), or it exited with
-// another status (a Go runtime fatal error exits 2). When ctx ends first,
-// the error wraps ctx's, and the caller, who set the limit, says which it
-// was. Child output can contain an entire outbound in a protocol-specific
-// encoding, so both output streams are discarded.
+// OK false whose output is runnerapi.ConfigRefusal's. Any other end is a
+// *testError: xray could not be started, a signal killed it (an OOM kill on
+// a small router), or it exited with another status (a Go runtime fatal
+// error exits 2). When ctx ends first, the error wraps ctx's, and the
+// caller, who set the limit, says which it was. Child output can contain an
+// entire outbound in a protocol-specific encoding, so nothing of it leaves
+// but what ConfigRefusal makes of it.
 func runTest(ctx context.Context, bin string, env []string, config string) (runnerapi.TestResult, error) {
+	out := &tailBuffer{max: maxTestOutput}
 	cmd := exec.CommandContext(ctx, bin, "run", "-test", "-c", config)
 	cmd.Env = env
+	cmd.Stdout, cmd.Stderr = out, out
 	err := cmd.Run()
 	var exit *exec.ExitError
 	switch {
@@ -235,7 +238,7 @@ func runTest(ctx context.Context, bin string, env []string, config string) (runn
 	case !errors.As(err, &exit):
 		return runnerapi.TestResult{}, startError(err)
 	case exit.ExitCode() == runnerapi.ExitConfigRefused:
-		return runnerapi.ConfigVerdict(exit.ExitCode()), nil
+		return runnerapi.TestResult{Output: runnerapi.ConfigRefusal(string(out.buf))}, nil
 	case exit.ExitCode() > 0:
 		return runnerapi.TestResult{}, exitedError(exit.ExitCode())
 	}
@@ -243,6 +246,29 @@ func runTest(ctx context.Context, bin string, env []string, config string) (runn
 		return runnerapi.TestResult{}, killedError(ws.Signal())
 	}
 	return runnerapi.TestResult{}, &testError{text: runnerapi.FaultKilled, err: err}
+}
+
+// maxTestOutput bounds what runTest keeps of xray's output: the end, where
+// xray says why it refuses a config, after any warnings.
+const maxTestOutput = 64 << 10
+
+// tailBuffer keeps the last max bytes written to it, so that an xray that
+// prints without end costs no more memory than that.
+type tailBuffer struct {
+	buf []byte
+	max int
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if len(p) >= b.max {
+		p = p[len(p)-b.max:]
+	}
+	if over := len(b.buf) + len(p) - b.max; over > 0 {
+		b.buf = append(b.buf[:0], b.buf[over:]...)
+	}
+	b.buf = append(b.buf, p...)
+	return n, nil
 }
 
 // testError is a test of a config that ended without xray's verdict. Its

@@ -1,0 +1,1 @@
+{"outbounds":[{"protocol":"trojan","tag":"srv-1234abcd","settings":{"servers":[{"address":"8.8.4.4","port":443,"password":"fixture-trojan-pass"}]}}]}

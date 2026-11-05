@@ -1,0 +1,1 @@
+{"outbounds":[{"protocol":"vless","tag":"srv-00001111","settings":{"vnext":[{"address":"example.com","port":443,"users":[{"id":"11111111-2222-4333-8444-555555555555","encryption":"none","flow":"xtls-rprx-vision"}]}]},"streamSettings":{"security":"reality","realitySettings":{"serverName":"example.com","publicKey":"fixture-bad-public-key","fingerprint":"chrome"}}}]}

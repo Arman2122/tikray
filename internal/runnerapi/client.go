@@ -2,6 +2,7 @@ package runnerapi
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -141,12 +142,18 @@ func (c *Client) Test(ctx context.Context, config []byte) (TestResult, error) {
 	return res, nil
 }
 
-// Older runners returned raw child output, sometimes containing escaped or
-// transformed credentials. Project it onto fixed public categories before it
-// can enter an error, a persisted verdict or history.
+// publicRefusal is the public form of a runner's reason for a refusal. A
+// runner's own reasons, from ConfigRefusal, are fixed words and public tags
+// and stay as they are. Older runners returned raw child output, sometimes
+// containing escaped or transformed credentials: project it onto the same
+// tags and fixed categories (see classifyRefusal) before it can enter an
+// error, a persisted verdict or history.
 func publicRefusal(text string) string {
 	if text == "" {
 		return ""
+	}
+	if publicRefusalRE.MatchString(text) {
+		return text
 	}
 	const prefix = "xray failed to load config (exit "
 	if n, ok := strings.CutPrefix(text, prefix); ok {
@@ -161,13 +168,9 @@ func publicRefusal(text string) string {
 		return TestOutputTruncated
 	case strings.Contains(text, "xray run -test did not finish within"):
 		return "xray config test did not finish"
-	case strings.Contains(text, "unknown user"):
-		return "unknown user"
-	case strings.Contains(text, "bad user"), strings.Contains(text, "user") && (strings.Contains(text, "not valid") || strings.Contains(text, "invalid")):
-		return "invalid user"
-	default:
-		return "xray failed to load config"
 	}
+	tags, category := classifyRefusal(text)
+	return refusalText(tags, cmp.Or(category, refusalLegacy))
 }
 
 // The previous runner sent its own timeout as a rejection, with this line

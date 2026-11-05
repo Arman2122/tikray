@@ -1,0 +1,1 @@
+{"outbounds":[{"protocol":"vless","tag":"srv-0badc0de","settings":{"vnext":[{"address":"example.com","port":443,"users":[{"id":"fixture-secret-not-a-uuid-but-long-enough-to-hash-31","encryption":"none"}]}]},"streamSettings":{"security":"tls"}}]}

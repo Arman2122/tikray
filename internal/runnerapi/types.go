@@ -216,8 +216,11 @@ func PublicTestError(text string) bool {
 	return testFaultRE.MatchString(text) && text != FaultExited+" "+strconv.Itoa(ExitConfigRefused)
 }
 
-// ConfigVerdict reports a completed xray test. Child output is unconstrained:
-// even a successful test can print an entire raw outbound.
+// ConfigVerdict is the verdict of a test that xray passed (exitCode 0), with
+// fixed words in place of xray's output: even a successful test can print an
+// entire raw outbound. For any other exitCode it is how the previous runner
+// reported a refusal, which the client still reads; a runner now reports one
+// with ConfigRefusal.
 func ConfigVerdict(exitCode int) TestResult {
 	if exitCode == 0 {
 		return TestResult{OK: true, Output: "Configuration OK."}

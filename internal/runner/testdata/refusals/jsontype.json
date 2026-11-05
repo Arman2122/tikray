@@ -1,0 +1,1 @@
+{"outbounds":[{"protocol":"vless","tag":"srv-0000aaac","settings":{"vnext":[{"address":"example.com","port":443,"users":{"id":"fixture-json-secret2"}}]}}]}

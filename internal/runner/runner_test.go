@@ -266,8 +266,8 @@ func TestTrialRejected(t *testing.T) {
 
 	err := g.r.Trial(t.Context())
 	var tf *runnerapi.TestFailedError
-	if !errors.As(err, &tf) || !strings.Contains(tf.Output, "failed to load config") {
-		t.Fatalf("Trial = %v; want a *TestFailedError with xray's output", err)
+	if !errors.As(err, &tf) || tf.Output != "xray rejected the config: invalid config" {
+		t.Fatalf("Trial = %v; want a *TestFailedError with the refusal", err)
 	}
 	g.wantState(t, runnerapi.StateRunning, oldCore)
 	if got := g.r.Status().XrayPID; got != pid || gone(pid) {
@@ -1114,8 +1114,20 @@ func TestTestConfigCapsOutput(t *testing.T) {
 	if err != nil || res.OK {
 		t.Fatalf("TestConfig = %+v, %v; want a rejection", res, err)
 	}
-	if res.Output != runnerapi.ConfigVerdict(23).Output {
-		t.Error("the runner should return only xray's exit status")
+	if res.Output != "xray rejected the config: invalid config" {
+		t.Errorf("output = %q; want only the fixed refusal", res.Output)
+	}
+}
+
+func TestTailBuffer(t *testing.T) {
+	b := &tailBuffer{max: 8}
+	for _, w := range []string{"abc", "defgh", "ij", "", "0123456789abcdef", "xyz"} {
+		if n, err := b.Write([]byte(w)); n != len(w) || err != nil {
+			t.Fatalf("Write(%q) = %d, %v", w, n, err)
+		}
+	}
+	if got := string(b.buf); got != "bcdefxyz" {
+		t.Errorf("kept %q, want the last 8 bytes %q", got, "bcdefxyz")
 	}
 }
 

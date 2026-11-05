@@ -1,8 +1,10 @@
 package runnerapi
 
 import (
+	"cmp"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -111,3 +113,134 @@ func publicStats(command, output string) any {
 	body.Stat = safe
 	return body
 }
+
+// Categories of xray's refusal of a config. A refusal names one, the first
+// of refusalRules that fits, after the srv- tags of the outbounds xray names.
+const (
+	refusalInvalidJSON   = "invalid JSON"
+	refusalFlow          = "unsupported flow"
+	refusalPlaintext     = "transport needs TLS or encryption"
+	refusalInsecure      = "allowInsecure refused"
+	refusalTLS           = "invalid TLS or REALITY settings"
+	refusalTransport     = "unsupported transport or security"
+	refusalProtocol      = "unknown protocol"
+	refusalCipher        = "unsupported cipher"
+	refusalPassword      = "missing or invalid password"
+	refusalEncryption    = "unsupported VLESS encryption"
+	refusalAddress       = "invalid port or address"
+	refusalUnknownUser   = "unknown user"
+	refusalInvalidUser   = "invalid user"
+	refusalInvalidConfig = "invalid config"
+	// refusalLegacy is what the client makes of an older runner's output in
+	// which xray refused the config for a reason no category fits.
+	refusalLegacy = "xray failed to load config"
+)
+
+// refusalRules match the lowercased text of xray's "Failed to start:" line, in
+// order: a later rule's words can appear in an earlier one's message. The
+// words are xray's own, as releases 26.1.18 to 26.10.31 print them; the user
+// rules also keep the categories the client gave older runners' output.
+var refusalRules = []struct {
+	category string
+	match    func(s string) bool
+}{
+	{refusalInvalidJSON, anyOf("failed to read config file", "failed to parse json config", "failed to decode config")},
+	{refusalFlow, anyOf(`"flow" doesn't support`, `support vless "flow"`)},
+	{refusalPlaintext, anyOf("without tls", `transport needs vless "encryption"`)},
+	{refusalInsecure, anyOf(`"allowinsecure"`)},
+	{refusalTLS, anyOf("failed to build tls config", "failed to build reality config")},
+	{refusalTransport, anyOf("unknown transport protocol", "unknown security")},
+	{refusalProtocol, anyOf("unknown config id", "unknown protocol")},
+	{refusalCipher, anyOf("cipher method")},
+	{refusalPassword, anyOf("password is not specified", "invalid key", "bad key", "decode key")},
+	{refusalEncryption, anyOf(`unsupported "encryption"`, `"encryption":"none"`)},
+	{refusalAddress, func(s string) bool {
+		return anyOf("invalid address", "address is not set", `"address" is not set`, "port of type")(s) || invalidPort.MatchString(s)
+	}},
+	{refusalUnknownUser, anyOf("unknown user")},
+	{refusalInvalidUser, func(s string) bool {
+		return anyOf("invalid uuid", "bad user", "invalid user", "invalid vmess user")(s) ||
+			strings.Contains(s, "user") && (strings.Contains(s, "not valid") || strings.Contains(s, "invalid"))
+	}},
+}
+
+var invalidPort = regexp.MustCompile(`invalid (?:[a-z]+ )?port`)
+
+func anyOf(words ...string) func(string) bool {
+	return func(s string) bool {
+		for _, w := range words {
+			if strings.Contains(s, w) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// maxRefusalTags bounds the tags a refusal names. xray stops at the first
+// outbound it cannot build.
+const maxRefusalTags = 4
+
+// refusalTag finds the tag of an outbound xray could not build. Only a tag the
+// renderer gives a server, srv- and 8 hex digits, is public.
+var refusalTag = regexp.MustCompile(`failed to build outbound config with tag (srv-[0-9a-f]{8})(?:[\s>]|$)`)
+
+// classifyRefusal reduces what xray printed when it refused a config to the
+// public tags of the outbounds it named and the first category that fits,
+// "" when none does. Only xray's "Failed to start:" line, the last thing it
+// prints, is read when there is one: the warnings before it name features,
+// such as a flow, that are not why it refused.
+func classifyRefusal(output string) (tags []string, category string) {
+	if i := strings.LastIndex(output, "Failed to start:"); i >= 0 {
+		output = output[i:]
+	}
+	for _, m := range refusalTag.FindAllStringSubmatch(output, -1) {
+		if !slices.Contains(tags, m[1]) && len(tags) < maxRefusalTags {
+			tags = append(tags, m[1])
+		}
+	}
+	s := strings.ToLower(output)
+	for _, r := range refusalRules {
+		if r.match(s) {
+			return tags, r.category
+		}
+	}
+	return tags, ""
+}
+
+// refusalText is a refusal's public text: the tags, if any, then category.
+func refusalText(tags []string, category string) string {
+	if len(tags) == 0 {
+		return category
+	}
+	return "outbound " + strings.Join(tags, ", ") + ": " + category
+}
+
+// refusalPrefix starts a runner's refusal of a config.
+const refusalPrefix = "xray rejected the config: "
+
+// ConfigRefusal is the public reason for xray's refusal of a config, made of
+// output, what "xray run -test" printed when it exited with
+// ExitConfigRefused: "xray rejected the config: ", the srv- tags of the
+// outbounds xray names, then one category, such as "xray rejected the
+// config: outbound srv-deadbeef: unsupported flow". Nothing else of output
+// is kept: xray quotes the config it refuses, credentials and all.
+func ConfigRefusal(output string) string {
+	tags, category := classifyRefusal(output)
+	return refusalPrefix + refusalText(tags, cmp.Or(category, refusalInvalidConfig))
+}
+
+// publicRefusalRE matches the refusals ConfigRefusal makes and those
+// publicRefusal makes of an older runner's xray output, and nothing else.
+var publicRefusalRE = func() *regexp.Regexp {
+	var categories []string
+	for _, c := range []string{refusalInvalidConfig, refusalLegacy} {
+		categories = append(categories, regexp.QuoteMeta(c))
+	}
+	for _, r := range refusalRules {
+		categories = append(categories, regexp.QuoteMeta(r.category))
+	}
+	return regexp.MustCompile(`^(?:` + regexp.QuoteMeta(refusalPrefix) + `)?` +
+		`(?:outbound srv-[0-9a-f]{8}(?:, srv-[0-9a-f]{8}){0,3}: )?` +
+		`(?:` + strings.Join(categories, "|") + `)$`)
+}()

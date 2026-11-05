@@ -9,7 +9,9 @@
 // -test"), noisytest (rejects "run -test" after 20 KiB of output), killedtest
 // (the test process is killed after producing incomplete output), crashtest
 // ("run -test" dies as a Go runtime fatal error does, with exit status 2,
-// after printing the config). A "run
+// after printing the config), flowtest ("run -test" refuses the config as
+// xray 26.10.21 refuses an outbound srv-deadbeef with a legacy VLESS flow,
+// then prints the config). A "run
 // -test" that accepts the config prints "config <path>" and the file's
 // contents first, then the permissions of the file and its directory and the
 // XRAY_LOCATION_ASSET it runs with. In every mode "api <args>" echoes its
@@ -67,6 +69,16 @@ func main() {
 				fmt.Print(string(config))
 			}
 			os.Exit(2)
+		case "flowtest":
+			fmt.Println("Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/amd64)")
+			fmt.Println("A unified platform for anti-censorship.")
+			fmt.Printf("Failed to start: main: failed to load config files: [%s] > infra/conf: "+
+				"failed to build outbound config with tag srv-deadbeef > infra/conf: failed to build outbound handler "+
+				"for protocol vless > infra/conf: VLESS users: \"flow\" doesn't support \"xtls-rprx-direct\" in this version\n", args[3])
+			if config, err := os.ReadFile(args[3]); err == nil {
+				fmt.Print(string(config))
+			}
+			os.Exit(23)
 		case "killedtest":
 			fmt.Println("partial diagnostic")
 			if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
