@@ -511,6 +511,16 @@ func stepAdoManyFails(s *hotStep) {
 	}
 	tags, ok := s.list()
 	if !ok {
+		// A fresh probe distinguishes a live srv-e from an old observatory entry.
+		if _, fresh := s.observeProbe("srv-e", time.Now()); !fresh {
+			s.errorf("srv-e has no fresh probe after the failed ado")
+		}
+		// A single ado succeeds only if the batch stopped before installing srv-f.
+		if add := s.xrayAPI("ado", s.rig.server, s.outbounds(outboundF)); add.exit != 0 {
+			s.errorf("ado of srv-f after the failed batch: %s, want exit 0", add)
+		} else if rm := s.xrayAPI("rmo", s.rig.server, "srv-f"); rm.exit != 0 {
+			s.errorf("removing the check's srv-f: %s, want exit 0", rm)
+		}
 		return
 	}
 	if !slices.Contains(tags, "srv-e") {
