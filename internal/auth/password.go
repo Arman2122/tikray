@@ -84,13 +84,13 @@ func acquire(ctx context.Context) (release func(), err error) {
 	// A select with a free slot and a done context picks either at random;
 	// a context that is done already takes none.
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("auth: waiting to check a password: %w", err)
+		return nil, fmt.Errorf("auth: waiting for password hashing: %w", err)
 	}
 	select {
 	case hashSem <- struct{}{}:
 		return func() { <-hashSem }, nil
 	case <-ctx.Done():
-		return nil, fmt.Errorf("auth: waiting to check a password: %w", ctx.Err())
+		return nil, fmt.Errorf("auth: waiting for password hashing: %w", ctx.Err())
 	}
 }
 
@@ -159,8 +159,8 @@ func parsePHC(phc string) (salt, key []byte, err error) {
 	return salt, key, nil
 }
 
-// ValidPassword checks the rules for a password: 10 to 256 bytes, and not the
-// username. The error is an ErrInvalid and does not show the password.
+// ValidPassword checks the rules for a password: 10 to 256 bytes, and not
+// visible in the public username. The error is an ErrInvalid and does not show the password.
 func ValidPassword(username, password string) error {
 	switch {
 	case len(password) < minPasswordBytes:
@@ -169,6 +169,8 @@ func ValidPassword(username, password string) error {
 		return invalidError(fmt.Sprintf("the password must be at most %d bytes", maxPasswordBytes))
 	case password == username:
 		return invalidError("the password must not be the username")
+	case strings.Contains(username, password):
+		return invalidError("the password must not be part of the public username")
 	}
 	return nil
 }

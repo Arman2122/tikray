@@ -531,3 +531,21 @@ func TestLimiterConcurrentUse(t *testing.T) {
 		t.Errorf("%d buckets after the run, want between 1 and 56", n)
 	}
 }
+
+func TestLateRefundDoesNotCreditNewBucket(t *testing.T) {
+	clk := newClock()
+	l := NewLimiter(clk.Now)
+	ip := netip.MustParseAddr("192.0.2.1")
+	done, ok, _ := l.Allow(ip)
+	if !ok {
+		t.Fatal("first attempt was refused")
+	}
+	clk.Advance(limiterIdle + time.Minute)
+	for range ipBurst {
+		mustFail(t, l, ip)
+	}
+	done(false)
+	if _, ok, _ := l.Allow(ip); ok {
+		t.Error("an old reservation refunded a different bucket")
+	}
+}

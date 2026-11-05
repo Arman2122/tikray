@@ -289,6 +289,29 @@ func TestRunnerHealth(t *testing.T) {
 	}
 }
 
+// A new daemon can poll xray after an outbound's credentials changed but
+// before the old probe result for the same tag has expired.
+func TestFirstObservationAfterReplacement(t *testing.T) {
+	const retired = "retired-fixture-value"
+	for _, tc := range []struct{ detail, want string }{
+		{"i/o timeout", "probe timed out"},
+		{"connection refused", "connection refused"},
+		{"TLS handshake failed", "handshake failed"},
+		{"network is unreachable", "destination unreachable"},
+		{"unknown backend error", "probe failed"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			r := newRig(t, stateOf(srv(idA)))
+			tried := r.clock.Now().UTC()
+			r.xray.status = []xray.OutboundStatus{{Tag: tag(idA), LastTry: tried, LastError: tc.detail + ": " + retired}}
+			got := r.tick().Servers[0]
+			if got.LastError != tc.want || got.Alive || got.Delay != 0 || !got.LastTry.Equal(tried) {
+				t.Error("the first observation should preserve the failure category and sample time only")
+			}
+		})
+	}
+}
+
 func TestSnapshotServers(t *testing.T) {
 	// State order is C, A, (disabled B), D; xray lists them in another order,
 	// with an outbound the state doesn't have and without D.
@@ -307,7 +330,7 @@ func TestSnapshotServers(t *testing.T) {
 	want := []ServerHealth{
 		{ID: idC, Alive: true, Delay: 35 * time.Millisecond, LastTry: utc},
 		// xray reports a dead server's delay as 99999999 ms: that isn't one.
-		{ID: idA, Alive: false, LastError: "dial tcp: i/o timeout", LastTry: utc},
+		{ID: idA, Alive: false, LastError: "probe timed out", LastTry: utc},
 		{ID: idD, Alive: false, LastError: "not observed yet"},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -602,7 +625,7 @@ func TestOneFailedPollKeepsServers(t *testing.T) {
 	// The second failure in a row is reported: every server dead, with why.
 	r.clock.advance(10 * time.Second)
 	lost := r.tick()
-	wantErr := "health: observatory: " + failure.Error()
+	wantErr := "health: observatory: " + (&xray.StatusError{Code: failure.Code}).Error()
 	for _, s := range lost.Servers {
 		if s.Alive || s.LastError != wantErr {
 			t.Errorf("after two failed polls server %s = %+v, want dead with %q", s.ID, s, wantErr)
@@ -679,7 +702,7 @@ func TestXrayErrorsNameTheirCall(t *testing.T) {
 	r.xray.statusErr = obsErr
 	r.tick()
 	snap = r.tick()
-	if want := "health: observatory: " + obsErr.Error(); snap.Servers[0].LastError != want {
+	if want := "health: observatory: " + (&xray.StatusError{Code: obsErr.Code}).Error(); snap.Servers[0].LastError != want {
 		t.Errorf("LastError = %q, want %q", snap.Servers[0].LastError, want)
 	}
 	if snap.Runner.Err != "" {

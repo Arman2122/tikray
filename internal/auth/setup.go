@@ -2,9 +2,12 @@ package auth
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // codeAlphabet is Crockford's base32: the digits and the letters but I, L, O
@@ -80,4 +83,64 @@ func validSetupCode(norm string) bool {
 		}
 	}
 	return true
+}
+
+// Public names appear in logs, token listings and session responses. A name
+// containing a bearer, a session/CSRF value, a setup code in its display
+// form, or a link must never be used to publish that credential. Match wire
+// formats, without trying passwords or confirming guesses against the store.
+const hiddenName = "‹redacted›"
+
+var credentialLabel = regexp.MustCompile(
+	`(?i:(?:https?|vless|vmess|trojan|ss)://|[0-9A-HJKMNP-TV-Z]{4}(?:-[0-9A-HJKMNP-TV-Z]{4}){2})` +
+		`|[0-9a-f]{64}|tkr_[0-9a-f]{8}_[A-Za-z0-9_-]{43}` +
+		// A standalone, canonical base64url encoding of 32 bytes.
+		`|(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048](?:$|[^A-Za-z0-9_-])`)
+
+// PublicName returns the label safe to display, including for older auth.json
+// files that already contain a credential as an admin or token name.
+func PublicName(name string) string {
+	if credentialLabel.MatchString(name) {
+		return hiddenName
+	}
+	return name
+}
+
+// PublicName also recognizes the actual cookie and CSRF sent by the caller
+// and the hashes of issued session IDs and bearer secrets inside longer names.
+func (s *Store) PublicName(name string, sess Session) string {
+	// The longest supported display name is 128 runes (a store server).
+	// Bound the work even when the caller has not yet validated its input.
+	if len(name) > 128*utf8.UTFMax {
+		return hiddenName
+	}
+	if (sess.ID != "" && strings.Contains(name, sess.ID)) || (sess.CSRF != "" && strings.Contains(name, sess.CSRF)) {
+		return hiddenName
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.publicNameLocked(name)
+}
+
+func (s *Store) publicNameLocked(name string) string {
+	if name = PublicName(name); name == hiddenName {
+		return name
+	}
+	if len(name) >= tokenSecretLen && strings.Contains(name, base64.StdEncoding.EncodeToString(s.csrfKey)) {
+		return hiddenName
+	}
+	// The IDs and secrets share the same encoded length. Recording a new
+	// plaintext copy to redact names would defeat their hashed storage.
+	for i := 0; i+tokenSecretLen <= len(name); i++ {
+		h := sha256Hex(name[i : i+tokenSecretLen])
+		if indexOfSession(s.d.Sessions, h) >= 0 {
+			return hiddenName
+		}
+		for _, tok := range s.d.Tokens {
+			if sameHash(tok.Hash, h) {
+				return hiddenName
+			}
+		}
+	}
+	return name
 }

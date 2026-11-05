@@ -67,7 +67,8 @@ func TestIsTested(t *testing.T) {
 		{version(26, 1, 18), true},
 		{version(26, 3, 27), true},
 		{version(26, 10, 21), true},
-		{version(26, 10, 22), false},
+		{version(26, 10, 31), true},
+		{version(26, 11, 1), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.v.String(), func(t *testing.T) {

@@ -35,8 +35,8 @@
 // HTTPS, and fail with "tikray serve is not running" where nothing answers;
 // they never write the state themselves. Their output is for people: a table
 // or a line, with no credential in it (no outbound's, no subscription's URL,
-// never the API token). --json prints what the API answered, as it is,
-// credentials and URLs included. See commands.go and commands_servers.go.
+// never the API token). --json prints the same public data as the API.
+// See commands.go and commands_servers.go.
 //
 // Signing in starts with the setup code, which serve makes at its first start
 // (in <data>/state/setup.code) and never prints: it prints a line that says to
@@ -150,8 +150,7 @@ commands:
                  TIKRAY_LISTEN. It prints the certificate's fingerprint.
 
 The commands below talk to a running "tikray serve" and fail with "tikray
-serve is not running" without one. --json prints the API's answer as it is,
-credentials and subscription URLs included; the tables leave them out.
+serve is not running" without one. --json prints the API's public data in JSON.
 
   server add <link> | --json FILE [--name N]
                  add a server from a share link, or from an xray outbound
@@ -508,7 +507,7 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, configFile 
 	unlock, err := lockServe(cfg.Data)
 	switch {
 	case errors.Is(err, errServeHeld):
-		return c.refused(cfg, base, fmt.Errorf("tikray serve is running (it holds %s)", filepath.Join(stateDir(cfg.Data), serveLockName)))
+		return c.refused(cfg, base, serveHeld(cfg.Data))
 	case err != nil:
 		return c.refused(cfg, base, err)
 	}

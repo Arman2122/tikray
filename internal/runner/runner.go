@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -28,8 +29,7 @@ const (
 var ErrInvalidCandidate = errors.New("runner: invalid candidate")
 
 // ErrInvalidConfig is wrapped around every reason Adopt refuses the config it
-// is given: a name that is not config/<64 hex>.json, or a file that is not
-// there.
+// is given: an invalid name, or a missing or non-regular file.
 var ErrInvalidConfig = errors.New("runner: invalid config")
 
 var errClosed = errors.New("runner: closed")
@@ -94,7 +94,10 @@ type view struct {
 	active  *runnerapi.Selection // mirrors active.json
 	cand    *runnerapi.Candidate // the open trial
 	running *runnerapi.Selection // what the current xray runs; nil when none should
-	version string               // xray version of running
+	// process is the process for which this view was published. It is nil
+	// when a failed reload leaves the prior config live.
+	process *process
+	version string // xray version of running
 	last    *runnerapi.TrialResult
 }
 
@@ -206,9 +209,9 @@ func (r *Runner) Reload(ctx context.Context) error {
 // the running xray's core and geo and config. Neither the process nor
 // last-trial.json changes.
 //
-// It acts only while xray runs from the active selection. During a trial or a
+// It records the running core and geo, including after a failed Reload. During a trial or a
 // restart it returns ErrBusy, with no xray runnerapi.ErrNoCore, and for a name
-// that is not config/<64 hex>.json, or a file that does not exist,
+// that is not config/<64 hex>.json, or a missing or non-regular file,
 // ErrInvalidConfig, whatever the state. Like Commit, it runs on the runner's
 // goroutine, so it never interleaves with a trial.
 func (r *Runner) Adopt(ctx context.Context, config string) error {
@@ -225,12 +228,15 @@ func (r *Runner) Status() runnerapi.Status {
 		State:     v.state,
 		Active:    clone(v.active),
 		Candidate: clone(v.cand),
-		XrayPID:   r.sup.PID(),
 		RoutesOK:  routesOK,
 		GatewayUp: gatewayUp,
 		LastTrial: clone(v.last),
 	}
-	if st.XrayPID > 0 {
+	if p := r.sup.running(); p != nil {
+		st.XrayPID = p.cmd.Process.Pid
+		if p == v.process {
+			st.XrayInstance = p.instance
+		}
 		st.XrayVersion = v.version
 	}
 	return st
@@ -457,7 +463,16 @@ func (r *Runner) adopt(config string) error {
 	if err := runnerapi.ValidateConfig(config); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidConfig, err)
 	}
-	fi, err := os.Stat(r.dirs().ConfigPath(config))
+	// A content-addressed file is created under run/config. Following a link
+	// here could commit a target outside the shared mount for the next boot.
+	path := r.dirs().ConfigPath(config)
+	fi, err := os.Lstat(filepath.Dir(path))
+	if err == nil {
+		if !fi.IsDir() {
+			return fmt.Errorf("%w: config directory must be a directory", ErrInvalidConfig)
+		}
+		fi, err = os.Lstat(path)
+	}
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("%w: %s does not exist", ErrInvalidConfig, config)
@@ -555,10 +570,12 @@ func (r *Runner) startActive() error {
 }
 
 func (r *Runner) start(sel runnerapi.Selection) error {
+	r.v.process = nil
 	if err := r.sup.Start(sel); err != nil {
 		return err
 	}
 	r.v.running = &sel
+	r.v.process = r.sup.running()
 	r.v.version = r.versionOf(sel)
 	return nil
 }

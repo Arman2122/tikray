@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
-	"unicode/utf8"
 
 	"github.com/Arman2122/tikray/internal/runnerapi"
 )
@@ -17,11 +16,6 @@ import (
 const (
 	// defaultTestTimeout bounds one TestConfig.
 	defaultTestTimeout = 20 * time.Second
-	// maxTestOutput caps the output TestConfig returns. xray says why it
-	// rejects a config first, so the start is what is kept.
-	maxTestOutput = 8 << 10
-	// truncatedMark ends an output that was cut to maxTestOutput.
-	truncatedMark = runnerapi.TestOutputTruncated
 	// testDirPrefix names TestConfig's directories in the run directory.
 	testDirPrefix = ".test-"
 )
@@ -36,7 +30,7 @@ const (
 // directory, never to run/config, whose files an apply may prune at any time,
 // and that directory is gone when TestConfig returns.
 //
-// A completed test returns xray's verdict and its first 8 KiB of output. A
+// A completed test returns its verdict and a diagnostic derived from its exit status. A
 // timeout or signal interrupts the test: the caller gets an error so it can
 // retry the same config. With no xray running the error is runnerapi.ErrNoCore.
 func (r *Runner) TestConfig(ctx context.Context, config []byte) (runnerapi.TestResult, error) {
@@ -57,49 +51,20 @@ func (r *Runner) TestConfig(ctx context.Context, config []byte) (runnerapi.TestR
 
 	tctx, cancel := context.WithTimeout(ctx, r.testTimeout)
 	defer cancel()
-	out := &headBuffer{max: maxTestOutput + 1} // a byte more tells a cut
-	err = runTest(tctx, r.sup.stagedPath(sel), r.sup.env(sel), path, out)
+	err = runTest(tctx, r.sup.stagedPath(sel), r.sup.env(sel), path)
 	var exit *exec.ExitError
 	switch {
 	case ctx.Err() != nil:
 		return runnerapi.TestResult{}, fmt.Errorf("runner: test config: %w", ctx.Err())
 	case err == nil:
-		return runnerapi.TestResult{OK: true, Output: capOutput(string(out.buf))}, nil
+		return runnerapi.ConfigVerdict(0), nil
 	case tctx.Err() != nil:
 		return runnerapi.TestResult{}, fmt.Errorf("runner: test config exceeded %s: %w", r.testTimeout, tctx.Err())
 	case errors.As(err, &exit) && exit.ExitCode() > 0:
-		return runnerapi.TestResult{Output: capOutput(string(out.buf))}, nil
+		return runnerapi.ConfigVerdict(exit.ExitCode()), nil
 	default: // xray could not start or a signal killed it before it finished
 		return runnerapi.TestResult{}, err
 	}
-}
-
-// headBuffer keeps the first max bytes written to it and drops the rest, so
-// that an xray that prints without end costs no more memory than that.
-type headBuffer struct {
-	buf []byte
-	max int
-}
-
-func (b *headBuffer) Write(p []byte) (int, error) {
-	if room := b.max - len(b.buf); room > 0 {
-		b.buf = append(b.buf, p[:min(room, len(p))]...)
-	}
-	return len(p), nil
-}
-
-// capOutput returns out when it has at most maxTestOutput bytes, and
-// otherwise its start, cut at a character boundary, and truncatedMark, in
-// maxTestOutput bytes.
-func capOutput(out string) string {
-	if len(out) <= maxTestOutput {
-		return out
-	}
-	cut := maxTestOutput - len(truncatedMark)
-	for cut > 0 && !utf8.RuneStart(out[cut]) {
-		cut--
-	}
-	return out[:cut] + truncatedMark
 }
 
 // cleanTestDirs removes the directories of TestConfig calls that a stopped

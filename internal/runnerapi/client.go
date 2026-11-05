@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -55,6 +56,12 @@ type errBody struct {
 func (c *Client) Status(ctx context.Context) (Status, error) {
 	var st Status
 	err := c.do(ctx, http.MethodGet, "/v1/status", nil, &st)
+	if err != nil {
+		return Status{}, err
+	}
+	if st.LastTrial != nil && st.LastTrial.Outcome == OutcomeRejected {
+		st.LastTrial.Detail = publicRefusal(st.LastTrial.Detail)
+	}
 	return st, err
 }
 
@@ -104,6 +111,12 @@ func (c *Client) XrayAPI(ctx context.Context, args ...string) (XrayAPIResponse, 
 	}
 	var resp XrayAPIResponse
 	err := c.do(ctx, http.MethodPost, "/v1/xray-api", XrayAPIRequest{Args: args}, &resp)
+	if err != nil {
+		return XrayAPIResponse{}, err
+	}
+	if len(args) > 0 {
+		resp = PublicXrayResult(args[0], resp)
+	}
 	return resp, err
 }
 
@@ -115,10 +128,46 @@ func (c *Client) XrayAPI(ctx context.Context, args ...string) (XrayAPIResponse, 
 func (c *Client) Test(ctx context.Context, config []byte) (TestResult, error) {
 	var res TestResult
 	err := c.send(ctx, testHTTP, http.MethodPost, "/v1/test", config, &res)
-	if err == nil && !res.OK && legacyTestTimeout(res.Output) {
+	if err != nil {
+		return TestResult{}, err
+	}
+	if !res.OK && legacyTestTimeout(res.Output) {
 		return TestResult{}, fmt.Errorf("runnerapi: xray run -test: %w", context.DeadlineExceeded)
 	}
-	return res, err
+	if res.OK {
+		return ConfigVerdict(0), nil
+	}
+	res.Output = publicRefusal(res.Output)
+	return res, nil
+}
+
+// Older runners returned raw child output, sometimes containing escaped or
+// transformed credentials. Project it onto fixed public categories before it
+// can enter an error, a persisted verdict or history.
+func publicRefusal(text string) string {
+	if text == "" {
+		return ""
+	}
+	const prefix = "xray failed to load config (exit "
+	if n, ok := strings.CutPrefix(text, prefix); ok {
+		if n, ok := strings.CutSuffix(n, ")"); ok {
+			if code, err := strconv.Atoi(n); err == nil && code > 0 && code <= 255 {
+				return ConfigVerdict(code).Output
+			}
+		}
+	}
+	switch {
+	case strings.Contains(text, TestOutputTruncated):
+		return TestOutputTruncated
+	case strings.Contains(text, "xray run -test did not finish within"):
+		return "xray config test did not finish"
+	case strings.Contains(text, "unknown user"):
+		return "unknown user"
+	case strings.Contains(text, "bad user"), strings.Contains(text, "user") && (strings.Contains(text, "not valid") || strings.Contains(text, "invalid")):
+		return "invalid user"
+	default:
+		return "xray failed to load config"
+	}
 }
 
 // The previous runner sent its own timeout as a rejection, with this line
@@ -179,7 +228,7 @@ func (c *Client) send(ctx context.Context, def *http.Client, method, path string
 		return fmt.Errorf("runnerapi: %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return fmt.Errorf("runnerapi: %s %s: reading response: %w", method, path, err)
 	}
@@ -187,7 +236,14 @@ func (c *Client) send(ctx context.Context, def *http.Client, method, path string
 		if resp.StatusCode == http.StatusUnauthorized && c.Unauthorized != nil {
 			c.Unauthorized(token)
 		}
+		if len(raw) > maxBody {
+			// Parsing a cut JSON response can leave a credential fragment.
+			raw = nil
+		}
 		return statusError(method, path, resp, raw)
+	}
+	if len(raw) > maxBody {
+		return fmt.Errorf("runnerapi: %s %s: response exceeds limit", method, path)
 	}
 	if out == nil {
 		return nil
@@ -202,6 +258,12 @@ func (c *Client) send(ctx context.Context, def *http.Client, method, path string
 func statusError(method, path string, resp *http.Response, raw []byte) error {
 	var eb errBody
 	_ = json.Unmarshal(raw, &eb) // a body that is not JSON leaves eb empty
+	// Older runners sometimes put process diagnostics in error bodies.
+	// Only the config refusal code or a busy/no-core sentinel is meaningful.
+	command := path == "/v1/test" || path == "/v1/trial" || path == "/v1/xray-api"
+	if command && resp.StatusCode != http.StatusUnprocessableEntity {
+		eb.Detail = ""
+	}
 	switch {
 	case resp.StatusCode == http.StatusConflict && eb.Error == "busy":
 		return wrapDetail(ErrBusy, eb.Detail)
@@ -214,11 +276,14 @@ func statusError(method, path string, resp *http.Response, raw []byte) error {
 		if out == "" {
 			out = strings.TrimSpace(string(raw))
 		}
-		return &TestFailedError{Output: out}
+		return &TestFailedError{Output: publicRefusal(out)}
+	}
+	if command {
+		return fmt.Errorf("runnerapi: %s %s: HTTP %d", method, path, resp.StatusCode)
 	}
 	text := strings.TrimSpace(string(raw))
 	if len(text) > maxErrText {
-		text = text[:maxErrText] + "..."
+		text = "" // a prefix can contain part of a credential
 	}
 	if text == "" {
 		return fmt.Errorf("runnerapi: %s %s: %s", method, path, resp.Status)

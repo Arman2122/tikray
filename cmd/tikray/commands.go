@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -21,12 +20,9 @@ import (
 	"github.com/Arman2122/tikray/internal/store"
 )
 
-// The commands that talk to tikray serve, over its API. They never write the
-// state, and what they print leaves out every credential: an outbound's, a
-// subscription's URL, the API token. Only --json prints the API's answer as
-// it is. The nouns are in commands_servers.go (server, sub, device and
-// policy); here are the daemon, status and events, and at the end the sign-in:
-// setup-code, admin reset and token, which are told there.
+// Most commands here talk to tikray serve. Admin reset can also take the
+// serve lock and reset the auth store directly. Setup-code and token create
+// print credentials only as part of their explicit delivery to the operator.
 
 // apiCall is a call of the API that a command makes, written as a method
 // expression, such as (*apiclient.Client).Apply.
@@ -506,12 +502,12 @@ func (c *cli) adminReset(ctx context.Context, args []string) int {
 		if _, err := cl.ResetAdmin(ctx); err != nil {
 			return c.failAPI(ctx, err)
 		}
-		return c.say(adminResetDone)
+		return c.say("%s", adminResetDone)
 	}
 	unlock, err := lockServe(cfg.Data)
 	switch {
 	case errors.Is(err, errServeHeld):
-		return c.fail(fmt.Errorf("tikray serve is running (it holds %s)", filepath.Join(stateDir(cfg.Data), serveLockName)))
+		return c.fail(serveHeld(cfg.Data))
 	case err != nil:
 		return c.fail(err)
 	}
@@ -523,7 +519,7 @@ func (c *cli) adminReset(ctx context.Context, args []string) int {
 	if err := people.Reset(); err != nil {
 		return c.fail(err)
 	}
-	return c.say(adminResetDone)
+	return c.say("%s", adminResetDone)
 }
 
 func (c *cli) tokenCommand(ctx context.Context, args []string) int {
@@ -535,25 +531,32 @@ func (c *cli) tokenCommand(ctx context.Context, args []string) int {
 }
 
 // tokenCreate makes a named API token and prints it on a line of its own, and
-// then a line that says it is shown this once: the service keeps only a hash,
+// writes the one-time notice to stderr: the service keeps only a hash,
 // and no later call shows it again.
 func (c *cli) tokenCreate(ctx context.Context, args []string) int {
 	fs := c.newFlagSet("token create", "token create <name> [--expires 720h]")
 	var expires time.Duration
+	var expiryProblem string
 	fs.Func("expires", "the token stops working after `DURATION`, such as 720h (default: it never expires)", func(s string) error {
+		// flag repeats the argument in its error. Keep it out of stderr in
+		// case a credential was pasted in place of the duration.
 		d, err := time.ParseDuration(s)
 		switch {
 		case err != nil:
-			return errors.New("want a duration such as 720h")
+			expiryProblem = "--expires needs a duration such as 720h"
 		case d <= 0:
-			return errors.New("must be longer than zero")
+			expiryProblem = "--expires must be longer than zero"
+		default:
+			expires = d
 		}
-		expires = d
 		return nil
 	})
 	pos, code, ok := c.parse(fs, args, 1)
 	if !ok {
 		return code
+	}
+	if expiryProblem != "" {
+		return c.flagError(fs, expiryProblem)
 	}
 	n := apiclient.NewToken{Name: pos[0]}
 	if expires > 0 {
@@ -571,8 +574,11 @@ func (c *cli) tokenCreate(ctx context.Context, args []string) int {
 		if made.Token == "" {
 			return c.fail(errors.New("tikray serve's answer holds no token"))
 		}
-		c.say("%s", oneWord(made.Token))
-		return c.say("this token is shown only once")
+		if _, err := fmt.Fprintln(c.stdout, oneWord(made.Token)); err != nil {
+			return c.fail(errors.New("could not write the newly created token: revoke it by id"))
+		}
+		fmt.Fprintln(c.stderr, "this token is shown only once")
+		return 0
 	})
 }
 
@@ -613,11 +619,15 @@ func (c *cli) tokenRemove(ctx context.Context, args []string) int {
 	if !ok {
 		return code
 	}
+	id, valid := auth.TokenID(pos[0])
+	if !valid {
+		return c.flagError(fs, "give a token id of eight lowercase hexadecimal digits")
+	}
 	return c.withDaemon(ctx, func(cl *apiclient.Client) int {
-		if _, err := cl.RevokeToken(ctx, pos[0]); err != nil {
+		if _, err := cl.RevokeToken(ctx, id); err != nil {
 			return c.failAPI(ctx, err)
 		}
-		return c.say("revoked token %s", oneWord(pos[0]))
+		return c.say("revoked token %s", id)
 	})
 }
 

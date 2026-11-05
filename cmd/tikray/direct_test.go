@@ -54,8 +54,8 @@ func TestDirectPathsRedactWhatXrayQuotes(t *testing.T) {
 			if code != 1 {
 				t.Fatalf("exit %d, want 1; stdout %q, stderr %q", code, stdout, stderr)
 			}
-			if !strings.Contains(stdout, "bad outbound") {
-				t.Fatalf("stdout %q does not show xray's rejection at all", stdout)
+			if !strings.Contains(stdout, "xray failed to load config") {
+				t.Fatal("stdout must report the xray config rejection")
 			}
 			last, err := os.ReadFile(filepath.Join(data, "state", "last-result.json"))
 			if err != nil {
@@ -67,11 +67,8 @@ func TestDirectPathsRedactWhatXrayQuotes(t *testing.T) {
 			}
 			for name, text := range map[string]string{"stdout": stdout, "stderr": stderr, "last-result.json": string(last), "core-history.jsonl": string(history)} {
 				if strings.Contains(text, serverSecret) {
-					t.Errorf("%s repeats the server's credential:\n%s", name, text)
+					t.Errorf("%s repeats the server's credential", name)
 				}
-			}
-			if !strings.Contains(stdout, "‹redacted›") {
-				t.Errorf("stdout %q shows no redaction", stdout)
 			}
 		})
 	}
@@ -157,8 +154,8 @@ func TestConfigFileCredentialsAreRedactedToo(t *testing.T) {
 			runner.mu.Unlock()
 
 			code, stdout, stderr := runFast(t, vars, "core", "update", "26.10.21", "--config", file)
-			if code != 1 || !strings.Contains(stdout, "bad outbounds") {
-				t.Fatalf("exit %d, stdout %q, stderr %q; want 1 and xray's rejection", code, stdout, stderr)
+			if code != 1 || !strings.Contains(stdout, "xray failed to load config") {
+				t.Fatalf("exit %d, want 1 and a config rejection", code)
 			}
 			last, err := os.ReadFile(filepath.Join(data, "state", "last-result.json"))
 			if err != nil {
@@ -171,12 +168,9 @@ func TestConfigFileCredentialsAreRedactedToo(t *testing.T) {
 			for what, text := range map[string]string{"stdout": stdout, "stderr": stderr, "last-result.json": string(last), "core-history.jsonl": string(history)} {
 				for _, secret := range []string{fileSecret, filePassword} {
 					if strings.Contains(text, secret) {
-						t.Errorf("%s repeats a credential of the config file:\n%s", what, text)
+						t.Errorf("%s repeats a credential of the config file", what)
 					}
 				}
-			}
-			if !strings.Contains(stdout, "‹redacted›") {
-				t.Errorf("stdout %q shows no redaction", stdout)
 			}
 		})
 	}

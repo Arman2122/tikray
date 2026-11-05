@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -154,7 +155,7 @@ func setCookie(t *testing.T, r response) (*http.Cookie, string) {
 	}
 	c, err := http.ParseSetCookie(vals[0])
 	if err != nil {
-		t.Fatalf("Set-Cookie does not parse: %v", err)
+		t.Fatal("Set-Cookie does not parse")
 	}
 	return c, vals[0]
 }
@@ -169,7 +170,7 @@ func checkSessionCookie(t *testing.T, r response) string {
 	}
 	want := "tikray_session=<id>; Path=/; Max-Age=604800; HttpOnly; Secure; SameSite=Strict"
 	if got := strings.Replace(raw, c.Value, "<id>", 1); got != want {
-		t.Errorf("Set-Cookie = %q\nwant         %q", got, want)
+		t.Error("the session cookie attributes differ from the expected flags")
 	}
 	return c.Value
 }
@@ -179,10 +180,10 @@ func checkCookieCleared(t *testing.T, r response) {
 	t.Helper()
 	c, raw := setCookie(t, r)
 	if c.Name != "tikray_session" || c.Value != "" {
-		t.Errorf("the cookie is %q = %q, want tikray_session emptied", c.Name, c.Value)
+		t.Error("expected an empty session cookie")
 	}
 	if want := "tikray_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"; raw != want {
-		t.Errorf("Set-Cookie = %q, want %q", raw, want)
+		t.Error("the clearing cookie attributes differ from the expected flags")
 	}
 }
 
@@ -268,7 +269,7 @@ func TestAuthChain(t *testing.T) {
 			} {
 				r := e.do(t, rt.method, rt.path, rt.body, c.h)
 				if r.status != c.status {
-					t.Errorf("%s: status = %d, want %d (%.200s)", c.who, r.status, c.status, r.body)
+					t.Errorf("%s: status = %d, want %d (body %d bytes)", c.who, r.status, c.status, len(r.body))
 				}
 				if c.status == 401 {
 					if code, _ := errorOf(t, r); code != "unauthorized" {
@@ -477,6 +478,9 @@ func TestAuthState(t *testing.T) {
 	} {
 		r := e.do(t, "GET", "/v1/auth/state", "", c.h)
 		sameJSON(t, r.body, fmt.Sprintf(`{"setup_required":false,"signed_in":%t}`, c.want))
+		if !c.want && c.h.Get("Cookie") != "" {
+			checkCookieCleared(t, r)
+		}
 		if r.status != 200 {
 			t.Errorf("%s: status = %d, want 200", c.who, r.status)
 		}
@@ -534,7 +538,7 @@ func TestCSRFRequiredForCookies(t *testing.T) {
 		}
 		r := e.do(t, c.method, c.path, c.body, withCSRF(sess))
 		if r.status != c.status {
-			t.Errorf("%s with the header: status = %d, want %d (%.200s)", name, r.status, c.status, r.body)
+			t.Errorf("%s with the header: status = %d, want %d (body %d bytes)", name, r.status, c.status, len(r.body))
 		}
 		if c.calls != "" {
 			if got := e.f.recorded(); len(got) == 0 || got[len(got)-1].Method != c.calls {
@@ -583,7 +587,7 @@ func TestCSRFRequiredForCookies(t *testing.T) {
 	t.Run("a request with no cookie has none to clear", func(t *testing.T) {
 		r := e.do(t, "GET", "/v1/status", "", nil)
 		if r.status != 401 || len(r.header.Values("Set-Cookie")) != 0 {
-			t.Errorf("status = %d, Set-Cookie = %q, want 401 and none", r.status, r.header.Values("Set-Cookie"))
+			t.Errorf("status = %d, cookie count = %d, want 401 and none", r.status, len(r.header.Values("Set-Cookie")))
 		}
 	})
 }
@@ -601,7 +605,7 @@ func TestBearerNeedsNoCSRF(t *testing.T) {
 		before := len(e.f.recorded())
 		r := e.do(t, "PUT", "/v1/policy", `{"mode":"full"}`, h)
 		if r.status != 200 {
-			t.Errorf("%s: status = %d, want 200 (%s)", what, r.status, r.body)
+			t.Errorf("%s: status = %d, want 200 (body %d bytes)", what, r.status, len(r.body))
 		}
 		if len(e.f.recorded()) != before+1 {
 			t.Errorf("%s: the backend was not called once", what)
@@ -635,7 +639,7 @@ func TestSetupAndLogin(t *testing.T) {
 	t.Run("a wrong code", func(t *testing.T) {
 		r := e.do(t, "POST", "/v1/auth/setup", setupBody(t, "K9K9-M8M8-Q7Q7", adminName, adminPass), nil)
 		if r.status != 401 {
-			t.Fatalf("status = %d, want 401 (%s)", r.status, r.body)
+			t.Fatalf("status = %d, want 401 (body %d bytes)", r.status, len(r.body))
 		}
 		if c, _ := errorOf(t, r); c != "bad_code" {
 			t.Errorf("code = %q, want bad_code", c)
@@ -652,7 +656,7 @@ func TestSetupAndLogin(t *testing.T) {
 		const tooShort = "Sh0rt-PW"
 		r := e.do(t, "POST", "/v1/auth/setup", setupBody(t, code, adminName, tooShort), nil)
 		if r.status != 400 {
-			t.Fatalf("status = %d, want 400 (%s)", r.status, r.body)
+			t.Fatalf("status = %d, want 400 (body %d bytes)", r.status, len(r.body))
 		}
 		c, detail := errorOf(t, r)
 		if c != "bad_request" || !strings.Contains(detail, "password") {
@@ -671,7 +675,7 @@ func TestSetupAndLogin(t *testing.T) {
 		typed := strings.ToLower(strings.ReplaceAll(code, "-", " "))
 		r := e.do(t, "POST", "/v1/auth/setup", setupBody(t, typed, adminName, adminPass), nil)
 		if r.status != 200 {
-			t.Fatalf("status = %d, want 200 (%s)", r.status, r.body)
+			t.Fatalf("status = %d, want 200 (body %d bytes)", r.status, len(r.body))
 		}
 		id := checkSessionCookie(t, r)
 		body := decodeAs[signedIn](t, r)
@@ -731,7 +735,7 @@ func TestSetupAndLogin(t *testing.T) {
 		} {
 			r := e.do(t, "POST", "/v1/auth/login", loginBody(t, c.user, c.pass), nil)
 			if r.status != 401 {
-				t.Fatalf("%q: status = %d, want 401 (%s)", c.user, r.status, r.body)
+				t.Fatalf("%q: status = %d, want 401 (body %d bytes)", c.user, r.status, len(r.body))
 			}
 			if code, _ := errorOf(t, r); code != "bad_credentials" {
 				t.Errorf("code = %q, want bad_credentials", code)
@@ -743,7 +747,7 @@ func TestSetupAndLogin(t *testing.T) {
 		}
 		for _, a := range answers[1:] {
 			if a != answers[0] {
-				t.Errorf("answers differ: %q and %q", answers[0], a)
+				t.Error("unknown-user and wrong-password responses differ")
 			}
 		}
 	})
@@ -752,7 +756,7 @@ func TestSetupAndLogin(t *testing.T) {
 		e.clock.Advance(time.Hour) // the five wrong ones before are forgiven by now
 		r := e.do(t, "POST", "/v1/auth/login", loginBody(t, adminName, adminPass), nil)
 		if r.status != 200 {
-			t.Fatalf("status = %d, want 200 (%s)", r.status, r.body)
+			t.Fatalf("status = %d, want 200 (body %d bytes)", r.status, len(r.body))
 		}
 		id := checkSessionCookie(t, r)
 		body := decodeAs[signedIn](t, r)
@@ -789,7 +793,7 @@ func TestSetupAndLogin(t *testing.T) {
 				continue
 			}
 			if code, _ := errorOf(t, r); code != "bad_request" {
-				t.Errorf("%s %.40q: code = %q, want bad_request", c.path, c.body, code)
+				t.Errorf("%s request (%d bytes): unexpected error code, want bad_request", c.path, len(c.body))
 			}
 		}
 	})
@@ -809,7 +813,7 @@ func TestRateLimited429(t *testing.T) {
 		// gets the 429 too, and no session is made.
 		r := e.do(t, "POST", "/v1/auth/login", loginBody(t, adminName, adminPass), nil)
 		if r.status != 429 {
-			t.Fatalf("status = %d, want 429 (%s)", r.status, r.body)
+			t.Fatalf("status = %d, want 429 (body %d bytes)", r.status, len(r.body))
 		}
 		if code, _ := errorOf(t, r); code != "rate_limited" {
 			t.Errorf("code = %q, want rate_limited", code)
@@ -848,7 +852,7 @@ func TestRateLimited429(t *testing.T) {
 		e.clock.Advance(31 * time.Second)
 		r = e.do(t, "POST", "/v1/auth/login", loginBody(t, adminName, adminPass), nil)
 		if r.status != 200 {
-			t.Fatalf("once the wait is over: status = %d, want 200 (%s)", r.status, r.body)
+			t.Fatalf("once the wait is over: status = %d, want 200 (body %d bytes)", r.status, len(r.body))
 		}
 		checkSessionCookie(t, r)
 	})
@@ -866,7 +870,7 @@ func TestRateLimited429(t *testing.T) {
 		}
 		r := e.do(t, "POST", "/v1/auth/setup", setupBody(t, code, adminName, adminPass), nil)
 		if r.status != 429 {
-			t.Fatalf("status = %d, want 429 (%s)", r.status, r.body)
+			t.Fatalf("status = %d, want 429 (body %d bytes)", r.status, len(r.body))
 		}
 		if got := r.header.Get("Retry-After"); got != "60" {
 			t.Errorf("Retry-After = %q, want 60", got)
@@ -876,7 +880,7 @@ func TestRateLimited429(t *testing.T) {
 		}
 		e.clock.Advance(time.Minute)
 		if r := e.do(t, "POST", "/v1/auth/setup", setupBody(t, code, adminName, adminPass), nil); r.status != 200 {
-			t.Errorf("once the wait is over: status = %d, want 200 (%s)", r.status, r.body)
+			t.Errorf("once the wait is over: status = %d, want 200 (body %d bytes)", r.status, len(r.body))
 		}
 	})
 }
@@ -903,18 +907,18 @@ func TestLimiterCountsOnlyCredentialFailures(t *testing.T) {
 			"a password that is short":   {"/v1/auth/setup", setupBody(t, code, adminName, "short"), 400},
 		} {
 			if r := e.do(t, "POST", c.path, c.body, nil); r.status != c.status {
-				t.Fatalf("%s, try %d: status = %d, want %d (%s)", what, i+1, r.status, c.status, r.body)
+				t.Fatalf("%s, try %d: status = %d, want %d (body %d bytes)", what, i+1, r.status, c.status, len(r.body))
 			}
 		}
 	}
 
 	// A success gives its token back, so any number of sign-ins work.
 	if r := e.do(t, "POST", "/v1/auth/setup", setupBody(t, code, adminName, adminPass), nil); r.status != 200 {
-		t.Fatalf("setup: status = %d, want 200 (%s)", r.status, r.body)
+		t.Fatalf("setup: status = %d, want 200 (body %d bytes)", r.status, len(r.body))
 	}
 	for i := range n {
 		if r := e.do(t, "POST", "/v1/auth/login", loginBody(t, adminName, adminPass), nil); r.status != 200 {
-			t.Fatalf("sign-in %d: status = %d, want 200 (%s)", i+1, r.status, r.body)
+			t.Fatalf("sign-in %d: status = %d, want 200 (body %d bytes)", i+1, r.status, len(r.body))
 		}
 	}
 	// So does an attempt at a setup that is claimed already.
@@ -1046,7 +1050,7 @@ func TestSessionRoutes(t *testing.T) {
 	t.Run("the session", func(t *testing.T) {
 		r := e.do(t, "GET", "/v1/auth/session", "", cookieOnly(sess))
 		if r.status != 200 {
-			t.Fatalf("status = %d, want 200 (%s)", r.status, r.body)
+			t.Fatalf("status = %d, want 200 (body %d bytes)", r.status, len(r.body))
 		}
 		body := decodeAs[struct {
 			Username  string    `json:"username"`
@@ -1054,7 +1058,7 @@ func TestSessionRoutes(t *testing.T) {
 			Expires   time.Time `json:"expires"`
 		}](t, r)
 		if body.Username != adminName || body.CSRFToken != sess.CSRF {
-			t.Errorf("username = %q, csrf_token is the session's: %t", body.Username, body.CSRFToken == sess.CSRF)
+			t.Error("the username or CSRF token differs from this session")
 		}
 		if left := time.Until(body.Expires); left < 11*time.Hour || left > 12*time.Hour+time.Minute {
 			t.Errorf("expires is %v from now, want about 12h", left)
@@ -1086,7 +1090,7 @@ func TestSessionRoutes(t *testing.T) {
 		}
 		r := e.do(t, "POST", "/v1/auth/logout", "", withCSRF(s))
 		if r.status != 204 || len(r.body) != 0 {
-			t.Fatalf("status = %d, body %q, want 204 and none", r.status, r.body)
+			t.Fatalf("status = %d, body %d bytes, want 204 and none", r.status, len(r.body))
 		}
 		checkCookieCleared(t, r)
 		if _, ok := e.store.Session(s.ID); ok {
@@ -1116,7 +1120,7 @@ func TestPasswordChangeEndsOtherSessions(t *testing.T) {
 	t.Run("a wrong current password changes nothing", func(t *testing.T) {
 		r := change(withCSRF(a), "not the password", otherPass)
 		if r.status != 403 {
-			t.Fatalf("status = %d, want 403 (%s)", r.status, r.body)
+			t.Fatalf("status = %d, want 403 (body %d bytes)", r.status, len(r.body))
 		}
 		if code, _ := errorOf(t, r); code != "bad_password" {
 			t.Errorf("code = %q, want bad_password", code)
@@ -1129,7 +1133,7 @@ func TestPasswordChangeEndsOtherSessions(t *testing.T) {
 	t.Run("a new password that breaks the rules", func(t *testing.T) {
 		r := change(withCSRF(a), adminPass, "short")
 		if r.status != 400 {
-			t.Fatalf("status = %d, want 400 (%s)", r.status, r.body)
+			t.Fatalf("status = %d, want 400 (body %d bytes)", r.status, len(r.body))
 		}
 		if code, _ := errorOf(t, r); code != "bad_request" {
 			t.Errorf("code = %q, want bad_request", code)
@@ -1151,7 +1155,7 @@ func TestPasswordChangeEndsOtherSessions(t *testing.T) {
 	t.Run("a session keeps itself and ends the others", func(t *testing.T) {
 		r := change(withCSRF(a), adminPass, otherPass)
 		if r.status != 204 {
-			t.Fatalf("status = %d, want 204 (%s)", r.status, r.body)
+			t.Fatalf("status = %d, want 204 (body %d bytes)", r.status, len(r.body))
 		}
 		if r := e.do(t, "GET", "/v1/auth/session", "", cookieOnly(a)); r.status != 200 {
 			t.Errorf("the session that changed it: status = %d, want 200", r.status)
@@ -1182,7 +1186,7 @@ func TestPasswordChangeEndsOtherSessions(t *testing.T) {
 			// The right current password: it is the caller that is refused.
 			r := change(h, otherPass, adminPass)
 			if r.status != 403 {
-				t.Errorf("%s: status = %d, want 403 (%s)", who, r.status, r.body)
+				t.Errorf("%s: status = %d, want 403 (body %d bytes)", who, r.status, len(r.body))
 				continue
 			}
 			if code, _ := errorOf(t, r); code != "forbidden" {
@@ -1214,7 +1218,7 @@ func TestPasswordChangeIsLimited(t *testing.T) {
 		for i := range 5 {
 			r := change(e, s, "wrong password "+fmt.Sprint(i), otherPass)
 			if r.status != 403 {
-				t.Fatalf("failure %d: status = %d, want 403 (%s)", i+1, r.status, r.body)
+				t.Fatalf("failure %d: status = %d, want 403 (body %d bytes)", i+1, r.status, len(r.body))
 			}
 			if code, _ := errorOf(t, r); code != "bad_password" {
 				t.Errorf("failure %d: code = %q, want bad_password", i+1, code)
@@ -1223,7 +1227,7 @@ func TestPasswordChangeIsLimited(t *testing.T) {
 		// The right current password is turned away before it is checked.
 		r := change(e, s, adminPass, otherPass)
 		if r.status != 429 {
-			t.Fatalf("status = %d, want 429 (%s)", r.status, r.body)
+			t.Fatalf("status = %d, want 429 (body %d bytes)", r.status, len(r.body))
 		}
 		if code, _ := errorOf(t, r); code != "rate_limited" {
 			t.Errorf("code = %q, want rate_limited", code)
@@ -1240,11 +1244,11 @@ func TestPasswordChangeIsLimited(t *testing.T) {
 		}
 		want := slices.Repeat([]string{"auth: password change failed from 127.0.0.1"}, 5)
 		if got := e.events(); !slices.Equal(got, want) {
-			t.Errorf("events = %q\nwant %q", got, want)
+			t.Errorf("got %d events, wanted %d with the expected messages", len(got), len(want))
 		}
 		e.clock.Advance(time.Minute)
 		if r := change(e, s, adminPass, otherPass); r.status != 204 {
-			t.Errorf("once the wait is over: status = %d, want 204 (%s)", r.status, r.body)
+			t.Errorf("once the wait is over: status = %d, want 204 (body %d bytes)", r.status, len(r.body))
 		}
 	})
 
@@ -1282,7 +1286,7 @@ func TestPasswordChangeIsLimited(t *testing.T) {
 		for i := range n {
 			next := fmt.Sprintf("a new long password %d", i)
 			if r := change(e, s, pass, next); r.status != 204 {
-				t.Fatalf("change %d: status = %d, want 204 (%s)", i+1, r.status, r.body)
+				t.Fatalf("change %d: status = %d, want 204 (body %d bytes)", i+1, r.status, len(r.body))
 			}
 			pass = next
 		}
@@ -1362,7 +1366,7 @@ func TestTokenRoutes(t *testing.T) {
 
 	r := create(authed(), `{"name":"ci","expires_in":"720h"}`)
 	if r.status != 201 {
-		t.Fatalf("status = %d, want 201 (%s)", r.status, r.body)
+		t.Fatalf("status = %d, want 201 (body %d bytes)", r.status, len(r.body))
 	}
 	if r.header.Get("Location") != "/v1/tokens" || r.header.Get("Cache-Control") != "no-store" {
 		t.Errorf("Location = %q, Cache-Control = %q", r.header.Get("Location"), r.header.Get("Cache-Control"))
@@ -1398,7 +1402,7 @@ func TestTokenRoutes(t *testing.T) {
 	t.Run("one that never expires has no expiry", func(t *testing.T) {
 		r := create(authed(), `{"name":"forever"}`)
 		if r.status != 201 {
-			t.Fatalf("status = %d, want 201 (%s)", r.status, r.body)
+			t.Fatalf("status = %d, want 201 (body %d bytes)", r.status, len(r.body))
 		}
 		var raw struct {
 			Token string
@@ -1409,10 +1413,10 @@ func TestTokenRoutes(t *testing.T) {
 		}
 		secrets = append(secrets, raw.Token, raw.Token[13:])
 		if _, has := raw.Info["expires"]; has {
-			t.Errorf("info = %v, want no expires", raw.Info)
+			t.Error("unexpected expires field")
 		}
 		if _, has := raw.Info["last_used"]; has {
-			t.Errorf("info = %v, want no last_used", raw.Info)
+			t.Error("unexpected last_used field")
 		}
 	})
 
@@ -1423,13 +1427,13 @@ func TestTokenRoutes(t *testing.T) {
 		}
 		list := decodeAs[[]tokenInfoBody](t, r)
 		if len(list) != 2 || list[0].ID != made.Info.ID || list[0].Name != "ci" {
-			t.Fatalf("list = %+v, want the two tokens, the oldest first", list)
+			t.Fatalf("got %d tokens, want two tokens oldest first", len(list))
 		}
 		if list[0].LastUsed == nil {
 			t.Error("the token that was used has no last_used")
 		}
 		if list[1].Name != "forever" || list[1].Expires != nil {
-			t.Errorf("list[1] = %+v", list[1])
+			t.Error("the second token should be forever with no expiry")
 		}
 		var raw []map[string]any
 		if err := json.Unmarshal(r.body, &raw); err != nil {
@@ -1438,7 +1442,7 @@ func TestTokenRoutes(t *testing.T) {
 		for _, item := range raw {
 			for k := range item {
 				if !slices.Contains([]string{"id", "name", "created", "expires", "last_used"}, k) {
-					t.Errorf("the list shows a field %q", k)
+					t.Error("the token list contains an unexpected field")
 				}
 			}
 		}
@@ -1447,14 +1451,14 @@ func TestTokenRoutes(t *testing.T) {
 	t.Run("an empty list is a list", func(t *testing.T) {
 		e2 := newAuthEnv(t, true)
 		if r := e2.do(t, "GET", "/v1/tokens", "", authed()); strings.TrimSpace(string(r.body)) != "[]" {
-			t.Errorf("body = %s, want []", r.body)
+			t.Errorf("body has %d bytes, want []", len(r.body))
 		}
 	})
 
 	t.Run("a token can make one", func(t *testing.T) {
 		r := create(bearer(made.Token), `{"name":"made by a token"}`)
 		if r.status != 201 {
-			t.Fatalf("status = %d, want 201 (%s)", r.status, r.body)
+			t.Fatalf("status = %d, want 201 (body %d bytes)", r.status, len(r.body))
 		}
 		var raw struct{ Token string }
 		if err := json.Unmarshal(r.body, &raw); err != nil {
@@ -1475,7 +1479,7 @@ func TestTokenRoutes(t *testing.T) {
 		}
 		r := create(withCSRF(sess), `{"name":"by session"}`)
 		if r.status != 201 {
-			t.Fatalf("create with the token: status = %d, want 201 (%s)", r.status, r.body)
+			t.Fatalf("create with the token: status = %d, want 201 (body %d bytes)", r.status, len(r.body))
 		}
 		var raw struct{ Token string }
 		if err := json.Unmarshal(r.body, &raw); err != nil {
@@ -1500,7 +1504,7 @@ func TestTokenRoutes(t *testing.T) {
 		} {
 			r := create(authed(), c.body)
 			if r.status != 400 {
-				t.Errorf("%s: status = %d, want 400 (%s)", c.what, r.status, r.body)
+				t.Errorf("%s: status = %d, want 400 (body %d bytes)", c.what, r.status, len(r.body))
 				continue
 			}
 			if code, _ := errorOf(t, r); code != "bad_request" {
@@ -1518,7 +1522,7 @@ func TestTokenRoutes(t *testing.T) {
 	t.Run("revoke", func(t *testing.T) {
 		r := do("DELETE", "/v1/tokens/"+made.Info.ID, "", authed())
 		if r.status != 204 || len(r.body) != 0 {
-			t.Fatalf("status = %d, body %q, want 204 and none", r.status, r.body)
+			t.Fatalf("status = %d, body %d bytes, want 204 and none", r.status, len(r.body))
 		}
 		if r := do("GET", "/v1/status", "", bearer(made.Token)); r.status != 401 {
 			t.Errorf("the revoked token: status = %d, want 401", r.status)
@@ -1539,12 +1543,12 @@ func TestTokenRoutes(t *testing.T) {
 		e3 := newAuthEnv(t, true)
 		for i := range 50 {
 			if r := e3.do(t, "POST", "/v1/tokens", fmt.Sprintf(`{"name":"t%d"}`, i), authed()); r.status != 201 {
-				t.Fatalf("token %d: status = %d, want 201 (%s)", i+1, r.status, r.body)
+				t.Fatalf("token %d: status = %d, want 201 (body %d bytes)", i+1, r.status, len(r.body))
 			}
 		}
 		r := e3.do(t, "POST", "/v1/tokens", `{"name":"one too many"}`, authed())
 		if r.status != 409 {
-			t.Fatalf("status = %d, want 409 (%s)", r.status, r.body)
+			t.Fatalf("status = %d, want 409 (body %d bytes)", r.status, len(r.body))
 		}
 		if code, _ := errorOf(t, r); code != "token_limit" {
 			t.Errorf("code = %q, want token_limit", code)
@@ -1595,12 +1599,12 @@ func TestResetRootOnly(t *testing.T) {
 		t.Fatal("a refused reset ended the session")
 	}
 	if got := e.events(); len(got) != 0 {
-		t.Errorf("events %v after refused resets, want none", got)
+		t.Errorf("%d events after refused resets, want none", len(got))
 	}
 
 	r := e.do(t, "POST", "/v1/auth/reset", "", authed())
 	if r.status != 204 || len(r.body) != 0 {
-		t.Fatalf("the root token: status = %d, body %q, want 204 and none", r.status, r.body)
+		t.Fatalf("the root token: status = %d, body %d bytes, want 204 and none", r.status, len(r.body))
 	}
 	if !e.store.NeedsSetup() {
 		t.Error("the admin was not reset")
@@ -1621,7 +1625,7 @@ func TestResetRootOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	if r := e.do(t, "POST", "/v1/auth/setup", setupBody(t, code, "bob", "bob's new password"), nil); r.status != 200 {
-		t.Errorf("setup after the reset: status = %d, want 200 (%s)", r.status, r.body)
+		t.Errorf("setup after the reset: status = %d, want 200 (body %d bytes)", r.status, len(r.body))
 	}
 	if strings.Contains(string(r.body), code) {
 		t.Error("the reset response shows the setup code")
@@ -1699,7 +1703,7 @@ func TestAuthEvents(t *testing.T) {
 		t.Helper()
 		got := last()
 		if !slices.Equal(got, want) {
-			t.Errorf("%s: events = %q\nwant %q", what, got, want)
+			t.Errorf("%s: got %d events, wanted %d with the expected messages", what, len(got), len(want))
 		}
 	}
 
@@ -1779,7 +1783,7 @@ func TestAuthEventsNameTheClient(t *testing.T) {
 		`auth: sign-in failed for "alice" from an address that is not known`,
 	}
 	if got := e.events(); !slices.Equal(got, want) {
-		t.Errorf("events = %q\nwant %q", got, want)
+		t.Errorf("got %d events, wanted %d with the expected messages", len(got), len(want))
 	}
 }
 
@@ -1913,5 +1917,106 @@ func TestAuthEventsHaveNoSecrets(t *testing.T) {
 				t.Errorf("an event shows %s", label)
 			}
 		}
+	}
+}
+
+func TestAuthRejectsCredentialLabels(t *testing.T) {
+	e := newAuthEnv(t, false)
+	const otherCredential = "wrong-public-label"
+	e.f.state.Servers[0].Outbound = json.RawMessage(`{"protocol":"trojan","settings":{"password":"` + otherCredential + `"}}`)
+	code, err := e.store.SetupCode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "admin " + strings.ToLower(code)
+	for _, attempt := range []struct {
+		code   string
+		status int
+	}{{"wrong", 401}, {code, 400}} {
+		r := e.do(t, "POST", "/v1/auth/setup", setupBody(t, attempt.code, name, adminPass), nil)
+		if r.status != attempt.status || strings.Contains(strings.ToLower(string(r.body)), strings.ToLower(code)) {
+			t.Error("a setup code in the public account name was accepted or disclosed")
+		}
+	}
+	if !e.store.NeedsSetup() {
+		t.Fatal("invalid public name claimed the admin")
+	}
+	r := e.do(t, "POST", "/v1/auth/setup", setupBody(t, code, adminName, adminPass), nil)
+	if r.status != 200 {
+		t.Fatal("could not claim an ordinary name")
+	}
+	sess := e.signIn(t)
+	_, named := e.token(t, "ordinary")
+	for _, name := range []string{testToken, "ci " + named, sess.ID, sess.CSRF, "ci " + sess.ID + "x", otherCredential} {
+		r := e.do(t, "POST", "/v1/tokens", mustJSON(t, map[string]string{"name": name}), withCSRF(sess))
+		if r.status != 400 || strings.Contains(string(r.body)+strings.Join(e.events(), "\n"), name) {
+			t.Error("credential accepted or disclosed as a token name")
+		}
+	}
+	if len(e.store.Tokens()) != 1 {
+		t.Error("a token with a sensitive name was persisted")
+	}
+}
+
+func TestLegacyCredentialLabelsStayPrivate(t *testing.T) {
+	e := newAuthEnv(t, true)
+	info, _ := e.token(t, "old token")
+	// Simulate an existing auth.json from an older version: its names were public.
+	path := filepath.Join(e.dir, "auth.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = bytes.ReplaceAll(data, []byte(`"name": "old token"`), []byte(`"name": "`+testToken+`"`))
+	data = bytes.ReplaceAll(data, []byte(`"username": "alice"`), []byte(`"username": "`+testToken+`"`))
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := auth.OpenStore(e.dir)
+	if err != nil {
+		t.Fatal("could not reopen the previous auth file")
+	}
+	e.h = NewHandler(e.f, testToken, st, auth.NewLimiter(e.clock.Now))
+	e.srv = httptest.NewServer(e.h)
+	t.Cleanup(e.srv.Close)
+	sess, err := st.SignIn(t.Context(), testToken, adminPass)
+	if err != nil {
+		t.Fatal("could not use the stored admin")
+	}
+	for _, r := range []response{
+		e.do(t, "GET", "/v1/auth/session", "", cookieOnly(sess)),
+		e.do(t, "GET", "/v1/tokens", "", cookieOnly(sess)),
+		e.do(t, "DELETE", "/v1/tokens/"+info.ID, "", withCSRF(sess)),
+		e.do(t, "POST", "/v1/auth/logout", "", withCSRF(sess)),
+	} {
+		if r.status >= 400 || bytes.Contains(r.body, []byte(testToken)) {
+			t.Error("cannot read or revoke a legacy record without exposing its name")
+		}
+	}
+	if strings.Contains(strings.Join(e.events(), "\n"), testToken) {
+		t.Error("a legacy credential label reached an event")
+	}
+}
+
+func TestLogoutReportsFailedRevocationWrite(t *testing.T) {
+	e := newAuthEnv(t, true)
+	s := e.signIn(t)
+	path := filepath.Join(e.dir, "auth.json")
+	if err := os.Rename(path, path+".previous"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r := e.do(t, "POST", "/v1/auth/logout", "", withCSRF(s))
+	if r.status != 500 {
+		t.Errorf("logout reported %d for a failed write", r.status)
+	}
+	if _, ok := e.store.Session(s.ID); ok {
+		t.Error("session still active in memory")
+	}
+	checkCookieCleared(t, r)
+	if len(e.events()) != 0 {
+		t.Error("recorded a successful logout after a failed write")
 	}
 }

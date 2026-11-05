@@ -1,8 +1,8 @@
 package runner
 
 import (
-	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -71,9 +71,10 @@ type Supervisor struct {
 
 // process is one xray run.
 type process struct {
-	cmd     *exec.Cmd
-	sel     runnerapi.Selection
-	started time.Time
+	cmd      *exec.Cmd
+	instance string
+	sel      runnerapi.Selection
+	started  time.Time
 	// expected is set before a deliberate stop signals the process, so that
 	// its exit is not reported.
 	expected atomic.Bool
@@ -196,8 +197,8 @@ func (s *Supervisor) CleanStage(keep ...string) error {
 }
 
 // Test runs "xray run -test" on the selection's config with the staged core
-// and returns what xray printed. A rejected config is an error wrapping the
-// *exec.ExitError; the output says why. The config's TUN devices are renamed
+// and returns the process verdict. A rejected config is an error wrapping
+// the *exec.ExitError. The config's TUN devices are renamed
 // for the test (see testConfig), so that it can run beside the active xray.
 func (s *Supervisor) Test(ctx context.Context, sel runnerapi.Selection) (string, error) {
 	path, err := s.Stage(sel)
@@ -209,18 +210,22 @@ func (s *Supervisor) Test(ctx context.Context, sel runnerapi.Selection) (string,
 		return "", err
 	}
 	defer cleanup()
-	var out bytes.Buffer
-	err = runTest(ctx, path, s.env(sel), config, &out)
-	return out.String(), err
+	err = runTest(ctx, path, s.env(sel), config)
+	if err == nil {
+		return runnerapi.ConfigVerdict(0).Output, nil
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() > 0 {
+		return runnerapi.ConfigVerdict(exit.ExitCode()).Output, err
+	}
+	return "", err
 }
 
-// runTest runs "<bin> run -test -c <config>" with env, and writes what xray
-// prints on stdout and stderr to out. A rejected config is an error wrapping
-// the *exec.ExitError. A trial and Runner.TestConfig both test this way.
-func runTest(ctx context.Context, bin string, env []string, config string, out io.Writer) error {
+// Child output can contain an entire outbound in a protocol-specific encoding.
+// The runner uses the exit status and discards both output streams.
+func runTest(ctx context.Context, bin string, env []string, config string) error {
 	cmd := exec.CommandContext(ctx, bin, "run", "-test", "-c", config)
 	cmd.Env = env
-	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("runner: xray run -test: %w", err)
 	}
@@ -301,7 +306,7 @@ func (s *Supervisor) Start(sel runnerapi.Selection) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("runner: start xray %s: %w", sel.Core, err)
 	}
-	p := &process{cmd: cmd, sel: sel, started: time.Now(), done: make(chan struct{})}
+	p := &process{cmd: cmd, instance: rand.Text(), sel: sel, started: time.Now(), done: make(chan struct{})}
 	s.cur.Store(p)
 	go s.watch(p)
 	return nil
@@ -366,16 +371,24 @@ func (s *Supervisor) Exits() <-chan Exit { return s.exits }
 
 // PID is the running xray's process ID, or 0 when none runs.
 func (s *Supervisor) PID() int {
-	p := s.cur.Load()
-	if p == nil {
-		return 0
-	}
-	select {
-	case <-p.done:
-		return 0
-	default:
+	if p := s.running(); p != nil {
 		return p.cmd.Process.Pid
 	}
+	return 0
+}
+
+// running samples the PID and process identity together, without waiting
+// for a concurrent Start or Stop.
+func (s *Supervisor) running() *process {
+	p := s.cur.Load()
+	if p != nil {
+		select {
+		case <-p.done:
+		default:
+			return p
+		}
+	}
+	return nil
 }
 
 // env is the environment of an xray process: the runner's own, with GOMEMLIMIT

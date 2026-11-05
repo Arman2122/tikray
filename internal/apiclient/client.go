@@ -33,11 +33,11 @@ import (
 	"time"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/store"
 )
 
-// maxResponse bounds what the client reads: the state, credentials and all,
-// is the largest answer.
+// maxResponse bounds what the client reads, including large state summaries.
 var maxResponse = 32 << 20 // a variable for the tests
 
 // dialTimeout bounds making a connection, and its TLS handshake.
@@ -265,7 +265,7 @@ func (c *Client) send(ctx context.Context, method, path string, in any) (Respons
 // Status is GET /v1/status: a service.Status.
 func (c *Client) Status(ctx context.Context) (Response, error) { return c.get(ctx, "/v1/status") }
 
-// State is GET /v1/state: the whole state, credentials included.
+// State reads the public state view. Links, private outbound options and subscription URLs stay on the service.
 func (c *Client) State(ctx context.Context) (Response, error) { return c.get(ctx, "/v1/state") }
 
 // Events is GET /v1/events: the events whose Seq is above after, as a list of
@@ -302,7 +302,7 @@ type ServerPatch struct {
 	Outbound json.RawMessage `json:"outbound,omitempty"`
 }
 
-// Servers is GET /v1/servers: a list of store.Server, credentials included.
+// Servers reads the server metadata, including the protocol and endpoint used for display.
 func (c *Client) Servers(ctx context.Context) (Response, error) { return c.get(ctx, "/v1/servers") }
 
 // AddServer is POST /v1/servers; the answer is the store.Server.
@@ -487,8 +487,12 @@ func (c *Client) CreateToken(ctx context.Context, n NewToken) (Response, error) 
 }
 
 // RevokeToken is DELETE /v1/tokens/{id}.
-func (c *Client) RevokeToken(ctx context.Context, id string) (Response, error) {
-	return c.send(ctx, http.MethodDelete, "/v1/tokens/"+url.PathEscape(id), nil)
+func (c *Client) RevokeToken(ctx context.Context, value string) (Response, error) {
+	id, ok := auth.TokenID(value)
+	if !ok {
+		return Response{}, errors.New("apiclient: invalid token id")
+	}
+	return c.send(ctx, http.MethodDelete, "/v1/tokens/"+id, nil)
 }
 
 // ResetAdmin is POST /v1/auth/reset: it removes the admin and every session and

@@ -252,7 +252,7 @@ func TestRefreshSkipsRefused(t *testing.T) {
 		t.Fatalf("result = %s, want 1 added, 1 kept, 1 skipped", refreshCounts(res))
 	}
 	sk := res.Skipped[0]
-	if !strings.Contains(sk.Err, "xray rejected") || !strings.Contains(sk.Err, "is not valid") {
+	if !strings.Contains(sk.Err, "xray rejected") || !strings.Contains(sk.Err, "invalid user") {
 		t.Error("skipped reason should identify the xray rejection and retain its safe explanation")
 	}
 	wantRedacted(t, sk.Err, secret{"the entry's id", otherID})
@@ -459,6 +459,22 @@ func TestRefreshRetryMarksARecreatedServerUntested(t *testing.T) {
 	st, _ := e.store.State()
 	if len(st.Servers) != 1 || !st.Servers[0].Untested {
 		t.Error("the retry added a server without testing its outbound or marking it untested")
+	}
+}
+
+func TestDisabledAndFailedRefreshOmitSensitiveLabels(t *testing.T) {
+	e, _ := newSubEnv(t)
+	const short = "qZx"
+	sub, _ := e.addSub(short)
+	e.addServer("manual", strings.Replace(trojanOutbound, trojanPW, short, 1))
+	e.patchSub(sub.ID, func(s *store.Subscription) { s.Disabled = true })
+	_, err := e.s.RefreshSubscription(bg, sub.ID)
+	if err == nil || strings.Contains(err.Error(), short) {
+		t.Error("disabled subscription refusal leaked its credential-shaped label")
+	}
+	e.s.refreshFailed(sub, "fixture failure")
+	if ev := e.eventsOf(KindError); len(ev) != 1 || strings.Contains(ev[0], short) {
+		t.Error("failed refresh event leaked its credential-shaped label")
 	}
 }
 

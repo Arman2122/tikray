@@ -58,7 +58,7 @@ func (s Selection) Validate() error {
 // but a content-addressed file under the runner's run directory.
 func ValidateConfig(config string) error {
 	if !configRE.MatchString(config) {
-		return fmt.Errorf("runnerapi: invalid config %q: want config/<64 hex>.json", config)
+		return errors.New("runnerapi: invalid config: want config/<64 hex>.json")
 	}
 	return nil
 }
@@ -97,14 +97,17 @@ const (
 
 // Status is the runner's answer to GET /v1/status.
 type Status struct {
-	State       string       `json:"state"`
-	Active      *Selection   `json:"active,omitempty"`
-	Candidate   *Candidate   `json:"candidate,omitempty"`
-	XrayPID     int          `json:"xray_pid"`
-	XrayVersion string       `json:"xray_version,omitempty"`
-	RoutesOK    bool         `json:"routes_ok"`
-	GatewayUp   bool         `json:"gateway_up"`
-	LastTrial   *TrialResult `json:"last_trial,omitempty"`
+	State     string     `json:"state"`
+	Active    *Selection `json:"active,omitempty"`
+	Candidate *Candidate `json:"candidate,omitempty"`
+	XrayPID   int        `json:"xray_pid"`
+	// XrayInstance identifies this process even when a runner restart reuses
+	// its numeric PID. An older runner omits it.
+	XrayInstance string       `json:"xray_instance,omitempty"`
+	XrayVersion  string       `json:"xray_version,omitempty"`
+	RoutesOK     bool         `json:"routes_ok"`
+	GatewayUp    bool         `json:"gateway_up"`
+	LastTrial    *TrialResult `json:"last_trial,omitempty"`
 }
 
 // XrayAPIRequest is the body of POST /v1/xray-api: arguments for "xray api".
@@ -131,11 +134,19 @@ const MaxTestBody = 1 << 20
 // TestOutputTruncated marks runner output whose final line may be a partial credential.
 const TestOutputTruncated = "\n[output truncated]"
 
-// TestResult is the answer to POST /v1/test: whether "xray run -test"
-// accepted the config, and what xray printed, at most 8 KiB of it.
+// TestResult is the verdict of POST /v1/test and its public diagnostic.
 type TestResult struct {
 	OK     bool   `json:"ok"`
 	Output string `json:"output"`
+}
+
+// ConfigVerdict reports a completed xray test. Child output is unconstrained:
+// even a successful test can print an entire raw outbound.
+func ConfigVerdict(exitCode int) TestResult {
+	if exitCode == 0 {
+		return TestResult{OK: true, Output: "Configuration OK."}
+	}
+	return TestResult{Output: fmt.Sprintf("xray failed to load config (exit %d)", exitCode)}
 }
 
 // Errors the runner reports with a 409.
@@ -156,7 +167,7 @@ var (
 var ErrNoToken = errors.New("waiting for the runner token")
 
 // TestFailedError is what Trial returns when "xray run -test" rejects the
-// candidate. Output is what xray printed.
+// candidate. Output describes the rejection without echoing private configuration.
 type TestFailedError struct{ Output string }
 
 func (e *TestFailedError) Error() string {

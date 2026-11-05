@@ -253,8 +253,8 @@ func TestService(t *testing.T) {
 		})
 		serverA = srv.ID
 		note("POST /v1/servers lab-a's link: server %s (%s), revision %d", srv.ID, srv.Name, resp.Revision)
-		if srv.Name != "lab-a" || srv.Link != linkA {
-			t.Errorf("server %s named %q, link as given %v: want lab-a from its link", srv.ID, srv.Name, srv.Link == linkA)
+		if srv.Name != "lab-a" || srv.Link != "" {
+			t.Error("adding lab-a must return its name without the share link")
 		}
 		dev := store.Device{Address: lanClient, Name: "lab-client", Policy: store.Policy{Mode: store.ModeSmart}}
 		resp = call(t, "PUT /v1/devices", nil, func(ctx context.Context) (apiclient.Response, error) { return api.SetDevice(ctx, dev) })

@@ -34,4 +34,3 @@
 - [ ] **Step 4: Commit**
 
   `git commit -m "Test servers in batches, and test again the ones saved untested once a core runs"`
-

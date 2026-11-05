@@ -401,7 +401,7 @@ func TestAddServerRejectedByXray(t *testing.T) {
 			e.runner.setTestReject("main: failed to load config: infra/conf: bad user " + c.secret.value + " in outbound srv")
 			_, rev, err := e.s.AddServer(bg, 0, c.n)
 			r := wantRefused(t, err, vlessSecret, trojanSecret)
-			if !strings.Contains(r.Reason, "main: failed to load config: infra/conf: bad user "+redacted+" in outbound srv") {
+			if !strings.Contains(r.Reason, "invalid user") {
 				t.Errorf("reason = %q, want xray's output with the secret redacted", show(r.Reason))
 			}
 			if rev != 0 {
@@ -637,7 +637,7 @@ func TestUpdateServerRejectedByXray(t *testing.T) {
 	link := vlessLink
 	_, _, err := e.s.UpdateServer(bg, rev, srv.ID, ServerPatch{Link: &link})
 	r := wantRefused(t, err, vlessSecret)
-	if !strings.Contains(r.Reason, "infra/conf: bad user "+redacted) {
+	if !strings.Contains(r.Reason, "invalid user") {
 		t.Errorf("reason = %q, want xray's output with the id redacted", show(r.Reason))
 	}
 	e.wantUnchanged(rev, 0, 1)
@@ -807,6 +807,55 @@ func TestRemoveServerClearsThePinAndDropsRules(t *testing.T) {
 	}
 	if got := kicks(e.s); got != 1 {
 		t.Errorf("kicked %d times, want 1", got)
+	}
+}
+
+func TestWarningOmitsSetupCodeShapedLabel(t *testing.T) {
+	e := newEnv(t)
+	name := "0123-4567-89AB"
+	srv, _, err := e.s.AddServer(bg, store.AnyRevision, NewServer{Name: name, Link: warnLink})
+	if err != nil {
+		t.Fatal("could not add the fixture server")
+	}
+	ev := e.eventsOf(KindWarning)
+	if len(ev) != 1 || !strings.Contains(ev[0], srv.ID) || strings.Contains(ev[0], name) {
+		t.Error("a warning label disclosed a setup-code-shaped value")
+	}
+}
+
+func TestReplacementWarningRedactsOldCredential(t *testing.T) {
+	e := newEnv(t)
+	e.addServer(trojanPW, trojanOutbound)
+	srv := e.serverNamed(trojanPW)
+	link := warnLink
+	if _, _, err := e.s.UpdateServer(bg, store.AnyRevision, srv.ID, ServerPatch{Link: &link}); err != nil {
+		t.Fatal("could not replace the fixture outbound")
+	}
+	ev := e.eventsOf(KindWarning)
+	if len(ev) != 1 || !strings.Contains(ev[0], srv.ID) || strings.Contains(ev[0], trojanPW) {
+		t.Error("a replacement warning should identify the server without the old credential")
+	}
+}
+
+// After deletion, the current state's redactor no longer knows the removed
+// outbound's credentials. A display name must not reintroduce one.
+func TestCleanupRedactsRemovedServerName(t *testing.T) {
+	e := newEnv(t)
+	e.addServer(trojanPW, trojanOutbound)
+	srv := e.serverNamed(trojanPW)
+	_, rev, err := e.store.Update(store.AnyRevision, func(st *store.State) error {
+		st.Routing.Pinned = srv.ID
+		return nil
+	})
+	if err != nil {
+		t.Fatal("could not pin the fixture server")
+	}
+	if _, err := e.s.RemoveServer(bg, rev, srv.ID); err != nil {
+		t.Fatal("could not remove the fixture server")
+	}
+	events := e.eventsOf(KindCleanup)
+	if len(events) != 1 || !strings.Contains(events[0], srv.ID) || strings.Contains(events[0], trojanPW) {
+		t.Error("cleanup should identify the server without its removed credential")
 	}
 }
 

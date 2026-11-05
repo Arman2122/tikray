@@ -93,6 +93,7 @@ type handler struct {
 	// root is the SHA-256 of the root token, and hasRoot says there is one:
 	// an empty token admits nobody.
 	root    [sha256.Size]byte
+	rootLen int
 	hasRoot bool
 	now     func() time.Time
 }
@@ -103,7 +104,7 @@ type handler struct {
 // check sits in front of the routes, so that a caller without a credential
 // learns nothing about them.
 func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter) http.Handler {
-	h := &handler{b: b, a: a, lim: lim, root: sha256.Sum256([]byte(root)), hasRoot: root != "", now: time.Now}
+	h := &handler{b: b, a: a, lim: lim, root: sha256.Sum256([]byte(root)), rootLen: len(root), hasRoot: root != "", now: time.Now}
 	mux := http.NewServeMux()
 	// The routes that need no credential, by their pattern: the one list. A
 	// request is public when the pattern the mux matches it to is on it, so
@@ -178,11 +179,10 @@ func (h *handler) status(w http.ResponseWriter, r *http.Request) {
 	h.reply(w, http.StatusOK, st.Revision, st)
 }
 
-// state answers with everything, the credentials of the servers and the
-// subscriptions' URLs included: the token is as good as the router's.
+// state returns the editable settings and public server metadata.
 func (h *handler) state(w http.ResponseWriter, _ *http.Request) {
 	st, rev := h.b.State()
-	h.reply(w, http.StatusOK, rev, st)
+	h.reply(w, http.StatusOK, rev, h.visibleState(st))
 }
 
 func (h *handler) events(w http.ResponseWriter, r *http.Request) {
@@ -202,23 +202,24 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) listServers(w http.ResponseWriter, _ *http.Request) {
 	st, rev := h.b.State()
-	h.reply(w, http.StatusOK, rev, orEmpty(st.Servers))
+	h.reply(w, http.StatusOK, rev, h.visibleServers(st, service.RedactorFor(st)))
 }
 
 func (h *handler) listSubscriptions(w http.ResponseWriter, _ *http.Request) {
 	st, rev := h.b.State()
-	h.reply(w, http.StatusOK, rev, orEmpty(st.Subscriptions))
+	h.reply(w, http.StatusOK, rev, h.visibleSubscriptions(st, service.RedactorFor(st)))
 }
 
 func (h *handler) listDevices(w http.ResponseWriter, _ *http.Request) {
 	st, rev := h.b.State()
-	h.reply(w, http.StatusOK, rev, orEmpty(st.Devices))
+	h.reply(w, http.StatusOK, rev, h.visibleDevices(st, service.RedactorFor(st)))
 }
 
 // getHealth answers with the settings of the connectivity probe. The
 // snapshot of what it saw is in the status.
 func (h *handler) getHealth(w http.ResponseWriter, _ *http.Request) {
 	st, rev := h.b.State()
+	st.Health.ProbeURL = h.publicURL(st.Health.ProbeURL, service.RedactorFor(st))
 	h.reply(w, http.StatusOK, rev, st.Health)
 }
 
@@ -250,7 +251,9 @@ func (h *handler) addServer(w http.ResponseWriter, r *http.Request) {
 	}
 	// The collection, where a GET finds it: no route reads one server alone.
 	w.Header().Set("Location", "/v1/servers")
-	h.reply(w, http.StatusCreated, newRev, srv)
+	st, _ := h.b.State()
+	st.Servers = append(st.Servers, srv)
+	h.reply(w, http.StatusCreated, newRev, h.visibleServer(srv, service.RedactorFor(st)))
 }
 
 func (h *handler) patchServer(w http.ResponseWriter, r *http.Request) {
@@ -268,7 +271,9 @@ func (h *handler) patchServer(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	h.reply(w, http.StatusOK, newRev, srv)
+	st, _ := h.b.State()
+	st.Servers = append(st.Servers, srv)
+	h.reply(w, http.StatusOK, newRev, h.visibleServer(srv, service.RedactorFor(st)))
 }
 
 // --- subscriptions
@@ -289,7 +294,9 @@ func (h *handler) addSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	// The collection, as for a server.
 	w.Header().Set("Location", "/v1/subscriptions")
-	h.reply(w, http.StatusCreated, newRev, sub)
+	st, _ := h.b.State()
+	st.Subscriptions = append(st.Subscriptions, sub)
+	h.reply(w, http.StatusCreated, newRev, h.visibleSub(sub, service.RedactorFor(st)))
 }
 
 func (h *handler) patchSubscription(w http.ResponseWriter, r *http.Request) {
@@ -307,7 +314,9 @@ func (h *handler) patchSubscription(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	h.reply(w, http.StatusOK, newRev, sub)
+	st, _ := h.b.State()
+	st.Subscriptions = append(st.Subscriptions, sub)
+	h.reply(w, http.StatusOK, newRev, h.visibleSub(sub, service.RedactorFor(st)))
 }
 
 // detached is the context of an operation that must run to its end whether
@@ -369,6 +378,7 @@ func (h *handler) setDevice(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
+	d.Name = h.publicName(h.redact(d.Name), callerOf(r).session)
 	h.reply(w, http.StatusOK, newRev, d)
 }
 
@@ -429,7 +439,18 @@ func set[T any](h *handler, do func(ctx context.Context, rev uint64, v T) (uint6
 			h.fail(w, err)
 			return
 		}
-		h.reply(w, http.StatusOK, newRev, v)
+		switch settings := any(v).(type) {
+		case store.Routing:
+			h.reply(w, http.StatusOK, newRev, h.visibleRouting(settings, h.redact))
+		case store.Health:
+			settings.ProbeURL = h.publicURL(settings.ProbeURL, h.redact)
+			h.reply(w, http.StatusOK, newRev, settings)
+		case store.DNS:
+			settings.Remote = h.publicURL(settings.Remote, h.redact)
+			h.reply(w, http.StatusOK, newRev, settings)
+		default:
+			h.reply(w, http.StatusOK, newRev, v)
+		}
 	}
 }
 
@@ -584,7 +605,10 @@ func bodyProblem(err error) string {
 		return "the request body has a field of the wrong type: " + typ.Field
 	}
 	// An unknown field, or a value its type refuses, such as a bad interval.
-	return "the request body is not accepted: " + err.Error()
+	if strings.HasPrefix(err.Error(), "json: unknown field ") {
+		return "the request body contains an unknown field"
+	}
+	return "the request body contains an invalid value"
 }
 
 // --- responses

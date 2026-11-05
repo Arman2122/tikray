@@ -367,7 +367,7 @@ func TestServerXrayAPI(t *testing.T) {
 	var gotArgs []string
 	var gotDeadline time.Time
 	var hasDeadline bool
-	resp := runnerapi.XrayAPIResponse{ExitCode: 0, Stdout: "ok"}
+	resp := runnerapi.XrayAPIResponse{ExitCode: 0, Stdout: `{"stat":[]}`}
 	a := newAPI(t, g, func(ctx context.Context, args []string) runnerapi.XrayAPIResponse {
 		gotArgs = args
 		gotDeadline, hasDeadline = ctx.Deadline()
@@ -379,8 +379,8 @@ func TestServerXrayAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("XrayAPI: %v", err)
 	}
-	if got != resp {
-		t.Errorf("XrayAPI = %+v, want %+v", got, resp)
+	if got.ExitCode != 0 || !strings.Contains(got.Stdout, `"stat": []`) {
+		t.Error("the empty counter list must survive")
 	}
 	if want := []string{"statsquery", "-s", "127.0.0.1:10085"}; !reflect.DeepEqual(gotArgs, want) {
 		t.Errorf("stub args = %q, want %q", gotArgs, want)
@@ -399,12 +399,39 @@ func TestServerXrayAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("XrayAPI with a failing xray api: %v", err)
 	}
-	if got != resp {
-		t.Errorf("XrayAPI = %+v, want %+v", got, resp)
+	if got != (runnerapi.XrayAPIResponse{ExitCode: 3}) {
+		t.Error("a failed mutation should expose only its exit status")
 	}
 }
 
 // TestServerXrayAPIRefused covers the requests that never reach xray api.
+func TestXrayAPIExposesOnlyDiagnosticFields(t *testing.T) {
+	const private = "private-fixture-word"
+	g := runningRig(t)
+	var result runnerapi.XrayAPIResponse
+	a := newAPI(t, g, func(context.Context, []string) runnerapi.XrayAPIResponse { return result })
+	for _, tc := range []struct {
+		cmd, output string
+		exit        int
+		want        string
+	}{
+		{"lso", `{"outbounds":[{"tag":"srv-1234abcd","settings":{"password":"` + private + `"}},{"tag":"` + private + `"}]}`, 0, "srv-1234abcd"},
+		{"ado", private, 1, ""},
+		{"rmo", private, 0, ""},
+		{"lsi", private, 0, ""},
+		{"stats", `{"stat":{"name":"outbound>>>direct>>>traffic>>>downlink","value":"42","other":"` + private + `"}}`, 0, "42"},
+		{"stats", "counter not found: " + private, 1, "not found"},
+		{"statsquery", `{"stat":[{"name":"user>>>` + private + `>>>traffic>>>downlink","value":"8"},{"name":"outbound>>>direct>>>traffic>>>downlink","value":"42"}]}`, 0, "42"},
+		{"statssys", `{"Uptime":12,"label":"` + private + `"}`, 0, "Uptime"},
+	} {
+		result = runnerapi.XrayAPIResponse{Stdout: tc.output, Stderr: private, ExitCode: tc.exit}
+		resp, err := a.c.XrayAPI(t.Context(), tc.cmd)
+		if err != nil || resp.ExitCode != tc.exit || strings.Contains(resp.Stdout+resp.Stderr, private) || !strings.Contains(resp.Stdout+resp.Stderr, tc.want) {
+			t.Errorf("%s did not return its safe fields and exit status", tc.cmd)
+		}
+	}
+}
+
 func TestServerXrayAPIRefused(t *testing.T) {
 	t.Run("no args", func(t *testing.T) {
 		a := newAPI(t, runningRig(t), nil)
@@ -421,8 +448,8 @@ func TestServerXrayAPIRefused(t *testing.T) {
 		g.boot(t) // no active.json: the runner stays empty
 		a := newAPI(t, g, nil)
 		_, err := a.c.XrayAPI(t.Context(), "adi")
-		if err == nil || !strings.Contains(err.Error(), "503") || !strings.Contains(err.Error(), "no_xray") {
-			t.Errorf("XrayAPI with no xray = %v, want a 503 no_xray error", err)
+		if err == nil || !strings.Contains(err.Error(), "HTTP 503") {
+			t.Error("XrayAPI with no xray must report HTTP 503")
 		}
 		if n := a.calls.Load(); n != 0 {
 			t.Errorf("xray api ran %d times, want 0", n)
@@ -509,6 +536,28 @@ func TestServerTest(t *testing.T) {
 
 // An interrupted process never gave a verdict on the outbound. The client
 // must see a runner error so that the service can retry it later.
+func TestConfigEndpointReturnsVerdictWithoutOpaqueInput(t *testing.T) {
+	const marker = "fixture-private-part"
+	configs := []string{
+		`{"outbounds":[{"protocol":"trojan","settings":{"password":"` + marker + `\"tail"}}]}`,
+		`{"outbounds":[{"protocol":"vless","streamSettings":{"wsSettings":{"headers":{"Cookie":"SID=` + marker + `","X-Vendor-Key":"` + marker + `"}}}}]}`,
+		`{"outbounds":[{"protocol":"future-protocol","settings":{"opaque":"` + marker + `"}}]}`,
+	}
+	for _, mode := range []string{"ok", "badconfig"} {
+		g := newRig(t, nil)
+		g.active(t, mode)
+		g.boot(t)
+		a := newAPI(t, g, nil)
+		for _, config := range configs {
+			resp, body := send(t, a.url, "POST", "/v1/test", "Bearer "+testToken, config)
+			var res runnerapi.TestResult
+			if resp.StatusCode != 200 || json.Unmarshal([]byte(body), &res) != nil || res.OK != (mode == "ok") || strings.Contains(body, marker) {
+				t.Error("test endpoint lost the verdict or disclosed a private config fragment")
+			}
+		}
+	}
+}
+
 func TestServerTestInterrupted(t *testing.T) {
 	for _, mode := range []string{"slowtest", "killedtest"} {
 		t.Run(mode, func(t *testing.T) {
@@ -667,6 +716,8 @@ func TestServerStatusCodes(t *testing.T) {
 		{name: "reload", method: "POST", path: "/v1/reload", status: 204},
 		{name: "adopt", setup: writeAdoptable, method: "POST", path: "/v1/adopt", body: adoptBody, status: 204},
 
+		{name: "adopt with trailing JSON", setup: writeAdoptable, method: "POST", path: "/v1/adopt", body: adoptBody + "{}", status: 400, code: "bad_request", detail: "invalid JSON"},
+		{name: "adopt with oversized trailing whitespace", setup: writeAdoptable, method: "POST", path: "/v1/adopt", body: adoptBody + strings.Repeat(" ", maxRequestBody), status: 400, code: "bad_request", detail: "too large"},
 		{name: "adopt of a bad name", method: "POST", path: "/v1/adopt", body: `{"config":"config/x.json"}`, status: 400, code: "bad_request", detail: "invalid config"},
 		{name: "adopt of a name that leaves run", method: "POST", path: "/v1/adopt", body: `{"config":"config/../active.json"}`, status: 400, code: "bad_request", detail: "invalid config"},
 		{name: "adopt of a missing file", method: "POST", path: "/v1/adopt", body: adoptBody, status: 400, code: "bad_request", detail: "does not exist"},

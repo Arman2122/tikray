@@ -89,7 +89,11 @@ func sha256Hex(secret string) string {
 
 // validHash reports whether h is what sha256Hex returns.
 func validHash(h string) bool {
-	if len(h) != 2*sha256.Size {
+	return lowerHex(h, 2*sha256.Size)
+}
+
+func lowerHex(h string, size int) bool {
+	if len(h) != size {
 		return false
 	}
 	for i := 0; i < len(h); i++ {
@@ -174,7 +178,7 @@ func csrfToken(key []byte, id string) string {
 // The caller limits sign-ins by client (Limiter) before it calls this: it is
 // the one that knows who is asking.
 func (s *Store) SignIn(ctx context.Context, username, password string) (Session, error) {
-	a, haveAdmin := s.admin()
+	a, haveAdmin := s.adminSnapshot()
 	isAdmin := haveAdmin && sameText(a.Username, username)
 	hash := DummyHash
 	if isAdmin {
@@ -272,34 +276,33 @@ func (s *Store) Session(id string) (Session, bool) {
 
 // SignOut ends the session with the id id. An id that is no session is
 // nothing to do. The session is gone here even when auth.json can't be written
-// (an end that is not saved would be a sign-out that fails silently): the next
-// write that works saves it.
-func (s *Store) SignOut(id string) {
+// (an end that is not saved would be a sign-out that fails silently): the caller gets the write error and
+// the next write that works saves it.
+func (s *Store) SignOut(id string) error {
 	if id == "" {
-		return
+		return nil
 	}
 	h := sha256Hex(id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.dropSessionsLocked(func(r sessionRecord) bool { return sameHash(r.Hash, h) })
+	return s.dropSessionsLocked(func(r sessionRecord) bool { return sameHash(r.Hash, h) })
 }
 
 // EndOtherSessions ends every session but the one with the id keep; an empty
 // keep ends them all. As SignOut, it holds even when it can't be saved.
-func (s *Store) EndOtherSessions(keep string) {
+func (s *Store) EndOtherSessions(keep string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if keep == "" {
-		s.dropSessionsLocked(func(sessionRecord) bool { return true })
-		return
+		return s.dropSessionsLocked(func(sessionRecord) bool { return true })
 	}
 	h := sha256Hex(keep)
-	s.dropSessionsLocked(func(r sessionRecord) bool { return !sameHash(r.Hash, h) })
+	return s.dropSessionsLocked(func(r sessionRecord) bool { return !sameHash(r.Hash, h) })
 }
 
 // dropSessionsLocked ends the sessions for which drop is true, and saves
 // when there were any. Callers hold s.mu.
-func (s *Store) dropSessionsLocked(drop func(sessionRecord) bool) {
+func (s *Store) dropSessionsLocked(drop func(sessionRecord) bool) error {
 	kept := make([]sessionRecord, 0, len(s.d.Sessions))
 	for _, r := range s.d.Sessions {
 		if !drop(r) {
@@ -307,12 +310,12 @@ func (s *Store) dropSessionsLocked(drop func(sessionRecord) bool) {
 		}
 	}
 	if len(kept) == len(s.d.Sessions) {
-		return
+		return nil
 	}
+	// The session ends in memory even if the disk is full. Tell the caller
+	// when persistence failed instead of acknowledging a durable logout.
 	s.d.Sessions = kept
-	// The error is dropped on purpose: what ended stays ended in memory, and
-	// the next write saves it.
-	_ = s.commit(s.d)
+	return s.commit(s.d)
 }
 
 // CSRFFor returns the CSRF token of the session with the id sessionID:

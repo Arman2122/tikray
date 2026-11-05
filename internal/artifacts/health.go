@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -37,13 +38,19 @@ type SOCKSProbe struct {
 }
 
 func (p SOCKSProbe) Check(ctx context.Context) error {
+	label := "artifacts: socks probe"
+	// The numeric gateway is useful when diagnosing a config override.
+	// Never echo an unvalidated address or the remote target URL.
+	if addr, err := netip.ParseAddrPort(p.Addr); err == nil && addr.Addr().Zone() == "" {
+		label += " through " + addr.String()
+	}
 	d, err := proxy.SOCKS5("tcp", p.Addr, nil, proxy.Direct)
 	if err != nil {
-		return fmt.Errorf("socks probe %s: %w", p.Addr, err)
+		return errors.New("artifacts: socks probe could not configure the proxy")
 	}
 	cd, ok := d.(proxy.ContextDialer)
 	if !ok {
-		return fmt.Errorf("socks probe %s: dialer cannot take a context", p.Addr)
+		return errors.New("artifacts: socks probe dialer cannot take a context")
 	}
 	timeout := p.Timeout
 	if timeout <= 0 {
@@ -60,15 +67,21 @@ func (p SOCKSProbe) Check(ctx context.Context) error {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.URL, nil)
 	if err != nil {
-		return fmt.Errorf("socks probe: %w", err)
+		return errors.New("artifacts: invalid socks probe URL")
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("socks probe through %s: %w", p.Addr, err)
+		// net/http includes the requested URL in its error, and the peer
+		// controls the underlying diagnostic. Only context errors need
+		// their identity preserved for cancellation and retries.
+		if cause := ctx.Err(); cause != nil {
+			return fmt.Errorf("%s: %w", label, cause)
+		}
+		return fmt.Errorf("%s: request failed", label)
 	}
 	resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("socks probe through %s: GET %s: HTTP %s", p.Addr, p.URL, resp.Status)
+		return fmt.Errorf("%s: HTTP %d", label, resp.StatusCode)
 	}
 	return nil
 }

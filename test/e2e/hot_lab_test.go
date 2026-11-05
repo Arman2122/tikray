@@ -122,10 +122,18 @@ func TestHot(t *testing.T) {
 		wantVia(t, note, "a")
 		before := hotRunner(ctx, t)
 		wantConfig(t, note, before, state, l.Newest)
-		rev := call(t, "add lab-b", callTimeout, &b, func(ctx context.Context) (apiclient.Response, error) {
+		var summary store.Server
+		rev := call(t, "add lab-b", callTimeout, &summary, func(ctx context.Context) (apiclient.Response, error) {
 			return api.AddServer(ctx, apiclient.NewServer{Link: linkB})
 		})
 		start := time.Now()
+		// The API only returns display metadata. Reconstruct the expected
+		// private render independently from the link we submitted.
+		b, err = serverFromLink(linkB)
+		if err != nil || summary.ID == "" || summary.Name != b.Name || summary.Link != "" {
+			t.Fatal("lab-b did not return its public metadata")
+		}
+		b.ID = summary.ID
 		state.Servers = append(state.Servers, b)
 		// Health.Alive comes from the observatory's OutboundStatus for this tag.
 		_, took, alive := waitHotStatus(ctx, api, start.Add(30*time.Second), func(st service.Status) bool {
@@ -210,9 +218,14 @@ func TestHot(t *testing.T) {
 		if err != nil {
 			t.Fatal("could not encode the changed lab-b outbound")
 		}
-		rev := call(t, "change lab-b", callTimeout, &b, func(ctx context.Context) (apiclient.Response, error) {
+		var summary store.Server
+		rev := call(t, "change lab-b", callTimeout, &summary, func(ctx context.Context) (apiclient.Response, error) {
 			return api.UpdateServer(ctx, b.ID, apiclient.ServerPatch{Outbound: raw})
 		})
+		if summary.ID != b.ID || summary.Link != "" {
+			t.Fatal("changed lab-b did not return its public metadata")
+		}
+		b.Outbound, b.Link = raw, ""
 		state.Servers = []store.Server{b}
 		r := waitApply(t, note, rev, time.Now(), time.Minute, "applied without restarting xray: added 0, removed 0, changed 1")
 		adopted := hotRunner(ctx, t)
@@ -244,7 +257,7 @@ func TestHot(t *testing.T) {
 		}
 		_, ok := poll(rctx, serveWithin(), time.Second, func() bool {
 			rs, err := runnerStatus(rctx)
-			return err == nil && rs.State == runnerapi.StateRunning && rs.XrayPID > 0 && rs.Active != nil && *rs.Active == disk
+			return err == nil && rs.State == runnerapi.StateRunning && rs.XrayPID > 0 && rs.XrayInstance != "" && rs.XrayInstance != adopted.XrayInstance && rs.Active != nil && *rs.Active == disk
 		})
 		if !ok {
 			t.Fatal("the restarted runner did not boot the adopted selection")
@@ -258,7 +271,7 @@ func TestHot(t *testing.T) {
 func hotRunner(ctx context.Context, t *testing.T) runnerapi.Status {
 	t.Helper()
 	st, err := runnerStatus(ctx)
-	if err != nil || st.State != runnerapi.StateRunning || st.XrayPID <= 0 || st.Active == nil {
+	if err != nil || st.State != runnerapi.StateRunning || st.XrayPID <= 0 || st.XrayInstance == "" || st.Active == nil {
 		t.Fatal("expected a running xray and its active selection")
 	}
 	return st
@@ -266,7 +279,11 @@ func hotRunner(ctx context.Context, t *testing.T) runnerapi.Status {
 
 func wantHotPID(t *testing.T, note func(string, ...any), before, after runnerapi.Status, hot bool) {
 	t.Helper()
-	note("xray PID before %d, after %d", before.XrayPID, after.XrayPID)
+	sameStart := before.XrayInstance != "" && before.XrayInstance == after.XrayInstance
+	note("xray PID before %d, after %d; same process start: %v", before.XrayPID, after.XrayPID, sameStart)
+	if sameStart != hot {
+		t.Errorf("same xray process start = %v, want %v", sameStart, hot)
+	}
 	if (before.XrayPID == after.XrayPID) != hot {
 		t.Errorf("xray PID before %d, after %d for hot=%v", before.XrayPID, after.XrayPID, hot)
 	}

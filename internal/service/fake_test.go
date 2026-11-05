@@ -158,6 +158,7 @@ type fakeRunner struct {
 	testReject    string
 	testNoCore    bool
 	testBroken    bool
+	restartBroken bool
 	testRejectFor string
 	testRejectOut string
 }
@@ -315,6 +316,9 @@ func (f *fakeRunner) RoundTrip(req *http.Request) (*http.Response, error) {
 	case "POST restart":
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.restartBroken {
+			return reply(http.StatusInternalServerError, map[string]string{"error": "internal"}), nil
+		}
 		if f.st.State == runnerapi.StateTrial {
 			return reply(http.StatusConflict, map[string]string{"error": "busy"}), nil
 		}

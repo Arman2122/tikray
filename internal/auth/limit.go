@@ -144,7 +144,7 @@ func (l *Limiter) Allow(ip netip.Addr) (done func(failed bool), ok bool, retryAf
 	return func(failed bool) {
 		once.Do(func() {
 			if !failed {
-				l.refund(ip)
+				l.refund(ip, b)
 			}
 		})
 	}, true, 0
@@ -153,12 +153,12 @@ func (l *Limiter) Allow(ip netip.Addr) (done func(failed bool), ok bool, retryAf
 // refund gives back the token that an Allow took for ip from each bucket. The
 // bucket of ip is dropped when that leaves it full: it is then the same as one
 // that was never made.
-func (l *Limiter) refund(ip netip.Addr) {
+func (l *Limiter) refund(ip netip.Addr, reserved *bucket) {
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.global.give(now, globalRefill)
-	if b := l.ips[ip]; b != nil {
+	if b := l.ips[ip]; b == reserved {
 		b.give(now, ipRefill)
 		if !b.full.After(now) {
 			delete(l.ips, ip)

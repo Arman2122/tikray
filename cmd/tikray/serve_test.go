@@ -3,10 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -103,9 +99,9 @@ func startServe(t *testing.T, vars map[string]string) *running {
 		}
 		select {
 		case code := <-r.done:
-			t.Fatalf("tikray serve exited with %d before it served: %s", code, r.stderr.String())
+			t.Fatalf("tikray serve exited with %d before the listener started", code)
 		case <-deadline:
-			t.Fatalf("tikray serve printed no startup line: %q", r.stderr.String())
+			t.Fatal("tikray serve printed no startup line")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
@@ -172,15 +168,7 @@ func (r *running) call(t *testing.T, method, path string, body any, cookie *http
 	if cookie != nil {
 		req.AddCookie(cookie)
 	}
-	hc := &http.Client{Transport: &http.Transport{DisableKeepAlives: true, TLSClientConfig: &tls.Config{
-		InsecureSkipVerify: true, // a self-signed certificate: the pin below is the check
-		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			if sum := sha256.Sum256(raw[0]); hex.EncodeToString(sum[:]) != r.fingerprint {
-				return errors.New("not the certificate serve printed")
-			}
-			return nil
-		},
-	}}}
+	hc := (&apiclient.Client{Fingerprint: r.fingerprint}).HTTPClient()
 	resp, err := hc.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -220,7 +208,7 @@ func (r *running) authState(t *testing.T, cookie *http.Cookie) (setupRequired, s
 		SignedIn      bool `json:"signed_in"`
 	}
 	if err := json.Unmarshal(body, &st); err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /v1/auth/state: status %d, body %q (%v)", resp.StatusCode, body, err)
+		t.Fatalf("GET /v1/auth/state returned status %d or invalid JSON", resp.StatusCode)
 	}
 	return st.SetupRequired, st.SignedIn
 }
@@ -296,7 +284,7 @@ func TestServeMakesSetupCode(t *testing.T) {
 	}
 	r = startServe(t, vars)
 	if strings.Contains(r.stderr.String(), "no admin yet") {
-		t.Errorf("serve hints at a setup with an admin:\n%s", r.stderr.String())
+		t.Error("serve hints at a setup with an admin")
 	}
 	if _, err := os.Stat(filepath.Join(state, "setup.code")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("setup.code after a restart with an admin: %v, want none", err)
@@ -318,10 +306,10 @@ func TestServeStartsAndStops(t *testing.T) {
 	}
 	token := string(tokenBytes)
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(token) {
-		t.Fatalf("the token file holds %q, want 64 hex digits", token)
+		t.Fatal("the token file should hold 64 hexadecimal digits")
 	}
 	if strings.Contains(r.stderr.String(), token) {
-		t.Errorf("stderr shows the token:\n%s", r.stderr.String())
+		t.Error("serve stderr showed the root token")
 	}
 	host, port, err := net.SplitHostPort(r.addr)
 	if err != nil || host != "127.0.0.1" || port == "0" || port == "" {
@@ -368,13 +356,13 @@ func TestServeStartsAndStops(t *testing.T) {
 	}
 
 	if code := r.stop(t); code != 0 {
-		t.Errorf("exit %d after the interrupt, want 0; stderr:\n%s", code, r.stderr.String())
+		t.Errorf("exit %d after the interrupt, want 0", code)
 	}
 	if err := cl.Healthz(context.Background()); !errors.Is(err, syscall.ECONNREFUSED) {
 		t.Errorf("healthz after the stop: %v, want connection refused", err)
 	}
 	if strings.Contains(r.stderr.String(), token) {
-		t.Errorf("stderr shows the token:\n%s", r.stderr.String())
+		t.Error("serve stderr showed the root token")
 	}
 }
 
@@ -449,9 +437,9 @@ func TestCLIFindsServeAtItsListenAddress(t *testing.T) {
 // look for.
 func ok2(t *testing.T, vars map[string]string, args ...string) string {
 	t.Helper()
-	code, stdout, stderr := runCLI(t, vars, args...)
+	code, stdout, _ := runCLI(t, vars, args...)
 	if code != 0 {
-		t.Fatalf("tikray %q: exit %d, stderr %q", args, code, stderr)
+		t.Fatalf("CLI command exited with %d", code)
 	}
 	return stdout
 }
@@ -731,7 +719,7 @@ func TestRunnerTokenGetWhileDropped(t *testing.T) {
 			for range 5000 {
 				s, err := tok.get(context.Background())
 				if err != nil || s != testToken {
-					t.Errorf("get = %q, %v; want the token", s, err)
+					t.Error("the token read failed or returned a different credential")
 					return
 				}
 				tok.drop(s) // the runner refused it
@@ -808,7 +796,7 @@ func TestServeUsesTheRunnersDefaultTimeouts(t *testing.T) {
 		t.Errorf("the runner client has an HTTP client of its own: %+v", w.runner.HTTP)
 	}
 	if w.runner.TokenFunc == nil || w.runner.Token != "" {
-		t.Errorf("the runner client has a fixed token (%q) or no way to wait for one", w.runner.Token)
+		t.Error("the runner client has a fixed token or no way to wait for one")
 	}
 }
 

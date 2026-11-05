@@ -25,7 +25,7 @@ func noSecrets(t *testing.T, what string, err error, secrets ...string) {
 	}
 	msg := err.Error()
 	if !strings.HasPrefix(msg, "auth:") {
-		t.Errorf("%s: the error %q does not start with %q", what, msg, "auth:")
+		t.Errorf("%s: the error lacks its package prefix", what)
 	}
 	for i, s := range secrets {
 		if s != "" && strings.Contains(msg, s) {
@@ -109,30 +109,34 @@ func TestCheckRefusesOtherParams(t *testing.T) {
 	raw := base64.RawStdEncoding
 
 	cases := map[string]string{
-		"argon2i":         with(1, "argon2i"),
-		"argon2d":         with(1, "argon2d"),
-		"old version":     with(2, "v=16"),
-		"new version":     with(2, "v=20"),
-		"more memory":     with(3, "m=65536,t=2,p=1"),
-		"less memory":     with(3, "m=4096,t=2,p=1"),
-		"more passes":     with(3, "m=19456,t=3,p=1"),
-		"more threads":    with(3, "m=19456,t=2,p=2"),
-		"reordered":       with(3, "t=2,m=19456,p=1"),
-		"padded numbers":  with(3, "m=019456,t=2,p=1"),
-		"no params":       with(3, ""),
-		"short salt":      with(4, raw.EncodeToString(make([]byte, 8))),
-		"long salt":       with(4, raw.EncodeToString(make([]byte, 32))),
-		"empty salt":      with(4, ""),
-		"short key":       with(5, raw.EncodeToString(make([]byte, 16))),
-		"long key":        with(5, raw.EncodeToString(make([]byte, 64))),
-		"salt not base64": with(4, "!!!!!!!!!!!!!!!!!!!!!!"),
-		"padded salt":     with(4, std.EncodeToString(make([]byte, 16))),
-		"missing hash":    strings.Join(base[:5], "$"),
-		"extra part":      phc + "$x",
-		"no leading $":    strings.TrimPrefix(phc, "$"),
-		"empty":           "",
-		"plain text":      "not a hash",
-		"bcrypt":          "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy",
+		"argon2i":        with(1, "argon2i"),
+		"argon2d":        with(1, "argon2d"),
+		"old version":    with(2, "v=16"),
+		"new version":    with(2, "v=20"),
+		"more memory":    with(3, "m=65536,t=2,p=1"),
+		"less memory":    with(3, "m=4096,t=2,p=1"),
+		"more passes":    with(3, "m=19456,t=3,p=1"),
+		"more threads":   with(3, "m=19456,t=2,p=2"),
+		"reordered":      with(3, "t=2,m=19456,p=1"),
+		"padded numbers": with(3, "m=019456,t=2,p=1"),
+		"no params":      with(3, ""),
+		"short salt":     with(4, raw.EncodeToString(make([]byte, 8))),
+		"long salt":      with(4, raw.EncodeToString(make([]byte, 32))),
+		"empty salt":     with(4, ""),
+		// Nonzero unused bits decode to the same bytes as the canonical
+		// encodings of these all-zero salts and keys.
+		"alternative salt encoding": with(4, strings.Repeat("A", 21)+"B"),
+		"alternative key encoding":  with(5, strings.Repeat("A", 42)+"B"),
+		"short key":                 with(5, raw.EncodeToString(make([]byte, 16))),
+		"long key":                  with(5, raw.EncodeToString(make([]byte, 64))),
+		"salt not base64":           with(4, "!!!!!!!!!!!!!!!!!!!!!!"),
+		"padded salt":               with(4, std.EncodeToString(make([]byte, 16))),
+		"missing hash":              strings.Join(base[:5], "$"),
+		"extra part":                phc + "$x",
+		"no leading $":              strings.TrimPrefix(phc, "$"),
+		"empty":                     "",
+		"plain text":                "not a hash",
+		"bcrypt":                    "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy",
 	}
 	var hashes atomic.Int32
 	argonHook = func() { hashes.Add(1) }
@@ -264,6 +268,7 @@ func TestValidPassword(t *testing.T) {
 	}{
 		{"nine bytes", "alice", strings.Repeat("a", 9), false},
 		{"ten bytes", "alice", strings.Repeat("a", 10), true},
+		{"password visible in username", "note-" + strings.Repeat("a", 12), strings.Repeat("a", 12), false},
 		{"256 bytes", "alice", strings.Repeat("a", 256), true},
 		{"257 bytes", "alice", strings.Repeat("a", 257), false},
 		{"empty", "alice", "", false},
@@ -277,7 +282,7 @@ func TestValidPassword(t *testing.T) {
 	for _, c := range cases {
 		err := ValidPassword(c.user, c.pass)
 		if (err == nil) != c.ok {
-			t.Errorf("%s: ValidPassword(%q, ...) = %v, ok want %v", c.name, c.user, err, c.ok)
+			t.Errorf("%s: ValidPassword success = %v, want %v", c.name, err == nil, c.ok)
 			continue
 		}
 		if err != nil {

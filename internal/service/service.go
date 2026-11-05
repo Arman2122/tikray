@@ -196,10 +196,13 @@ func New(c Config) (*Service, error) {
 	if s.fetcher == nil {
 		s.fetcher = defaultFetcher(c.Socks, c.Monitor)
 	}
-	if m := c.Monitor; m != nil && m.State == nil {
-		m.State = func() store.State {
-			st, _ := c.Store.State()
-			return st
+	if m := c.Monitor; m != nil {
+		m.Redactor = RedactorFor
+		if m.State == nil {
+			m.State = func() store.State {
+				st, _ := c.Store.State()
+				return st
+			}
 		}
 	}
 	st, _ := c.Store.State()
@@ -209,7 +212,7 @@ func New(c Config) (*Service, error) {
 			continue
 		}
 		srv := st.Servers[i]
-		s.record(KindDegraded, fmt.Sprintf("server %s (%s) disabled: %s", srv.ID, srv.Name, srv.Invalid))
+		s.record(KindDegraded, fmt.Sprintf("server %s disabled: %s", eventLabel(batchRedactor(st, nil), srv.ID, srv.Name), srv.Invalid))
 	}
 	return s, nil
 }
@@ -302,7 +305,7 @@ func (s *Service) Status(ctx context.Context) Status {
 	}
 	name, err := configName(s.updater(st, rev), rs.Active)
 	s.noteRender(rev, err, false)
-	out.Applied = err == nil && name == rs.Active.Config
+	out.Applied = err == nil && name == rs.Active.Config && !artifacts.HotPending(s.data)
 	return out
 }
 

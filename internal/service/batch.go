@@ -207,7 +207,7 @@ func isolateOutbound(group []testOutbound, results map[string]string, test func(
 }
 
 // batchRedactor includes unsaved outbounds in the runner's diagnostics. When
-// one contains a credential shorter than the state redactor's threshold,
+// one contains a short credential that could be repeated in runner output,
 // withhold the detail altogether: the reason may become persistent in Invalid.
 func batchRedactor(st store.State, documents []json.RawMessage) func(string) string {
 	short := false

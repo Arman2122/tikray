@@ -81,7 +81,7 @@ func newFakeRunner(t *testing.T, run string, active *runnerapi.Selection) *fakeR
 	f.st = runnerapi.Status{State: runnerapi.StateEmpty}
 	if active != nil {
 		a := *active
-		f.st = runnerapi.Status{State: runnerapi.StateRunning, Active: &a, XrayPID: 42, XrayVersion: fakeXrayVersion(a.Core), RoutesOK: true, GatewayUp: true}
+		f.st = runnerapi.Status{State: runnerapi.StateRunning, Active: &a, XrayPID: 42, XrayInstance: "initial", XrayVersion: fakeXrayVersion(a.Core), RoutesOK: true, GatewayUp: true}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", f.handleStatus)
@@ -170,6 +170,7 @@ func (f *fakeRunner) handleTrial(w http.ResponseWriter, r *http.Request) {
 func (f *fakeRunner) startTrial(c runnerapi.Candidate) {
 	f.st.State, f.st.Candidate = runnerapi.StateTrial, &c
 	f.st.XrayPID, f.st.XrayVersion = 43, fakeXrayVersion(c.Core)
+	f.st.XrayInstance = "trial-" + f.st.XrayInstance
 	f.st.RoutesOK, f.st.GatewayUp = true, true
 	f.restartLive(c.Config)
 }
@@ -387,6 +388,7 @@ func (f *fakeRunner) handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.st.State, f.st.XrayPID = runnerapi.StateRunning, f.st.XrayPID+1
+	f.st.XrayInstance = "restart-" + f.st.XrayInstance
 	f.restartLive(f.st.Active.Config)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -846,8 +848,8 @@ func TestUpdateRejected(t *testing.T) {
 
 	res, err := e.u.Update(bg, "26.10.21", UpdateOptions{})
 	wantOutcome(t, res, err, runnerapi.OutcomeRejected)
-	if res.Detail != "Failed to start: bad config" {
-		t.Errorf("Detail = %q, want xray's output", res.Detail)
+	if res.Detail != "xray failed to load config" {
+		t.Error("expected the config refusal category")
 	}
 	var tf *runnerapi.TestFailedError
 	if !errors.As(err, &tf) {
@@ -1650,7 +1652,7 @@ func TestUpdateTrialErrors(t *testing.T) {
 				fakeError(w, http.StatusInternalServerError, "internal", "disk on fire")
 			},
 			outcome: OutcomeRefused,
-			detail:  "disk on fire",
+			detail:  "HTTP 500",
 			actions: []string{"trial"},
 		},
 		{

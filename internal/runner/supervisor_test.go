@@ -211,6 +211,20 @@ func TestStageMissingCore(t *testing.T) {
 	}
 }
 
+func captureTestReport(t *testing.T) func() string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "report")
+	t.Setenv("TIKRAY_FAKE_TEST_REPORT", path)
+	return func() string {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal("fake xray did not record its invocation")
+		}
+		return string(b)
+	}
+}
+
 func TestTestReportsFailure(t *testing.T) {
 	f := newFixture(t, "badconfig", nil)
 	out, err := f.sup.Test(t.Context(), f.sel)
@@ -238,15 +252,17 @@ func TestTestAcceptsGoodConfig(t *testing.T) {
 }
 
 func TestTestRenamesTunDevice(t *testing.T) {
+	report := captureTestReport(t)
 	// xray before 26.10 opens the TUN device while it tests a config, and
 	// the running xray holds xray0 (M1 lab): -test must use another name.
 	f := newFixture(t, "ok", nil)
 	orig := f.d.ConfigPath(f.sel.Config)
 	writeFile(t, orig, `{"inbounds": [{"tag": "tun-in", "protocol": "tun", "settings": {"name": "xray0", "MTU": 1500}}]}`)
-	out, err := f.sup.Test(t.Context(), f.sel)
+	_, err := f.sup.Test(t.Context(), f.sel)
 	if err != nil {
-		t.Fatalf("Test: %v\n%s", err, out)
+		t.Fatalf("Test: %v", err)
 	}
+	out := report()
 	// The fake prints the path it tested and the config it read there.
 	path, _, _ := strings.Cut(strings.TrimPrefix(out, "config "), "\n")
 	if path == orig || !strings.Contains(out, `"name":"xray-test0"`) || strings.Contains(out, "xray0") {
@@ -261,11 +277,13 @@ func TestTestRenamesTunDevice(t *testing.T) {
 }
 
 func TestTestUsesConfigWithoutTunAsIs(t *testing.T) {
+	report := captureTestReport(t)
 	f := newFixture(t, "ok", nil)
-	out, err := f.sup.Test(t.Context(), f.sel)
+	_, err := f.sup.Test(t.Context(), f.sel)
 	if err != nil {
-		t.Fatalf("Test: %v\n%s", err, out)
+		t.Fatalf("Test: %v", err)
 	}
+	out := report()
 	if want := "config " + f.d.ConfigPath(f.sel.Config) + "\n"; !strings.HasPrefix(out, want) {
 		t.Errorf("Test output %q, want xray run -test on the selection's config (%q)", out, want)
 	}

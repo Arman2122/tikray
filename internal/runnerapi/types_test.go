@@ -74,6 +74,14 @@ func TestValidateConfig(t *testing.T) {
 	}
 }
 
+func TestInvalidConfigDoesNotEchoInput(t *testing.T) {
+	const value = "sensitive-input"
+	err := ValidateConfig(value)
+	if err == nil || strings.Contains(err.Error(), value) {
+		t.Error("a rejected config name was echoed or accepted")
+	}
+}
+
 func TestAdoptRequestWireName(t *testing.T) {
 	b, err := json.Marshal(AdoptRequest{Config: "config/x.json"})
 	if err != nil {

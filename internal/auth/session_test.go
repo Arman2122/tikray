@@ -100,7 +100,7 @@ func readView(t *testing.T, dir string) fileView {
 	return v
 }
 
-// sha256Hex is the hash of a session id or of the secret part of a token, as
+// sumHex is the hash of a session id or of the secret part of a token, as
 // auth.json holds it.
 func sumHex(s string) string {
 	sum := sha256.Sum256([]byte(s))

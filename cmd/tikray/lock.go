@@ -14,6 +14,10 @@ const serveLockName = "serve.lock"
 // errServeHeld means that another process holds serve.lock.
 var errServeHeld = errors.New("serve.lock is held")
 
+func serveHeld(data string) error {
+	return fmt.Errorf("tikray serve is running (it holds %s)", filepath.Join(stateDir(data), serveLockName))
+}
+
 // lockServe takes the lock of the state's owner, <data>/state/serve.lock,
 // without waiting, and makes the state directory (0700) if it is missing.
 // It gives errServeHeld when another process holds it.

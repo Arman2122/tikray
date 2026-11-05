@@ -77,11 +77,12 @@ func (s *Service) loop(ctx context.Context) {
 // have untested servers: the pass must check them before going idle.
 func (s *Service) catchUp(ctx context.Context) {
 	st, rev := s.store.State()
-	if rev == 0 {
+	pending := artifacts.HotPending(s.data)
+	if rev == 0 && !pending {
 		return
 	}
 	rs, err := s.runner.Status(ctx)
-	if err == nil && rs.Active != nil && !hasUntested(st) && !artifacts.HotPending(s.data) {
+	if err == nil && rs.Active != nil && !hasUntested(st) && !pending {
 		name, err := configName(s.updater(st, rev), rs.Active)
 		if err == nil && name == rs.Active.Config {
 			return
@@ -145,7 +146,9 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 		}
 	}
 	res, err := u.Apply(ctx)
-	again = s.retryable(ctx, res, err) && ctx.Err() == nil
+	// A failed recovery can leave xray partially changed, even if the
+	// fallback reports a normally terminal config rejection.
+	again = ctx.Err() == nil && (artifacts.HotPending(s.data) || s.retryable(ctx, res, err))
 	if !again {
 		retry = 0
 	}
@@ -190,6 +193,11 @@ func (s *Service) ApplyNow(ctx context.Context) (artifacts.Result, error) {
 	}
 	defer s.pokeMonitor()
 	defer s.release()
+	defer func() {
+		if artifacts.HotPending(s.data) {
+			s.Kick() // the loop owns retry/backoff once this caller returns
+		}
+	}()
 	st, rev := s.store.State()
 	if _, err := s.runner.Status(ctx); err != nil {
 		err = s.runnerError(ctx, err)

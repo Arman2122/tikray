@@ -66,8 +66,8 @@ type tokenRecord struct {
 	saved time.Time // the LastUsed that auth.json holds
 }
 
-func (r *tokenRecord) info() TokenInfo {
-	return TokenInfo{ID: r.ID, Name: r.Name, Created: r.Created, Expires: r.Expires, LastUsed: r.LastUsed}
+func (s *Store) tokenInfoLocked(r *tokenRecord) TokenInfo {
+	return TokenInfo{ID: r.ID, Name: s.publicNameLocked(r.Name), Created: r.Created, Expires: r.Expires, LastUsed: r.LastUsed}
 }
 
 // validTokenName checks the rules for the name of a token: 1 to 64 runes of
@@ -89,15 +89,7 @@ func validTokenName(name string) error {
 
 // validTokenID reports whether id is 8 lower-case hex digits.
 func validTokenID(id string) bool {
-	if len(id) != tokenIDLen {
-		return false
-	}
-	for i := 0; i < len(id); i++ {
-		if c := id[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
+	return lowerHex(id, tokenIDLen)
 }
 
 // validTokenRecords reports whether auth.json's tokens are usable.
@@ -133,6 +125,16 @@ func parseToken(tok string) (id, secret string, ok bool) {
 	return id, secret, true
 }
 
+// TokenID returns the public id of an id or a complete token. Only this
+// component belongs in a revocation URL or command output.
+func TokenID(value string) (string, bool) {
+	if validTokenID(value) {
+		return value, true
+	}
+	id, _, ok := parseToken(value)
+	return id, ok
+}
+
 // CreateToken makes an API token with the name name, which stops working at
 // expires (the zero time is never; a time that is not in the future is an
 // ErrInvalid). It returns what is known of the token and the token itself:
@@ -142,6 +144,9 @@ func parseToken(tok string) (id, secret string, ok bool) {
 func (s *Store) CreateToken(name string, expires time.Time) (TokenInfo, string, error) {
 	if err := validTokenName(name); err != nil {
 		return TokenInfo{}, "", err
+	}
+	if s.PublicName(name, Session{}) != name {
+		return TokenInfo{}, "", invalidError("the name of a token must not contain a credential")
 	}
 	now := s.clock()
 	if !expires.IsZero() {
@@ -178,7 +183,7 @@ func (s *Store) CreateToken(name string, expires time.Time) (TokenInfo, string, 
 	if err := s.commit(next); err != nil {
 		return TokenInfo{}, "", err
 	}
-	return rec.info(), tokenPrefix + id + "_" + secret, nil
+	return s.tokenInfoLocked(&rec), tokenPrefix + id + "_" + secret, nil
 }
 
 // Tokens lists the API tokens, the oldest first, with no secret: a token that
@@ -188,7 +193,7 @@ func (s *Store) Tokens() []TokenInfo {
 	defer s.mu.Unlock()
 	out := make([]TokenInfo, len(s.d.Tokens))
 	for i := range s.d.Tokens {
-		out[i] = s.d.Tokens[i].info()
+		out[i] = s.tokenInfoLocked(&s.d.Tokens[i])
 	}
 	return out
 }
@@ -241,5 +246,5 @@ func (s *Store) CheckToken(tok string) (TokenInfo, bool) {
 		// by the next write.
 		_ = s.commit(s.d)
 	}
-	return rec.info(), true
+	return s.tokenInfoLocked(rec), true
 }

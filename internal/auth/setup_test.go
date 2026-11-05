@@ -19,15 +19,15 @@ func TestSetupCodeFormatAndNormalize(t *testing.T) {
 			t.Fatalf("a code has the wrong shape: len %d", len(code))
 		}
 		if !codeForm.MatchString(code) {
-			t.Fatalf("a code has a symbol outside the alphabet: %q", code)
+			t.Fatal("a code has a symbol outside the alphabet")
 		}
 		if seen[code] {
-			t.Fatalf("the same code came twice in 50 draws: %q", code)
+			t.Fatal("the same code came twice in 50 draws")
 		}
 		seen[code] = true
 		// A code is its own canonical form once the dashes are gone.
 		if got := NormalizeSetupCode(code); got != strings.ReplaceAll(code, "-", "") {
-			t.Fatalf("a code does not normalise to itself without its dashes: %q", code)
+			t.Fatal("a code does not normalise to itself without its dashes")
 		}
 	}
 
@@ -60,7 +60,7 @@ func TestSetupCodeFormatAndNormalize(t *testing.T) {
 	}
 	typed := strings.NewReplacer("0", "o", "1", "l", "-", " ").Replace(strings.ToLower(code))
 	if NormalizeSetupCode(typed) != NormalizeSetupCode(code) {
-		t.Errorf("a sloppy copy of %q (%q) does not normalise to it", code, typed)
+		t.Error("a sloppy copy of the code did not normalize to the original")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/sharelink"
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -34,10 +35,11 @@ type source struct {
 
 // warningNotes are the warning events for srv, saved from a link whose parser
 // gave warnings: one each.
-func warningNotes(srv store.Server, warnings []string) []note {
+func warningNotes(srv store.Server, warnings []string, redact func(string) string) []note {
+	label := eventLabel(redact, srv.ID, srv.Name)
 	notes := make([]note, len(warnings))
 	for i, w := range warnings {
-		notes[i] = note{KindWarning, fmt.Sprintf("server %s (%s): %s", srv.ID, srv.Name, w)}
+		notes[i] = note{KindWarning, fmt.Sprintf("server %s: %s", label, w)}
 	}
 	return notes
 }
@@ -107,7 +109,7 @@ func (s *Service) testServer(ctx context.Context, rev uint64, id string, fn edit
 	}
 	var pending *note
 	if err != nil {
-		label := testLabel(next, id, srv.Name)
+		label := eventLabel(batchRedactor(next, nil), id, srv.Name)
 		why := RedactorFor(next)(s.runnerError(ctx, err).Error())
 		pending = &note{KindUntested, fmt.Sprintf("server %s saved without xray's test of it: %s", label, why)}
 	}
@@ -127,8 +129,8 @@ func (s *Service) testServer(ctx context.Context, rev uint64, id string, fn edit
 
 // A display name is user input and can itself contain an outbound credential.
 // Keep the public ID when it is unsafe to include the name in a test event.
-func testLabel(st store.State, id, name string) string {
-	if name = batchRedactor(st, nil)(name); name != "" {
+func eventLabel(redact func(string) string, id, name string) string {
+	if name = redact(auth.PublicName(name)); name != "" {
 		return id + " (" + name + ")"
 	}
 	return id
@@ -165,7 +167,10 @@ func (s *Service) AddServer(ctx context.Context, rev uint64, n NewServer) (store
 	srv := store.Server{ID: store.NewID(), Name: cmp.Or(n.Name, src.name), Link: src.link, Outbound: src.outbound}
 	add := func(st *store.State) ([]note, error) {
 		st.Servers = append(st.Servers, srv)
-		return warningNotes(srv, src.warnings), nil
+		if len(src.warnings) == 0 {
+			return nil, nil
+		}
+		return warningNotes(srv, src.warnings, batchRedactor(*st, nil)), nil
 	}
 	tested, err := s.testServer(ctx, rev, srv.ID, add)
 	if err != nil {
@@ -210,6 +215,7 @@ func (s *Service) UpdateServer(ctx context.Context, rev uint64, id string, p Ser
 			return nil, notFound(*st, "server", id)
 		}
 		srv := &st.Servers[i]
+		old := *srv
 		if p.Name != nil {
 			srv.Name = *p.Name
 		}
@@ -219,7 +225,13 @@ func (s *Service) UpdateServer(ctx context.Context, rev uint64, id string, p Ser
 		if replace {
 			srv.Link, srv.Outbound, srv.Invalid = src.link, src.outbound, ""
 		}
-		return warningNotes(*srv, src.warnings), nil
+		if len(src.warnings) == 0 {
+			return nil, nil
+		}
+		// A warning's display name can contain either outbound's credential.
+		both := *st
+		both.Servers = append(slices.Clone(st.Servers), old)
+		return warningNotes(*srv, src.warnings, batchRedactor(both, nil)), nil
 	}
 	if replace {
 		var err error
@@ -245,8 +257,9 @@ func (s *Service) RemoveServer(ctx context.Context, rev uint64, id string) (uint
 			return nil, notFound(*st, "server", id)
 		}
 		srv := st.Servers[i]
+		notes := forget(st, srv, batchRedactor(*st, nil))
 		st.Servers = slices.Delete(st.Servers, i, i+1)
-		return forget(st, srv), nil
+		return notes, nil
 	})
 	return next, err
 }
@@ -255,18 +268,18 @@ func (s *Service) RemoveServer(ctx context.Context, rev uint64, id string) (uint
 // the custom rules that send traffic through it, and returns a cleanup event
 // for the pin, if it cleared one, and one for the rules, if it dropped any.
 // The state would be invalid otherwise.
-func forget(st *store.State, srv store.Server) []note {
+func forget(st *store.State, srv store.Server, redact func(string) string) []note {
 	var notes []note
 	if st.Routing.Pinned == srv.ID {
 		st.Routing.Pinned = ""
-		notes = append(notes, note{KindCleanup, fmt.Sprintf("server %s (%s) removed: the pin on it is cleared", srv.ID, srv.Name)})
+		notes = append(notes, note{KindCleanup, fmt.Sprintf("server %s removed: the pin on it is cleared", eventLabel(redact, srv.ID, srv.Name))})
 	}
 	before := len(st.Routing.Rules)
 	st.Routing.Rules = slices.DeleteFunc(st.Routing.Rules, func(r store.Rule) bool {
 		return r.Action == store.ActionServer && r.Server == srv.ID
 	})
 	if n := before - len(st.Routing.Rules); n > 0 {
-		notes = append(notes, note{KindCleanup, fmt.Sprintf("server %s (%s) removed: %d custom routing rule(s) that sent traffic through it are dropped", srv.ID, srv.Name, n)})
+		notes = append(notes, note{KindCleanup, fmt.Sprintf("server %s removed: %d custom routing rule(s) that sent traffic through it are dropped", eventLabel(redact, srv.ID, srv.Name), n)})
 	}
 	return notes
 }

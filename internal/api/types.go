@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"net/url"
 	"strings"
 	"time"
 
@@ -153,52 +152,17 @@ func newRefreshResponse(r service.RefreshResult, redact func(string) string) ref
 	return out
 }
 
-// lineLabel says which line of a subscription was skipped without showing it.
-// A share link that did not parse holds a credential that is in no state, so
-// that no redactor knows it: the label is the link's scheme, "://…", and
-// "#<name>" when the link has a fragment, which is the name it shows (as the
-// parser reads it: unescaped, without the characters a name may not hold).
-// A line that is no URL is "…".
-//
-// The fragment starts at the first "#", as in any URL. A link that is broken
-// by a raw "#" in its credential shows what follows it; this is the one
-// place the label can show part of one.
+// A malformed link can contain a credential on either side of a '#'. Only
+// its recognized protocol is safe to identify in the refresh response.
 func lineLabel(line string) string {
-	const none = "…"
-	i := strings.Index(line, "://")
-	if i <= 0 || !isScheme(line[:i]) {
-		return none
-	}
-	label := line[:i] + "://…"
-	if _, frag, ok := strings.Cut(line[i:], "#"); ok {
-		if name, err := url.PathUnescape(frag); err == nil {
-			frag = name
-		}
-		frag = strings.Map(func(r rune) rune {
-			if store.ForbiddenInName(r) {
-				return -1
-			}
-			return r
-		}, frag)
-		if frag != "" {
-			label += "#" + frag
+	scheme, _, ok := strings.Cut(line, "://")
+	if ok {
+		switch strings.ToLower(scheme) {
+		case "vless", "vmess", "trojan", "ss":
+			return strings.ToLower(scheme) + "://…"
 		}
 	}
-	return label
-}
-
-// isScheme reports whether s is a URL scheme: a letter, then letters,
-// digits, "+", "-" or ".".
-func isScheme(s string) bool {
-	for i, c := range s {
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
-		case i > 0 && (c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.'):
-		default:
-			return false
-		}
-	}
-	return s != ""
+	return "…"
 }
 
 // coreResponse is service.CoreInfo on the wire.

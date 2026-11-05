@@ -210,6 +210,11 @@ func quoteName(s string) string {
 	return strconv.Quote(s)
 }
 
+// Auth labels can also repeat a credential from a configured server.
+func (h *handler) authLabel(name string, session auth.Session) string {
+	return h.redact(h.publicName(name, session))
+}
+
 // record keeps an event of the kind auth. It is told what happened, never
 // what was sent: no password, no code, no id, token or CSRF token is in any
 // of them.
@@ -250,6 +255,11 @@ func (h *handler) forbid(w http.ResponseWriter, detail string) {
 
 func (h *handler) authState(w http.ResponseWriter, r *http.Request) {
 	_, signedIn := h.authenticate(r)
+	if !signedIn {
+		if _, err := r.Cookie(sessionCookie); err == nil {
+			clearSessionCookie(w)
+		}
+	}
 	writeJSON(w, http.StatusOK, authStateResponse{SetupRequired: h.a.NeedsSetup(), SignedIn: signedIn})
 }
 
@@ -297,7 +307,7 @@ func (h *handler) setup(w http.ResponseWriter, r *http.Request) {
 		h.refuseErr(w, err)
 		return
 	}
-	h.record("setup completed: admin %s created from %s", quoteName(in.Username), ipText(ip))
+	h.record("setup completed: admin %s created from %s", quoteName(h.authLabel(in.Username, auth.Session{})), ipText(ip))
 	// The password was just checked and saved: this is the same one, and not
 	// a guess for the Limiter to count.
 	s, err := h.a.SignIn(r.Context(), in.Username, in.Password)
@@ -331,7 +341,7 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err == nil:
 		failed = false
-		h.record("signed in: %s from %s", quoteName(in.Username), ipText(ip))
+		h.record("signed in: %s from %s", quoteName(h.authLabel(in.Username, auth.Session{})), ipText(ip))
 	case errors.Is(err, auth.ErrBadCredentials):
 		h.record("sign-in failed for %s from %s", h.failedUser(in.Username), ipText(ip))
 	}
@@ -352,7 +362,7 @@ func (h *handler) failedUser(given string) string {
 	admin := h.a.Username()
 	x, y := sha256.Sum256([]byte(admin)), sha256.Sum256([]byte(given))
 	if admin != "" && subtle.ConstantTimeCompare(x[:], y[:]) == 1 {
-		return quoteName(admin)
+		return quoteName(h.authLabel(admin, auth.Session{}))
 	}
 	return "an unknown user"
 }
@@ -369,7 +379,7 @@ func (h *handler) session(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, rev := h.b.State()
-	h.reply(w, http.StatusOK, rev, whoamiResponse{Username: h.a.Username(), CSRFToken: c.session.CSRF, Expires: c.session.Expires})
+	h.reply(w, http.StatusOK, rev, whoamiResponse{Username: h.authLabel(h.a.Username(), c.session), CSRFToken: c.session.CSRF, Expires: c.session.Expires})
 }
 
 // logout ends the session of the request and drops its cookie.
@@ -379,9 +389,13 @@ func (h *handler) logout(w http.ResponseWriter, r *http.Request) {
 		h.forbid(w, "this needs a signed-in session, which a token is not")
 		return
 	}
-	h.a.SignOut(c.session.ID)
+	err := h.a.SignOut(c.session.ID)
 	clearSessionCookie(w)
-	h.record("signed out: %s from %s", quoteName(h.a.Username()), ipText(clientIP(r)))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.record("signed out: %s from %s", quoteName(h.authLabel(h.a.Username(), c.session)), ipText(clientIP(r)))
 	_, rev := h.b.State()
 	h.noContent(w, rev)
 }
@@ -451,10 +465,11 @@ func (h *handler) reset(w http.ResponseWriter, r *http.Request) {
 
 // --- the token routes
 
-func (h *handler) listTokens(w http.ResponseWriter, _ *http.Request) {
+func (h *handler) listTokens(w http.ResponseWriter, r *http.Request) {
 	list := h.a.Tokens()
 	out := make([]tokenInfo, 0, len(list))
 	for _, t := range list {
+		t.Name = h.authLabel(t.Name, callerOf(r).session)
 		out = append(out, newTokenInfo(t))
 	}
 	_, rev := h.b.State()
@@ -466,6 +481,10 @@ func (h *handler) listTokens(w http.ResponseWriter, _ *http.Request) {
 func (h *handler) createToken(w http.ResponseWriter, r *http.Request) {
 	var in newTokenRequest
 	if !h.decode(w, r, &in) {
+		return
+	}
+	if h.authLabel(in.Name, callerOf(r).session) != in.Name {
+		h.writeError(w, http.StatusBadRequest, codeBadRequest, "the name of a token must not contain a credential")
 		return
 	}
 	var expires time.Time
@@ -502,7 +521,7 @@ func (h *handler) revokeToken(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	h.record("API token %s (%s) revoked", quoteName(name), id)
+	h.record("API token %s (%s) revoked", quoteName(h.authLabel(name, callerOf(r).session)), id)
 	_, rev := h.b.State()
 	h.noContent(w, rev)
 }

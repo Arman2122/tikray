@@ -31,7 +31,7 @@ func TestClientMapsErrors(t *testing.T) {
 	defer srv.Close()
 	c := &Client{BaseURL: srv.URL, Token: "tok", HTTP: srv.Client()}
 	var tf *TestFailedError
-	if err := c.Trial(context.Background()); !errors.As(err, &tf) || tf.Output != "failed to load config" {
+	if err := c.Trial(context.Background()); !errors.As(err, &tf) || tf.Output != "xray failed to load config" {
 		t.Errorf("Trial: %v", err)
 	}
 	if err := c.Commit(context.Background()); !errors.Is(err, ErrNoTrial) {
@@ -40,6 +40,22 @@ func TestClientMapsErrors(t *testing.T) {
 	c.Token = "wrong"
 	if _, err := c.Status(context.Background()); err == nil {
 		t.Error("bad token accepted")
+	}
+}
+
+func TestLongRunnerErrorDoesNotQuoteAPartialCredential(t *testing.T) {
+	const prefix = "fixture-part"
+	for _, tc := range []struct{ status, limit int }{{500, maxErrText}, {422, maxBody}} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(tc.status)
+			_, _ = io.WriteString(w, strings.Repeat("x", tc.limit-len(prefix))+prefix+"-tail")
+		}))
+		c := &Client{BaseURL: server.URL, Token: "test", HTTP: server.Client()}
+		err := c.Trial(t.Context())
+		server.Close()
+		if err == nil || strings.Contains(err.Error(), prefix) {
+			t.Error("a truncated runner error body exposed part of a value")
+		}
 	}
 }
 
@@ -106,7 +122,7 @@ func TestClientStatus(t *testing.T) {
 		LastTrial: &TrialResult{
 			Candidate: Candidate{Selection: Selection{Core: "26.10.20", Config: "config/" + strings.Repeat("c", 64) + ".json"}, Deadline: time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)},
 			Outcome:   OutcomeRejected,
-			Detail:    "bad config",
+			Detail:    "xray failed to load config",
 			At:        time.Date(2026, 10, 24, 8, 59, 0, 0, time.UTC),
 		},
 	}
@@ -189,7 +205,7 @@ func TestClientAdopt(t *testing.T) {
 		t.Fatalf("Adopt: %v", err)
 	}
 	if gotMethod != http.MethodPost || gotPath != "/v1/adopt" || gotAuth != "Bearer tok" || gotType != "application/json" {
-		t.Errorf("request was %s %s with Authorization %q, Content-Type %q", gotMethod, gotPath, gotAuth, gotType)
+		t.Errorf("request was %s %s with expected bearer=%v, Content-Type %q", gotMethod, gotPath, gotAuth == "Bearer tok", gotType)
 	}
 	if want := `{"config":"` + config + `"}`; gotBody != want {
 		t.Errorf("body = %s, want %s", gotBody, want)
@@ -214,12 +230,14 @@ func TestClientAdopt(t *testing.T) {
 		{name: "a 409 with another code", status: 409, body: `{"error":"other"}`, inError: "409"},
 		{name: "a 409 that is not JSON", status: 409, body: `conflict`, inError: "conflict"},
 		{name: "bad_request", status: 400, body: `{"error":"bad_request","detail":"runner: invalid config: no such file"}`, inError: "400"},
-		{name: "bad_request detail", status: 400, body: `{"error":"bad_request","detail":"runner: invalid config: no such file"}`, inError: "no such file"},
 		{name: "unauthorized", status: 401, body: `{"error":"unauthorized"}`, inError: "401"},
 		{name: "internal", status: 500, body: `{"error":"internal","detail":"runner: adopt: disk full"}`, inError: "disk full"},
 	} {
 		status, answer = tc.status, tc.body
 		err := c.Adopt(context.Background(), config)
+		if tc.status == 400 && (err == nil || !strings.Contains(err.Error(), "no such file")) {
+			t.Error("missing safe config error detail")
+		}
 		switch {
 		case tc.wantNone:
 			if err != nil {
@@ -259,8 +277,23 @@ func TestClientXrayAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (XrayAPIResponse{ExitCode: 3, Stdout: "statsquery -s 127.0.0.1:10085", Stderr: "warn"}); got != want {
-		t.Errorf("XrayAPI = %+v, want %+v", got, want)
+	if got != (XrayAPIResponse{ExitCode: 3}) {
+		t.Error("a failed command should expose its exit code only")
+	}
+}
+
+func TestOldRunnerCommandOutputRemainsPrivate(t *testing.T) {
+	const marker = "fixture-private-fragment"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(XrayAPIResponse{Stdout: `{"outbounds":[{"tag":"srv-bbbbbbbb","opaque":"` + marker + `"}]}`, Stderr: marker})
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "test", HTTP: srv.Client()}
+	for _, cmd := range []string{"lso", "ado", "lsi"} {
+		got, err := c.XrayAPI(t.Context(), cmd)
+		if err != nil || strings.Contains(got.Stdout+got.Stderr, marker) || (cmd == "lso" && !strings.Contains(got.Stdout, "srv-bbbbbbbb")) {
+			t.Errorf("%s exposed an old runner's command output or lost the public tag", cmd)
+		}
 	}
 }
 
@@ -330,11 +363,11 @@ func TestClientTest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (TestResult{OK: true, Output: "Configuration OK.\n"}); got != want {
+	if want := (TestResult{OK: true, Output: "Configuration OK."}); got != want {
 		t.Errorf("Test = %+v, want %+v", got, want)
 	}
 	if gotMethod != http.MethodPost || gotPath != "/v1/test" || gotAuth != "Bearer tok" || gotType != "application/json" {
-		t.Errorf("request was %s %s with Authorization %q, Content-Type %q", gotMethod, gotPath, gotAuth, gotType)
+		t.Errorf("request was %s %s with expected bearer=%v, Content-Type %q", gotMethod, gotPath, gotAuth == "Bearer tok", gotType)
 	}
 	if gotBody != config {
 		t.Errorf("body = %q, want the config %q as it is", gotBody, config)
@@ -346,8 +379,57 @@ func TestClientTest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Test of a rejected config: %v", err)
 	}
-	if want := (TestResult{OK: false, Output: "Failed to start: failed to load config"}); got != want {
+	if want := (TestResult{OK: false, Output: "xray failed to load config"}); got != want {
 		t.Errorf("Test = %+v, want %+v", got, want)
+	}
+}
+
+func TestOldRunnerFailedCommandDoesNotEchoResponse(t *testing.T) {
+	const marker = "fixture-private-fragment"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errBody{Error: "internal", Detail: "config contains " + marker})
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "test", HTTP: srv.Client()}
+	_, testErr := c.Test(t.Context(), []byte("{}"))
+	_, apiErr := c.XrayAPI(t.Context(), "ado")
+	for _, err := range []error{testErr, apiErr, c.Trial(t.Context())} {
+		if err == nil || strings.Contains(err.Error(), marker) || !strings.Contains(err.Error(), "500") {
+			t.Error("an unsuccessful runner operation should expose its status without its body")
+		}
+	}
+}
+
+func TestOldRunnerRejectionsCannotEchoOpaqueConfig(t *testing.T) {
+	const marker = "fixture-private-fragment"
+	for _, ok := range []bool{false, true} {
+		res := TestResult{OK: ok, Output: "worker echoed " + marker}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/test":
+				json.NewEncoder(w).Encode(res)
+			case "/v1/trial":
+				w.WriteHeader(422)
+				json.NewEncoder(w).Encode(errBody{Error: "test_failed", Detail: res.Output})
+			case "/v1/status":
+				json.NewEncoder(w).Encode(Status{LastTrial: &TrialResult{Outcome: OutcomeRejected, Detail: res.Output}})
+			}
+		}))
+		c := &Client{BaseURL: srv.URL, Token: "test", HTTP: srv.Client()}
+		got, err := c.Test(t.Context(), []byte(`{"outbounds":[{"protocol":"future"}]}`))
+		if err != nil || got.OK != ok || strings.Contains(got.Output, marker) {
+			t.Error("old runner test answer exposed a private fragment or lost its verdict")
+		}
+		var tf *TestFailedError
+		if err := c.Trial(t.Context()); !errors.As(err, &tf) || strings.Contains(err.Error(), marker) {
+			t.Error("old runner trial rejection exposed a private fragment or lost its type")
+		}
+		st, err := c.Status(t.Context())
+		if err != nil || st.LastTrial == nil || strings.Contains(st.LastTrial.Detail, marker) {
+			t.Error("old runner last trial exposed a private fragment")
+		}
+		srv.Close()
 	}
 }
 
@@ -375,8 +457,8 @@ func TestClientTestOlderRunnerTimeout(t *testing.T) {
 				if !errors.Is(err, context.DeadlineExceeded) || res != (TestResult{}) || strings.Contains(err.Error(), partial) {
 					t.Error("a legacy timeout should give a deadline error without the incomplete output")
 				}
-			} else if err != nil || res != tc.result {
-				t.Error("the completed verdict should be preserved")
+			} else if err != nil || res.OK != tc.result.OK || strings.Contains(res.Output, partial) {
+				t.Error("the completed verdict should be preserved without carrying child output")
 			}
 		})
 	}

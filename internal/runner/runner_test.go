@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -274,6 +275,27 @@ func TestTrialRejected(t *testing.T) {
 	}
 	g.wantLastTrial(t, runnerapi.OutcomeRejected, cand)
 	g.wantNoCandidate(t)
+}
+
+func TestTrialDoesNotPublishXrayCredentials(t *testing.T) {
+	const credential = "private-fixture-value"
+	g := newRig(t, nil)
+	g.active(t, "ok")
+	g.boot(t)
+	cand := g.candidate(t, "badconfig", 5*time.Second)
+	writeFile(t, g.d.ConfigPath(cand.Config), `{"outbounds":[{"settings":{"password":"`+credential+`"}}]}`)
+	var logs syncBuffer
+	old := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(old)
+	err := g.r.Trial(t.Context())
+	last, readErr := ReadLastTrial(g.d)
+	if err == nil || readErr != nil || last == nil || last.Outcome != runnerapi.OutcomeRejected {
+		t.Fatal("expected a recorded config rejection")
+	}
+	if strings.Contains(err.Error(), credential) || strings.Contains(last.Detail, credential) || strings.Contains(logs.String(), credential) {
+		t.Fatal("the runner published the rejected config's credential")
+	}
 }
 
 func TestTrialExitReverts(t *testing.T) {
@@ -863,6 +885,28 @@ func TestTrialTestTimeout(t *testing.T) {
 	g.wantNoCandidate(t)
 }
 
+func TestFailedReloadCannotQualifyAHotChange(t *testing.T) {
+	g := runningRig(t)
+	before := g.r.Status()
+	next := *before.Active
+	next.Config = g.config(t, "other")
+	if err := WriteActive(g.d, next); err != nil {
+		t.Fatal(err)
+	}
+	// Stage fails before stopping the old process, which still runs the
+	// previous config even though Status now reports the new active.json.
+	if err := os.Remove(g.d.CoreBinary(next.Core)); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.r.Reload(t.Context()); err == nil {
+		t.Fatal("reload should fail")
+	}
+	after := g.r.Status()
+	if after.XrayPID != before.XrayPID || after.Active == nil || *after.Active != next || after.XrayInstance != "" {
+		t.Error("a live process running a different config must not qualify a hot change")
+	}
+}
+
 func TestRestartAndReload(t *testing.T) {
 	g := newRig(t, nil)
 	if err := g.r.Restart(t.Context()); err == nil {
@@ -991,20 +1035,21 @@ func TestTestConfigNoCore(t *testing.T) {
 // TestTestConfigFile checks where the config is tested: a file of its own,
 // 0600 in a fresh 0700 directory under the run directory, gone afterwards.
 func TestTestConfigFile(t *testing.T) {
+	report := captureTestReport(t)
 	g := runningRig(t)
 	config := `{"outbounds":[{"protocol":"freedom","tag":"direct"}]}`
 	res, err := g.r.TestConfig(t.Context(), []byte(config))
 	if err != nil || !res.OK {
 		t.Fatalf("TestConfig = %+v, %v; want OK", res, err)
 	}
-	path := testedPath(res.Output)
+	path := testedPath(report())
 	if dir := filepath.Dir(path); filepath.Dir(dir) != g.d.Run() || !strings.HasPrefix(filepath.Base(dir), ".test-") {
 		t.Errorf("xray tested %s, want a file in a .test-* directory of %s", path, g.d.Run())
 	}
-	if !strings.Contains(res.Output, "\n"+config+"\n") {
+	if !strings.Contains(report(), "\n"+config+"\n") {
 		t.Errorf("xray tested\n%s\nwant the config as it was sent", res.Output)
 	}
-	if !strings.Contains(res.Output, "perm file=600 dir=700\n") {
+	if !strings.Contains(report(), "perm file=600 dir=700\n") {
 		t.Errorf("xray tested\n%s\nwant a file with mode 0600 in a directory with mode 0700", res.Output)
 	}
 	if left := testLeftovers(t, g.d); len(left) != 0 {
@@ -1013,17 +1058,19 @@ func TestTestConfigFile(t *testing.T) {
 }
 
 func TestTestConfigRenamesTunDevice(t *testing.T) {
+	report := captureTestReport(t)
 	g := runningRig(t)
 	res, err := g.r.TestConfig(t.Context(), []byte(`{"inbounds":[{"tag":"tun-in","protocol":"tun","settings":{"name":"xray0","MTU":1500}}]}`))
 	if err != nil || !res.OK {
 		t.Fatalf("TestConfig = %+v, %v; want OK", res, err)
 	}
-	if !strings.Contains(res.Output, `"name":"xray-test0"`) || strings.Contains(res.Output, "xray0") {
+	if !strings.Contains(report(), `"name":"xray-test0"`) || strings.Contains(report(), "xray0") {
 		t.Errorf("xray tested\n%s\nwant the TUN device named xray-test0", res.Output)
 	}
 }
 
 func TestTestConfigAssetEnv(t *testing.T) {
+	report := captureTestReport(t)
 	t.Setenv("XRAY_LOCATION_ASSET", "/elsewhere") // the runner's own never reaches xray
 	t.Run("geo", func(t *testing.T) {
 		g := newRig(t, nil)
@@ -1034,17 +1081,27 @@ func TestTestConfigAssetEnv(t *testing.T) {
 		}
 		g.boot(t)
 		res, err := g.r.TestConfig(t.Context(), []byte(`{}`))
-		if want := "env XRAY_LOCATION_ASSET=" + g.d.GeoDir("g1") + "\n"; err != nil || !strings.Contains(res.Output, want) {
+		if want := "env XRAY_LOCATION_ASSET=" + g.d.GeoDir("g1") + "\n"; err != nil || !strings.Contains(report(), want) {
 			t.Errorf("TestConfig = %+v, %v; want xray run with %q", res, err, want)
 		}
 	})
 	t.Run("no geo", func(t *testing.T) {
 		g := runningRig(t)
 		res, err := g.r.TestConfig(t.Context(), []byte(`{}`))
-		if want := "env XRAY_LOCATION_ASSET=\n"; err != nil || !strings.Contains(res.Output, want) {
+		if want := "env XRAY_LOCATION_ASSET=\n"; err != nil || !strings.Contains(report(), want) {
 			t.Errorf("TestConfig = %+v, %v; want xray run with %q", res, err, want)
 		}
 	})
+}
+
+func TestTestConfigHidesCredentials(t *testing.T) {
+	g := runningRig(t)
+	const credential = "private-fixture-value"
+	config := []byte(`{"outbounds":[{"settings":{"password":"` + credential + `"}}]}`)
+	res, err := g.r.TestConfig(t.Context(), config)
+	if err != nil || !res.OK || strings.Contains(res.Output, credential) {
+		t.Error("the passing test should preserve its verdict without repeating a credential")
+	}
 }
 
 func TestTestConfigCapsOutput(t *testing.T) {
@@ -1055,13 +1112,8 @@ func TestTestConfigCapsOutput(t *testing.T) {
 	if err != nil || res.OK {
 		t.Fatalf("TestConfig = %+v, %v; want a rejection", res, err)
 	}
-	if len(res.Output) > 8<<10 {
-		t.Errorf("output is %d bytes, want at most 8 KiB", len(res.Output))
-	}
-	// xray says why first: the start is kept.
-	if !strings.HasPrefix(res.Output, "Failed to start: failed to load config\n") || !strings.HasSuffix(res.Output, truncatedMark) {
-		t.Errorf("output starts %.60q and ends %q; want xray's first line kept and %q at the end",
-			res.Output, res.Output[max(0, len(res.Output)-40):], truncatedMark)
+	if res.Output != runnerapi.ConfigVerdict(23).Output {
+		t.Error("the runner should return only xray's exit status")
 	}
 }
 
@@ -1146,6 +1198,33 @@ func (g *rig) wantActive(t *testing.T, want runnerapi.Selection) {
 // running xray, and Adopt makes it the active one without touching the
 // process. It does so only while an xray runs from the active selection, and
 // not while a trial or a restart is under way.
+// active.json must keep pointing to a real config inside the shared run
+// directory even after a reboot. A link into another mount is not one.
+func TestAdoptRefusesLinkedConfig(t *testing.T) {
+	for _, directory := range []bool{false, true} {
+		g := newRig(t, nil)
+		current := g.active(t, "ok")
+		g.boot(t)
+		name := g.config(t, "linked")
+		path := g.d.ConfigPath(name)
+		if directory {
+			path = filepath.Dir(path)
+		}
+		outside := filepath.Join(t.TempDir(), "elsewhere")
+		if err := os.Rename(path, outside); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, path); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.r.Adopt(t.Context(), name); !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("linked directory=%v: want invalid config", directory)
+		} else {
+			g.wantActive(t, current)
+		}
+	}
+}
+
 func TestAdoptOnlyWhileRunning(t *testing.T) {
 	t.Run("running", func(t *testing.T) {
 		t.Parallel()
@@ -1178,7 +1257,7 @@ func TestAdoptOnlyWhileRunning(t *testing.T) {
 		want := runnerapi.Selection{Core: oldCore, Geo: "g1", Config: next}
 		g.wantActive(t, want)
 		after := g.r.Status()
-		if after.State != runnerapi.StateRunning || after.XrayPID != before.XrayPID || after.XrayVersion != before.XrayVersion {
+		if before.XrayInstance == "" || after.XrayInstance != before.XrayInstance || after.State != runnerapi.StateRunning || after.XrayPID != before.XrayPID || after.XrayVersion != before.XrayVersion {
 			t.Errorf("status after Adopt = %+v; want the same running xray as before, %+v", after, before)
 		}
 		if !reflect.DeepEqual(after.LastTrial, before.LastTrial) {
@@ -1200,7 +1279,7 @@ func TestAdoptOnlyWhileRunning(t *testing.T) {
 		waitLog(t, log, "config "+g.d.ConfigPath(next))
 		waitFor(t, 5*time.Second, "xray running again", func() bool {
 			st := g.r.Status()
-			return st.State == runnerapi.StateRunning && st.XrayPID > 0 && st.XrayPID != before.XrayPID
+			return st.State == runnerapi.StateRunning && st.XrayPID > 0 && st.XrayPID != before.XrayPID && st.XrayInstance != "" && st.XrayInstance != before.XrayInstance
 		})
 		g.wantActive(t, want)
 

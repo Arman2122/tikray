@@ -40,6 +40,30 @@ func server(id, outbound string) store.Server {
 	return store.Server{ID: id, Name: "s-" + id, Outbound: json.RawMessage(outbound)}
 }
 
+func TestRedactorProtectsOpaqueHeaders(t *testing.T) {
+	const marker = "fixture-private-part"
+	raw := json.RawMessage(`{"streamSettings":{"headers":{"X-New-Header":"` + marker + `","Cookie":"first=public; session=` + marker + `"}}}`)
+	for _, config := range []json.RawMessage{raw, json.RawMessage(`{"headers":{"cookie":["id=` + marker + `; flag=yes"]}}`)} {
+		if text := RedactorWith(store.Default(), config)("legacy runner repeated " + marker); strings.Contains(text, marker) {
+			t.Fatal("a header or cookie value escaped redaction")
+		}
+	}
+}
+
+func TestRedactorProtectsURLAndHeaderFragments(t *testing.T) {
+	const value = "private-fixture-value"
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"address":"https://name:` + value + `@example.test/"}`),
+		json.RawMessage(`{"headers":{"Authorization":"Bearer ` + value + `"}}`),
+		json.RawMessage(`{"headers":{"proxy-authorization":["Basic ` + value + `"]}}`),
+	} {
+		redact := RedactorWith(store.Default(), raw)
+		if strings.Contains(redact("rejected "+value), value) {
+			t.Error("diagnostic exposed a credential outside the original URL or header")
+		}
+	}
+}
+
 func TestRedactorCoversSecrets(t *testing.T) {
 	const (
 		trojanPW = "trojan-pass-1234"
@@ -65,9 +89,10 @@ func TestRedactorCoversSecrets(t *testing.T) {
 		{"the VLESS id", vlessID},
 		{"the Trojan password", trojanPW},
 		{"the SS password", ssPW},
+		{"the short password", short},
 	}
 	wantRedacted(t, got, secrets...)
-	want := "user " + redacted + " rejected; trojan " + redacted + "; ss=" + redacted + `; fetching "` + redacted + `" failed; pw abc`
+	want := redacted
 	wantText(t, got, want, secrets...)
 	if got := red("nothing secret here"); got != "nothing secret here" {
 		t.Errorf("text with no secret became %q", got)
@@ -203,6 +228,20 @@ func TestRedactorCoversURLForms(t *testing.T) {
 	probe := []secret{{"the probe's user", "probeuser"}, {"its password", "probepass"}}
 	wantRedacted(t, got, probe...)
 	wantText(t, got, `Get "https://`+redacted+`:***@probe.example.com/generate_204": `+redacted, probe...)
+}
+
+// Earlier diagnostics and peer errors can repeat a probe or DoH API key
+// outside the URL that carried it, in encoded or decoded form.
+func TestRedactorProtectsProbeAndDNSQueryValues(t *testing.T) {
+	st := store.Default()
+	st.Health.ProbeURL = "https://probe.example/ping?token=probe%2Ffixture"
+	st.DNS.Remote = "https://dns.example/dns-query?key=dns%3Dfixture"
+	redact := RedactorFor(st)
+	for _, value := range []string{"probe%2Ffixture", "probe/fixture", "dns%3Dfixture", "dns=fixture"} {
+		if strings.Contains(redact("peer rejected "+value), value) {
+			t.Error("a query credential escaped the redactor")
+		}
+	}
 }
 
 // A server's share link encodes its credentials, an SS password in base64.

@@ -30,7 +30,7 @@ func TestParseToken(t *testing.T) {
 	}
 	const id = "0a1b2c3d"
 	if gotID, gotSecret, ok := parseToken("tkr_" + id + "_" + secret); !ok || gotID != id || gotSecret != secret {
-		t.Errorf("parseToken of a well-formed token = (%q, %q, %v)", gotID, gotSecret, ok)
+		t.Error("parseToken did not split a well-formed token into its ID and secret")
 	}
 	// The whole base64url alphabet is allowed in the secret.
 	if _, _, ok := parseToken("tkr_" + id + "_" + "-_" + secret[2:]); !ok {
@@ -226,7 +226,7 @@ func testTokenExpiry(t *testing.T) {
 	for name, at := range map[string]time.Time{"now": clk.Now(), "the past": clk.Now().Add(-time.Hour)} {
 		_, tok, err := s.CreateToken("late", at)
 		if !errors.Is(err, ErrInvalid) || tok != "" {
-			t.Errorf("an expiry of %s: (%q, %v), want ErrInvalid and no token", name, tok, err)
+			t.Errorf("an expiry of %s: (token present=%t, err=%v), want ErrInvalid and no token", name, tok != "", err)
 		}
 	}
 	if n := len(s.Tokens()); n != 0 {
@@ -266,7 +266,7 @@ func testTokenCap(t *testing.T) {
 	}
 	_, tok, err := s.CreateToken("one too many", time.Time{})
 	if !errors.Is(err, ErrTokenLimit) || tok != "" {
-		t.Errorf("the 51st token: (%q, %v), want ErrTokenLimit and no token", tok, err)
+		t.Errorf("the 51st token: (token present=%t, err=%v), want ErrTokenLimit and no token", tok != "", err)
 	}
 	noSecrets(t, "limit", err)
 	if n := len(s.Tokens()); n != 50 {
@@ -281,7 +281,7 @@ func testTokenCap(t *testing.T) {
 	}
 	_, tok, err = s.CreateToken("one more", time.Time{})
 	if !errors.Is(err, ErrTokenLimit) || tok != "" {
-		t.Errorf("a token with one of the 50 expired: (%q, %v), want ErrTokenLimit and no token", tok, err)
+		t.Errorf("a token with one of the 50 expired: (token present=%t, err=%v), want ErrTokenLimit and no token", tok != "", err)
 	}
 	if list := s.Tokens(); len(list) != 50 || list[0].ID != first.ID {
 		t.Errorf("Tokens() lists %d tokens with an expired one, want 50 with it first", len(list))
@@ -307,7 +307,8 @@ func testTokenNames(t *testing.T) {
 	}{
 		{"empty", "", false},
 		{"one rune", "a", true},
-		{"64 ASCII", strings.Repeat("a", 64), true},
+		{"64 ASCII", strings.Repeat("z", 64), true},
+		{"64 hex digits are a bearer or hash", strings.Repeat("a", 64), false},
 		{"65 ASCII", strings.Repeat("a", 65), false},
 		{"64 runes of 2 bytes", strings.Repeat("é", 64), true},
 		{"65 runes of 2 bytes", strings.Repeat("é", 65), false},
@@ -331,7 +332,7 @@ func testTokenNames(t *testing.T) {
 		}
 		if err != nil {
 			if !errors.Is(err, ErrInvalid) || tok != "" {
-				t.Errorf("%s: (%q, %v), want ErrInvalid and no token", c.name, tok, err)
+				t.Errorf("%s: (token present=%t, err=%v), want ErrInvalid and no token", c.name, tok != "", err)
 			}
 			noSecrets(t, c.name, err)
 			continue
@@ -465,7 +466,7 @@ func TestTokenWritesThatFailChangeNothing(t *testing.T) {
 
 	_, tok2, err := s.CreateToken("new", time.Time{})
 	if err == nil || tok2 != "" {
-		t.Errorf("CreateToken with no way to save: (%q, %v), want an error and no token", tok2, err)
+		t.Errorf("CreateToken with no way to save: (token present=%t, err=%v), want an error and no token", tok2 != "", err)
 	} else {
 		noSecrets(t, "create", err, tok)
 	}

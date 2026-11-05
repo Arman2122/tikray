@@ -175,7 +175,7 @@ type hotOutbound struct {
 // an object with a tag of its own.
 func parseHot(data []byte) (hotConfig, bool) {
 	var top map[string]json.RawMessage
-	if err := json.Unmarshal(data, &top); err != nil || top == nil {
+	if err := json.Unmarshal(data, &top); err != nil || top == nil || !uniqueFields(json.NewDecoder(bytes.NewReader(data))) {
 		return hotConfig{}, false
 	}
 	var list []json.RawMessage
@@ -205,6 +205,42 @@ func parseHot(data []byte) (hotConfig, bool) {
 		c.outbounds = append(c.outbounds, hotOutbound{tag: tag, canonical: s, raw: raw})
 	}
 	return c, true
+}
+
+// xray decodes objects into structs, case-insensitively, and merges repeated
+// object fields. A map comparison could lose a rule or target the wrong
+// outbound in a config imported before tikray rendered it. Use a trial whenever
+// the input admits both readings. parseHot has already validated the JSON.
+func uniqueFields(d *json.Decoder) bool {
+	d.UseNumber()
+	tok, err := d.Token()
+	if err != nil {
+		return false
+	}
+	delim, container := tok.(json.Delim)
+	if !container {
+		return true
+	}
+	var seen map[string]bool
+	if delim == '{' {
+		seen = make(map[string]bool)
+	}
+	for d.More() {
+		if seen != nil {
+			key, err := d.Token()
+			name, ok := key.(string)
+			name = strings.ToLower(name)
+			if err != nil || !ok || seen[name] {
+				return false
+			}
+			seen[name] = true
+		}
+		if !uniqueFields(d) {
+			return false
+		}
+	}
+	_, err = d.Token()
+	return err == nil
 }
 
 // servers are c's outbounds of servers, others the rest, each in order.
@@ -249,6 +285,17 @@ func canonical(raw []byte) (string, any, bool) {
 	return string(b), v, true
 }
 
+// A runner container gets a new PID namespace each time it starts. The public
+// per-process ID from the supervisor also distinguishes xray starts in it.
+type xrayProcess struct {
+	pid      int
+	instance string
+}
+
+func processOf(st runnerapi.Status) xrayProcess {
+	return xrayProcess{pid: st.XrayPID, instance: st.XrayInstance}
+}
+
 // hotAttempt is how a try at a hot change ended.
 type hotAttempt struct {
 	// done says that res holds the outcome, and err is its error.
@@ -261,13 +308,9 @@ type hotAttempt struct {
 	// touched says that the marker is there: a call may have changed the
 	// running xray.
 	touched bool
-	// pid is the PID of an xray seen after the change's last xray api call
-	// (and after the adopt, once there was one), -1 when none was: an xray
-	// with another PID was started after that call, from the active config or
-	// a trial's candidate, and so runs nothing of the change that the runner
-	// does not record. Until the change makes a call it is the PID at Apply's
-	// start.
-	pid int
+	// process is sampled after the last xray api call or adopt. A different
+	// identified process then started after the change, from a saved config.
+	process xrayProcess
 	// gate is the baseline's verdict once the hot path has taken it. The
 	// trial keeps it: by then xray may run a part of the change, which says
 	// nothing about the active config.
@@ -284,7 +327,7 @@ type hotAttempt struct {
 // records the commit as a committed trial would, pruning included.
 func (u *CoreUpdater) hot(ctx context.Context, st runnerapi.Status, cfg *config, res *Result) hotAttempt {
 	active := st.Active
-	if st.State != runnerapi.StateRunning || st.XrayPID == 0 || runsCore(st, active.Core) != nil {
+	if st.State != runnerapi.StateRunning || st.XrayPID == 0 || st.XrayInstance == "" || runsCore(st, active.Core) != nil {
 		return hotAttempt{}
 	}
 	// The name is the runner's: it must name a config under run/ and nothing
@@ -312,14 +355,15 @@ func (u *CoreUpdater) hot(ctx context.Context, st runnerapi.Status, cfg *config,
 	case err != nil:
 		return hotAttempt{failed: err}
 	case !tr.OK:
-		res.Outcome, res.Detail = runnerapi.OutcomeRejected, tr.Output
-		return hotAttempt{done: true, err: &runnerapi.TestFailedError{Output: tr.Output}}
+		detail := cmp.Or(tr.Output, "xray rejected the candidate config")
+		res.Outcome, res.Detail = runnerapi.OutcomeRejected, detail
+		return hotAttempt{done: true, err: &runnerapi.TestFailedError{Output: detail}}
 	}
 	g, err := u.baselineGate(ctx, active.Core)
 	if err != nil {
 		return hotAttempt{done: true, err: refuse(res, err)}
 	}
-	h := hotAttempt{gate: &g, pid: st.XrayPID}
+	h := hotAttempt{gate: &g, process: processOf(st)}
 	if h.failed = u.change(ctx, st, cfg, p, g, &h); h.failed != nil {
 		return h
 	}
@@ -341,7 +385,7 @@ func (u *CoreUpdater) hot(ctx context.Context, st runnerapi.Status, cfg *config,
 // and then the runner's adopt of cfg. The xray that took the change must
 // still run after the adopt: one the runner restarted meanwhile, from the
 // config that was active, lacks a part of it. h.touched is set once the
-// marker is written, before the first xray api call, and h.pid follows the
+// marker is written, before the first xray api call, and h.process follows the
 // xray that the change saw.
 func (u *CoreUpdater) change(ctx context.Context, st runnerapi.Status, cfg *config, p plan, g gate, h *hotAttempt) error {
 	if len(p.remove) > 0 || len(p.add) > 0 {
@@ -351,9 +395,9 @@ func (u *CoreUpdater) change(ctx context.Context, st runnerapi.Status, cfg *conf
 		h.touched = true
 	}
 	// The runner may have started xray again since st, so the calls may have
-	// reached another xray than st's: a failure takes the PID from after it.
+	// reached another xray than st's: a failure takes the process identity from after it.
 	failed := func(err error) error {
-		h.pid = u.pidNow(ctx)
+		h.process = u.processNow(ctx)
 		return err
 	}
 	u.logf("xray-core %s: changing xray's outbounds without a restart", st.Active.Core)
@@ -378,34 +422,33 @@ func (u *CoreUpdater) change(ctx context.Context, st runnerapi.Status, cfg *conf
 	// Taken or not (an answer can be lost), the adopt may have made cfg the
 	// active config: only an xray seen after it is known to run what the
 	// runner records.
-	h.pid = -1
+	h.process = xrayProcess{}
 	cctx, cancel := cleanupContext(ctx)
 	after, serr := u.Runner.Status(cctx)
 	cancel()
 	if serr == nil {
-		h.pid = after.XrayPID
+		h.process = processOf(after)
 	}
 	switch {
 	case aerr != nil:
 		return fmt.Errorf("adopting the config: %w", aerr)
 	case serr != nil:
 		return fmt.Errorf("checking on xray after the adopt: %w", serr)
-	case after.State != runnerapi.StateRunning || after.XrayPID != st.XrayPID:
+	case after.State != runnerapi.StateRunning || h.process != processOf(st):
 		return fmt.Errorf("xray restarted during the change (pid %d, then %d, %s), so it may lack a part of it", st.XrayPID, after.XrayPID, after.State)
 	}
 	return nil
 }
 
-// pidNow is the PID of the xray that the runner's status shows now, -1 when
-// the status can't be had. It runs even once ctx has ended.
-func (u *CoreUpdater) pidNow(ctx context.Context) int {
+// processNow samples xray even once the caller's context has ended.
+func (u *CoreUpdater) processNow(ctx context.Context) xrayProcess {
 	cctx, cancel := cleanupContext(ctx)
 	defer cancel()
 	st, err := u.Runner.Status(cctx)
 	if err != nil {
-		return -1
+		return xrayProcess{}
 	}
-	return st.XrayPID
+	return processOf(st)
 }
 
 // addOutbounds has xray api ado add the outbounds add, from a file in
@@ -437,16 +480,15 @@ func (u *CoreUpdater) addOutbounds(ctx context.Context, api *runnerapi.Client, s
 	return xrayAPI(ctx, api, "ado", server, path.Join(cmp.Or(u.RunnerRun, defaultRunnerRun), "hot", name))
 }
 
-// xrayAPI runs "xray api <args>" in the runner. Anything but exit 0 is an
-// error, with what xray printed.
+// Only the operation and exit status are public. An xray error can echo an
+// old server that the current state no longer has.
 func xrayAPI(ctx context.Context, c *runnerapi.Client, args ...string) error {
 	resp, err := c.XrayAPI(ctx, args...)
 	if err != nil {
-		return fmt.Errorf("xray api %s: %w", args[0], err)
+		return fmt.Errorf("xray api %s request failed", args[0])
 	}
 	if resp.ExitCode != 0 {
-		out := cmp.Or(strings.TrimSpace(resp.Stderr), strings.TrimSpace(resp.Stdout))
-		return fmt.Errorf("xray api %s: exit status %d: %s", strings.Join(args, " "), resp.ExitCode, out)
+		return fmt.Errorf("xray api %s: exit status %d", args[0], resp.ExitCode)
 	}
 	return nil
 }
@@ -458,7 +500,7 @@ func xrayAPI(ctx context.Context, c *runnerapi.Client, args ...string) error {
 func (u *CoreUpdater) fellBack(ctx context.Context, h hotAttempt, res *Result) {
 	lead(res, "the hot change failed ("+u.redact(h.failed.Error())+"), so a trial was tried")
 	if h.touched {
-		u.resync(ctx, h.pid, res)
+		u.resync(ctx, h.process, res)
 	}
 }
 
@@ -487,20 +529,20 @@ func (u *CoreUpdater) heal(ctx context.Context, st runnerapi.Status, cfg *config
 		err = u.applyTrial(ctx, *active, cfg, res, nil)
 		lead(res, hotUnfinished+", so a trial was tried")
 	}
-	u.resync(ctx, st.XrayPID, res)
+	u.resync(ctx, processOf(st), res)
 	return err
 }
 
 // resync makes sure that xray runs what the runner records as active, after a
-// hot change that may have reached it: unless an xray other than the one
-// with pid (-1: none) runs now, which was started since from the active
-// config, or from a trial's candidate, xray is restarted. The marker goes
-// once that is known; a restart that fails keeps it, for the next Apply.
-func (u *CoreUpdater) resync(ctx context.Context, pid int, res *Result) {
+// hot change that may have reached it. If another identified process is
+// already running, it started after the change. Otherwise restart explicitly;
+// a failed restart keeps the marker for the next Apply.
+func (u *CoreUpdater) resync(ctx context.Context, seen xrayProcess, res *Result) {
 	cctx, cancel := cleanupContext(ctx)
 	defer cancel()
-	if pid >= 0 {
-		if st, err := u.Runner.Status(cctx); err == nil && st.XrayPID != pid {
+	if seen.instance != "" {
+		st, err := u.Runner.Status(cctx)
+		if err == nil && st.XrayInstance != "" && st.XrayPID > 0 && processOf(st) != seen {
 			u.clearPending(res)
 			return
 		}

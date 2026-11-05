@@ -17,4 +17,3 @@
 - [ ] **Step 2: Commit**
 
   `git commit -m "Test hot outbound changes against every xray release tikray supports"`
-

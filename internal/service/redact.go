@@ -7,26 +7,17 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Arman2122/tikray/internal/runnerapi"
+	"github.com/Arman2122/tikray/internal/secrettext"
 	"github.com/Arman2122/tikray/internal/store"
 )
 
 // redacted is what a secret is replaced with.
 const redacted = "‹redacted›"
 
-// minSecret is the length, in bytes, below which a string is not taken for a
-// secret: replacing every "abc" would make a text unreadable without
-// protecting anything.
+// Credentials shorter than minSecret occur in ordinary words too. Withhold
+// an affected diagnostic rather than repeatedly replacing individual letters.
 const minSecret = 4
-
-// secretKeys are the keys of an outbound whose string values are
-// credentials, in lower case: xray matches its keys without regard to case.
-// secretKey is WireGuard's private key, as xray names it; user and pass are
-// SOCKS's and HTTP's (pass MASQUE's too), auth is Hysteria 2's, key a TLS
-// client certificate's, and secrets XDrive's.
-var secretKeys = map[string]bool{
-	"id": true, "password": true, "privatekey": true, "presharedkey": true, "seed": true, "secretkey": true,
-	"user": true, "pass": true, "auth": true, "key": true, "secrets": true,
-}
 
 // RedactorFor returns a function that replaces every secret of st in a text
 // with ‹redacted›. The secrets are:
@@ -40,10 +31,10 @@ var secretKeys = map[string]bool{
 //   - each subscription URL, as it is, as its parsed form, with its password
 //     masked the way net/http and url.URL.Redacted show it, and without its
 //     userinfo, and that userinfo's user name and password;
-//   - the user name and password in the probe URL's userinfo, which xray's
-//     observatory may repeat; the rest of that URL is no secret.
+//   - the userinfo and query values of probe and resolver URLs. Earlier
+//     diagnostics can contain these values even after their URL is shortened.
 //
-// A string shorter than 4 bytes is left alone. Where secrets overlap in the
+// A message that can expose a short credential is withheld. Where secrets overlap in the
 // text, as when one holds another, the whole stretch they cover is replaced
 // once, so that no part of either is left.
 func RedactorFor(st store.State) func(string) string { return RedactorWith(st) }
@@ -56,9 +47,13 @@ func RedactorFor(st store.State) func(string) string { return RedactorWith(st) }
 // not JSON has none to find.
 func RedactorWith(st store.State, documents ...json.RawMessage) func(string) string {
 	set := map[string]bool{}
+	short := map[string]bool{}
 	add := func(s string) {
-		if len(s) >= minSecret {
+		switch {
+		case len(s) >= minSecret:
 			set[s] = true
+		case s != "":
+			short[s] = true
 		}
 	}
 	for _, doc := range documents {
@@ -73,16 +68,25 @@ func RedactorWith(st store.State, documents ...json.RawMessage) func(string) str
 		urlSecrets(sub.URL, true, add)
 	}
 	urlSecrets(st.Health.ProbeURL, false, add)
-	if len(set) == 0 {
-		return func(s string) string { return s }
-	}
+	urlSecrets(st.DNS.Remote, false, add)
 	secrets := make([]string, 0, len(set))
 	for s := range set {
 		secrets = append(secrets, s)
 	}
 	// Longest first, for the same result whatever the map's order.
 	slices.SortFunc(secrets, func(a, b string) int { return cmp.Or(cmp.Compare(len(b), len(a)), strings.Compare(a, b)) })
-	return func(text string) string { return redact(text, secrets) }
+	return func(text string) string {
+		if strings.Contains(text, runnerapi.TestOutputTruncated) {
+			return redacted // the cut can leave only the prefix of a secret
+		}
+		text = redact(text, secrets)
+		for s := range short {
+			if strings.Contains(text, s) {
+				return redacted
+			}
+		}
+		return text
+	}
 }
 
 // redact replaces every stretch of text that secrets cover with one
@@ -119,31 +123,10 @@ func redact(text string, secrets []string) string {
 	return b.String()
 }
 
-// outboundSecrets calls add with the credentials in an outbound (see
-// RedactorFor). An outbound that is not JSON has none to find.
+// outboundSecrets visits the same config fields the runner hides from test
+// and trial diagnostics.
 func outboundSecrets(raw json.RawMessage, add func(string)) {
-	var v any
-	if json.Unmarshal(raw, &v) != nil {
-		return
-	}
-	var walk func(v any, secret bool)
-	walk = func(v any, secret bool) {
-		switch v := v.(type) {
-		case string:
-			if secret {
-				add(v)
-			}
-		case []any:
-			for _, e := range v {
-				walk(e, secret)
-			}
-		case map[string]any:
-			for k, e := range v {
-				walk(e, secretKeys[strings.ToLower(k)])
-			}
-		}
-	}
-	walk(v, false)
+	secrettext.Credentials(raw, add)
 }
 
 // urlSecrets calls add with the user name and password of raw's userinfo
@@ -160,11 +143,30 @@ func urlSecrets(raw string, whole bool, add func(string)) {
 			add(p)
 		}
 	}
+	// HTTP errors and stored diagnostics can echo an individual value in
+	// its original URL encoding or after decoding it.
+	add(u.RawQuery)
+	for pair := range strings.SplitSeq(u.RawQuery, "&") {
+		if _, encoded, ok := strings.Cut(pair, "="); ok {
+			add(encoded)
+			if decoded, err := url.QueryUnescape(encoded); err == nil {
+				add(decoded)
+			}
+		}
+	}
 	if !whole {
 		return
 	}
 	add(u.String())
 	add(u.Redacted())
+	if u.Path != "" && u.Path != "/" {
+		// Account paths can also occur in probe URLs or errors that have
+		// lost or changed their query string.
+		base := *u
+		base.User, base.Fragment, base.RawFragment = nil, "", ""
+		base.RawQuery, base.ForceQuery = "", false
+		add(base.String())
+	}
 	if u.User != nil {
 		if _, ok := u.User.Password(); ok {
 			// net/http's errors mask the password with three stars, as

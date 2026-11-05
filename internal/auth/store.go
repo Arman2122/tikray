@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -143,9 +144,15 @@ func OpenStore(dir string) (*Store, error) {
 		if err := s.removeCode(); err != nil {
 			return nil, err
 		}
-	} else if _, err := os.Stat(s.path(codeFile)); errors.Is(err, fs.ErrNotExist) {
-		if _, err := s.newCode(); err != nil {
-			return nil, err
+	} else {
+		_, err := os.Stat(s.path(codeFile))
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			if _, err := s.newCode(); err != nil {
+				return nil, err
+			}
+		case err != nil:
+			return nil, fmt.Errorf("auth: checking %s: %w", codeFile, err)
 		}
 	}
 	return s, nil
@@ -263,8 +270,8 @@ func (d *fileData) markSaved() {
 	}
 }
 
-// admin returns the admin, if there is one.
-func (s *Store) admin() (admin, bool) {
+// adminSnapshot returns a copy for checking a password outside the lock.
+func (s *Store) adminSnapshot() (admin, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.d.Admin == nil {
@@ -275,8 +282,8 @@ func (s *Store) admin() (admin, bool) {
 
 // Username returns the admin's username, or "" when there is no admin yet.
 func (s *Store) Username() string {
-	a, _ := s.admin()
-	return a.Username
+	a, _ := s.adminSnapshot()
+	return s.PublicName(a.Username, Session{})
 }
 
 // NeedsSetup reports whether there is no admin yet: the first one is to be
@@ -434,6 +441,11 @@ func (s *Store) Claim(ctx context.Context, code, username, password string) erro
 	if err := ValidPassword(username, password); err != nil {
 		return err
 	}
+	// Check the code first: even when a label is unsafe, a bad guess must
+	// count as a bad code. Public account names can reach logs and responses.
+	if s.PublicName(username, Session{}) != username || strings.Contains(NormalizeSetupCode(username), NormalizeSetupCode(code)) {
+		return invalidError("the username must not contain a credential")
+	}
 	// The hash takes its time and a lot of memory: not under the lock.
 	hash, err := HashPassword(ctx, password)
 	if err != nil {
@@ -489,7 +501,7 @@ func (s *Store) Reset() error {
 // the old. An empty keep (or the id of no session) ends them all. The API
 // tokens stay.
 func (s *Store) ChangePassword(ctx context.Context, keep, current, next string) error {
-	a, ok := s.admin()
+	a, ok := s.adminSnapshot()
 	if !ok {
 		return ErrNoAdmin
 	}
@@ -510,7 +522,10 @@ func (s *Store) ChangePassword(ctx context.Context, keep, current, next string) 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.d.Admin == nil || s.d.Admin.Hash != a.Hash {
+	if s.d.Admin == nil {
+		return ErrNoAdmin
+	}
+	if s.d.Admin.Hash != a.Hash {
 		return ErrBadPassword
 	}
 	d := s.d

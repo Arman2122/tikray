@@ -62,7 +62,7 @@ func claim(t *testing.T, s *Store, dir, user, pass string) {
 // adminOf is the admin the store holds, for the tests that look inside.
 func adminOf(t *testing.T, s *Store) admin {
 	t.Helper()
-	a, ok := s.admin()
+	a, ok := s.adminSnapshot()
 	if !ok {
 		t.Fatal("the store has no admin")
 	}
@@ -175,7 +175,7 @@ func TestClaim(t *testing.T) {
 	for _, bad := range []string{"", "0000-0000-0000", "ZZZZ-ZZZZ-ZZZZ", code + "0", code[:len(code)-1], code[:4]} {
 		err := s.Claim(ctx, bad, "alice", testPassword)
 		if !errors.Is(err, ErrBadCode) {
-			t.Errorf("Claim with a wrong code %q: %v, want ErrBadCode", bad, err)
+			t.Error("claim with a wrong code should return ErrBadCode")
 		}
 	}
 	if !s.NeedsSetup() || !exists(codePath) || readFile(t, codePath) != code {
@@ -356,13 +356,13 @@ func TestResetMakesNewCode(t *testing.T) {
 		t.Error("a reset changed the CSRF key")
 	}
 	if len(file.Tokens) != 1 || file.Tokens[0].ID != info.ID || file.Tokens[0].Name != "kept" {
-		t.Errorf("a reset changed the tokens: %v", file.Tokens)
+		t.Error("a reset changed the tokens")
 	}
 	if _, ok := s.CheckToken(secret); !ok {
 		t.Error("a reset ended an API token")
 	}
 	if got := string(bytes.TrimSpace(file.Sessions)); got != "[]" {
-		t.Errorf("a reset left the sessions as %s, want []", got)
+		t.Error("a reset left sessions in auth.json")
 	}
 	for _, sess := range []Session{sess1, sess2} {
 		if _, ok := s.Session(sess.ID); ok {
@@ -564,7 +564,7 @@ func TestChangePassword(t *testing.T) {
 	t0 := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
 	t1 := t0.Add(48 * time.Hour)
 	s.now = func() time.Time { return t0 }
-	claim(t, s, dir, "alice", testPassword)
+	claim(t, s, dir, "admin-name-long", testPassword)
 	before := adminOf(t, s)
 
 	const next = "a different long password"
@@ -574,7 +574,7 @@ func TestChangePassword(t *testing.T) {
 	if err := s.ChangePassword(ctx, "", testPassword+"x", next); !errors.Is(err, ErrBadPassword) {
 		t.Errorf("a wrong current password: %v, want ErrBadPassword", err)
 	}
-	for name, bad := range map[string]string{"short": "short", "the username": "alice", "long": strings.Repeat("a", 257)} {
+	for name, bad := range map[string]string{"short": "short", "the username": "admin-name-long", "long": strings.Repeat("a", 257)} {
 		if err := s.ChangePassword(ctx, "", testPassword, bad); !errors.Is(err, ErrInvalid) {
 			t.Errorf("a new password that is %s: %v, want a validation error", name, err)
 		}
@@ -592,7 +592,7 @@ func TestChangePassword(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := adminOf(t, s)
-	if after.Username != "alice" || after.Hash == before.Hash || !after.ChangedAt.Equal(t1) {
+	if after.Username != "admin-name-long" || after.Hash == before.Hash || !after.ChangedAt.Equal(t1) {
 		t.Errorf("the admin after a change: %q, new hash %v, changed at %v", after.Username, after.Hash != before.Hash, after.ChangedAt)
 	}
 	if ok, err := CheckPassword(ctx, after.Hash, next); err != nil || !ok {
@@ -725,7 +725,7 @@ func TestEmptySetupCodeFileOpensNothing(t *testing.T) {
 	}
 	for _, code := range []string{"", " ", "-", "\n"} {
 		if err := s.Claim(ctx, code, "alice", testPassword); err == nil {
-			t.Errorf("Claim(%q) over an empty setup.code succeeded", code)
+			t.Error("claim over an empty setup.code succeeded")
 		}
 	}
 	if !s.NeedsSetup() {
@@ -842,7 +842,7 @@ func TestReadSetupCode(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "state")
 		code, claimed, err := ReadSetupCode(dir)
 		if !errors.Is(err, ErrNoSetupCode) || code != "" || claimed {
-			t.Errorf("ReadSetupCode = (%q, %v, %v), want no code, not claimed, ErrNoSetupCode", code, claimed, err)
+			t.Errorf("ReadSetupCode returned code=%t, claimed=%v, err=%v, want no code, not claimed, ErrNoSetupCode", code != "", claimed, err)
 		}
 		if exists(dir) {
 			t.Error("ReadSetupCode made the state directory")
@@ -857,7 +857,7 @@ func TestReadSetupCode(t *testing.T) {
 			t.Errorf("ReadSetupCode = (%v, %v, %v), want the code in setup.code, not claimed", codeForm.MatchString(code), claimed, err)
 		}
 		if after := stateFiles(t, dir); !reflect.DeepEqual(before, after) {
-			t.Errorf("ReadSetupCode changed the directory:\nbefore %v\nafter  %v", before, after)
+			t.Error("ReadSetupCode changed the state directory")
 		}
 	})
 
@@ -869,7 +869,7 @@ func TestReadSetupCode(t *testing.T) {
 			t.Fatal(err)
 		}
 		if code, claimed, err := ReadSetupCode(dir); err != nil || claimed || code != "7F3K-9Q2M-XX4T" {
-			t.Errorf("ReadSetupCode = (%v, %v, %v), want 7F3K-9Q2M-XX4T", code == "7F3K-9Q2M-XX4T", claimed, err)
+			t.Errorf("ReadSetupCode = (%v, %v, %v), want the canonical code", code == "7F3K-9Q2M-XX4T", claimed, err)
 		}
 	})
 
@@ -879,13 +879,13 @@ func TestReadSetupCode(t *testing.T) {
 		before := stateFiles(t, dir)
 		code, claimed, err := ReadSetupCode(dir)
 		if err != nil || !claimed || code != "" {
-			t.Errorf("ReadSetupCode = (%q, %v, %v), want no code, claimed", code, claimed, err)
+			t.Errorf("ReadSetupCode returned code=%t, claimed=%v, err=%v, want no code, claimed", code != "", claimed, err)
 		}
 		if exists(filepath.Join(dir, "setup.code")) {
 			t.Error("ReadSetupCode made a setup.code beside the admin")
 		}
 		if after := stateFiles(t, dir); !reflect.DeepEqual(before, after) {
-			t.Errorf("ReadSetupCode changed the directory:\nbefore %v\nafter  %v", before, after)
+			t.Error("ReadSetupCode changed the state directory")
 		}
 	})
 
@@ -900,7 +900,7 @@ func TestReadSetupCode(t *testing.T) {
 		}
 		code, claimed, err := ReadSetupCode(dir)
 		if err != nil || !claimed || code != "" {
-			t.Errorf("ReadSetupCode = (%q, %v, %v), want no code, claimed", code, claimed, err)
+			t.Errorf("ReadSetupCode returned code=%t, claimed=%v, err=%v, want no code, claimed", code != "", claimed, err)
 		}
 		if !exists(filepath.Join(dir, "setup.code")) {
 			t.Error("ReadSetupCode removed a file: it only reads")
@@ -917,7 +917,7 @@ func TestReadSetupCode(t *testing.T) {
 		}
 		code, claimed, err := ReadSetupCode(dir)
 		if !errors.Is(err, ErrNoSetupCode) || code != "" || claimed {
-			t.Errorf("ReadSetupCode = (%q, %v, %v), want no code, not claimed, ErrNoSetupCode", code, claimed, err)
+			t.Errorf("ReadSetupCode returned code=%t, claimed=%v, err=%v, want no code, not claimed, ErrNoSetupCode", code != "", claimed, err)
 		}
 		if exists(filepath.Join(dir, "setup.code")) {
 			t.Error("ReadSetupCode made a setup.code")
@@ -955,12 +955,40 @@ func TestReadSetupCode(t *testing.T) {
 				}
 				code, claimed, err := ReadSetupCode(dir)
 				if err == nil || errors.Is(err, ErrNoSetupCode) || claimed || code != "" {
-					t.Fatalf("ReadSetupCode = (%q, %v, %v), want an error and nothing else", code, claimed, err)
+					t.Fatalf("ReadSetupCode returned code=%t, claimed=%v, err=%v, want an error and nothing else", code != "", claimed, err)
 				}
 				if strings.Contains(err.Error(), "SECRETJUNK") || !strings.HasPrefix(err.Error(), "auth: ") {
-					t.Errorf("the error %q shows the file's content or lacks the package prefix", err)
+					t.Error("the error shows file content or lacks the package prefix")
 				}
 			})
 		}
 	})
+}
+
+func TestOpenReportsSetupStatError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, codeFile)
+	if err := os.Symlink(path, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenStore(dir); err == nil {
+		t.Error("opened store with unreadable setup file")
+	}
+}
+
+func TestChangePasswordResetDuringHash(t *testing.T) {
+	s, dir := openTest(t)
+	claim(t, s, dir, "alice", testPassword)
+	var once sync.Once
+	argonHook = func() {
+		once.Do(func() {
+			if err := s.Reset(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	t.Cleanup(func() { argonHook = nil })
+	if err := s.ChangePassword(t.Context(), "", testPassword, "valid-new-password"); !errors.Is(err, ErrNoAdmin) {
+		t.Error("password change must report that the admin was reset")
+	}
 }

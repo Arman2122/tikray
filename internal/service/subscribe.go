@@ -144,12 +144,13 @@ func (s *Service) RemoveSubscription(ctx context.Context, rev uint64, id string)
 		if i < 0 {
 			return nil, notFound(*st, "subscription", id)
 		}
+		redact := batchRedactor(*st, nil)
 		st.Subscriptions = slices.Delete(st.Subscriptions, i, i+1)
 		var notes []note
 		left := make([]store.Server, 0, len(st.Servers))
 		for _, srv := range st.Servers {
 			if srv.Subscription == id {
-				notes = append(notes, forget(st, srv)...)
+				notes = append(notes, forget(st, srv, redact)...)
 			} else {
 				left = append(left, srv)
 			}
@@ -223,7 +224,8 @@ func (s *Service) RefreshSubscription(ctx context.Context, id string) (RefreshRe
 	}
 	sub := st.Subscriptions[i]
 	if sub.Disabled {
-		return RefreshResult{}, &Refused{Reason: fmt.Sprintf("subscription %s (%s) is disabled", sub.ID, sub.Name)}
+		label := eventLabel(batchRedactor(st, nil), sub.ID, sub.Name)
+		return RefreshResult{}, &Refused{Reason: fmt.Sprintf("subscription %s is disabled", label)}
 	}
 
 	var parsed subscription.Result
@@ -270,7 +272,7 @@ func (s *Service) RefreshSubscription(ctx context.Context, id string) (RefreshRe
 		// The state changed twice meanwhile, or the subscription points
 		// elsewhere now: no failure of its list, and the next look tries
 		// again.
-		s.record(KindError, fmt.Sprintf("subscription %s (%s): the refresh was not stored: %v", sub.ID, sub.Name, err))
+		s.record(KindError, fmt.Sprintf("subscription %s: the refresh was not stored: %v", eventLabel(batchRedactor(st, nil), sub.ID, sub.Name), err))
 		return RefreshResult{}, err
 	case errors.Is(err, ErrNotFound):
 		return RefreshResult{}, err
@@ -389,6 +391,11 @@ func (s *Service) mergeFetched(id string, got fetched, res *RefreshResult) edit 
 			}
 		}
 		merged := subscription.Merge(st.Servers, id, got.entries)
+		// Warnings and cleanups can name a server whose old credential was
+		// just removed. Both snapshots are available here, before the write.
+		withBoth := *st
+		withBoth.Servers = slices.Concat(st.Servers, merged)
+		redact := batchRedactor(withBoth, nil)
 		*res = RefreshResult{Skipped: got.skipped, Via: got.via}
 		var warnings []note
 		var untested int
@@ -410,8 +417,8 @@ func (s *Service) mergeFetched(id string, got fetched, res *RefreshResult) edit 
 			default:
 				res.Kept++
 			}
-			if changed {
-				warnings = append(warnings, warningNotes(*srv, got.entries[j].Server.Warnings)...)
+			if w := got.entries[j].Server.Warnings; changed && len(w) != 0 {
+				warnings = append(warnings, warningNotes(*srv, w, redact)...)
 			}
 			// On a retry the matching server can have changed. Keep its
 			// current marker unless this exact entry passed, or the merge
@@ -436,12 +443,12 @@ func (s *Service) mergeFetched(id string, got fetched, res *RefreshResult) edit 
 		for _, srv := range olds {
 			if !stays[srv.ID] {
 				res.Removed++
-				cleanup = append(cleanup, forget(st, srv)...)
+				cleanup = append(cleanup, forget(st, srv, redact)...)
 			}
 		}
 		sub.LastFetch, sub.LastError = s.now().UTC(), ""
 
-		label := testLabel(*st, sub.ID, sub.Name)
+		label := eventLabel(redact, sub.ID, sub.Name)
 		notes := []note{{KindRefresh, fmt.Sprintf("subscription %s: added %d, updated %d, removed %d, kept %d, skipped %d via %s",
 			label, res.Added, res.Updated, res.Removed, res.Kept, len(res.Skipped), res.Via)}}
 		notes = append(append(notes, cleanup...), warnings...)
@@ -465,7 +472,7 @@ var errMoved = errors.New("service: the subscription is gone or points elsewhere
 // removed, or pointed at another URL, while that was fetched has nothing to
 // answer for it: nothing is written, held or recorded.
 func (s *Service) refreshFailed(sub store.Subscription, reason string) {
-	var name string
+	label := sub.ID
 	var wait time.Duration
 	_, _, err := s.store.Update(store.AnyRevision, func(st *store.State) error {
 		i := subscriptionIndex(st.Subscriptions, sub.ID)
@@ -474,7 +481,7 @@ func (s *Service) refreshFailed(sub store.Subscription, reason string) {
 		}
 		cur := &st.Subscriptions[i]
 		cur.LastError = reason
-		name, wait = cur.Name, min(time.Hour, time.Duration(cur.Interval))
+		label, wait = eventLabel(batchRedactor(*st, nil), sub.ID, cur.Name), min(time.Hour, time.Duration(cur.Interval))
 		return nil
 	})
 	if errors.Is(err, errMoved) {
@@ -486,7 +493,7 @@ func (s *Service) refreshFailed(sub store.Subscription, reason string) {
 	if err != nil {
 		reason += fmt.Sprintf(" (and the error could not be kept: %v)", err)
 	}
-	s.record(KindError, fmt.Sprintf("subscription %s (%s): %s", sub.ID, name, reason))
+	s.record(KindError, fmt.Sprintf("subscription %s: %s", label, reason))
 }
 
 // passesChecks reports whether srv, with its reason for being invalid

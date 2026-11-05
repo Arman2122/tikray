@@ -24,7 +24,7 @@ import (
 )
 
 // The secrets of the fake daemon's state and the token it is called with:
-// none of them may be in what a command prints without --json.
+// none of them may be in what a command prints.
 const (
 	apiToken   = "f00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeed"
 	secretID   = "5fdc6e8a-4a2b-4a3c-9d8e-1f2a3b4c5d6e"

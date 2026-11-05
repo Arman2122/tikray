@@ -28,8 +28,7 @@ import (
 	"github.com/Arman2122/tikray/internal/subscription"
 )
 
-// humanSecrets are in the fake daemon's state, and so in what --json shows,
-// and in nothing else a command prints.
+// humanSecrets are in the fake daemon's state and must stay out of all CLI formats.
 var humanSecrets = []string{secretID, secretPass, "4f9a1c7e2b", "hunter2"}
 
 // runAPI is runCLI for a command that talks to the daemon. Whatever the
@@ -39,18 +38,18 @@ func runAPI(t *testing.T, vars map[string]string, args ...string) (code int, std
 	code, stdout, stderr = runCLI(t, vars, args...)
 	for name, out := range map[string]string{"stdout": stdout, "stderr": stderr} {
 		if strings.Contains(out, apiToken) {
-			t.Errorf("tikray %q: the API token is in %s", args, name)
+			t.Errorf("the API token is in %s", name)
 		}
 	}
 	return code, stdout, stderr
 }
 
 // noSecrets reports each of humanSecrets in out.
-func noSecrets(t *testing.T, args []string, out string) {
+func noSecrets(t *testing.T, out string) {
 	t.Helper()
 	for _, s := range humanSecrets {
 		if strings.Contains(out, s) {
-			t.Errorf("tikray %q printed %q:\n%s", args, s, out)
+			t.Fatal("the CLI output contains a fixture credential")
 		}
 	}
 }
@@ -69,9 +68,9 @@ func ok(t *testing.T, vars map[string]string, args ...string) string {
 	t.Helper()
 	code, stdout, stderr := runAPI(t, vars, args...)
 	if code != 0 || stderr != "" {
-		t.Fatalf("tikray %q: exit %d, stderr %q; want 0 and nothing on stderr (stdout %q)", args, code, stderr, stdout)
+		t.Fatalf("command failed (exit %d, stderr length %d)", code, len(stderr))
 	}
-	noSecrets(t, args, stdout)
+	noSecrets(t, stdout)
 	return stdout
 }
 
@@ -162,7 +161,7 @@ func TestServerAddRefusals(t *testing.T) {
 			if code != 1 || stdout != "" || !strings.Contains(stderr, tc.want) {
 				t.Errorf("exit %d, stdout %q, stderr %q; want 1 and an error naming %q", code, stdout, stderr, tc.want)
 			}
-			noSecrets(t, tc.args, stderr)
+			noSecrets(t, stderr)
 		})
 	}
 	if n := len(fake.called("AddServer")); n != 0 {
@@ -193,23 +192,23 @@ func TestServerList(t *testing.T) {
 		t.Errorf("table\n%s\nwant rows %q", out, want)
 	}
 
-	// --json is the API's answer as it is, credentials and all.
+	// JSON retains public server metadata without its credentials.
 	code, stdout, stderr := runAPI(t, vars, "server", "list", "--json")
 	if code != 0 || stderr != "" {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
 	var servers []store.Server
-	if err := json.Unmarshal([]byte(stdout), &servers); err != nil {
-		t.Fatalf("stdout is not the API's JSON: %v\n%s", err, stdout)
+	if err := json.Unmarshal([]byte(stdout), &servers); err != nil || len(servers) != len(fake.state.Servers) {
+		t.Fatal("--json did not return the expected number of servers")
 	}
-	if !reflect.DeepEqual(servers, fake.state.Servers) {
-		t.Errorf("--json printed %+v, want the API's servers", servers)
+	for i, srv := range servers {
+		if srv.ID != fake.state.Servers[i].ID || srv.Name != fake.state.Servers[i].Name || srv.Link != "" {
+			t.Error("--json did not return public server metadata")
+		}
 	}
-	if !strings.Contains(stdout, secretID) {
-		t.Error("--json does not pass the API's JSON through as it is")
-	}
+	noSecrets(t, stdout)
 	if !strings.HasSuffix(stdout, "\n") {
-		t.Errorf("--json output %q does not end in a newline", stdout)
+		t.Error("--json output does not end in a newline")
 	}
 }
 
@@ -306,9 +305,15 @@ func TestSubList(t *testing.T) {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
 	var subs []store.Subscription
-	if err := json.Unmarshal([]byte(stdout), &subs); err != nil || !reflect.DeepEqual(subs, fake.state.Subscriptions) {
-		t.Errorf("--json printed %q (%v), want the API's subscriptions", stdout, err)
+	if err := json.Unmarshal([]byte(stdout), &subs); err != nil || len(subs) != len(fake.state.Subscriptions) {
+		t.Fatal("--json did not return the expected number of subscriptions")
 	}
+	for i, sub := range subs {
+		if sub.ID != fake.state.Subscriptions[i].ID || sub.Name != fake.state.Subscriptions[i].Name || sub.URL != "" {
+			t.Error("--json did not return public subscription metadata")
+		}
+	}
+	noSecrets(t, stdout)
 }
 
 func TestSubRemoveAndRefresh(t *testing.T) {
@@ -327,10 +332,13 @@ func TestSubRemoveAndRefresh(t *testing.T) {
 	}
 
 	out := ok(t, vars, "sub", "refresh", "9be8f7a6")
-	for _, want := range []string{"9be8f7a6", "proxy", "2 added", "1 updated", "0 removed", "5 kept", "vless://…#odd", "unsupported"} {
+	for _, want := range []string{"9be8f7a6", "proxy", "2 added", "1 updated", "0 removed", "5 kept", "vless://…", "unsupported"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("refresh: stdout %q lacks %q", out, want)
 		}
+	}
+	if strings.Contains(out, "#odd") {
+		t.Error("the refresh repeated the private link fragment")
 	}
 	if calls := fake.called("RefreshSubscription"); len(calls) != 1 || calls[0][0] != "9be8f7a6" {
 		t.Errorf("RefreshSubscription calls %v", calls)
@@ -965,7 +973,7 @@ func TestSetupCodeCommand(t *testing.T) {
 		vars := noDaemonEnv(t)
 		code, stdout, stderr := runCLI(t, vars, "setup-code")
 		if code != 1 || stdout != "" || stderr != "tikray: no setup code yet: start tikray serve\n" {
-			t.Errorf("exit %d, stdout %q, stderr %q; want 1 and \"no setup code yet: start tikray serve\" on stderr", code, stdout, stderr)
+			t.Errorf("exit %d, want 1 and the no-setup-code message on stderr", code)
 		}
 		if strings.Contains(stdout+stderr, "claimed") {
 			t.Error("setup-code says the admin is claimed when there is none")
@@ -986,7 +994,7 @@ func TestSetupCodeCommand(t *testing.T) {
 
 		code, stdout, stderr := runCLI(t, cli, "setup-code")
 		if code != 0 || stdout != want+"\n" || stderr != "" {
-			t.Errorf("exit %d, stderr %q; want 0, the code in setup.code and one line", code, stderr)
+			t.Errorf("exit %d, want only the code in setup.code on stdout", code)
 		}
 		if after := stateSnapshot(t, data); !reflect.DeepEqual(before, after) {
 			t.Error("setup-code changed auth.json or setup.code")
@@ -995,7 +1003,7 @@ func TestSetupCodeCommand(t *testing.T) {
 		r.claimAdmin(t, want)
 		code, stdout, stderr = runCLI(t, cli, "setup-code")
 		if code != 0 || stdout != claimed || stderr != "" {
-			t.Errorf("after the claim: exit %d, stdout %q, stderr %q; want 0 and %q", code, stdout, stderr, claimed)
+			t.Errorf("after the claim: exit %d, want only the claimed message", code)
 		}
 		if _, err := os.Stat(filepath.Join(data, "state", "setup.code")); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("setup-code made setup.code beside the admin: %v", err)
@@ -1006,7 +1014,7 @@ func TestSetupCodeCommand(t *testing.T) {
 			t.Fatalf("exit %d", c)
 		}
 		if code, stdout, _ := runCLI(t, cli, "setup-code"); code != 0 || stdout != claimed {
-			t.Errorf("serve stopped: exit %d, stdout %q; want 0 and %q", code, stdout, claimed)
+			t.Errorf("serve stopped: exit %d, want only the claimed message", code)
 		}
 
 		// A code that a claim that died left beside the admin is not shown.
@@ -1015,7 +1023,7 @@ func TestSetupCodeCommand(t *testing.T) {
 		}
 		code, stdout, _ = runCLI(t, cli, "setup-code")
 		if code != 0 || stdout != claimed || strings.Contains(stdout, want) {
-			t.Errorf("with a stale code beside the admin: exit %d, stdout %q; want 0 and %q", code, stdout, claimed)
+			t.Errorf("with a stale code beside the admin: exit %d, want only the claimed message", code)
 		}
 	})
 }
@@ -1038,17 +1046,17 @@ func TestAdminResetViaDaemonAndDirect(t *testing.T) {
 	// Through the daemon: it is the one that resets, and it says so in its
 	// events (the direct path has no service to tell).
 	if out := ok2(t, cli, "admin", "reset"); out != done {
-		t.Errorf("admin reset printed %q, want %q", out, done)
+		t.Error("admin reset did not print the recovery instructions")
 	}
 	if events := ok2(t, cli, "events"); !strings.Contains(events, "auth  admin reset from 127.0.0.1") {
-		t.Errorf("serve recorded no reset:\n%s", events)
+		t.Error("serve recorded no reset event")
 	}
 	if need, in := r.authState(t, cookie); !need || in {
 		t.Errorf("after the reset setup_required is %v and signed_in %v, want true and false", need, in)
 	}
 	second := strings.TrimSpace(ok2(t, cli, "setup-code"))
 	if !setupCodeForm.MatchString(second) || second == first || second != setupCodeOf(t, data) {
-		t.Errorf("after the reset setup-code shows %q: want the new code that is in setup.code", second)
+		t.Error("after reset setup-code must show only the new code in setup.code")
 	}
 	if resp, _ := r.call(t, http.MethodPost, "/v1/auth/login", map[string]string{"username": "alice", "password": adminPassword}, nil); resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("the old admin signed in after the reset: status %d", resp.StatusCode)
@@ -1079,7 +1087,7 @@ func TestAdminResetViaDaemonAndDirect(t *testing.T) {
 	unlock()
 
 	if out := ok2(t, cli, "admin", "reset"); out != done {
-		t.Errorf("the direct admin reset printed %q, want %q", out, done)
+		t.Error("direct admin reset did not print the recovery instructions")
 	}
 	b, err := os.ReadFile(filepath.Join(state, "auth.json"))
 	if err != nil {
@@ -1125,7 +1133,7 @@ func TestAdminResetNeedsTheRootToken(t *testing.T) {
 	asToken["TIKRAY_API_TOKEN"] = named
 	code, stdout, stderr := runCLI(t, asToken, "admin", "reset")
 	if code != 1 || stdout != "" || !strings.Contains(stderr, "forbidden") || strings.Contains(stderr, named) {
-		t.Errorf("a named token's reset: exit %d, stdout %q, stderr %q; want 1 and forbidden", code, stdout, stderr)
+		t.Errorf("a named token's reset: exit %d, want 1 and a safe forbidden error", code)
 	}
 }
 
@@ -1136,20 +1144,22 @@ func TestTokenCommands(t *testing.T) {
 	vars := d.env(t)
 	form := regexp.MustCompile(`^tkr_([0-9a-f]{8})_([A-Za-z0-9_-]{43})$`)
 
-	// The token is on a line of its own, and the line after says it is the only
-	// time.
-	out := ok(t, vars, "token", "create", "ci-runner", "--expires", "720h")
-	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-	if len(lines) != 2 || lines[1] != "this token is shown only once" {
-		t.Fatalf("token create printed %d lines, want the token and \"this token is shown only once\"", len(lines))
+	create := func(args ...string) string {
+		t.Helper()
+		code, out, hint := runCLI(t, vars, append([]string{"token", "create"}, args...)...)
+		if code != 0 || hint != "this token is shown only once\n" || strings.Count(out, "\n") != 1 {
+			t.Fatalf("token create must print only the token on stdout and its notice on stderr (exit %d)", code)
+		}
+		token := strings.TrimSuffix(out, "\n")
+		if !form.MatchString(token) {
+			t.Fatal("token create did not return a token")
+		}
+		return token
 	}
-	m := form.FindStringSubmatch(lines[0])
-	if m == nil {
-		t.Fatal("the first line of token create is no token")
-	}
-	token, id, secret := m[0], m[1], m[2]
-	// Another token that does not expire.
-	other := strings.Split(ok(t, vars, "token", "create", "backup"), "\n")[0]
+	token := create("ci-runner", "--expires", "720h")
+	m := form.FindStringSubmatch(token)
+	id, secret := m[1], m[2]
+	other := create("backup")
 	otherID := form.FindStringSubmatch(other)[1]
 
 	// The list has the ids, the names and the times, and no secret: not the
@@ -1198,7 +1208,7 @@ func TestTokenCommands(t *testing.T) {
 	use := maps.Clone(vars)
 	use["TIKRAY_API_TOKEN"] = token
 	if code, stdout, stderr := runCLI(t, use, "token", "list"); code != 0 || strings.Contains(stdout+stderr, secret) {
-		t.Errorf("token list with the new token: exit %d, stderr %q", code, stderr)
+		t.Errorf("token list with the new token: exit %d or unsafe output", code)
 	}
 	if err := json.Unmarshal([]byte(ok(t, vars, "token", "list", "--json")), &listed); err != nil || listed[0].LastUsed.IsZero() {
 		t.Errorf("the list does not show that the token was used (%v)", err)
@@ -1209,25 +1219,59 @@ func TestTokenCommands(t *testing.T) {
 		t.Errorf("token rm printed %q", got)
 	}
 	if table := ok(t, vars, "token", "list"); strings.Contains(table, id) || !strings.Contains(table, otherID) {
-		t.Errorf("after the revoke the list is:\n%s", table)
+		t.Error("the list must include only the surviving token")
 	}
 	if code, _, stderr := runCLI(t, use, "token", "list"); code != 1 || !strings.Contains(stderr, "unauthorized") {
-		t.Errorf("a revoked token: exit %d, stderr %q; want 1 and unauthorized", code, stderr)
+		t.Errorf("a revoked token: exit %d, want 1 and unauthorized", code)
 	}
 	// What the API refuses is printed as it says it.
 	if code, stdout, stderr := runAPI(t, vars, "token", "rm", id); code != 1 || stdout != "" || !strings.HasPrefix(stderr, "tikray: not_found: ") {
-		t.Errorf("revoking it again: exit %d, stdout %q, stderr %q; want 1 and \"tikray: not_found: ...\"", code, stdout, stderr)
+		t.Errorf("revoking it again: exit %d, want 1 and not_found", code)
 	}
 	if code, stdout, stderr := runAPI(t, vars, "token", "create", ""); code != 1 || stdout != "" || !strings.HasPrefix(stderr, "tikray: bad_request: ") {
-		t.Errorf("a token with no name: exit %d, stdout %q, stderr %q; want 1 and \"tikray: bad_request: ...\"", code, stdout, stderr)
+		t.Errorf("a token with no name: exit %d, want 1 and bad_request", code)
 	}
 	// An empty list is its header.
-	ok(t, vars, "token", "rm", otherID)
+	if code, out, errOut := runCLI(t, vars, "token", "rm", other); code != 0 || out != "revoked token "+otherID+"\n" || errOut != "" {
+		t.Error("pasting the full token for revocation should report only the public id")
+	}
 	if got := rows(ok(t, vars, "token", "list")); len(got) != 1 {
 		t.Errorf("the list of no tokens is %q, want the header alone", got)
 	}
 	if got := strings.TrimSpace(ok(t, vars, "token", "list", "--json")); got != "[]" {
 		t.Errorf("token list --json of no tokens is %q, want []", got)
+	}
+}
+
+// A pasted credential must not reach the request path or an error, even
+// when it is malformed and the daemon cannot be reached.
+func TestTokenRemoveRejectsMalformedInput(t *testing.T) {
+	value := "tkr_00000001_private-fixture-value"
+	code, out, errOut := runCLI(t, map[string]string{"TIKRAY_DATA": t.TempDir()}, "token", "rm", value)
+	if code != 2 || out != "" || strings.Contains(errOut, value) {
+		t.Error("malformed token argument was accepted or echoed")
+	}
+}
+
+func TestTokenExpiryDoesNotEchoInput(t *testing.T) {
+	value := "private-fixture-value"
+	code, out, errOut := runCLI(t, nil, "token", "create", "script", "--expires", value)
+	if code != 2 || out != "" || strings.Contains(errOut, value) {
+		t.Error("an invalid token expiry must not be echoed in the usage error")
+	}
+}
+
+func TestTokenCreateReportsLostOutput(t *testing.T) {
+	d := startDaemon(t, newFake())
+	var errBuf bytes.Buffer
+	full, err := os.OpenFile("/dev/full", os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer full.Close()
+	code := run(context.Background(), []string{"token", "create", "script"}, envOf(d.env(t)), full, &errBuf)
+	if code != 1 || !strings.Contains(errBuf.String(), "could not write") || strings.Contains(errBuf.String(), "tkr_") {
+		t.Error("failed token output should report a safe delivery failure")
 	}
 }
 

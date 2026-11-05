@@ -38,7 +38,7 @@ type errResponse struct {
 // runnerapi. Every request needs "Authorization: Bearer <token>", and an empty
 // token admits nobody. xrayAPI runs "xray api <args>" with the running core;
 // the server calls it only while an xray runs, with a context that ends after
-// 10 s, and reports its result whatever the exit code.
+// 10 s, and reports its exit code and the supported diagnostic fields.
 func NewServer(r *Runner, token string, xrayAPI func(ctx context.Context, args []string) runnerapi.XrayAPIResponse) http.Handler {
 	s := &server{r: r, token: token, xrayAPI: xrayAPI}
 	mux := http.NewServeMux()
@@ -100,13 +100,18 @@ func act(fn func(context.Context) error) http.HandlerFunc {
 // decodeBody decodes the request's JSON body into v. When it cannot, it
 // answers 400 and returns false.
 func decodeBody(w http.ResponseWriter, req *http.Request, v any) bool {
-	if err := json.NewDecoder(req.Body).Decode(v); err != nil {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
 			writeError(w, http.StatusBadRequest, "bad_request", "request body too large")
 			return false
 		}
-		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body: "+err.Error())
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return false
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return false
 	}
 	return true
@@ -127,7 +132,7 @@ func (s *server) xrayAPIRoute(w http.ResponseWriter, req *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(req.Context(), xrayAPITimeout)
 	defer cancel()
-	reply(w, http.StatusOK, s.xrayAPI(ctx, in.Args))
+	reply(w, http.StatusOK, runnerapi.PublicXrayResult(in.Args[0], s.xrayAPI(ctx, in.Args)))
 }
 
 // adopt serves POST /v1/adopt: the body names the config to adopt, see

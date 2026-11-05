@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"os"
@@ -78,6 +79,7 @@ func newHotEnv(t *testing.T, active, candidate string) (*coreEnv, *fakeRender) {
 	})
 	r.body = candidate
 	e.u.Hot, e.u.XrayAPIServer, e.u.RunnerRun = true, apiAddr, filepath.Join(e.data, "run")
+	e.u.Redact = func(text string) string { return text }
 	return e, r
 }
 
@@ -235,6 +237,8 @@ func TestHotPlan(t *testing.T) {
 		added, removed    int
 		changed           int
 	}{
+		{name: "active tag has two spellings", active: cfg(block, `{"tag":"srv-a","TAG":"stray","protocol":"freedom"}`), candidate: cfg(block, sa)},
+		{name: "active routing repeats a key", active: `{"routing":{"domainStrategy":"IPIfNonMatch"},"routing":{"rules":[]},"log":{"loglevel":"warning"},"outbounds":[` + block + `,` + sa + `]}`, candidate: cfg(block, sa, sb)},
 		{name: "add", active: rendered(t, one), candidate: rendered(t, two), hot: true, add: []string{tagB}, added: 1},
 		{name: "remove", active: rendered(t, two), candidate: rendered(t, one), hot: true, remove: []string{tagB}, removed: 1},
 		{name: "disable", active: rendered(t, two), candidate: rendered(t, disabled), hot: true, remove: []string{tagB}, removed: 1},
@@ -272,7 +276,7 @@ func TestHotPlan(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p, ok := hotPlan([]byte(tc.active), []byte(tc.candidate))
 			if ok != tc.hot {
-				t.Fatalf("hotPlan qualifies: %v, want %v (plan %+v)", ok, tc.hot, p)
+				t.Fatalf("hotPlan qualifies: %v, want %v (added %d, removed %d, changed %d)", ok, tc.hot, p.added, p.removed, p.changed)
 			}
 			if !ok {
 				return
@@ -302,7 +306,7 @@ func TestHotPlan(t *testing.T) {
 	// What is added is the candidate's outbound itself.
 	p, ok := hotPlan([]byte(rendered(t, one)), []byte(rendered(t, withServers(srvA2))))
 	if !ok || len(p.add) != 1 || !bytes.Contains(p.add[0], []byte("203.0.113.20")) {
-		t.Errorf("plan %+v (%v), want server a's new outbound added", p, ok)
+		t.Errorf("plan qualifies: %v, %d additions; want server a's changed outbound", ok, len(p.add))
 	}
 }
 
@@ -381,7 +385,7 @@ func TestHotApply(t *testing.T) {
 
 	lines := historyLines(t, e)
 	if len(lines) != 1 || !strings.Contains(lines[0], `"hot":true`) || !strings.Contains(lines[0], `"kind":"config"`) {
-		t.Fatalf("history = %q, want one line of a config, hot", lines)
+		t.Fatalf("history has %d lines, want one line for a hot config", len(lines))
 	}
 	wantResult(t, e.history(t)[0], want)
 	wantConfigs(t, e, shaOf(candidate)+".json", old[0], old[1], old[2], old[3])
@@ -398,7 +402,7 @@ func TestHotApplyProbes(t *testing.T) {
 		res, err := e.u.Apply(bg)
 		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
 		if want := "applied without restarting xray: added 1, removed 0, changed 0; " + baselineNote; res.Detail != want || !res.Hot {
-			t.Errorf("Result = %+v, want hot with Detail %q", res, want)
+			t.Errorf("got hot=%t, want a hot result with the expected detail", res.Hot)
 		}
 		if at := p.calls(); !reflect.DeepEqual(at, []int{1}) {
 			t.Errorf("the probe saw %v runner actions before each call, want the baseline alone", at)
@@ -412,7 +416,7 @@ func TestHotApplyProbes(t *testing.T) {
 		res, err := e.u.Apply(bg)
 		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
 		if want := "applied without restarting xray: added 0, removed 1, changed 0"; res.Detail != want || !res.Hot {
-			t.Errorf("Result = %+v, want hot with Detail %q", res, want)
+			t.Errorf("got hot=%t, want a hot result with the expected detail", res.Hot)
 		}
 		wantActions(t, e.runner, "test", "xray-api", "adopt")
 		if fs := e.runner.state(); !reflect.DeepEqual(fs.apiArgs, [][]string{{"rmo", "--server=" + apiAddr, tagA}}) || len(fs.adoFiles) != 0 {
@@ -456,7 +460,7 @@ func TestHotFallsBackToTrial(t *testing.T) {
 					}
 				})
 			},
-			why:     "exit status 1: failed to build outbound: boom",
+			why:     "exit status 1",
 			actions: []string{"test", "xray-api", "xray-api"},
 		},
 		{
@@ -505,7 +509,7 @@ func TestHotFallsBackToTrial(t *testing.T) {
 				t.Error("Result.Hot is set for a trial")
 			}
 			if !strings.HasPrefix(res.Detail, "the hot change failed (") || !strings.HasSuffix(res.Detail, "), so a trial was tried") {
-				t.Errorf("Detail = %q, want the note that the hot change failed", res.Detail)
+				t.Error("the fallback detail lacks the note explaining the hot failure")
 			}
 			wantDetail(t, res, tc.why)
 			wantActions(t, e.runner, append(tc.actions, "trial", "commit")...)
@@ -519,7 +523,7 @@ func TestHotFallsBackToTrial(t *testing.T) {
 			wantLive(t, e, candidate)
 			wantHotDirEmpty(t, e)
 			if h := e.history(t); len(h) != 1 || h[0].Hot || !strings.HasPrefix(h[0].Detail, "the hot change failed (") {
-				t.Errorf("history = %+v, want the trial's line with the note", h)
+				t.Errorf("history has %d lines, want the trial's line with the note", len(h))
 			}
 		})
 	}
@@ -548,7 +552,7 @@ func TestHotFallbackRestoresXray(t *testing.T) {
 		wantOutcome(t, res, err, OutcomeRefused)
 		wantDetail(t, res, "the hot change failed (")
 		wantDetail(t, res, "), so a trial was tried: ")
-		wantDetail(t, res, "disk full")
+		wantDetail(t, res, "HTTP 500")
 		wantDetail(t, res, "xray was restarted from the active config")
 		wantActions(t, e.runner, "test", "xray-api", "xray-api", "trial", "restart")
 		wantLive(t, e, active)
@@ -569,7 +573,7 @@ func TestHotFallbackRestoresXray(t *testing.T) {
 
 		res, err := e.u.Apply(bg)
 		wantOutcome(t, res, err, runnerapi.OutcomeRejected)
-		wantDetail(t, res, "), so a trial was tried: Failed to start: out of memory")
+		wantDetail(t, res, "), so a trial was tried: xray failed to load config")
 		wantDetail(t, res, "xray was restarted from the active config")
 		wantActions(t, e.runner, "test", "xray-api", "xray-api", "trial", "restart")
 		wantLive(t, e, active)
@@ -703,10 +707,45 @@ func TestHotFallbackRestoresXray(t *testing.T) {
 		res, err := e.u.Apply(bg)
 		wantOutcome(t, res, err, OutcomeRefused)
 		wantDetail(t, res, "the hot change failed (")
-		wantDetail(t, res, "test broke")
+		wantDetail(t, res, "HTTP 500")
 		wantActions(t, e.runner, "test", "trial")
 		wantLive(t, e, active)
 	})
+}
+
+func TestHotRunnerReusesPID(t *testing.T) {
+	active := rendered(t, withServers(srvA))
+	candidate := rendered(t, withServers(srvA, srvB))
+	e, _ := newHotEnv(t, active, candidate)
+	e.runner.script(func(f *fakeRunner) {
+		f.st.XrayInstance = "first"
+		f.onAdopt = func(w http.ResponseWriter, config string) bool {
+			// A new PID namespace can start xray under the very same PID.
+			f.st.XrayInstance = "second"
+			f.restartLive(f.st.Active.Config)
+			return false
+		}
+	})
+	res, err := e.u.Apply(bg)
+	wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+	if res.Hot {
+		t.Error("adopted after the runner restarted with the same PID")
+	}
+	wantLive(t, e, candidate)
+	wantPending(t, e, false)
+}
+
+func TestHotRequiresProcessIdentity(t *testing.T) {
+	active := rendered(t, withServers(srvA))
+	candidate := rendered(t, withServers(srvA, srvB))
+	e, _ := newHotEnv(t, active, candidate)
+	e.runner.script(func(f *fakeRunner) { f.st.XrayInstance = "" })
+	res, err := e.u.Apply(bg)
+	wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+	if res.Hot {
+		t.Error("older runner must use a trial")
+	}
+	wantActions(t, e.runner, "trial", "commit")
 }
 
 // A candidate that xray run -test rejects is rejected as a trial would reject
@@ -724,7 +763,7 @@ func TestHotRejectedTouchesNothing(t *testing.T) {
 
 	res, err := e.u.Apply(bg)
 	wantOutcome(t, res, err, runnerapi.OutcomeRejected)
-	wantResult(t, res, Result{From: "26.10.21", To: "26.10.21", Outcome: "rejected", Kind: "config", Detail: "Failed to start: unknown user", At: t0})
+	wantResult(t, res, Result{From: "26.10.21", To: "26.10.21", Outcome: "rejected", Kind: "config", Detail: "unknown user", At: t0})
 	var tf *runnerapi.TestFailedError
 	if !errors.As(err, &tf) {
 		t.Errorf("err = %v, want a *TestFailedError, as a trial's rejection has", err)
@@ -742,7 +781,7 @@ func TestHotRejectedTouchesNothing(t *testing.T) {
 	wantNoCandidateFile(t, e)
 	wantHotDirEmpty(t, e)
 	if h := e.history(t); len(h) != 1 || h[0].Outcome != runnerapi.OutcomeRejected || h[0].Kind != KindConfig {
-		t.Errorf("history = %+v", h)
+		t.Errorf("history has %d lines, want the expected config result", len(h))
 	}
 }
 
@@ -761,7 +800,7 @@ func TestHotInterruptedHeals(t *testing.T) {
 		live              store.State // what xray runs: the change, or part of it
 		why               string      // the hot change fails with this, and the trial applies the candidate; empty: it goes through
 	}{
-		{"the ado went through", withServers(srvA), withServers(srvA, srvB), withServers(srvA, srvB), "existing tag found: " + tagB},
+		{"the ado went through", withServers(srvA), withServers(srvA, srvB), withServers(srvA, srvB), "exit status 1"},
 		{"the rmo went through", withServers(srvA), withServers(srvA2), withServers(), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -775,7 +814,7 @@ func TestHotInterruptedHeals(t *testing.T) {
 			if tc.why == "" {
 				// The rmo of the tag xray lacks succeeds and the ado adds it.
 				if !res.Hot || res.Detail != "applied without restarting xray: added 0, removed 0, changed 1" {
-					t.Errorf("Result = %+v, want the hot change, changing one", res)
+					t.Error("expected a hot change replacing one server")
 				}
 				wantActions(t, e.runner, "test", "xray-api", "xray-api", "adopt")
 				wantLive(t, e, candidate)
@@ -847,7 +886,7 @@ func TestHotOnlyForServerOutbounds(t *testing.T) {
 			res, err := e.u.Apply(bg)
 			wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
 			if res.Hot || res.Detail != "" {
-				t.Errorf("Result = %+v, want a trial's, with no note", res)
+				t.Error("expected a trial with no fallback note")
 			}
 			wantActions(t, e.runner, "trial", "commit")
 			if fs := e.runner.state(); len(fs.tested) != 0 || len(fs.apiArgs) != 0 {
@@ -865,7 +904,7 @@ func TestHotOff(t *testing.T) {
 	res, err := e.u.Apply(bg)
 	wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
 	if res.Hot || res.Detail != "" {
-		t.Errorf("Result = %+v, want a trial's", res)
+		t.Error("expected a trial result")
 	}
 	wantActions(t, e.runner, "trial", "commit")
 	if fs := e.runner.state(); len(fs.tested) != 0 || len(fs.apiArgs) != 0 || len(fs.adopted) != 0 {
@@ -928,6 +967,18 @@ func TestHotKeepsApplysChecks(t *testing.T) {
 		}
 		wantActions(t, e.runner, "trial", "commit")
 	})
+	t.Run("a core rollback", func(t *testing.T) {
+		e, _ := newHotEnv(t, active, candidate)
+		install(t, e.cores(), "26.3.27")
+		e.writeHistory(t, committedResult("26.3.27", ""), committedResult("26.10.21", "26.3.27"))
+		res, err := e.u.Rollback(bg)
+		wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+		if res.Hot || res.To != "26.3.27" {
+			t.Error("rollback must switch core through a trial")
+		}
+		wantActions(t, e.runner, "trial", "commit")
+	})
+
 }
 
 // The reason a hot change failed is xray's output, which can name a server's
@@ -946,11 +997,63 @@ func TestHotRedactsTheReason(t *testing.T) {
 
 	res, err := e.u.Apply(bg)
 	wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
-	wantDetail(t, res, "invalid user ‹redacted›")
+	wantDetail(t, res, "xray api ado: exit status 1")
 	for what, s := range map[string]string{"Detail": res.Detail, "the history": strings.Join(historyLines(t, e), "\n"), "the log": log.String()} {
 		if strings.Contains(s, secret) {
 			t.Errorf("%s holds the secret", what)
 		}
+	}
+}
+
+func TestHotWithholdsAnOldCredential(t *testing.T) {
+	const oldSecret = "old-fixture-value"
+	moved := srvA
+	moved.Outbound = json.RawMessage(strings.Replace(string(srvA.Outbound), "b831381d-6324-4d53-ad4f-8cda48b30811", oldSecret, 1))
+	e, _ := newHotEnv(t, rendered(t, withServers(moved)), rendered(t, withServers(srvA)))
+	e.runner.script(func(f *fakeRunner) {
+		f.onXrayAPI = func(w http.ResponseWriter, _ []string) {
+			writeJSONReply(w, http.StatusOK, runnerapi.XrayAPIResponse{ExitCode: 1, Stderr: "rejected " + oldSecret})
+		}
+	})
+	res, err := e.u.Apply(bg)
+	wantOutcome(t, res, err, runnerapi.OutcomeCommitted)
+	if strings.Contains(res.Detail, oldSecret) || strings.Contains(strings.Join(historyLines(t, e), ""), oldSecret) {
+		t.Fatal("an active-only credential reached the fallback detail")
+	}
+}
+
+func TestHotWithholdsUnsafeTestOutput(t *testing.T) {
+	for _, redactor := range []bool{false, true} {
+		t.Run(fmt.Sprintf("redactor=%t", redactor), func(t *testing.T) {
+			const private = "private-fixture"
+			active := rendered(t, withServers(srvA))
+			e, _ := newHotEnv(t, active, rendered(t, withServers(srvA, srvB)))
+			e.u.Redact = nil
+			if redactor {
+				e.u.Redact = func(text string) string { return text }
+			}
+			var log bytes.Buffer
+			e.u.Log = &log
+			output := private
+			if redactor {
+				output += runnerapi.TestOutputTruncated
+			}
+			e.runner.script(func(f *fakeRunner) {
+				f.onTest = func(w http.ResponseWriter, _ []byte) bool {
+					writeJSONReply(w, http.StatusOK, runnerapi.TestResult{Output: output})
+					return true
+				}
+			})
+			res, err := e.u.Apply(bg)
+			if err == nil || res.Outcome != runnerapi.OutcomeRejected {
+				t.Fatal("expected the candidate to be rejected")
+			}
+			for _, text := range []string{res.Detail, err.Error(), log.String(), strings.Join(historyLines(t, e), "")} {
+				if strings.Contains(text, private) {
+					t.Fatal("unsafe runner text reached the hot result, error, log or history")
+				}
+			}
+		})
 	}
 }
 
@@ -1081,7 +1184,7 @@ func TestHotPendingSurvivesUntilHealed(t *testing.T) {
 		t.Errorf("xray runs the outbounds %v, want the active config's, %v", got, want)
 	}
 	if res, err := e.u.Apply(bg); err != nil || res.Outcome != OutcomeNoop {
-		t.Errorf("the apply after = %+v, %v; want noop", res, err)
+		t.Error("expected noop after recovery")
 	}
 }
 

@@ -24,7 +24,7 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M1: runner and artifacts | Done, merged (PR #3) | |
 | M2a: state model and render | Done, merged (PR #4) | |
 | M2b: the service (`tikray serve`, HTTPS API, health, subscriptions) | Done, merged (PR #5) | |
-| **M2c: human sign-in and hot server changes** | **In progress: Tasks 1–9 complete, final review underway** | this branch |
+| **M2c: human sign-in and hot server changes** | **In progress: Tasks 1–9 complete; whole-branch fixes under final validation** | this branch |
 | M3: RouterOS (installer, reconciler, version adapters, watchdog, uninstall, CHR e2e) | Not started | |
 | M4: web UI | Not started | |
 | M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
@@ -46,8 +46,8 @@ Roughly half of the total effort is done.
 | 6 | Hot server changes through `xray api` (rmo/ado), with a trial fallback and a crash-safe pending marker | fdf5577, 55e3ad1, c103901, 791ce92 | done, reviewed (2 fix rounds) |
 | 7 | Compat test of hot changes against real xray releases | fb76752, 79f8582, 5a5c2cd | done, reviewed |
 | 8 | Re-test servers saved untested; batched first-refresh tests | b3038ab | done, reviewed |
-| 9 | End-to-end `TestAuth` and `TestHot` on CHR (3 platforms), spec update | see the M2c ledger | done on all three CHRs |
-| — | Final whole-branch review, one fix wave, PR to `main` | — | not started |
+| 9 | End-to-end `TestAuth` and `TestHot` on CHR (3 platforms), spec update | 4ad5f3c | done on all three CHRs |
+| — | Final whole-branch review and fix wave | see the M2c ledger | validating reviewed images |
 
 ### Next steps, in order
 

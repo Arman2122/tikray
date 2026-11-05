@@ -421,7 +421,7 @@ func TestRoutes(t *testing.T) {
 			return err
 		}, "POST", "/v1/tokens", "", `{"name":"ci"}`},
 		{"RevokeToken", func(c *Client, ctx context.Context) error { _, err := c.RevokeToken(ctx, "3fa9c1d2"); return err }, "DELETE", "/v1/tokens/3fa9c1d2", "", ""},
-		{"RevokeToken escapes the id", func(c *Client, ctx context.Context) error { _, err := c.RevokeToken(ctx, "a/../b?c"); return err }, "DELETE", "/v1/tokens/a%2F..%2Fb%3Fc", "", ""},
+
 		{"ResetAdmin", func(c *Client, ctx context.Context) error { _, err := c.ResetAdmin(ctx); return err }, "POST", "/v1/auth/reset", "", ""},
 	}
 	for _, tc := range cases {
@@ -618,5 +618,28 @@ func TestTLSConfig(t *testing.T) {
 	}
 	if !tr.DisableKeepAlives {
 		t.Error("connections are kept alive: each call should be pinned afresh")
+	}
+}
+
+// A failing transport includes its request URL in the error. Validate
+// the public id before sending, including when an operator pastes a token.
+func TestRevokeTokenKeepsSecretOutOfPath(t *testing.T) {
+	rec := newRecorder(t)
+	var path string
+	rec.reply = func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}
+	const id = "3fa9c1d2"
+	token := "tkr_" + id + "_" + strings.Repeat("A", 43)
+	_, err := rec.client().RevokeToken(t.Context(), token)
+	if err != nil || path != "/v1/tokens/"+id {
+		t.Fatal("a pasted token must send only its public id")
+	}
+	path = ""
+	bad := "a/../b?private-fixture-value"
+	_, err = rec.client().RevokeToken(t.Context(), bad)
+	if err == nil || strings.Contains(err.Error(), bad) || path != "" {
+		t.Error("an invalid id must be refused locally without echoing it")
 	}
 }

@@ -115,7 +115,9 @@ The runner does only what is needed to carry traffic safely:
   protected by a bearer token (`/data/run/runner.token`): `status`, `reload`,
   `restart`, `test`, `trial`, `commit`, `abort`, `adopt`, and `xray-api` (runs `xray api <cmd>`
   with the active core binary, so JSON → protobuf conversion always matches the
-  running version).
+  running version). The runner exposes public tags and traffic/system counters
+  from diagnostic commands. Mutation and unmodeled commands report their
+  exit status without echoing private configuration or command output.
 - **Trial protocol (A/B slots):**
   1. tikray writes `/data/run/candidate.json` (core version, geo version, config
      file, deadline) and calls `trial`.
@@ -214,7 +216,9 @@ M2 builds the control plane in three parts:
   running binary's `xray api rmo` and `ado` to remove and add the changed
   outbounds. If the baseline probe passed, the new config must pass it too.
   The runner then adopts the tested config in `active.json`. The xray PID
-  stays the same, and a restart loads that config from disk.
+  stays the same, and a restart loads that config from disk. The runner also identifies
+  each xray start independently of the PID, since a new container can reuse a
+  PID. A runner that cannot supply this identity takes the trial path.
 - A rejected candidate leaves the live process alone. A failure during the
   live change falls back to a full trial. A durable `run/hot/pending` marker
   makes the next apply resynchronize xray after an interruption. Rule edits,
@@ -661,7 +665,7 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
   in-container `tikray setup-code` prints it as `XXXX-XXXX-XXXX`. Claiming
   the admin consumes it. Only the root bearer in `state/api.token` may reset
   the admin over HTTPS. Reset ends all sessions, keeps named tokens and generates a new code.
-- **Passwords:** 10–256 bytes, distinct from the username. Argon2id uses
+- **Passwords:** 10–256 bytes. The public username must not contain the password. Argon2id uses
   19,456 KiB, two iterations, parallelism one, a 16-byte salt and a 32-byte
   key. At most two hashes run concurrently. An unknown user costs one hash,
   as does a wrong password.
@@ -673,6 +677,9 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
 - **CSRF:** cookie-authenticated requests other than GET and HEAD require
   `X-Tikray-CSRF`, the base64url HMAC-SHA256 of that session ID with the
   service's CSRF key. Bearer requests are exempt.
+- Admin and token names are public metadata. Credential-shaped labels are
+  refused on creation or masked when reading older records. Session and token
+  expiry use UTC wall time across restarts; the router needs an accurate clock.
 - **Rate limiting:** failed setup and sign-in attempts share a bucket of
   five per IPv4 address or IPv6 /64, refilling once per minute, and a
   global bucket of 100, refilling once per nine seconds. An exhausted
@@ -683,6 +690,12 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
   every ten minutes. Revocation takes effect immediately. Admin, session,
   token and CSRF records live in `state/auth.json` (0600), separate from the
   desired state and the config rendered for xray.
+- **API data views:** the root bearer still manages all settings and can
+  reset the admin. All three credential types receive display metadata for
+  servers, including their protocol and endpoint. Share links, arbitrary
+  outbound settings and subscription URLs are write-only over the API.
+  Probe and resolver responses omit userinfo and queries. Private restore
+  data resides in the protected state file.
 - **Secrets:** server credentials and the RouterOS password are kept in the
   `0700` state directory in files with mode `0600`. The rendered xray configs hold the servers'
   credentials too, so they are `0600` in a `0700` `run/config/`; both images

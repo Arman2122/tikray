@@ -36,9 +36,22 @@ func main() {
 	case len(args) == 3 && args[0] == "run" && args[1] == "-c":
 		serve(args[2])
 	case len(args) == 4 && args[0] == "run" && args[1] == "-test" && args[2] == "-c":
+		// Only file-layout tests opt into this observation channel. The
+		// real runner discards both streams from the process under test.
+		if path := os.Getenv("TIKRAY_FAKE_TEST_REPORT"); path != "" {
+			report, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+			if err != nil {
+				panic(err)
+			}
+			defer report.Close()
+			os.Stdout = report
+		}
 		switch mode {
 		case "badconfig":
 			fmt.Println("Failed to start: failed to load config")
+			if config, err := os.ReadFile(args[3]); err == nil {
+				fmt.Print(string(config))
+			}
 			os.Exit(23)
 		case "noisytest":
 			fmt.Println("Failed to start: failed to load config")

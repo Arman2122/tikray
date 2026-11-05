@@ -8,6 +8,7 @@ package health
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"slices"
@@ -114,6 +115,9 @@ type Monitor struct {
 	Probe func(store.State) artifacts.HealthChecker
 	// State returns the state to judge the runner against.
 	State func() store.State
+	// Redactor removes secrets of the sampled state before any diagnostic
+	// is cached. Without one, the monitor still hides probe URL credentials.
+	Redactor func(store.State) func(string) string
 	// Interval is the time between checks; zero means 10 s.
 	Interval time.Duration
 	// ProbeEvery is the time between probes; zero means 60 s. A probe runs
@@ -240,6 +244,21 @@ func (m *Monitor) ProxyHealthy(_ context.Context) bool {
 func (m *Monitor) tick(ctx context.Context) {
 	now := m.now()
 	st := m.State()
+	// The next request may see a different state. Capture this sample's
+	// credentials lazily; a healthy check usually has no errors to scrub.
+	var red func(string) string
+	redact := func(msg string) string {
+		if msg == "" {
+			return ""
+		}
+		if m.Redactor == nil {
+			return scrub(msg, st.Health.ProbeURL)
+		}
+		if red == nil {
+			red = m.Redactor(st)
+		}
+		return red(msg)
+	}
 	members := membersOf(st)
 	snap := Snapshot{At: now.UTC()}
 
@@ -272,10 +291,11 @@ func (m *Monitor) tick(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	snap.Probe = m.probe(ctx, st, now, watch)
+	snap.Probe = m.probe(ctx, st, now, watch, redact)
 	if ctx.Err() != nil {
 		return
 	}
+	snap.Runner.Err = redact(snap.Runner.Err)
 	snap.Level = level(live, proxy, snap.Servers, snap.Probe)
 	m.mu.Lock()
 	m.snap = snap
@@ -301,6 +321,10 @@ func (m *Monitor) observe(ctx context.Context) ([]xray.OutboundStatus, error) {
 		return nil, ctx.Err() // shutdown, not a failed poll
 	}
 	if err == nil {
+		obs = slices.Clone(obs)
+		for i := range obs {
+			obs[i].LastError = probeFailure(obs[i].LastError)
+		}
 		m.pollFails, m.lastObs, m.haveObs = 0, obs, true
 		return obs, nil
 	}
@@ -308,7 +332,35 @@ func (m *Monitor) observe(ctx context.Context) ([]xray.OutboundStatus, error) {
 	if m.pollFails == 1 && m.haveObs {
 		return m.lastObs, nil
 	}
-	return nil, fmt.Errorf("health: observatory: %w", err)
+	var status *xray.StatusError
+	if errors.As(err, &status) {
+		// The code is public; the peer supplies the accompanying message.
+		return nil, fmt.Errorf("health: observatory: %w", &xray.StatusError{Code: status.Code})
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("health: observatory: %w", context.DeadlineExceeded)
+	}
+	return nil, errors.New("health: observatory: query failed")
+}
+
+// A retained probe result can quote credentials from an older outbound
+// that the service has never seen. Publish a cause, never the raw text.
+func probeFailure(detail string) string {
+	s := strings.ToLower(detail)
+	switch {
+	case s == "":
+		return ""
+	case strings.Contains(s, "timeout"), strings.Contains(s, "timed out"), strings.Contains(s, "deadline exceeded"):
+		return "probe timed out"
+	case strings.Contains(s, "refused"):
+		return "connection refused"
+	case strings.Contains(s, "handshake"), strings.Contains(s, "certificate"):
+		return "handshake failed"
+	case strings.Contains(s, "unreachable"), strings.Contains(s, "no route to host"), strings.Contains(s, "no such host"):
+		return "destination unreachable"
+	default:
+		return "probe failed"
+	}
 }
 
 // selected returns the ID of the member that proxy-open picks, or "". A
@@ -340,7 +392,7 @@ func (m *Monitor) selected(ctx context.Context, members []store.Server, r *Runne
 // While there is nothing to probe (watch is false: the runner is down or no
 // server is enabled) there is no result, and the probe runs at the first
 // check that has something to probe.
-func (m *Monitor) probe(ctx context.Context, st store.State, now time.Time, watch bool) ProbeHealth {
+func (m *Monitor) probe(ctx context.Context, st store.State, now time.Time, watch bool, redact func(string) string) ProbeHealth {
 	var check artifacts.HealthChecker
 	if watch && m.Probe != nil {
 		check = m.Probe(st)
@@ -360,7 +412,7 @@ func (m *Monitor) probe(ctx context.Context, st store.State, now time.Time, watc
 	}
 	res := ProbeHealth{Ran: true, OK: err == nil, At: now.UTC()}
 	if err != nil {
-		res.Err = scrub(fmt.Sprintf("health: probe: %v", err), st.Health.ProbeURL)
+		res.Err = redact(fmt.Sprintf("health: probe: %v", err))
 	}
 	m.probeRes, m.probeAt = res, now
 	return res

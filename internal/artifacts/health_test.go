@@ -3,6 +3,7 @@ package artifacts
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"reflect"
@@ -77,6 +78,57 @@ func TestSOCKSProbe(t *testing.T) {
 	}
 }
 
+// The probe's errors go into health snapshots and trial history. The
+// request URL, net/http's wrapped error and the peer's reason phrase can
+// each carry secrets. Only the outcome and status code belong there.
+func TestSOCKSProbeDiagnosticPrivacy(t *testing.T) {
+	const secret = "private-probe-fixture"
+	origin := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		c, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error("could not send test HTTP status")
+			return
+		}
+		defer c.Close()
+		fmt.Fprintf(buf, "HTTP/1.1 503 %s\r\nContent-Length: 0\r\n\r\n", secret)
+		buf.Flush()
+	})
+	_, port, _ := net.SplitHostPort(origin.Listener.Addr().String())
+	host := "probe.invalid:" + port
+	socks, _ := startSOCKS5(t, map[string]string{host: origin.Listener.Addr().String()})
+	target := "http://operator:" + secret + "@" + host + "/ping?token=" + secret
+	for _, tc := range []struct{ name, target, socks string }{
+		{"invalid target", target + "%zz", socks},
+		{"transport failure", target, "127.0.0.1:1"},
+		{"peer status", target, socks},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := (SOCKSProbe{Addr: tc.socks, URL: tc.target}).Check(t.Context())
+			if err == nil || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "operator") {
+				t.Fatal("the failed probe must return a credential-free diagnostic")
+			}
+			if tc.name == "peer status" && !strings.Contains(err.Error(), "HTTP 503") {
+				t.Error("the probe should retain the HTTP status code")
+			}
+		})
+	}
+	for _, exp := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(t.Context())
+		if exp {
+			deadline, end := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+			ctx = deadline
+			end()
+		} else {
+			cancel()
+		}
+		err := (SOCKSProbe{Addr: socks, URL: target}).Check(ctx)
+		cancel()
+		if !errors.Is(err, ctx.Err()) || strings.Contains(err.Error(), secret) {
+			t.Error("probe cancellation must retain context identity without its target URL")
+		}
+	}
+}
+
 func TestXrayAPIProbe(t *testing.T) {
 	f := newFakeRunner(t, t.TempDir(), &runnerapi.Selection{Core: "26.10.21", Config: "config/" + strings.Repeat("ab", 32) + ".json"})
 	var got [][]string
@@ -102,8 +154,8 @@ func TestXrayAPIProbe(t *testing.T) {
 		answer = runnerapi.XrayAPIResponse{ExitCode: 1, Stderr: "failed to dial: connection refused\n"}
 	})
 	err := (XrayAPIProbe{Runner: f.client()}).Check(bg)
-	if err == nil || !strings.Contains(err.Error(), "connection refused") || !strings.Contains(err.Error(), "exit status 1") {
-		t.Errorf("err = %v, want the exit code and stderr", err)
+	if err == nil || strings.Contains(err.Error(), "connection refused") || !strings.Contains(err.Error(), "exit status 1") {
+		t.Error("expected the exit status without process stderr")
 	}
 
 	f.script(func(f *fakeRunner) {
@@ -111,7 +163,7 @@ func TestXrayAPIProbe(t *testing.T) {
 			fakeError(w, http.StatusServiceUnavailable, "no_xray", "no xray is running")
 		}
 	})
-	if err := (XrayAPIProbe{Runner: f.client()}).Check(bg); err == nil || !strings.Contains(err.Error(), "no xray") {
+	if err := (XrayAPIProbe{Runner: f.client()}).Check(bg); err == nil || !strings.Contains(err.Error(), "HTTP 503") {
 		t.Errorf("err = %v, want the runner's refusal", err)
 	}
 
