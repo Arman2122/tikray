@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/sharelink"
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -34,10 +35,11 @@ type source struct {
 
 // warningNotes are the warning events for srv, saved from a link whose parser
 // gave warnings: one each.
-func warningNotes(srv store.Server, warnings []string) []note {
+func warningNotes(srv store.Server, warnings []string, redact func(string) string) []note {
+	label := eventLabel(redact, srv.ID, srv.Name)
 	notes := make([]note, len(warnings))
 	for i, w := range warnings {
-		notes[i] = note{KindWarning, fmt.Sprintf("server %s (%s): %s", srv.ID, srv.Name, w)}
+		notes[i] = note{KindWarning, fmt.Sprintf("server %s: %s", label, w)}
 	}
 	return notes
 }
@@ -90,80 +92,48 @@ func withoutTag(raw json.RawMessage) json.RawMessage {
 	return out
 }
 
-// testConfig is the config the runner tests a server with: the server's
-// outbound, tagged as it is in the real config, and the direct outbound.
-func testConfig(srv store.Server) ([]byte, error) {
-	var out map[string]json.RawMessage
-	if err := json.Unmarshal(srv.Outbound, &out); err != nil {
-		return nil, fmt.Errorf("service: the outbound of server %s: %w", srv.ID, err)
-	}
-	tag, err := json.Marshal(srv.Tag())
-	if err != nil {
-		return nil, err
-	}
-	out["tag"] = tag
-	return json.Marshal(map[string]any{"outbounds": []any{out, map[string]string{"protocol": "freedom", "tag": "direct"}}})
-}
-
-// verdict is how the runner's test of a server went. At most one field is
-// set: both empty means that xray took the server.
-type verdict struct {
-	// rejected is xray's rejection of the server, as text for the person who
-	// asked. It is the runner's words, which can repeat the outbound's
-	// credentials: it must be redacted (see refuse) before it is shown.
-	rejected string
-	// unavailable is why the runner could not test: no xray runs, or the
-	// runner can't be reached, or it failed.
-	unavailable error
-}
-
-// tryServer has the runner's xray test srv in a config of its own. The error
-// is for a test that did not take place for a reason that is not the runner's:
-// ctx ended (the caller gave up), or the outbound is not an object.
-func (s *Service) tryServer(ctx context.Context, srv store.Server) (verdict, error) {
-	cfg, err := testConfig(srv)
-	if err != nil {
-		return verdict{}, err
-	}
-	res, err := s.runner.Test(ctx, cfg)
-	switch {
-	case ctx.Err() != nil:
-		return verdict{}, ctx.Err()
-	case err != nil:
-		return verdict{unavailable: err}, nil
-	case !res.OK:
-		reason := "xray rejected the server"
-		if out := strings.TrimSpace(res.Output); out != "" {
-			reason += ": " + out
-		}
-		return verdict{rejected: reason}, nil
-	}
-	return verdict{}, nil
-}
-
-// testServer has the runner's xray test server id as it is in the state that
-// fn leads to, before that state is written, and returns a *Refused if xray
-// rejects it. When the runner can't test (no xray runs, or it can't be
-// reached, or it fails), the server is to be saved all the same, and the
-// result is the untested event to record then: the trial of the apply is the
-// net. A ctx that ends is no such case: the caller gave up.
-func (s *Service) testServer(ctx context.Context, rev uint64, id string, fn edit) ([]note, error) {
+// testServer previews a server edit before testing its outbound. The edit it
+// returns saves the verdict with that very outbound, in the same state write.
+func (s *Service) testServer(ctx context.Context, rev uint64, id string, fn edit) (edit, error) {
 	next, err := s.preview(rev, fn)
 	if err != nil {
 		return nil, err
 	}
 	srv := serverIn(next, id)
-	v, err := s.tryServer(ctx, srv)
-	switch {
-	case err != nil:
-		return nil, err
-	case v.unavailable != nil:
-		return []note{{KindUntested, fmt.Sprintf("server %s (%s) saved without xray's test of it: %v", srv.ID, srv.Name, s.runnerError(ctx, v.unavailable))}}, nil
-	case v.rejected != "":
-		// refuse redacts the text with the credentials of the new server.
-		return nil, refuse(next, v.rejected)
+	rejected, err := s.testOutbounds(ctx, map[string]json.RawMessage{id: srv.Outbound})
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
-	return nil, nil
+	if reason := rejected[id]; reason != "" {
+		return nil, refuse(next, reason)
+	}
+	var pending *note
+	if err != nil {
+		label := eventLabel(batchRedactor(next, nil), id, srv.Name)
+		why := RedactorFor(next)(s.runnerError(ctx, err).Error())
+		pending = &note{KindUntested, fmt.Sprintf("server %s saved without xray's test of it: %s", label, why)}
+	}
+	return func(st *store.State) ([]note, error) {
+		notes, err := fn(st)
+		if err != nil {
+			return nil, err
+		}
+		srv := &st.Servers[serverIndex(st.Servers, id)]
+		srv.Untested = pending != nil
+		if pending != nil {
+			notes = append(notes, *pending)
+		}
+		return notes, nil
+	}, nil
+}
+
+// A display name is user input and can itself contain an outbound credential.
+// Keep the public ID when it is unsafe to include the name in a test event.
+func eventLabel(redact func(string) string, id, name string) string {
+	if name = redact(auth.PublicName(name)); name != "" {
+		return id + " (" + name + ")"
+	}
+	return id
 }
 
 // NewServer is a server to add: from a share link, or from an xray outbound
@@ -197,13 +167,16 @@ func (s *Service) AddServer(ctx context.Context, rev uint64, n NewServer) (store
 	srv := store.Server{ID: store.NewID(), Name: cmp.Or(n.Name, src.name), Link: src.link, Outbound: src.outbound}
 	add := func(st *store.State) ([]note, error) {
 		st.Servers = append(st.Servers, srv)
-		return warningNotes(srv, src.warnings), nil
+		if len(src.warnings) == 0 {
+			return nil, nil
+		}
+		return warningNotes(srv, src.warnings, batchRedactor(*st, nil)), nil
 	}
-	untested, err := s.testServer(ctx, rev, srv.ID, add)
+	tested, err := s.testServer(ctx, rev, srv.ID, add)
 	if err != nil {
 		return store.Server{}, 0, err
 	}
-	st, next, err := s.change(rev, add, untested...)
+	st, next, err := s.change(rev, tested)
 	if err != nil {
 		return store.Server{}, 0, err
 	}
@@ -242,6 +215,7 @@ func (s *Service) UpdateServer(ctx context.Context, rev uint64, id string, p Ser
 			return nil, notFound(*st, "server", id)
 		}
 		srv := &st.Servers[i]
+		old := *srv
 		if p.Name != nil {
 			srv.Name = *p.Name
 		}
@@ -251,16 +225,21 @@ func (s *Service) UpdateServer(ctx context.Context, rev uint64, id string, p Ser
 		if replace {
 			srv.Link, srv.Outbound, srv.Invalid = src.link, src.outbound, ""
 		}
-		return warningNotes(*srv, src.warnings), nil
+		if len(src.warnings) == 0 {
+			return nil, nil
+		}
+		// A warning's display name can contain either outbound's credential.
+		both := *st
+		both.Servers = append(slices.Clone(st.Servers), old)
+		return warningNotes(*srv, src.warnings, batchRedactor(both, nil)), nil
 	}
-	var untested []note
 	if replace {
 		var err error
-		if untested, err = s.testServer(ctx, rev, id, patch); err != nil {
+		if patch, err = s.testServer(ctx, rev, id, patch); err != nil {
 			return store.Server{}, 0, err
 		}
 	}
-	st, next, err := s.change(rev, patch, untested...)
+	st, next, err := s.change(rev, patch)
 	if err != nil {
 		return store.Server{}, 0, err
 	}
@@ -278,8 +257,9 @@ func (s *Service) RemoveServer(ctx context.Context, rev uint64, id string) (uint
 			return nil, notFound(*st, "server", id)
 		}
 		srv := st.Servers[i]
+		notes := forget(st, srv, batchRedactor(*st, nil))
 		st.Servers = slices.Delete(st.Servers, i, i+1)
-		return forget(st, srv), nil
+		return notes, nil
 	})
 	return next, err
 }
@@ -288,18 +268,18 @@ func (s *Service) RemoveServer(ctx context.Context, rev uint64, id string) (uint
 // the custom rules that send traffic through it, and returns a cleanup event
 // for the pin, if it cleared one, and one for the rules, if it dropped any.
 // The state would be invalid otherwise.
-func forget(st *store.State, srv store.Server) []note {
+func forget(st *store.State, srv store.Server, redact func(string) string) []note {
 	var notes []note
 	if st.Routing.Pinned == srv.ID {
 		st.Routing.Pinned = ""
-		notes = append(notes, note{KindCleanup, fmt.Sprintf("server %s (%s) removed: the pin on it is cleared", srv.ID, srv.Name)})
+		notes = append(notes, note{KindCleanup, fmt.Sprintf("server %s removed: the pin on it is cleared", eventLabel(redact, srv.ID, srv.Name))})
 	}
 	before := len(st.Routing.Rules)
 	st.Routing.Rules = slices.DeleteFunc(st.Routing.Rules, func(r store.Rule) bool {
 		return r.Action == store.ActionServer && r.Server == srv.ID
 	})
 	if n := before - len(st.Routing.Rules); n > 0 {
-		notes = append(notes, note{KindCleanup, fmt.Sprintf("server %s (%s) removed: %d custom routing rule(s) that sent traffic through it are dropped", srv.ID, srv.Name, n)})
+		notes = append(notes, note{KindCleanup, fmt.Sprintf("server %s removed: %d custom routing rule(s) that sent traffic through it are dropped", eventLabel(redact, srv.ID, srv.Name), n)})
 	}
 	return notes
 }

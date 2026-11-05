@@ -17,8 +17,6 @@ const (
 	// maxRequestBody bounds what the server reads from a caller; the largest
 	// request is the argument list of xray api.
 	maxRequestBody = 64 << 10
-	// maxTestBody bounds the config of POST /v1/test instead.
-	maxTestBody = 1 << 20
 	// xrayAPITimeout bounds one xray api call.
 	xrayAPITimeout = 10 * time.Second
 )
@@ -40,7 +38,7 @@ type errResponse struct {
 // runnerapi. Every request needs "Authorization: Bearer <token>", and an empty
 // token admits nobody. xrayAPI runs "xray api <args>" with the running core;
 // the server calls it only while an xray runs, with a context that ends after
-// 10 s, and reports its result whatever the exit code.
+// 10 s, and reports its exit code and the supported diagnostic fields.
 func NewServer(r *Runner, token string, xrayAPI func(ctx context.Context, args []string) runnerapi.XrayAPIResponse) http.Handler {
 	s := &server{r: r, token: token, xrayAPI: xrayAPI}
 	mux := http.NewServeMux()
@@ -52,6 +50,7 @@ func NewServer(r *Runner, token string, xrayAPI func(ctx context.Context, args [
 	mux.HandleFunc("POST /v1/reload", act(r.Reload))
 	mux.HandleFunc("POST /v1/xray-api", s.xrayAPIRoute)
 	mux.HandleFunc("POST /v1/test", s.test)
+	mux.HandleFunc("POST /v1/adopt", s.adopt)
 	return s.authenticated(mux)
 }
 
@@ -66,7 +65,7 @@ func (s *server) authenticated(next http.Handler) http.Handler {
 		}
 		limit := int64(maxRequestBody)
 		if req.URL.Path == "/v1/test" {
-			limit = maxTestBody
+			limit = runnerapi.MaxTestBody
 		}
 		req.Body = http.MaxBytesReader(w, req.Body, limit)
 		next.ServeHTTP(w, req)
@@ -98,15 +97,29 @@ func act(fn func(context.Context) error) http.HandlerFunc {
 	}
 }
 
-func (s *server) xrayAPIRoute(w http.ResponseWriter, req *http.Request) {
-	var in runnerapi.XrayAPIRequest
-	if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+// decodeBody decodes the request's JSON body into v. When it cannot, it
+// answers 400 and returns false.
+func decodeBody(w http.ResponseWriter, req *http.Request, v any) bool {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
 			writeError(w, http.StatusBadRequest, "bad_request", "request body too large")
-			return
+			return false
 		}
-		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body: "+err.Error())
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return false
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return false
+	}
+	return true
+}
+
+func (s *server) xrayAPIRoute(w http.ResponseWriter, req *http.Request) {
+	var in runnerapi.XrayAPIRequest
+	if !decodeBody(w, req, &in) {
 		return
 	}
 	if len(in.Args) == 0 {
@@ -119,7 +132,21 @@ func (s *server) xrayAPIRoute(w http.ResponseWriter, req *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(req.Context(), xrayAPITimeout)
 	defer cancel()
-	reply(w, http.StatusOK, s.xrayAPI(ctx, in.Args))
+	reply(w, http.StatusOK, runnerapi.PublicXrayResult(in.Args[0], s.xrayAPI(ctx, in.Args)))
+}
+
+// adopt serves POST /v1/adopt: the body names the config to adopt, see
+// Runner.Adopt.
+func (s *server) adopt(w http.ResponseWriter, req *http.Request) {
+	var in runnerapi.AdoptRequest
+	if !decodeBody(w, req, &in) {
+		return
+	}
+	if err := s.r.Adopt(req.Context(), in.Config); err != nil {
+		writeFailure(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // test serves POST /v1/test: the body is the config to test, see
@@ -150,10 +177,14 @@ func (s *server) test(w http.ResponseWriter, req *http.Request) {
 // writeFailure maps an error from the runner to its status code.
 func writeFailure(w http.ResponseWriter, err error) {
 	var tf *runnerapi.TestFailedError
+	var te *testError
 	switch {
 	case errors.As(err, &tf):
 		writeError(w, http.StatusUnprocessableEntity, "test_failed", tf.Output)
-	case errors.Is(err, ErrInvalidCandidate):
+	case errors.As(err, &te):
+		// Fixed words the client passes on; the cause can name a path.
+		writeError(w, http.StatusInternalServerError, "internal", te.text)
+	case errors.Is(err, ErrInvalidCandidate), errors.Is(err, ErrInvalidConfig):
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 	case errors.Is(err, runnerapi.ErrBusy):
 		writeError(w, http.StatusConflict, "busy", "")

@@ -72,14 +72,17 @@ func (s *Service) loop(ctx context.Context) {
 }
 
 // catchUp kicks once at the start when the state was saved (its revision is
-// above 0) and is not the runner's config, or the runner can't tell.
+// above 0) and is not the runner's config, or the runner can't tell, or a hot
+// change did not finish (artifacts.HotPending). A matching config can also
+// have untested servers: the pass must check them before going idle.
 func (s *Service) catchUp(ctx context.Context) {
 	st, rev := s.store.State()
-	if rev == 0 {
+	pending := artifacts.HotPending(s.data)
+	if rev == 0 && !pending {
 		return
 	}
 	rs, err := s.runner.Status(ctx)
-	if err == nil && rs.Active != nil {
+	if err == nil && rs.Active != nil && !hasUntested(st) && !pending {
 		name, err := configName(s.updater(st, rev), rs.Active)
 		if err == nil && name == rs.Active.Config {
 			return
@@ -88,10 +91,11 @@ func (s *Service) catchUp(ctx context.Context) {
 	s.Kick()
 }
 
-// pass applies the newest state once, unless the runner runs it already, and
-// records how that went. It reports whether to try again later: when the
-// runner can't be reached, or another update or trial is in the way. retry is
-// how long the loop waits then, for the event to say.
+// pass applies the newest state once, unless the runner runs it already and no
+// hot change is unfinished (artifacts.HotPending), and records how that went.
+// It reports whether to try again later: when the runner can't be reached, or
+// another update or trial is in the way. retry is how long the loop waits
+// then, for the event to say.
 func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 	if s.acquire(ctx) != nil {
 		return false
@@ -121,6 +125,13 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 		s.record(KindApply, fmt.Sprintf("revision %d not applied: %v; trying again in %s", rev, s.runnerError(ctx, err), retry))
 		return true
 	}
+	defer func() {
+		// A rejection can leave the previous core running: it can tell us
+		// which untested server to disable before the next apply.
+		if s.retest(ctx) {
+			again = true
+		}
+	}()
 	u := s.updater(st, rev)
 	if rs.Active != nil {
 		name, err := configName(u, rs.Active)
@@ -129,13 +140,15 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 			// Apply would refuse with the same error.
 			s.noteRender(rev, err, true)
 			return false
-		case name == rs.Active.Config:
+		case name == rs.Active.Config && !artifacts.HotPending(s.data):
 			s.record(KindApply, fmt.Sprintf("revision %d is applied already", rev))
 			return false
 		}
 	}
 	res, err := u.Apply(ctx)
-	again = s.retryable(ctx, res, err) && ctx.Err() == nil
+	// A failed recovery can leave xray partially changed, even if the
+	// fallback reports a normally terminal config rejection.
+	again = ctx.Err() == nil && (artifacts.HotPending(s.data) || s.retryable(ctx, res, err))
 	if !again {
 		retry = 0
 	}
@@ -180,6 +193,11 @@ func (s *Service) ApplyNow(ctx context.Context) (artifacts.Result, error) {
 	}
 	defer s.pokeMonitor()
 	defer s.release()
+	defer func() {
+		if artifacts.HotPending(s.data) {
+			s.Kick() // the loop owns retry/backoff once this caller returns
+		}
+	}()
 	st, rev := s.store.State()
 	if _, err := s.runner.Status(ctx); err != nil {
 		err = s.runnerError(ctx, err)
@@ -227,6 +245,11 @@ func (s *Service) coreOp(ctx context.Context, what string, op func(*artifacts.Co
 		s.record(KindCore, fmt.Sprintf("%s failed: %v", what, err))
 		return artifacts.Result{}, err
 	}
+	defer func() {
+		if s.retest(ctx) {
+			s.Kick()
+		}
+	}()
 	res, err := op(s.updater(st, rev))
 	switch {
 	case err != nil:

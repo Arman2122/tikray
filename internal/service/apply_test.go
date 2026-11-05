@@ -25,7 +25,7 @@ var bg = context.Background()
 // vlessID is a server credential that the tests' xray output repeats.
 const vlessID = "b831381d-6324-4d53-ad4f-8cda48b30811"
 
-const vlessOutbound = `{"protocol":"vless","settings":{"vnext":[{"address":"203.0.113.10","port":443,"users":[{"encryption":"none","id":"` + vlessID + `"}]}]}}`
+const vlessOutbound = `{"protocol":"vless","settings":{"vnext":[{"address":"10.77.113.10","port":443,"users":[{"encryption":"none","id":"` + vlessID + `"}]}]}}`
 
 // hideID is v as %+v prints it, with vlessID in place of the id, so that a
 // failure message never shows it.
@@ -319,8 +319,12 @@ func TestRejectedIsNotRetried(t *testing.T) {
 				if strings.Contains(text, vlessID) {
 					t.Errorf("%s holds the server's id", what)
 				}
-				if !strings.Contains(text, redacted) {
-					t.Errorf("%s has no %s where the id was", what, redacted)
+				want := redacted
+				if tc.outcome == runnerapi.OutcomeRejected {
+					want = "invalid user"
+				}
+				if !strings.Contains(text, want) {
+					t.Errorf("%s omitted the expected public diagnostic", what)
 				}
 			}
 
@@ -375,6 +379,114 @@ func TestKickInSyncAppliesNothing(t *testing.T) {
 		t.Errorf("apply events %q, want one that says revision 1 is applied", got)
 	}
 	wantStatus(t, e.s, true, false)
+}
+
+// leaveHotPending puts in the env's data root the marker of a hot change that
+// tikray did not finish.
+func (e *env) leaveHotPending() {
+	e.t.Helper()
+	dir := filepath.Join(e.data, "run", "hot")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pending"), []byte(artifacts.ConfigName([]byte("{}\n"))+"\n"), 0o600); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// wantHealed fails unless one apply restarted xray from the active config, as
+// an apply does while the marker of an unfinished hot change is there, and
+// removed the marker.
+func wantHealed(t *testing.T, e *env) {
+	t.Helper()
+	wantTrials(t, e)
+	if calls := e.runner.gotCalls(); !slices.Contains(calls, "restart") {
+		t.Errorf("runner calls %v, want a restart", calls)
+	}
+	if artifacts.HotPending(e.data) {
+		t.Error("the marker is still there")
+	}
+	if got := e.eventsOf(KindApply); len(got) != 1 || !strings.Contains(got[0], "a hot change had not finished, so xray was restarted from the active config") {
+		t.Errorf("apply events %q, want one that says xray was restarted", got)
+	}
+}
+
+// A tikray that died during a hot change left xray with outbounds that the
+// active config lacks, which the marker says: the start applies even though
+// the runner's config is the state's render.
+func TestStartHotPendingApplies(t *testing.T) {
+	e := newEnv(t)
+	e.edit()
+	e.inSync()
+	e.leaveHotPending()
+	e.start()
+	e.advance(2 * time.Second)
+	wantHealed(t, e)
+}
+
+// So does a pass.
+func TestKickHotPendingApplies(t *testing.T) {
+	e := newEnv(t)
+	e.edit()
+	e.inSync()
+	e.start()
+	e.leaveHotPending()
+	e.kick()
+	e.advance(2 * time.Second)
+	wantHealed(t, e)
+}
+
+func TestPendingRecoveryOnUnsavedState(t *testing.T) {
+	e := newEnv(t)
+	e.inSync()
+	e.leaveHotPending()
+	if e.s.Status(bg).Applied {
+		t.Error("an unverified live process was reported as applied")
+	}
+	e.start()
+	e.advance(defaultDebounce)
+	wantHealed(t, e)
+}
+
+func TestPendingRecoveryRetriesAfterRejection(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicit=%t", explicit), func(t *testing.T) {
+			e := newEnv(t)
+			e.edit()
+			e.inSync()
+			e.start()
+			e.outOfSync()
+			e.leaveHotPending()
+			e.runner.setReject("bad candidate")
+			e.runner.mu.Lock()
+			e.runner.restartBroken = true
+			e.runner.mu.Unlock()
+			if explicit {
+				res, err := e.s.ApplyNow(bg)
+				if err == nil || res.Outcome != runnerapi.OutcomeRejected {
+					t.Fatal("explicit apply should report the rejected trial")
+				}
+				e.settle() // the loop armed the debounce for the recovery kick
+			} else {
+				e.kick()
+				e.advance(defaultDebounce)
+			}
+			if !artifacts.HotPending(e.data) {
+				t.Fatal("an unsuccessful recovery must retain the marker")
+			}
+			e.runner.mu.Lock()
+			e.runner.restartBroken = false
+			e.runner.mu.Unlock()
+			if explicit {
+				e.advance(defaultDebounce)
+			} else {
+				e.advance(defaultRetry)
+			}
+			if artifacts.HotPending(e.data) {
+				t.Error("service left the live process unreconciled after a temporary restart failure")
+			}
+		})
+	}
 }
 
 // A state that does not render is not applied. Status records the failure
@@ -781,9 +893,31 @@ func TestStatusHealth(t *testing.T) {
 	if h.Level == LevelUnknown || len(h.Servers) != 1 {
 		t.Fatalf("Health = %s, want the first check's", hideID(h))
 	}
-	for what, text := range map[string]string{"Runner.Err": h.Runner.Err, "Servers[0].LastError": h.Servers[0].LastError, "Probe.Err": h.Probe.Err} {
+	for what, text := range map[string]string{"Runner.Err": h.Runner.Err, "Probe.Err": h.Probe.Err} {
 		if strings.Contains(text, vlessID) || !strings.Contains(text, redacted) {
 			t.Errorf("Health.%s = %s, want the id redacted", what, hideID(text))
+		}
+	}
+	if h.Servers[0].LastError != "connection refused" {
+		t.Error("the observatory should report the refusal without xray's free-form text")
+	}
+	// The monitor sampled the old outbound. Its cached diagnostics must
+	// stay safe when the next state no longer contains that credential.
+	_, _, err := e.store.Update(store.AnyRevision, func(st *store.State) error {
+		st.Servers = nil
+		return nil
+	})
+	if err != nil {
+		t.Fatal("could not remove the fixture server")
+	}
+	for _, cached := range []health.Snapshot{m.Snapshot(), e.s.Status(bg).Health} {
+		if len(cached.Servers) != 1 {
+			t.Fatal("expected the previous sample")
+		}
+		for _, msg := range []string{cached.Runner.Err, cached.Probe.Err, cached.Servers[0].LastError} {
+			if strings.Contains(msg, vlessID) || !strings.Contains(msg, "refused") {
+				t.Error("cached diagnostic revealed the old credential or lost its cause")
+			}
 		}
 	}
 	e.shutdown()

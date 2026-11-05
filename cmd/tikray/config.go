@@ -60,6 +60,10 @@ type Config struct {
 	// (TIKRAY_PROBE_URL). It is the URL xray's observatory probes, so the two
 	// agree on whether the proxy works.
 	ProbeURL string
+	// Hot lets an apply that changes only the servers go live without
+	// restarting xray (artifacts.CoreUpdater.Hot). It is on unless TIKRAY_HOT
+	// is off, which makes every apply a trial.
+	Hot bool
 }
 
 const (
@@ -144,7 +148,7 @@ func loadConfig(getenv func(string) string, warn io.Writer) (Config, store.State
 // variable takes its default; the two lists are empty by default. The
 // addresses of the runner (TIKRAY_RUNNER_URL, TIKRAY_SOCKS, TIKRAY_XRAY_API)
 // and the probe URL (TIKRAY_PROBE_URL) stay empty when unset: their default is
-// the state's (withState).
+// the state's (withState). Hot changes are on unless TIKRAY_HOT is off.
 func configFromEnv(getenv func(string) string) (Config, error) {
 	str := func(key, def string) string {
 		if v := getenv(key); v != "" {
@@ -166,6 +170,7 @@ func configFromEnv(getenv func(string) string) (Config, error) {
 		Listen:          str("TIKRAY_LISTEN", defaultListen),
 		API:             getenv("TIKRAY_API"),
 		APIToken:        strings.TrimSpace(getenv("TIKRAY_API_TOKEN")),
+		Hot:             getenv("TIKRAY_HOT") != "off",
 	}
 	if cfg.API == "" {
 		cfg.API = apiForListen(cfg.Listen)

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "hot_add",
+    "pass": true,
+    "detail": "LAN whoami reached lab-a (203.0.113.10) after 0s; active config config/62f4fb4340c1b66825f99070cec91f34e79ba8aa8ad46379bed806d5c3f3dd46.json, the render for 26.10.31: true; observatory reported lab-b alive after 16s; revision 2 applied, hot=true (observed after 16s); applied without restarting xray: added 1, removed 0, changed 0; xray PID before 16, after 16; same process start: true; active config config/c45b8d8e57577d73275ca143f0e9e1a1e17d107b691d90318568658e7c9d9134.json, the render for 26.10.31: true; run/hot/pending absent",
+    "seconds": 16.6
+  },
+  {
+    "id": "hot_remove",
+    "pass": true,
+    "detail": "revision 3 applied, hot=true (observed after 3s); applied without restarting xray: added 0, removed 1, changed 0; xray PID before 16, after 16; same process start: true; active config config/f490053ac4fbe7f88cceb431d00fc6e89ae647038d30b72389d3163b666e7755.json, the render for 26.10.31: true; lso lists lab-b and no longer lists lab-a; LAN whoami reached lab-b (203.0.113.11) after 0s; run/hot/pending absent",
+    "seconds": 3.3
+  },
+  {
+    "id": "not_hot",
+    "pass": true,
+    "detail": "revision 4 applied, hot=false (observed after 13s); xray PID before 16, after 80; same process start: false; active config config/561ef7e2bc4ab78c3301f0f355129938f873c6ef7a4f1cb222536cb45ba47892.json, the render for 26.10.31: true; runner committed a trial for the full policy; LAN whoami reached lab-b (203.0.113.11) after 0s; run/hot/pending absent",
+    "seconds": 13.3
+  },
+  {
+    "id": "hot_survives_runner_restart",
+    "pass": true,
+    "detail": "revision 5 applied, hot=true (observed after 3s); applied without restarting xray: added 0, removed 0, changed 1; xray PID before 80, after 80; same process start: true; active config config/b2f0fab1a77152cb19b94207b5a3bc55d2057211c9785b55be57df9ddbfcda4d.json, the render for 26.10.31: true; runner restarted from active.json with core 26.10.31 and config config/b2f0fab1a77152cb19b94207b5a3bc55d2057211c9785b55be57df9ddbfcda4d.json; LAN whoami reached lab-b (203.0.113.11) after 2s; run/hot/pending absent",
+    "seconds": 12.6
+  }
+]

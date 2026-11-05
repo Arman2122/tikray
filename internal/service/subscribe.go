@@ -144,12 +144,13 @@ func (s *Service) RemoveSubscription(ctx context.Context, rev uint64, id string)
 		if i < 0 {
 			return nil, notFound(*st, "subscription", id)
 		}
+		redact := batchRedactor(*st, nil)
 		st.Subscriptions = slices.Delete(st.Subscriptions, i, i+1)
 		var notes []note
 		left := make([]store.Server, 0, len(st.Servers))
 		for _, srv := range st.Servers {
 			if srv.Subscription == id {
-				notes = append(notes, forget(st, srv)...)
+				notes = append(notes, forget(st, srv, redact)...)
 			} else {
 				left = append(left, srv)
 			}
@@ -188,11 +189,11 @@ type RefreshResult struct {
 // that holds no server (a block page, the notice of an expired account) fails
 // an attempt like an error status, so it is never merged. When both fail the
 // error wraps ErrFetchFailed, and the subscription's LastError says why; the
-// servers, and LastFetch, are as they were. Every server that is new or whose
-// outbound changed is tested by the runner's xray, one at a time, and one that
-// xray rejects is left out and listed in Skipped; when the runner can't test,
-// they are saved all the same, with one untested event. If xray rejects every
-// server the list holds, nothing is merged and the error is a *Refused.
+// servers, and LastFetch, are as they were. The runner tests new, changed
+// and previously untested outbounds in batches. A rejected entry goes to
+// Skipped. Entries the runner could not test are saved with Untested set
+// and one untested event. If xray rejects every server, nothing is merged
+// and the error is a *Refused.
 //
 // Then the list is merged as subscription.Merge does, which keeps the IDs. A
 // pin on a server that is no longer listed is cleared and the custom rules
@@ -223,7 +224,8 @@ func (s *Service) RefreshSubscription(ctx context.Context, id string) (RefreshRe
 	}
 	sub := st.Subscriptions[i]
 	if sub.Disabled {
-		return RefreshResult{}, &Refused{Reason: fmt.Sprintf("subscription %s (%s) is disabled", sub.ID, sub.Name)}
+		label := eventLabel(batchRedactor(st, nil), sub.ID, sub.Name)
+		return RefreshResult{}, &Refused{Reason: fmt.Sprintf("subscription %s is disabled", label)}
 	}
 
 	var parsed subscription.Result
@@ -246,7 +248,7 @@ func (s *Service) RefreshSubscription(ctx context.Context, id string) (RefreshRe
 		return RefreshResult{}, fmt.Errorf("%w: %s", ErrFetchFailed, reason)
 	}
 
-	got, untested, err := s.testEntries(ctx, st, id, parsed)
+	got, err := s.testEntries(ctx, st, id, parsed)
 	if err != nil {
 		return RefreshResult{}, err
 	}
@@ -258,15 +260,11 @@ func (s *Service) RefreshSubscription(ctx context.Context, id string) (RefreshRe
 	}
 	got.url, got.via = sub.URL, via
 
-	var extra []note
-	if untested > 0 {
-		extra = append(extra, note{KindUntested, fmt.Sprintf("subscription %s (%s): %d servers saved without a runner test", sub.ID, sub.Name, untested)})
-	}
 	var res RefreshResult
 	merge := s.mergeFetched(id, got, &res)
-	if _, _, err = s.change(rev, merge, extra...); errors.Is(err, store.ErrConflict) {
+	if _, _, err = s.change(rev, merge); errors.Is(err, store.ErrConflict) {
 		_, rev = s.store.State()
-		_, _, err = s.change(rev, merge, extra...)
+		_, _, err = s.change(rev, merge)
 	}
 	switch {
 	case err == nil:
@@ -274,7 +272,7 @@ func (s *Service) RefreshSubscription(ctx context.Context, id string) (RefreshRe
 		// The state changed twice meanwhile, or the subscription points
 		// elsewhere now: no failure of its list, and the next look tries
 		// again.
-		s.record(KindError, fmt.Sprintf("subscription %s (%s): the refresh was not stored: %v", sub.ID, sub.Name, err))
+		s.record(KindError, fmt.Sprintf("subscription %s: the refresh was not stored: %v", eventLabel(batchRedactor(st, nil), sub.ID, sub.Name), err))
 		return RefreshResult{}, err
 	case errors.Is(err, ErrNotFound):
 		return RefreshResult{}, err
@@ -316,66 +314,58 @@ type fetched struct {
 	url, via string
 	// entries are what xray did not reject, in the list's order.
 	entries []subscription.Entry
+	// passed uses the link: Parse returns each link once, while Merge allocates
+	// fresh IDs on each run for servers it adds.
+	passed map[string]bool
 	// skipped are the lines of the list that gave no server, and the entries
 	// that xray rejected.
 	skipped []subscription.Skipped
 }
 
-// testEntries has the runner's xray test each entry of parsed that is new
-// to subscription subID in st, or whose outbound differs from the server it
-// would merge into, and returns what is left to merge. An entry that xray
-// rejects goes to skipped, with xray's words redacted. When the runner can't
-// test, that entry and those after it are left untested and merged all the
-// same, and untested is how many: the trial of the apply is the net. An error
-// is for a ctx that ends.
-func (s *Service) testEntries(ctx context.Context, st store.State, subID string, parsed subscription.Result) (got fetched, untested int, err error) {
-	got.skipped = append([]subscription.Skipped{}, parsed.Skipped...)
-	// The merge is done on a copy to see which servers the entries would be:
-	// Merge alone knows which entry keeps which. Its new IDs are not kept.
+// testEntries tests new, changed and previously untested outbounds in batches.
+// On a runner failure, keep the results of finished tests and let the next
+// pass handle any remaining entries. A cancelled refresh saves nothing.
+func (s *Service) testEntries(ctx context.Context, st store.State, subID string, parsed subscription.Result) (fetched, error) {
+	got := fetched{skipped: append([]subscription.Skipped{}, parsed.Skipped...), passed: map[string]bool{}}
 	merged := subscription.Merge(st.Servers, subID, parsed.Entries)
+	would := slices.DeleteFunc(merged, func(srv store.Server) bool { return srv.Subscription != subID })
 	before := map[string]store.Server{}
 	for _, srv := range st.Servers {
 		if srv.Subscription == subID {
 			before[srv.ID] = srv
 		}
 	}
-	would := slices.DeleteFunc(slices.Clone(merged), func(srv store.Server) bool { return srv.Subscription != subID })
-
-	canTest := true
+	outbounds := map[string]json.RawMessage{}
+	for _, srv := range would {
+		prev, kept := before[srv.ID]
+		if !kept || prev.Untested || !sameJSON(prev.Outbound, srv.Outbound) {
+			outbounds[srv.ID] = srv.Outbound
+		}
+	}
+	results, _ := s.testOutboundSet(ctx, outbounds)
+	if err := ctx.Err(); err != nil {
+		return fetched{}, fmt.Errorf("service: testing the servers of subscription %s: %w", subID, err)
+	}
+	// The runner can quote a new entry's link as well as credentials in
+	// either the batch or the old state.
+	var redact func(string) string
 	for j, srv := range would {
 		entry := parsed.Entries[j]
-		if prev, ok := before[srv.ID]; ok && sameJSON(prev.Outbound, srv.Outbound) {
-			got.entries = append(got.entries, entry)
-			continue
-		}
-		var reason string
-		if canTest {
-			v, err := s.tryServer(ctx, srv)
-			switch {
-			case ctx.Err() != nil:
-				return fetched{}, 0, s.redactError(fmt.Errorf("service: testing the servers of subscription %s: %w", subID, ctx.Err()))
-			case err != nil:
-				reason = err.Error()
-			case v.unavailable != nil:
-				canTest = false
-			default:
-				reason = v.rejected
-			}
-		}
+		reason, tested := results[srv.ID]
 		if reason != "" {
-			// The runner's words repeat the entry's credentials; refuse
-			// redacts them with those of the state it would have joined.
-			with := st
-			with.Servers = append(slices.Clone(st.Servers), srv)
-			got.skipped = append(got.skipped, subscription.Skipped{Line: cutLine(entry.Link), Err: refuse(with, reason).Reason})
+			if redact == nil {
+				st.Servers = append(slices.Clone(st.Servers), would...)
+				redact = RedactorFor(st)
+			}
+			got.skipped = append(got.skipped, subscription.Skipped{Line: cutLine(entry.Link), Err: redact(reason)})
 			continue
 		}
-		if !canTest {
-			untested++
+		if tested {
+			got.passed[entry.Link] = true
 		}
 		got.entries = append(got.entries, entry)
 	}
-	return got, untested, nil
+	return got, nil
 }
 
 // mergeFetched is the edit that merges got into subscription id of whatever
@@ -401,8 +391,14 @@ func (s *Service) mergeFetched(id string, got fetched, res *RefreshResult) edit 
 			}
 		}
 		merged := subscription.Merge(st.Servers, id, got.entries)
+		// Warnings and cleanups can name a server whose old credential was
+		// just removed. Both snapshots are available here, before the write.
+		withBoth := *st
+		withBoth.Servers = slices.Concat(st.Servers, merged)
+		redact := batchRedactor(withBoth, nil)
 		*res = RefreshResult{Skipped: got.skipped, Via: got.via}
 		var warnings []note
+		var untested int
 		stays := map[string]bool{}
 		j := 0 // the entry of the next server of the subscription
 		for k := range merged {
@@ -421,14 +417,22 @@ func (s *Service) mergeFetched(id string, got fetched, res *RefreshResult) edit 
 			default:
 				res.Kept++
 			}
-			if changed {
-				warnings = append(warnings, warningNotes(*srv, got.entries[j].Server.Warnings)...)
+			if w := got.entries[j].Server.Warnings; changed && len(w) != 0 {
+				warnings = append(warnings, warningNotes(*srv, w, redact)...)
 			}
-			// Merge copies Invalid from the old server. A new outbound that
-			// passes the checks (and the runner's test, which testEntries
-			// did) clears it, as UpdateServer's does, and Disabled stays as
-			// it is: enabling the server is for its owner. An outbound
-			// that is the same keeps its reason.
+			// On a retry the matching server can have changed. Keep its
+			// current marker unless this exact entry passed, or the merge
+			// now introduces an outbound for which we have no test.
+			if got.passed[srv.Link] {
+				srv.Untested = false
+			} else if changed {
+				srv.Untested = true
+			}
+			if srv.Untested {
+				untested++
+			}
+			// A changed outbound supersedes the old invalid reason if it
+			// passes local checks. Disabled stays as its owner set it.
 			if ok && changed && srv.Invalid != "" && passesChecks(*srv) {
 				srv.Invalid = ""
 			}
@@ -439,14 +443,19 @@ func (s *Service) mergeFetched(id string, got fetched, res *RefreshResult) edit 
 		for _, srv := range olds {
 			if !stays[srv.ID] {
 				res.Removed++
-				cleanup = append(cleanup, forget(st, srv)...)
+				cleanup = append(cleanup, forget(st, srv, redact)...)
 			}
 		}
 		sub.LastFetch, sub.LastError = s.now().UTC(), ""
 
-		notes := []note{{KindRefresh, fmt.Sprintf("subscription %s (%s): added %d, updated %d, removed %d, kept %d, skipped %d via %s",
-			sub.ID, sub.Name, res.Added, res.Updated, res.Removed, res.Kept, len(res.Skipped), res.Via)}}
-		return append(append(notes, cleanup...), warnings...), nil
+		label := eventLabel(redact, sub.ID, sub.Name)
+		notes := []note{{KindRefresh, fmt.Sprintf("subscription %s: added %d, updated %d, removed %d, kept %d, skipped %d via %s",
+			label, res.Added, res.Updated, res.Removed, res.Kept, len(res.Skipped), res.Via)}}
+		notes = append(append(notes, cleanup...), warnings...)
+		if untested > 0 {
+			notes = append(notes, note{KindUntested, fmt.Sprintf("subscription %s: %d servers saved without a runner test", label, untested)})
+		}
+		return notes, nil
 	}
 }
 
@@ -463,7 +472,7 @@ var errMoved = errors.New("service: the subscription is gone or points elsewhere
 // removed, or pointed at another URL, while that was fetched has nothing to
 // answer for it: nothing is written, held or recorded.
 func (s *Service) refreshFailed(sub store.Subscription, reason string) {
-	var name string
+	label := sub.ID
 	var wait time.Duration
 	_, _, err := s.store.Update(store.AnyRevision, func(st *store.State) error {
 		i := subscriptionIndex(st.Subscriptions, sub.ID)
@@ -472,7 +481,7 @@ func (s *Service) refreshFailed(sub store.Subscription, reason string) {
 		}
 		cur := &st.Subscriptions[i]
 		cur.LastError = reason
-		name, wait = cur.Name, min(time.Hour, time.Duration(cur.Interval))
+		label, wait = eventLabel(batchRedactor(*st, nil), sub.ID, cur.Name), min(time.Hour, time.Duration(cur.Interval))
 		return nil
 	})
 	if errors.Is(err, errMoved) {
@@ -484,7 +493,7 @@ func (s *Service) refreshFailed(sub store.Subscription, reason string) {
 	if err != nil {
 		reason += fmt.Sprintf(" (and the error could not be kept: %v)", err)
 	}
-	s.record(KindError, fmt.Sprintf("subscription %s (%s): %s", sub.ID, name, reason))
+	s.record(KindError, fmt.Sprintf("subscription %s: %s", label, reason))
 }
 
 // passesChecks reports whether srv, with its reason for being invalid

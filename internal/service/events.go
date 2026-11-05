@@ -25,6 +25,10 @@ const (
 	// KindError: a failure outside any of the above, such as a state that
 	// does not render.
 	KindError = "error"
+	// KindAuth: who signed in or failed to, a password changed, a token made
+	// or revoked, the admin reset. The API records them (Record); none holds
+	// a secret.
+	KindAuth = "auth"
 )
 
 // maxEvents is how many events the service keeps.
@@ -51,6 +55,11 @@ func (s *Service) Events(after uint64) []Event {
 	}
 	return append([]Event{}, s.events[i:]...)
 }
+
+// Record keeps an event of kind with msg, as record does (redacted, and
+// written to the log), for the API's: sign-ins, password changes, tokens. The
+// caller's text holds no secret of its own; the redactor is for the state's.
+func (s *Service) Record(kind, msg string) { s.record(kind, msg) }
 
 // record keeps an event of kind with msg, redacted, and writes it to the log.
 // It is the one way an event is made. It reads the state to redact, so it

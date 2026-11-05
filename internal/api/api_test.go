@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/health"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/service"
@@ -75,6 +76,9 @@ type fakeBackend struct {
 	events []service.Event
 	core   service.CoreInfo
 
+	// logs are the events the handlers recorded through Record.
+	logs []loggedEvent
+
 	// onStatus, if set, runs inside Status.
 	onStatus func()
 	// gate, if set, runs inside ApplyNow, CoreUpdate, CoreRollback,
@@ -131,6 +135,23 @@ func (f *fakeBackend) change(method string, rev uint64, args ...any) (uint64, er
 		return 0, store.ErrConflict
 	}
 	return f.newRev, nil
+}
+
+// loggedEvent is an event that a handler recorded.
+type loggedEvent struct{ Kind, Message string }
+
+// Record keeps the event for the tests to read (loggedEvents). Like State
+// and Redactor it is no call to check.
+func (f *fakeBackend) Record(kind, msg string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logs = append(f.logs, loggedEvent{kind, msg})
+}
+
+func (f *fakeBackend) loggedEvents() []loggedEvent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]loggedEvent(nil), f.logs...)
 }
 
 func (f *fakeBackend) State() (store.State, uint64) { return f.state.Clone(), f.rev }
@@ -287,9 +308,25 @@ func authed(extra ...string) http.Header {
 
 func serve(t *testing.T, f *fakeBackend) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(NewHandler(f, testToken))
+	srv := httptest.NewServer(newHandler(t, f))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// newHandler is the API over b with the root token testToken, a store in a
+// directory of its own (no admin yet) and a limiter.
+func newHandler(t testing.TB, b Backend) http.Handler {
+	t.Helper()
+	return newHandlerWithRoot(t, b, testToken)
+}
+
+func newHandlerWithRoot(t testing.TB, b Backend, root string) http.Handler {
+	t.Helper()
+	a, err := auth.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewHandler(b, root, a, auth.NewLimiter(nil))
 }
 
 func mustJSON(t testing.TB, v any) string {
@@ -313,7 +350,7 @@ func sameJSON(t *testing.T, got []byte, want string) {
 		t.Fatalf("bad want: %v", err)
 	}
 	if !reflect.DeepEqual(g, w) {
-		t.Errorf("body = %s\nwant   %s", got, want)
+		t.Error("JSON response differs from the expected public fields")
 	}
 }
 
@@ -345,6 +382,10 @@ var anyRev = store.AnyRevision
 
 func routes(t testing.TB) []routeCase {
 	st := testState()
+	public := st.Clone()
+	public.Servers[0].Link = ""
+	public.Servers[0].Outbound = json.RawMessage(`{"protocol":"vless","settings":{"address":"203.0.113.10","port":443}}`)
+	public.Subscriptions[0].URL = ""
 	dev := func(addr string, name string, mode store.Mode) store.Device {
 		return store.Device{Address: netip.MustParsePrefix(addr), Name: name, Policy: store.Policy{Mode: mode}}
 	}
@@ -352,7 +393,7 @@ func routes(t testing.TB) []routeCase {
 		{name: "status", method: "GET", path: "/v1/status", status: 200, etag: curRev,
 			calls:    []call{{Method: "Status"}},
 			response: `{"revision":7,"applied":true,"pending":false,"core":"26.10.21","core_tested":false,"health":` + mustJSON(t, health.Snapshot{Level: "ok"}) + `,"degraded":[]}`},
-		{name: "state", method: "GET", path: "/v1/state", status: 200, etag: curRev, response: mustJSON(t, st)},
+		{name: "state", method: "GET", path: "/v1/state", status: 200, etag: curRev, response: mustJSON(t, public)},
 		{name: "events", method: "GET", path: "/v1/events?after=5", status: 200, etag: curRev,
 			calls:    []call{{Method: "Events", Args: []any{uint64(5)}}},
 			response: `[{"seq":6,"at":"2026-10-25T12:00:00Z","kind":"apply","message":"revision 7 applied"}]`},
@@ -361,10 +402,10 @@ func routes(t testing.TB) []routeCase {
 		{name: "events, none new", method: "GET", path: "/v1/events?after=6", status: 200, etag: curRev,
 			calls: []call{{Method: "Events", Args: []any{uint64(6)}}}, response: `[]`},
 
-		{name: "list servers", method: "GET", path: "/v1/servers", status: 200, etag: curRev, response: mustJSON(t, st.Servers)},
+		{name: "list servers", method: "GET", path: "/v1/servers", status: 200, etag: curRev, response: mustJSON(t, public.Servers)},
 		{name: "add a server from a link", method: "POST", path: "/v1/servers", body: `{"link":"vless://x","name":"lab"}`, status: 201, etag: nextRev,
 			calls:    []call{{Method: "AddServer", Rev: anyRev, Args: []any{service.NewServer{Link: "vless://x", Name: "lab"}}}},
-			response: `{"id":"aaaaaaaa","name":"lab","link":"vless://x","outbound":{"protocol":"vless"}}`},
+			response: `{"id":"aaaaaaaa","name":"lab","outbound":{"protocol":"vless"}}`},
 		{name: "add a server from an outbound", method: "POST", path: "/v1/servers", body: `{"name":"raw","outbound":{"protocol":"vless"}}`, status: 201, etag: nextRev,
 			calls: []call{{Method: "AddServer", Rev: anyRev, Args: []any{service.NewServer{Name: "raw", Outbound: json.RawMessage(`{"protocol":"vless"}`)}}}}},
 		{name: "add a server, null outbound", method: "POST", path: "/v1/servers", body: `{"link":"vless://x","outbound":null}`, status: 201, etag: nextRev,
@@ -377,10 +418,10 @@ func routes(t testing.TB) []routeCase {
 		{name: "delete a server", method: "DELETE", path: "/v1/servers/5ab3c4d5", status: 204, etag: nextRev,
 			calls: []call{{Method: "RemoveServer", Rev: anyRev, Args: []any{"5ab3c4d5"}}}},
 
-		{name: "list subscriptions", method: "GET", path: "/v1/subscriptions", status: 200, etag: curRev, response: mustJSON(t, st.Subscriptions)},
+		{name: "list subscriptions", method: "GET", path: "/v1/subscriptions", status: 200, etag: curRev, response: mustJSON(t, public.Subscriptions)},
 		{name: "add a subscription", method: "POST", path: "/v1/subscriptions", body: `{"name":"lab","url":"https://sub.example/x","interval":"6h"}`, status: 201, etag: nextRev,
 			calls:    []call{{Method: "AddSubscription", Rev: anyRev, Args: []any{service.NewSubscription{Name: "lab", URL: "https://sub.example/x", Interval: store.Duration(6 * time.Hour)}}}},
-			response: `{"id":"bbbbbbbb","name":"lab","url":"https://sub.example/x","interval":"6h0m0s"}`},
+			response: `{"id":"bbbbbbbb","name":"lab","url":"","interval":"6h0m0s"}`},
 		{name: "patch a subscription", method: "PATCH", path: "/v1/subscriptions/9be8f7a6", body: `{"interval":"12h","disabled":false,"url":"https://sub.example/y","name":"n"}`, status: 200, etag: nextRev,
 			calls: []call{{Method: "UpdateSubscription", Rev: anyRev, Args: []any{"9be8f7a6", service.SubscriptionPatch{
 				Name: ptr("n"), URL: ptr("https://sub.example/y"), Disabled: ptr(false), Interval: ptr(store.Duration(12 * time.Hour))}}}}},
@@ -389,7 +430,7 @@ func routes(t testing.TB) []routeCase {
 		{name: "refresh a subscription", method: "POST", path: "/v1/subscriptions/9be8f7a6/refresh", status: 200, etag: curRev,
 			calls: []call{{Method: "RefreshSubscription", Args: []any{"9be8f7a6"}}},
 			response: `{"added":1,"updated":2,"removed":3,"kept":4,"via":"direct","skipped":[` +
-				`{"line":"trojan://…#lab-b","reason":"bad port"},{"line":"…","reason":"scheme is not supported"}]}`},
+				`{"line":"trojan://…","reason":"bad port"},{"line":"…","reason":"scheme is not supported"}]}`},
 
 		{name: "list devices", method: "GET", path: "/v1/devices", status: 200, etag: curRev, response: mustJSON(t, st.Devices)},
 		{name: "set a device, escaped CIDR", method: "PUT", path: "/v1/devices/192.168.88.10%2F32", body: `{"name":"tv","policy":{"mode":"smart"}}`, status: 200, etag: nextRev,
@@ -500,7 +541,7 @@ func TestTokenRequired(t *testing.T) {
 	})
 
 	t.Run("an empty token admits nobody", func(t *testing.T) {
-		srv := httptest.NewServer(NewHandler(newFake(), ""))
+		srv := httptest.NewServer(newHandlerWithRoot(t, newFake(), ""))
 		defer srv.Close()
 		for _, h := range []http.Header{{}, {"Authorization": {"Bearer "}}, {"Authorization": {"Bearer"}}} {
 			if r := request(t, srv, "GET", "/v1/status", "", h); r.status != 401 {
@@ -517,20 +558,20 @@ func TestRoutes(t *testing.T) {
 			srv := serve(t, f)
 			r := request(t, srv, rt.method, rt.path, rt.body, authed())
 			if r.status != rt.status {
-				t.Fatalf("status = %d, want %d (body %s)", r.status, rt.status, r.body)
+				t.Fatalf("status = %d, want %d", r.status, rt.status)
 			}
 			if got := r.header.Get("ETag"); got != rt.etag {
 				t.Errorf("ETag = %q, want %q", got, rt.etag)
 			}
 			if got := f.recorded(); !reflect.DeepEqual(got, rt.calls) && !(len(got) == 0 && len(rt.calls) == 0) {
-				t.Errorf("backend calls = %+v\nwant           %+v", got, rt.calls)
+				t.Errorf("backend calls differ from expected: got %d calls, want %d", len(got), len(rt.calls))
 			}
 			if r.header.Get("Cache-Control") != "no-store" {
 				t.Errorf("Cache-Control = %q, want no-store: bodies hold credentials", r.header.Get("Cache-Control"))
 			}
 			if rt.status == 204 {
 				if len(r.body) != 0 {
-					t.Errorf("a 204 has a body: %s", r.body)
+					t.Errorf("a 204 has a body of %d bytes", len(r.body))
 				}
 				return
 			}
@@ -540,7 +581,7 @@ func TestRoutes(t *testing.T) {
 			if rt.response != "" {
 				sameJSON(t, r.body, rt.response)
 			} else if !json.Valid(r.body) {
-				t.Errorf("the body is not JSON: %s", r.body)
+				t.Error("the body is not JSON")
 			}
 			if rt.status == 201 {
 				// The collection, where a GET finds what was made: no route
@@ -572,7 +613,7 @@ func TestListsAreNeverNull(t *testing.T) {
 	sameJSON(t, r.body, `{"active":"","slots":[],"history":[]}`)
 
 	// A refresh that skipped nothing says so with a list, too.
-	srv2 := httptest.NewServer(NewHandler(&withSkips{newFake(), nil}, testToken))
+	srv2 := httptest.NewServer(newHandler(t, &withSkips{newFake(), nil}))
 	defer srv2.Close()
 	r = request(t, srv2, "POST", "/v1/subscriptions/9be8f7a6/refresh", "", authed())
 	sameJSON(t, r.body, `{"added":0,"updated":0,"removed":0,"kept":0,"skipped":[],"via":"direct"}`)
@@ -594,14 +635,14 @@ func (w *withSkips) RefreshSubscription(context.Context, string) (service.Refres
 func TestSkippedLinesCarryNoCredential(t *testing.T) {
 	const password = "s3cretPassw0rd"
 	for _, c := range []struct{ name, line, want string }{
-		{"a trojan link", "trojan://" + password + "@host.example:443?sni=x#Frankfurt%202", "trojan://…#Frankfurt 2"},
+		{"a trojan link", "trojan://" + password + "@host.example:443?sni=x#Frankfurt%202", "trojan://…"},
 		{"a link without a name", "ss://YWVzLTI1Ni1nY206" + password + "@1.2.3.4:8388", "ss://…"},
 		{"a base64 link", "vmess://eyJhZGQiOiJob3N0In0=", "vmess://…"},
 		{"a credential in the query", "trojan://p@h?password=" + password, "trojan://…"},
-		{"the name starts at the first #", "trojan://" + password + "@h#a#b", "trojan://…#a#b"},
-		{"a name that does not unescape", "trojan://" + password + "@h#100%zz", "trojan://…#100%zz"},
-		{"a name with an escape character", "vless://" + password + "@h#ev\x1b[31mil", "vless://…#ev[31mil"},
-		{"a name with a bidi override", "vless://" + password + "@h#ab\u202ecd", "vless://…#abcd"},
+		{"the name starts at the first #", "trojan://" + password + "@h#a#b", "trojan://…"},
+		{"a name that does not unescape", "trojan://" + password + "@h#100%zz", "trojan://…"},
+		{"a name with an escape character", "vless://" + password + "@h#ev\x1b[31mil", "vless://…"},
+		{"a name with a bidi override", "vless://" + password + "@h#ab\u202ecd", "vless://…"},
 		{"text", "hello", "…"},
 		{"a page", "<html>blocked</html>", "…"},
 		{"text that holds ://", "not a url ://" + password, "…"},
@@ -612,7 +653,7 @@ func TestSkippedLinesCarryNoCredential(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			skipped := []subscription.Skipped{{Line: c.line, Err: "bad port"}}
-			srv := httptest.NewServer(NewHandler(&withSkips{newFake(), skipped}, testToken))
+			srv := httptest.NewServer(newHandler(t, &withSkips{newFake(), skipped}))
 			defer srv.Close()
 			r := request(t, srv, "POST", "/v1/subscriptions/9be8f7a6/refresh", "", authed())
 			if r.status != 200 {
@@ -625,17 +666,17 @@ func TestSkippedLinesCarryNoCredential(t *testing.T) {
 				Skipped []struct{ Line, Reason string }
 			}
 			if err := json.Unmarshal(r.body, &got); err != nil || len(got.Skipped) != 1 {
-				t.Fatalf("body = %s (%v)", r.body, err)
+				t.Fatal("malformed skipped-line response")
 			}
 			if got.Skipped[0].Line != c.want {
-				t.Errorf("line = %q, want %q", got.Skipped[0].Line, c.want)
+				t.Errorf("skipped-line label differs from %q", c.want)
 			}
 		})
 	}
 
 	t.Run("the reason is redacted", func(t *testing.T) {
 		skipped := []subscription.Skipped{{Line: "trojan://x@h", Err: "xray rejects id " + secretID}}
-		srv := httptest.NewServer(NewHandler(&withSkips{newFake(), skipped}, testToken))
+		srv := httptest.NewServer(newHandler(t, &withSkips{newFake(), skipped}))
 		defer srv.Close()
 		r := request(t, srv, "POST", "/v1/subscriptions/9be8f7a6/refresh", "", authed())
 		if strings.Contains(string(r.body), secretID) || !strings.Contains(string(r.body), "‹redacted›") {
@@ -1059,7 +1100,7 @@ func TestErrorsHaveNoSecrets(t *testing.T) {
 				}
 			}
 			if !c.fixedMsg && !strings.Contains(detail, "‹redacted›") {
-				t.Errorf("the detail was not redacted: %q", detail)
+				t.Error("the detail was not redacted")
 			}
 		})
 	}

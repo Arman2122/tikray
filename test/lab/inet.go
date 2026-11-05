@@ -39,11 +39,11 @@ type InetOptions struct {
 }
 
 // vlessServers are the lab's two VLESS servers. Each listens on its own address
-// in tklab-inet and sends from it, so a target's idea of the caller tells which
-// server a request went through. name is what Inet.SetServer takes.
+// in tklab-inet. Private listener addresses permit plaintext VLESS on newer
+// cores; the sendThrough addresses identify the two servers at whoami.
 var vlessServers = []vlessServer{
-	{"a", "203.0.113.10:443", "xray-server.json"},
-	{"b", "203.0.113.11:443", "xray-server-b.json"},
+	{"a", "10.77.113.10:443", "xray-server.json"},
+	{"b", "10.77.113.11:443", "xray-server-b.json"},
 }
 
 type vlessServer struct{ name, addr, config string }
@@ -172,8 +172,8 @@ func (i *Inet) Stop() {
 	os.RemoveAll(i.dir)
 }
 
-// SetServer takes the VLESS server name ("a", 203.0.113.10, or "b",
-// 203.0.113.11) down or brings it up. Down kills and reaps its process and
+// SetServer takes the named VLESS server down or brings it up.
+// Down kills and reaps its process and
 // returns once the port refuses connections. Up starts it again, with the same
 // xray binary and config, and returns once the port accepts them. Either is
 // harmless when the server is already in that state.

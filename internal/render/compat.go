@@ -37,7 +37,7 @@ func Check(v xrayver.Version) error {
 
 // Tested is the oldest and the newest xray-core release the rendered config
 // is tested against (spec §4.9, §8.2).
-var Tested = [2]xrayver.Version{{Major: 26, Minor: 1, Patch: 18}, {Major: 26, Minor: 10, Patch: 21}}
+var Tested = [2]xrayver.Version{{Major: 26, Minor: 1, Patch: 18}, {Major: 26, Minor: 10, Patch: 31}}
 
 // IsTested reports whether v lies within Tested, both ends included. The UI
 // labels any other release "untested"; Check still decides whether it can

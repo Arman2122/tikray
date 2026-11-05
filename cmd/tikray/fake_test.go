@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"sync"
@@ -16,13 +17,14 @@ import (
 
 	"github.com/Arman2122/tikray/internal/api"
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/health"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 )
 
 // The secrets of the fake daemon's state and the token it is called with:
-// none of them may be in what a command prints without --json.
+// none of them may be in what a command prints.
 const (
 	apiToken   = "f00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeedf00dfeed"
 	secretID   = "5fdc6e8a-4a2b-4a3c-9d8e-1f2a3b4c5d6e"
@@ -157,6 +159,9 @@ func (f *fakeBackend) enter(ctx context.Context) {
 
 func (f *fakeBackend) State() (store.State, uint64)  { return f.state.Clone(), f.rev }
 func (f *fakeBackend) Redactor() func(string) string { return service.RedactorFor(f.state) }
+
+// Record drops the event: the CLI tests do not read what the API logs.
+func (f *fakeBackend) Record(string, string) {}
 
 func (f *fakeBackend) Status(context.Context) service.Status {
 	f.rec("Status")
@@ -294,6 +299,18 @@ func (f *fakeBackend) SetHealth(_ context.Context, rev uint64, h store.Health) (
 // discardLog is the error log of a test server that is refused on purpose.
 func discardLog() *log.Logger { return log.New(io.Discard, "", 0) }
 
+// apiHandler is the API over b with the root token, an auth store in a
+// directory of its own (no admin: these tests call with the root token) and a
+// limiter.
+func apiHandler(t testing.TB, b api.Backend, token string) http.Handler {
+	t.Helper()
+	a, err := auth.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api.NewHandler(b, token, a, auth.NewLimiter(nil))
+}
+
 // daemon is the fake backend behind the real API handler, on a TLS test
 // server.
 type daemon struct {
@@ -304,7 +321,7 @@ type daemon struct {
 // startDaemon serves fake over HTTPS with the test server's own certificate.
 func startDaemon(t *testing.T, fake *fakeBackend) *daemon {
 	t.Helper()
-	srv := httptest.NewUnstartedServer(api.NewHandler(fake, apiToken))
+	srv := httptest.NewUnstartedServer(apiHandler(t, fake, apiToken))
 	// Refusing a certificate on purpose makes the server log the handshake.
 	srv.Config.ErrorLog = discardLog()
 	srv.StartTLS()

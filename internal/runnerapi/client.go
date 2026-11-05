@@ -2,11 +2,13 @@ package runnerapi
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -55,6 +57,12 @@ type errBody struct {
 func (c *Client) Status(ctx context.Context) (Status, error) {
 	var st Status
 	err := c.do(ctx, http.MethodGet, "/v1/status", nil, &st)
+	if err != nil {
+		return Status{}, err
+	}
+	if st.LastTrial != nil && st.LastTrial.Outcome == OutcomeRejected {
+		st.LastTrial.Detail = publicRefusal(st.LastTrial.Detail)
+	}
 	return st, err
 }
 
@@ -87,6 +95,16 @@ func (c *Client) Reload(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/v1/reload", nil, nil)
 }
 
+// Adopt makes config, a file under the runner's run directory named like
+// Selection.Config, the active one without restarting xray: the running xray
+// must already run it, as after a change made through XrayAPI. The core and
+// geo stay those of the running xray. It returns ErrBusy during a trial or a
+// restart and ErrNoCore when no xray runs; a name that is invalid, or a file
+// that does not exist, is a 400 error.
+func (c *Client) Adopt(ctx context.Context, config string) error {
+	return c.do(ctx, http.MethodPost, "/v1/adopt", AdoptRequest{Config: config}, nil)
+}
+
 // XrayAPI runs "xray api <args>" in the runner and returns its output.
 func (c *Client) XrayAPI(ctx context.Context, args ...string) (XrayAPIResponse, error) {
 	if args == nil {
@@ -94,6 +112,12 @@ func (c *Client) XrayAPI(ctx context.Context, args ...string) (XrayAPIResponse, 
 	}
 	var resp XrayAPIResponse
 	err := c.do(ctx, http.MethodPost, "/v1/xray-api", XrayAPIRequest{Args: args}, &resp)
+	if err != nil {
+		return XrayAPIResponse{}, err
+	}
+	if len(args) > 0 {
+		resp = PublicXrayResult(args[0], resp)
+	}
 	return resp, err
 }
 
@@ -105,7 +129,96 @@ func (c *Client) XrayAPI(ctx context.Context, args ...string) (XrayAPIResponse, 
 func (c *Client) Test(ctx context.Context, config []byte) (TestResult, error) {
 	var res TestResult
 	err := c.send(ctx, testHTTP, http.MethodPost, "/v1/test", config, &res)
-	return res, err
+	if err != nil {
+		return TestResult{}, err
+	}
+	if !res.OK && legacyTestTimeout(res.Output) {
+		return TestResult{}, fmt.Errorf("runnerapi: xray run -test: %w", context.DeadlineExceeded)
+	}
+	if res.OK {
+		return ConfigVerdict(0), nil
+	}
+	res.Output = publicRefusal(res.Output)
+	if !refusalVerdict(res.Output) {
+		// An older runner's test that failed for its own reasons: only a
+		// completed test can condemn a server.
+		return TestResult{}, fmt.Errorf("runnerapi: xray run -test: %s", cmp.Or(res.Output, unknownRefusal))
+	}
+	return res, nil
+}
+
+// refusalVerdict reports whether text, a public refusal (see
+// publicRefusal), is xray's verdict on a config rather than a test that
+// failed for another reason.
+func refusalVerdict(text string) bool {
+	return text != "" && text != unknownRefusal && text != unfinishedRefusal && !PublicTestError(text)
+}
+
+// Words publicRefusal gives an older runner's output that names no category.
+const (
+	// unknownRefusal is for a text that shows no sign that xray refused the
+	// config: older runners reported any test that failed, a killed one or
+	// one whose core they could not stage too, as a refusal.
+	unknownRefusal = "the runner reported an error"
+	// unfinishedRefusal is for an older runner's own timeout.
+	unfinishedRefusal = "xray config test did not finish"
+)
+
+// publicRefusal is the public form of a runner's reason for a refusal. A
+// runner's own reasons, from ConfigRefusal, are fixed words and public tags
+// and stay as they are. Older runners returned raw child output, sometimes
+// containing escaped or transformed credentials: project it onto the same
+// tags and fixed categories (see classifyRefusal) before it can enter an
+// error, a persisted verdict or history. Only xray's own words of a refusal
+// make it a refusal of the config.
+func publicRefusal(text string) string {
+	switch {
+	case strings.TrimSpace(text) == "":
+		return ""
+	case publicRefusalRE.MatchString(text), text == unknownRefusal, text == unfinishedRefusal, PublicTestError(text):
+		return text
+	}
+	// The previous runner named the exit status, and took any for a refusal.
+	const prefix = "xray failed to load config (exit "
+	if n, ok := strings.CutPrefix(text, prefix); ok {
+		if n, ok := strings.CutSuffix(n, ")"); ok {
+			if code, err := strconv.Atoi(n); err == nil && code > 0 && code <= 255 {
+				if code != ExitConfigRefused {
+					return FaultExited + " " + n
+				}
+				return ConfigVerdict(code).Output
+			}
+		}
+	}
+	// Older runners cut a long output to its first 8 KiB. The last line can
+	// be the start of a credential, which no redactor can recognise, and is
+	// no evidence of anything: only the whole lines before it are read.
+	if head, _, cut := strings.Cut(text, TestOutputTruncated); cut {
+		text = head[:max(strings.LastIndexByte(head, '\n'), 0)]
+	}
+	if strings.Contains(text, "xray run -test did not finish within") {
+		return unfinishedRefusal
+	}
+	// Without xray's own words of a refusal, its "Failed to start:" or an
+	// outbound it failed to build, words that match a category, such as a
+	// warning's or a panic's, are no evidence of one.
+	if !strings.Contains(text, "Failed to start:") && !refusalTag.MatchString(text) {
+		return unknownRefusal
+	}
+	tags, category := classifyRefusal(text)
+	return refusalText(tags, cmp.Or(category, refusalLegacy))
+}
+
+// The previous runner sent its own timeout as a rejection, with this line
+// before any xray output. Only a completed test can condemn a server.
+func legacyTestTimeout(output string) bool {
+	line, _, ended := strings.Cut(output, "\n")
+	duration, ok := strings.CutPrefix(line, "xray run -test did not finish within ")
+	if !ended || !ok {
+		return false
+	}
+	d, err := time.ParseDuration(duration)
+	return err == nil && d > 0 && d.String() == duration
 }
 
 // do sends one request, see send.
@@ -154,7 +267,7 @@ func (c *Client) send(ctx context.Context, def *http.Client, method, path string
 		return fmt.Errorf("runnerapi: %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return fmt.Errorf("runnerapi: %s %s: reading response: %w", method, path, err)
 	}
@@ -162,7 +275,14 @@ func (c *Client) send(ctx context.Context, def *http.Client, method, path string
 		if resp.StatusCode == http.StatusUnauthorized && c.Unauthorized != nil {
 			c.Unauthorized(token)
 		}
+		if len(raw) > maxBody {
+			// Parsing a cut JSON response can leave a credential fragment.
+			raw = nil
+		}
 		return statusError(method, path, resp, raw)
+	}
+	if len(raw) > maxBody {
+		return fmt.Errorf("runnerapi: %s %s: response exceeds limit", method, path)
 	}
 	if out == nil {
 		return nil
@@ -177,6 +297,14 @@ func (c *Client) send(ctx context.Context, def *http.Client, method, path string
 func statusError(method, path string, resp *http.Response, raw []byte) error {
 	var eb errBody
 	_ = json.Unmarshal(raw, &eb) // a body that is not JSON leaves eb empty
+	// Older runners sometimes put process diagnostics in error bodies.
+	// Only the config refusal code, a busy/no-core sentinel, or the fixed
+	// words of a test that ended without a verdict is meaningful.
+	command := path == "/v1/test" || path == "/v1/trial" || path == "/v1/xray-api"
+	fault := path != "/v1/xray-api" && resp.StatusCode == http.StatusInternalServerError && PublicTestError(eb.Detail)
+	if command && resp.StatusCode != http.StatusUnprocessableEntity && !fault {
+		eb.Detail = ""
+	}
 	switch {
 	case resp.StatusCode == http.StatusConflict && eb.Error == "busy":
 		return wrapDetail(ErrBusy, eb.Detail)
@@ -189,11 +317,17 @@ func statusError(method, path string, resp *http.Response, raw []byte) error {
 		if out == "" {
 			out = strings.TrimSpace(string(raw))
 		}
-		return &TestFailedError{Output: out}
+		return &TestFailedError{Output: publicRefusal(out)}
+	}
+	if fault {
+		return fmt.Errorf("runnerapi: %s %s: HTTP %d: %s", method, path, resp.StatusCode, eb.Detail)
+	}
+	if command {
+		return fmt.Errorf("runnerapi: %s %s: HTTP %d", method, path, resp.StatusCode)
 	}
 	text := strings.TrimSpace(string(raw))
 	if len(text) > maxErrText {
-		text = text[:maxErrText] + "..."
+		text = "" // a prefix can contain part of a credential
 	}
 	if text == "" {
 		return fmt.Errorf("runnerapi: %s %s: %s", method, path, resp.Status)

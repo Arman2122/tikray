@@ -1,0 +1,38 @@
+[
+  {
+    "id": "setup_required",
+    "pass": true,
+    "detail": "container log read=true lines=15; hint start=true command=true end=true complete=true; listener=true; order correct=true; setup code exposed=false; fresh API requires setup; file and CLI agreed on a 12-symbol code; CLI exited 0",
+    "seconds": 4.5
+  },
+  {
+    "id": "claim_admin",
+    "pass": true,
+    "detail": "three wrong codes returned 401 bad_code; claim returned 200 with a secure, HttpOnly, SameSite=Strict cookie for / with a 7-day Max-Age; setup file consumed",
+    "seconds": 2.3
+  },
+  {
+    "id": "session_and_csrf",
+    "pass": true,
+    "detail": "cookie GET 200; missing-CSRF PUT 403 at revision 0; cookie with CSRF and root bearer without CSRF each wrote one revision",
+    "seconds": 0.3
+  },
+  {
+    "id": "api_token",
+    "pass": true,
+    "detail": "two tokens created and used; list returned both names without their secrets; revoked token received 401",
+    "seconds": 0.3
+  },
+  {
+    "id": "restart_keeps_auth",
+    "pass": true,
+    "detail": "after a container stop and start the old session and token each received 200; signed in, setup not required",
+    "seconds": 6.9
+  },
+  {
+    "id": "login_rate_limit",
+    "pass": true,
+    "detail": "five bad passwords received 401; the sixth and the right password received 429; login succeeded after Retry-After 58 s",
+    "seconds": 62.2
+  }
+]

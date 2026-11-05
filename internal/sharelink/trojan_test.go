@@ -25,7 +25,7 @@ var trojanCases = []parseCase{
 		wantJSON: trojanOut("10.1.2.3", "443", "pw", `{"network":"ws","wsSettings":{"path":"/t"}}`),
 	},
 	// xray-core 26.7.11 and newer refuse the whole config for Trojan with no
-	// TLS to a public address.
+	// TLS to an address that is not private.
 	{
 		name:        "security none to a public IP is refused",
 		link:        "trojan://hunter2@1.2.3.4:443?security=none&type=ws&path=/t",
@@ -39,7 +39,7 @@ var trojanCases = []parseCase{
 		link:        "trojan://hunter2@example.com:443?security=none",
 		wantErr:     kindUnsupported,
 		refused:     true,
-		errContains: "public address",
+		errContains: "name is local",
 		secret:      "hunter2",
 	},
 	{

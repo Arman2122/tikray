@@ -211,26 +211,36 @@ func TestStageMissingCore(t *testing.T) {
 	}
 }
 
+func captureTestReport(t *testing.T) func() string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "report")
+	t.Setenv("TIKRAY_FAKE_TEST_REPORT", path)
+	return func() string {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal("fake xray did not record its invocation")
+		}
+		return string(b)
+	}
+}
+
 func TestTestReportsFailure(t *testing.T) {
 	f := newFixture(t, "badconfig", nil)
-	out, err := f.sup.Test(t.Context(), f.sel)
-	if err == nil {
-		t.Fatal("Test accepted a bad config")
+	res, err := f.sup.Test(t.Context(), f.sel)
+	if err != nil || res.OK {
+		t.Fatalf("Test = %+v, %v; want xray's refusal and no error", res, err)
 	}
-	if !strings.Contains(out, "failed to load config") {
-		t.Errorf("output = %q, want it to contain %q", out, "failed to load config")
-	}
-	var ee *exec.ExitError
-	if !errors.As(err, &ee) || ee.ExitCode() != 23 {
-		t.Errorf("err = %v, want an *exec.ExitError with code 23", err)
+	if res.Output != "xray rejected the config: invalid config" {
+		t.Errorf("output = %q, want the fixed refusal", res.Output)
 	}
 }
 
 func TestTestAcceptsGoodConfig(t *testing.T) {
 	f := newFixture(t, "ok", nil)
-	out, err := f.sup.Test(t.Context(), f.sel)
-	if err != nil || !strings.Contains(out, "Configuration OK.") {
-		t.Fatalf("Test = %q, %v; want Configuration OK. and no error", out, err)
+	res, err := f.sup.Test(t.Context(), f.sel)
+	if err != nil || !res.OK || res.Output != "Configuration OK." {
+		t.Fatalf("Test = %+v, %v; want Configuration OK. and no error", res, err)
 	}
 	if f.sup.PID() != 0 {
 		t.Errorf("Test started a supervised process (PID %d)", f.sup.PID())
@@ -238,15 +248,17 @@ func TestTestAcceptsGoodConfig(t *testing.T) {
 }
 
 func TestTestRenamesTunDevice(t *testing.T) {
+	report := captureTestReport(t)
 	// xray before 26.10 opens the TUN device while it tests a config, and
 	// the running xray holds xray0 (M1 lab): -test must use another name.
 	f := newFixture(t, "ok", nil)
 	orig := f.d.ConfigPath(f.sel.Config)
 	writeFile(t, orig, `{"inbounds": [{"tag": "tun-in", "protocol": "tun", "settings": {"name": "xray0", "MTU": 1500}}]}`)
-	out, err := f.sup.Test(t.Context(), f.sel)
+	_, err := f.sup.Test(t.Context(), f.sel)
 	if err != nil {
-		t.Fatalf("Test: %v\n%s", err, out)
+		t.Fatalf("Test: %v", err)
 	}
+	out := report()
 	// The fake prints the path it tested and the config it read there.
 	path, _, _ := strings.Cut(strings.TrimPrefix(out, "config "), "\n")
 	if path == orig || !strings.Contains(out, `"name":"xray-test0"`) || strings.Contains(out, "xray0") {
@@ -261,11 +273,13 @@ func TestTestRenamesTunDevice(t *testing.T) {
 }
 
 func TestTestUsesConfigWithoutTunAsIs(t *testing.T) {
+	report := captureTestReport(t)
 	f := newFixture(t, "ok", nil)
-	out, err := f.sup.Test(t.Context(), f.sel)
+	_, err := f.sup.Test(t.Context(), f.sel)
 	if err != nil {
-		t.Fatalf("Test: %v\n%s", err, out)
+		t.Fatalf("Test: %v", err)
 	}
+	out := report()
 	if want := "config " + f.d.ConfigPath(f.sel.Config) + "\n"; !strings.HasPrefix(out, want) {
 		t.Errorf("Test output %q, want xray run -test on the selection's config (%q)", out, want)
 	}
@@ -447,8 +461,8 @@ func TestStageWhileForking(t *testing.T) {
 		sel := f.sel
 		sel.Core = fmt.Sprintf("26.10.%d", 100+i)
 		writeFile(t, f.d.CoreBinary(sel.Core), string(src))
-		if _, err := f.sup.Test(t.Context(), sel); err != nil {
-			t.Fatalf("core %s: %v", sel.Core, err)
+		if res, err := f.sup.Test(t.Context(), sel); err != nil || !res.OK {
+			t.Fatalf("core %s: %+v, %v", sel.Core, res, err)
 		}
 	}
 }

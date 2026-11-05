@@ -3,6 +3,8 @@
 package e2e
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http/httptest"
 	"os"
@@ -11,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/Arman2122/tikray/internal/api"
+	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/test/lab/fixtures/labinet"
 )
 
@@ -51,8 +55,8 @@ func TestAPIClient(t *testing.T) {
 		"not a PEM":      {token, "failure: no such item"},
 		"a key":          {token, "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n"},
 	} {
-		if got, err := apiClient(c.token, c.crt); err == nil {
-			t.Errorf("%s: got a client %+v, want an error", name, got)
+		if _, err := apiClient(c.token, c.crt); err == nil {
+			t.Errorf("%s: expected an error", name)
 		} else if strings.Contains(err.Error(), token) {
 			t.Errorf("%s: the error names the token", name)
 		}
@@ -141,5 +145,89 @@ func TestSetSubCleansUp(t *testing.T) {
 		if e.Name() != "a" {
 			t.Errorf("setSub left %q behind after a failed rename", e.Name())
 		}
+	}
+}
+
+// Regressions in upstream redaction must fail checks without copying the
+// offending diagnostic into their test output or committed results.
+func TestServiceEvidenceOmitsDiagnostics(t *testing.T) {
+	const private = "unexpected-provider-value"
+	var st service.Status
+	st.Health.Runner.Err = private
+	for _, evidence := range []string{
+		describeStatus(st, nil),
+		describeStatus(st, errors.New(private)),
+		describe(artifacts.Result{Outcome: "rejected", Detail: private}),
+	} {
+		if strings.Contains(evidence, private) {
+			t.Error("service evidence included raw diagnostic text")
+		}
+	}
+}
+
+func TestServiceStatusCLI(t *testing.T) {
+	for _, tc := range []struct {
+		name, syntax, output     string
+		discoveryErr, commandErr bool
+		supported, wantErr       bool
+	}{
+		{"discovery failed", "", "", true, false, false, true},
+		{"discovery empty", "", "", false, false, false, true},
+		{"interactive only", "number", "", false, false, false, false},
+		{"command failed", "number cmd", "", false, true, true, true},
+		{"incorrect revision", "number cmd", "revision 1\ncli-succeeded", false, false, true, true},
+		{"command exited unsuccessfully", "number cmd", "revision 0", false, false, true, true},
+		{"status succeeded", "number cmd", "revision   0\napplied no\ncli-succeeded\n", false, false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			run := func(_ context.Context, _ string) (string, error) {
+				calls++
+				if calls == 1 {
+					if tc.discoveryErr {
+						return "", errors.New("private discovery diagnostic")
+					}
+					return tc.syntax, nil
+				}
+				if tc.commandErr {
+					return "", errors.New("private command diagnostic")
+				}
+				return tc.output, nil
+			}
+			supported, err := statusCLI(t.Context(), run)
+			if supported != tc.supported || (err != nil) != tc.wantErr || (err != nil && strings.Contains(err.Error(), "private")) {
+				t.Error("incorrect support or error result, or unsafe diagnostic")
+			}
+			if (calls == 2) != tc.supported {
+				t.Error("command should run only after discovery confirms support")
+			}
+		})
+	}
+}
+
+func TestServicePrintedFingerprint(t *testing.T) {
+	const id = "*3"
+	pin := strings.Repeat("a", 64)
+	other := strings.Repeat("b", 64)
+	line := func(id, fp string) string {
+		return id + " container: tikray: serving on :443, certificate sha256 " + fp + "\n"
+	}
+	for _, tc := range []struct {
+		name, output, previous string
+		wantErr                bool
+	}{
+		{"no listener", "", "", true},
+		{"wrong pin", line(id, other), "", true},
+		{"only the old start", line(id, pin), id, true},
+		{"initial start", line(id, pin), "", false},
+		{"new start", line("*2", other) + line(id, pin), "*2", false},
+		{"latest pin differs", line("*2", pin) + line(id, other), "*2", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := matchServeFingerprint(tc.output, pin, tc.previous)
+			if (err != nil) != tc.wantErr || !tc.wantErr && got != id {
+				t.Error("the newest service start must print the pinned fingerprint")
+			}
+		})
 	}
 }

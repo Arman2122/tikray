@@ -69,9 +69,9 @@ var vlessCases = []parseCase{
 	},
 	{
 		name:     "no tls does not take the host for a server name",
-		link:     "vless://" + vlessID + "@203.0.113.10:443?type=ws&host=a.example.com",
-		wantName: "203.0.113.10:443",
-		wantJSON: vlessOut("203.0.113.10", "443", plainUser,
+		link:     "vless://" + vlessID + "@10.77.113.10:443?type=ws&host=a.example.com",
+		wantName: "10.77.113.10:443",
+		wantJSON: vlessOut("10.77.113.10", "443", plainUser,
 			`{"network":"ws","wsSettings":{"host":"a.example.com","path":"/"}}`),
 	},
 	{
@@ -393,7 +393,7 @@ var vlessCases = []parseCase{
 	},
 
 	// xray-core 26.7.11 and newer refuse the whole config for VLESS with no TLS
-	// and no encryption to a public address.
+	// and no encryption to an address that is not private.
 	{
 		name:        "no security to a public IP is refused",
 		link:        "vless://" + vlessID + "@1.2.3.4:443",
@@ -415,14 +415,14 @@ var vlessCases = []parseCase{
 		link:        vlessBase + "?security=none",
 		wantErr:     kindUnsupported,
 		refused:     true,
-		errContains: "public address",
+		errContains: "name is local",
 		secret:      vlessID,
 	},
 	{
 		name:     "security none to a private IP",
-		link:     "vless://" + vlessID + "@203.0.113.10:443?security=none",
-		wantName: "203.0.113.10:443",
-		wantJSON: vlessOut("203.0.113.10", "443", plainUser, `{"network":"tcp"}`),
+		link:     "vless://" + vlessID + "@10.77.113.10:443?security=none",
+		wantName: "10.77.113.10:443",
+		wantJSON: vlessOut("10.77.113.10", "443", plainUser, `{"network":"tcp"}`),
 	},
 	{
 		name:     "security none to a private domain",

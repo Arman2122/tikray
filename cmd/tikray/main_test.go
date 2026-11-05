@@ -650,6 +650,20 @@ func TestNewUpdater(t *testing.T) {
 	if u.Data != data || u.Arch != "arm64" || u.Runner != runner || u.Health == nil {
 		t.Errorf("updater %+v", u)
 	}
+	// Hot changes follow TIKRAY_HOT (Config.Hot), name xray's API as the
+	// health check does, and find run/ where the runner's image mounts it.
+	if u.Hot || u.XrayAPIServer != "" || u.RunnerRun != "" {
+		t.Errorf("Hot %v, XrayAPIServer %q, RunnerRun %q; want off, as cfg.Hot is, and the defaults", u.Hot, u.XrayAPIServer, u.RunnerRun)
+	}
+	hotCfg := cfg
+	hotCfg.Hot, hotCfg.XrayAPI = true, "10.0.0.3:10085"
+	hu, err := newUpdater(hotCfg, runner, io.Discard, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hu.Hot || hu.XrayAPIServer != "10.0.0.3:10085" {
+		t.Errorf("with Hot: Hot %v, XrayAPIServer %q", hu.Hot, hu.XrayAPIServer)
+	}
 
 	// With no key file the index stays unused.
 	cfg.IndexURLs, cfg.IndexPubKeyFile = nil, ""
@@ -962,13 +976,13 @@ func (r *trialRunner) xrayAPICalls() [][]string {
 
 // runFast is runCLI for a command that drives a trial: the updater waits 1 ms,
 // not 10 s, before it looks at the candidate, and gives up on its health check
-// after 300 ms, not 30 s.
+// after 1 s, not 30 s.
 func runFast(t *testing.T, vars map[string]string, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
 	var out, errb bytes.Buffer
 	c := &cli{getenv: envOf(vars), stdout: &out, stderr: &errb, tune: func(u *artifacts.CoreUpdater) {
 		u.EarlyExit = time.Millisecond
-		u.HealthWindow = 300 * time.Millisecond
+		u.HealthWindow = time.Second
 	}}
 	code = c.run(context.Background(), args)
 	return code, out.String(), errb.String()

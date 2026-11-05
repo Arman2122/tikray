@@ -153,6 +153,23 @@ func TestServerTag(t *testing.T) {
 	}
 }
 
+func TestServerUntestedRoundTrip(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		srv := Server{Untested: want}
+		b, err := json.Marshal(srv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(b, []byte(`"untested"`)) != want {
+			t.Errorf("untested key presence = %t, want %t", !want, want)
+		}
+		var saved Server
+		if err := json.Unmarshal(b, &saved); err != nil || saved.Untested != want {
+			t.Errorf("untested after round trip = %t, %v, want %t", saved.Untested, err, want)
+		}
+	}
+}
+
 func TestNewID(t *testing.T) {
 	re := regexp.MustCompile(`^[0-9a-f]{8}$`)
 	seen := map[string]bool{}
@@ -551,6 +568,31 @@ func TestValidateInvalidMustStayDisabled(t *testing.T) {
 	}
 }
 
+// withMasked returns valid() with the placeholder of the API's views in every
+// value a view shows: a state that a copied view reached before tikray
+// refused it on write.
+func withMasked() State {
+	s := valid()
+	s.Servers[0].Name = "Frankfurt " + Masked
+	s.Subscriptions[0].Name = Masked
+	s.Devices[0].Name, s.Devices[0].MAC = "tv "+Masked, Masked
+	s.Routing.BlockList = []string{"domain:ads.example", "regexp:" + Masked}
+	s.Routing.Domestic.Domains = []string{"domain:" + Masked}
+	s.Routing.Rules = []Rule{{Domains: []string{"keyword:" + Masked}, Action: ActionDirect}}
+	s.Health.ProbeURL = "https://probe.example/" + Masked
+	s.DNS.Remote = "https://dns.example/" + Masked
+	return s
+}
+
+// The placeholder is refused when it is written (see Update), not when a
+// state is checked: a state that already holds it must still load, and its
+// config must still render.
+func TestValidateAcceptsMaskedPlaceholder(t *testing.T) {
+	if err := withMasked().Validate(); err != nil {
+		t.Errorf("Validate = %v, want a state that holds the placeholder accepted", err)
+	}
+}
+
 func TestValidateReportsEveryProblem(t *testing.T) {
 	s := valid()
 	s.Devices[0].Address = netip.MustParsePrefix("192.168.1.5/24")
@@ -594,8 +636,8 @@ func TestValidateKeepsSecretsOutOfErrors(t *testing.T) {
 // outbound xray-core refuses says why, and repeats no id, password or key.
 func TestValidateRefusedOutboundsNameTheReason(t *testing.T) {
 	for _, tt := range []struct{ name, outbound, reason string }{
-		{"vless", fmt.Sprintf(vlessPlainTo, "1.2.3.4"), "xray-core refuses VLESS without TLS or encryption to a public address"},
-		{"trojan", fmt.Sprintf(trojanPlain, "1.2.3.4"), "xray-core refuses Trojan without TLS to a public address"},
+		{"vless", fmt.Sprintf(vlessPlainTo, "1.2.3.4"), "xray-core 26.10.31 and later refuse VLESS without TLS or encryption unless the server's IP address is private"},
+		{"trojan", fmt.Sprintf(trojanPlain, "1.2.3.4"), "xray-core 26.10.31 and later refuse Trojan without TLS unless the server's IP address is private"},
 		{"shadowsocks none", fmt.Sprintf(ssMethod, "none", "s3cret-pw"), "xray-core refuses the Shadowsocks methods none and plain"},
 		{"shadowsocks 2022", fmt.Sprintf(ssMethod, "2022-blake3-aes-256-gcm", "s3cret-pw"), "xray-core refuses a Shadowsocks 2022 password"},
 		{"allowInsecure", fmt.Sprintf(vlessInsecure, true), "xray-core refuses allowInsecure"},
@@ -622,7 +664,7 @@ func TestValidateRefusedOutboundsNameTheReason(t *testing.T) {
 
 func TestValidateAccepts(t *testing.T) {
 	for _, tt := range []struct{ name, outbound string }{
-		{"vless without tls or encryption to a private IP", fmt.Sprintf(vlessPlainTo, "203.0.113.10")},
+		{"vless without tls or encryption to a private IP", fmt.Sprintf(vlessPlainTo, "10.77.113.10")},
 		{"vless without tls or encryption to a private domain", fmt.Sprintf(vlessPlainTo, "foo.test")},
 		{"vless with tls to a public IP", fmt.Sprintf(vlessTLSTo, "1.2.3.4")},
 		{"trojan without tls to a private IP", fmt.Sprintf(trojanPlain, "10.1.2.3")},

@@ -158,6 +158,7 @@ type fakeRunner struct {
 	testReject    string
 	testNoCore    bool
 	testBroken    bool
+	restartBroken bool
 	testRejectFor string
 	testRejectOut string
 }
@@ -188,6 +189,17 @@ func (f *fakeRunner) setDown(down bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.down = down
+}
+
+// xrayRefusal is output as an older runner sent xray's refusal of a config:
+// xray prints it after "Failed to start:", which the client needs to see to
+// take it for a refusal. Blank output, and the previous runner's own
+// "(exit N)" texts, are sent as they are.
+func xrayRefusal(output string) string {
+	if strings.TrimSpace(output) == "" || strings.Contains(output, "Failed to start:") || strings.HasPrefix(output, "xray failed to load config (exit ") {
+		return output
+	}
+	return "Failed to start: " + output
 }
 
 // setTestReject makes the runner's test of a config fail with output.
@@ -312,6 +324,17 @@ func (f *fakeRunner) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, err
 		}
 		return f.test(req), nil
+	case "POST restart":
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.restartBroken {
+			return reply(http.StatusInternalServerError, map[string]string{"error": "internal"}), nil
+		}
+		if f.st.State == runnerapi.StateTrial {
+			return reply(http.StatusConflict, map[string]string{"error": "busy"}), nil
+		}
+		f.st.XrayPID++
+		return reply(http.StatusNoContent, nil), nil
 	}
 	return reply(http.StatusNotFound, map[string]string{"error": "bad_request"}), nil
 }
@@ -331,9 +354,9 @@ func (f *fakeRunner) test(req *http.Request) *http.Response {
 	case f.testBroken:
 		return reply(http.StatusInternalServerError, map[string]string{"error": "internal", "detail": "the trial ended while the config was tested"})
 	case f.testReject != "":
-		return reply(http.StatusOK, runnerapi.TestResult{Output: f.testReject})
+		return reply(http.StatusOK, runnerapi.TestResult{Output: xrayRefusal(f.testReject)})
 	case f.testRejectFor != "" && bytes.Contains(body, []byte(f.testRejectFor)):
-		return reply(http.StatusOK, runnerapi.TestResult{Output: f.testRejectOut})
+		return reply(http.StatusOK, runnerapi.TestResult{Output: xrayRefusal(f.testRejectOut)})
 	}
 	return reply(http.StatusOK, runnerapi.TestResult{OK: true, Output: "Configuration OK."})
 }

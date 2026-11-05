@@ -1,7 +1,16 @@
 // Package api serves the tikray service over HTTPS: the servers,
 // subscriptions, devices, policy, routing, DNS and health settings, the
-// apply, the xray-core update and rollback, and the status and the events.
-// Every route but GET /healthz needs the bearer token.
+// apply, the xray-core update and rollback, and the status and the events,
+// and who may call them: the admin signing in, and named API tokens.
+//
+// A request is authenticated by the first of these that holds, and is 401
+// when none does (auth.go): the root token (Authorization: Bearer <token>,
+// the one in state/api.token), a named API token (Authorization: Bearer
+// tkr_...), or the session cookie of a signed-in admin. The routes without a
+// credential are GET /healthz, GET /v1/auth/state, and the two that start a
+// session, POST /v1/auth/setup and POST /v1/auth/login, which a Limiter holds
+// to a few failures by client address. A request made with a cookie that
+// changes anything must carry X-Tikray-CSRF.
 //
 // Bodies are JSON, with snake_case names like the store's. Every response to
 // an authenticated request, an error included, carries ETag: "<revision>": the
@@ -15,16 +24,17 @@
 //
 // An error is {"error": code, "detail": text}, the text redacted of every
 // secret of the state. An apply, an update or a rollback that failed with an
-// outcome adds "result": the artifacts.Result, its detail redacted. Neither
-// the token nor the Authorization header is ever in a body, and nothing here
-// logs a request.
+// outcome adds "result": the artifacts.Result, its detail redacted. No
+// credential is ever in a body, nor in an event, but where it is handed to
+// its owner (a session's own CSRF token, a new API token), and nothing here
+// logs a request. Every response carries headers that keep a browser from
+// treating it as a page, and from keeping it.
 package api
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -32,8 +42,10 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -53,6 +65,9 @@ type Backend interface {
 	CoreRollback(ctx context.Context) (artifacts.Result, error)
 	// Redactor returns the function that hides the state's secrets in a text.
 	Redactor() func(string) string
+	// Record keeps an event of kind with msg, as the service's own are: the
+	// API's way to log who signed in, a password changed, a token made.
+	Record(kind, msg string)
 
 	AddServer(ctx context.Context, rev uint64, n service.NewServer) (store.Server, uint64, error)
 	UpdateServer(ctx context.Context, rev uint64, id string, p service.ServerPatch) (store.Server, uint64, error)
@@ -71,16 +86,35 @@ type Backend interface {
 	SetHealth(ctx context.Context, rev uint64, h store.Health) (uint64, error)
 }
 
-type handler struct{ b Backend }
+type handler struct {
+	b   Backend
+	a   *auth.Store
+	lim *auth.Limiter
+	// root is the SHA-256 of the root token, and hasRoot says there is one:
+	// an empty token admits nobody.
+	root    [sha256.Size]byte
+	rootLen int
+	hasRoot bool
+	now     func() time.Time
+}
 
-// NewHandler returns the API over b. Every request but GET /healthz needs
-// "Authorization: Bearer <token>", and an empty token admits nobody. The
-// check sits in front of the routes, so that a caller without the token
+// NewHandler returns the API over b, for the callers that auth.go lets in:
+// the root token root (an empty one admits nobody), a named token or a
+// session of a, and the sign-in routes held to lim (neither may be nil). The
+// check sits in front of the routes, so that a caller without a credential
 // learns nothing about them.
-func NewHandler(b Backend, token string) http.Handler {
-	h := &handler{b: b}
+func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter) http.Handler {
+	h := &handler{b: b, a: a, lim: lim, root: sha256.Sum256([]byte(root)), rootLen: len(root), hasRoot: root != "", now: time.Now}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", healthz)
+	// The routes that need no credential, by their pattern: the one list. A
+	// request is public when the pattern the mux matches it to is on it, so
+	// that no way of spelling a path makes a public route of another (guard).
+	public := map[string]bool{}
+	handlePublic := func(pattern string, f http.HandlerFunc) {
+		public[pattern] = true
+		mux.HandleFunc(pattern, f)
+	}
+	handlePublic("GET /healthz", healthz)
 
 	mux.HandleFunc("GET /v1/status", h.status)
 	mux.HandleFunc("GET /v1/state", h.state)
@@ -112,42 +146,25 @@ func NewHandler(b Backend, token string) http.Handler {
 	mux.HandleFunc("POST /v1/core/rollback", h.coreRollback)
 	mux.HandleFunc("GET /v1/core", h.core)
 
+	// Who may call them (auth.go). The state of the sign-in, setup and login
+	// are public.
+	handlePublic("GET /v1/auth/state", h.authState)
+	handlePublic("POST /v1/auth/setup", h.setup)
+	handlePublic("POST /v1/auth/login", h.login)
+	mux.HandleFunc("GET /v1/auth/session", h.session)
+	mux.HandleFunc("POST /v1/auth/logout", h.logout)
+	mux.HandleFunc("PUT /v1/auth/password", h.password)
+	mux.HandleFunc("POST /v1/auth/reset", h.reset)
+	mux.HandleFunc("GET /v1/tokens", h.listTokens)
+	mux.HandleFunc("POST /v1/tokens", h.createToken)
+	mux.HandleFunc("DELETE /v1/tokens/{id}", h.revokeToken)
+
 	// What the ServeMux would answer in plain text, in JSON. A wrong method
 	// on a route lands here too.
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		h.writeError(w, http.StatusNotFound, codeNotFound, "no such route")
 	})
-	return authenticated(token, mux)
-}
-
-// authenticated answers 401 unless the request carries the token, with a
-// constant-time comparison: both sides are hashed first, so that neither the
-// content nor the length of what the caller sent shows in the time it takes.
-// GET /healthz is the one route without it, and the body of every other is
-// capped here.
-func authenticated(token string, next http.Handler) http.Handler {
-	want := sha256.Sum256([]byte(token))
-	const scheme = "Bearer "
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == "/healthz" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		v := r.Header.Get("Authorization")
-		ok := len(v) >= len(scheme) && strings.EqualFold(v[:len(scheme)], scheme)
-		var presented string
-		if ok {
-			presented = v[len(scheme):]
-		}
-		got := sha256.Sum256([]byte(presented))
-		if token == "" || !ok || subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			writeJSON(w, http.StatusUnauthorized, errorBody{Error: codeUnauthorized})
-			return
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-		next.ServeHTTP(w, r)
-	})
+	return h.guard(mux, public)
 }
 
 // healthz answers that the service runs: the handler exists only once it does.
@@ -162,11 +179,10 @@ func (h *handler) status(w http.ResponseWriter, r *http.Request) {
 	h.reply(w, http.StatusOK, st.Revision, st)
 }
 
-// state answers with everything, the credentials of the servers and the
-// subscriptions' URLs included: the token is as good as the router's.
+// state returns the editable settings and public server metadata.
 func (h *handler) state(w http.ResponseWriter, _ *http.Request) {
 	st, rev := h.b.State()
-	h.reply(w, http.StatusOK, rev, st)
+	h.reply(w, http.StatusOK, rev, h.visibleState(st))
 }
 
 func (h *handler) events(w http.ResponseWriter, r *http.Request) {
@@ -186,23 +202,24 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) listServers(w http.ResponseWriter, _ *http.Request) {
 	st, rev := h.b.State()
-	h.reply(w, http.StatusOK, rev, orEmpty(st.Servers))
+	h.reply(w, http.StatusOK, rev, h.visibleServers(st, service.RedactorFor(st)))
 }
 
 func (h *handler) listSubscriptions(w http.ResponseWriter, _ *http.Request) {
 	st, rev := h.b.State()
-	h.reply(w, http.StatusOK, rev, orEmpty(st.Subscriptions))
+	h.reply(w, http.StatusOK, rev, h.visibleSubscriptions(st, service.RedactorFor(st)))
 }
 
 func (h *handler) listDevices(w http.ResponseWriter, _ *http.Request) {
 	st, rev := h.b.State()
-	h.reply(w, http.StatusOK, rev, orEmpty(st.Devices))
+	h.reply(w, http.StatusOK, rev, h.visibleDevices(st, service.RedactorFor(st)))
 }
 
 // getHealth answers with the settings of the connectivity probe. The
 // snapshot of what it saw is in the status.
 func (h *handler) getHealth(w http.ResponseWriter, _ *http.Request) {
 	st, rev := h.b.State()
+	st.Health.ProbeURL = h.publicURL(st.Health.ProbeURL, service.RedactorFor(st))
 	h.reply(w, http.StatusOK, rev, st.Health)
 }
 
@@ -224,7 +241,7 @@ func (h *handler) addServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in newServerRequest
-	if !h.decode(w, r, &in) {
+	if !h.decode(w, r, &in) || h.maskedRequest(w, in.Name) {
 		return
 	}
 	srv, newRev, err := h.b.AddServer(r.Context(), rev, service.NewServer{Link: in.Link, Name: in.Name, Outbound: present(in.Outbound)})
@@ -234,7 +251,9 @@ func (h *handler) addServer(w http.ResponseWriter, r *http.Request) {
 	}
 	// The collection, where a GET finds it: no route reads one server alone.
 	w.Header().Set("Location", "/v1/servers")
-	h.reply(w, http.StatusCreated, newRev, srv)
+	st, _ := h.b.State()
+	st.Servers = append(st.Servers, srv)
+	h.reply(w, http.StatusCreated, newRev, h.visibleServer(srv, service.RedactorFor(st)))
 }
 
 func (h *handler) patchServer(w http.ResponseWriter, r *http.Request) {
@@ -243,7 +262,7 @@ func (h *handler) patchServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in serverPatchRequest
-	if !h.decode(w, r, &in) {
+	if !h.decode(w, r, &in) || h.maskedRequest(w, in.Name) {
 		return
 	}
 	patch := service.ServerPatch{Name: in.Name, Disabled: in.Disabled, Link: in.Link, Outbound: present(in.Outbound)}
@@ -252,7 +271,9 @@ func (h *handler) patchServer(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	h.reply(w, http.StatusOK, newRev, srv)
+	st, _ := h.b.State()
+	st.Servers = append(st.Servers, srv)
+	h.reply(w, http.StatusOK, newRev, h.visibleServer(srv, service.RedactorFor(st)))
 }
 
 // --- subscriptions
@@ -263,7 +284,7 @@ func (h *handler) addSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in newSubscriptionRequest
-	if !h.decode(w, r, &in) {
+	if !h.decode(w, r, &in) || h.maskedRequest(w, in.Name) {
 		return
 	}
 	sub, newRev, err := h.b.AddSubscription(r.Context(), rev, service.NewSubscription{Name: in.Name, URL: in.URL, Interval: in.Interval})
@@ -273,7 +294,9 @@ func (h *handler) addSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	// The collection, as for a server.
 	w.Header().Set("Location", "/v1/subscriptions")
-	h.reply(w, http.StatusCreated, newRev, sub)
+	st, _ := h.b.State()
+	st.Subscriptions = append(st.Subscriptions, sub)
+	h.reply(w, http.StatusCreated, newRev, h.visibleSub(sub, service.RedactorFor(st)))
 }
 
 func (h *handler) patchSubscription(w http.ResponseWriter, r *http.Request) {
@@ -282,7 +305,7 @@ func (h *handler) patchSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in subscriptionPatchRequest
-	if !h.decode(w, r, &in) {
+	if !h.decode(w, r, &in) || h.maskedRequest(w, in.Name) {
 		return
 	}
 	patch := service.SubscriptionPatch{Name: in.Name, URL: in.URL, Disabled: in.Disabled, Interval: in.Interval}
@@ -291,7 +314,9 @@ func (h *handler) patchSubscription(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
-	h.reply(w, http.StatusOK, newRev, sub)
+	st, _ := h.b.State()
+	st.Subscriptions = append(st.Subscriptions, sub)
+	h.reply(w, http.StatusOK, newRev, h.visibleSub(sub, service.RedactorFor(st)))
 }
 
 // detached is the context of an operation that must run to its end whether
@@ -340,7 +365,7 @@ func (h *handler) setDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var d store.Device
-	if !h.decode(w, r, &d) {
+	if !h.decode(w, r, &d) || h.maskedRequest(w, d) {
 		return
 	}
 	if d.Address.IsValid() && d.Address != addr {
@@ -353,6 +378,7 @@ func (h *handler) setDevice(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, err)
 		return
 	}
+	d.Name = h.shown(d.Name, h.redact, callerOf(r).session)
 	h.reply(w, http.StatusOK, newRev, d)
 }
 
@@ -405,7 +431,7 @@ func set[T any](h *handler, do func(ctx context.Context, rev uint64, v T) (uint6
 			return
 		}
 		var v T
-		if !h.decode(w, r, &v) {
+		if !h.decode(w, r, &v) || h.maskedRequest(w, v) {
 			return
 		}
 		newRev, err := do(r.Context(), rev, v)
@@ -413,7 +439,18 @@ func set[T any](h *handler, do func(ctx context.Context, rev uint64, v T) (uint6
 			h.fail(w, err)
 			return
 		}
-		h.reply(w, http.StatusOK, newRev, v)
+		switch settings := any(v).(type) {
+		case store.Routing:
+			h.reply(w, http.StatusOK, newRev, h.visibleRouting(settings, h.redact))
+		case store.Health:
+			settings.ProbeURL = h.publicURL(settings.ProbeURL, h.redact)
+			h.reply(w, http.StatusOK, newRev, settings)
+		case store.DNS:
+			settings.Remote = h.publicURL(settings.Remote, h.redact)
+			h.reply(w, http.StatusOK, newRev, settings)
+		default:
+			h.reply(w, http.StatusOK, newRev, v)
+		}
 	}
 }
 
@@ -517,6 +554,17 @@ var errTrailing = errors.New("the request body holds more than one JSON value")
 // decode reads the body into v as one JSON value, in which a field v does not
 // have is an error. It answers 400 itself when the body is no good.
 func (h *handler) decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	if problem := decodeBody(r, v); problem != "" {
+		h.writeError(w, http.StatusBadRequest, codeBadRequest, problem)
+		return false
+	}
+	return true
+}
+
+// decodeBody is decode without the answer: it returns what is wrong with the
+// body, for the person who sent it, or "" when v has been read from it. The
+// routes that have no credential to show for it answer with refuse.
+func decodeBody(r *http.Request, v any) (problem string) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	err := dec.Decode(v)
@@ -530,10 +578,9 @@ func (h *handler) decode(w http.ResponseWriter, r *http.Request, v any) bool {
 		}
 	}
 	if err == nil {
-		return true
+		return ""
 	}
-	h.writeError(w, http.StatusBadRequest, codeBadRequest, bodyProblem(err))
-	return false
+	return bodyProblem(err)
 }
 
 func isTooBig(err error) bool {
@@ -558,7 +605,10 @@ func bodyProblem(err error) string {
 		return "the request body has a field of the wrong type: " + typ.Field
 	}
 	// An unknown field, or a value its type refuses, such as a bad interval.
-	return "the request body is not accepted: " + err.Error()
+	if strings.HasPrefix(err.Error(), "json: unknown field ") {
+		return "the request body contains an unknown field"
+	}
+	return "the request body contains an invalid value"
 }
 
 // --- responses

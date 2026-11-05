@@ -46,8 +46,8 @@ func TestLifecycleState(t *testing.T) {
 	if err := json.Unmarshal(st.Servers[0].Outbound, &ob); err != nil {
 		t.Fatal(err)
 	}
-	if ob.Protocol != "vless" || len(ob.Settings.Vnext) != 1 || ob.Settings.Vnext[0].Address != "203.0.113.10" || ob.Settings.Vnext[0].Port != 443 {
-		t.Errorf("outbound %s, want VLESS to 203.0.113.10:443", st.Servers[0].Outbound)
+	if ob.Protocol != "vless" || len(ob.Settings.Vnext) != 1 || ob.Settings.Vnext[0].Address != "10.77.113.10" || ob.Settings.Vnext[0].Port != 443 {
+		t.Error("want VLESS to the private lab-a listener 10.77.113.10:443")
 	}
 	if id := st.Servers[0].ID; len(id) != 8 {
 		t.Errorf("server ID %q, want one from store.NewID", id)

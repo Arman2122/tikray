@@ -1,0 +1,1 @@
+{"outbounds":[{"protocol":"vless","tag":"srv-00000e0e","settings":{"vnext":[{"address":12345,"port":443,"users":[{"id":"11111111-2222-4333-8444-555555555555","encryption":"none"}]}]},"streamSettings":{"security":"tls"}}]}

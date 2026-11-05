@@ -99,9 +99,9 @@ func startServe(t *testing.T, vars map[string]string) *running {
 		}
 		select {
 		case code := <-r.done:
-			t.Fatalf("tikray serve exited with %d before it served: %s", code, r.stderr.String())
+			t.Fatalf("tikray serve exited with %d before the listener started", code)
 		case <-deadline:
-			t.Fatalf("tikray serve printed no startup line: %q", r.stderr.String())
+			t.Fatal("tikray serve printed no startup line")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
@@ -130,6 +130,170 @@ func (r *running) client(t *testing.T, data string) *apiclient.Client {
 	return &apiclient.Client{BaseURL: "https://" + r.addr, Token: strings.TrimSpace(string(tok)), Fingerprint: r.fingerprint}
 }
 
+// The sign-in, as the tests of serve and of the commands that go with it need
+// it. The CLI has no command for it (a person signs in at a page), and apiclient
+// no call, so a test makes the requests as a browser would.
+
+const (
+	// noAdminHint is the line serve prints while there is no admin.
+	noAdminHint = `tikray: no admin yet: run "tikray setup-code" in this container to get the setup code` + "\n"
+	// adminPassword is the password the tests give their admin.
+	adminPassword = "correct horse battery staple"
+)
+
+// setupCodeForm is a setup code as it is shown: three groups of four symbols of
+// Crockford's base32.
+var setupCodeForm = regexp.MustCompile(`^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$`)
+
+// call sends a request to the API without a token, with the body (nil for none)
+// as JSON and the session cookie (nil for none). It trusts the certificate that
+// serve printed, and no other.
+func (r *running) call(t *testing.T, method, path string, body any, cookie *http.Cookie) (*http.Response, []byte) {
+	t.Helper()
+	var in io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		in = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, "https://"+r.addr+path, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	hc := (&apiclient.Client{Fingerprint: r.fingerprint}).HTTPClient()
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp, out
+}
+
+// claimAdmin makes the admin (alice, with adminPassword) with the setup code,
+// as the setup page does, and returns the cookie of the session it starts.
+func (r *running) claimAdmin(t *testing.T, code string) *http.Cookie {
+	t.Helper()
+	resp, _ := r.call(t, http.MethodPost, "/v1/auth/setup", map[string]string{"code": code, "username": "alice", "password": adminPassword}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("claiming the admin with the setup code: status %d, want 200", resp.StatusCode)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == "tikray_session" {
+			return c
+		}
+	}
+	t.Fatal("claiming the admin started no session")
+	return nil
+}
+
+// authState is what GET /v1/auth/state says to the holder of cookie (nil for
+// none): whether an admin is yet to be made, and whether the cookie is a session.
+func (r *running) authState(t *testing.T, cookie *http.Cookie) (setupRequired, signedIn bool) {
+	t.Helper()
+	resp, body := r.call(t, http.MethodGet, "/v1/auth/state", nil, cookie)
+	var st struct {
+		SetupRequired bool `json:"setup_required"`
+		SignedIn      bool `json:"signed_in"`
+	}
+	if err := json.Unmarshal(body, &st); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/auth/state returned status %d or invalid JSON", resp.StatusCode)
+	}
+	return st.SetupRequired, st.SignedIn
+}
+
+// setupCodeOf is the code in <data>/state/setup.code.
+func setupCodeOf(t *testing.T, data string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(data, "state", "setup.code"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// serve makes the setup code at its first start and says where to get it, and
+// never says the code: not on its stderr, which a supervisor keeps in a log.
+func TestServeMakesSetupCode(t *testing.T) {
+	vars, data := serveEnv(t)
+	state := filepath.Join(data, "state")
+
+	r := startServe(t, vars)
+	// The hint comes before the startup line, so that it is there when the
+	// startup line is.
+	code := setupCodeOf(t, data)
+	if !setupCodeForm.MatchString(code) {
+		t.Fatalf("setup.code does not hold a setup code (%d bytes)", len(code))
+	}
+	for name, mode := range map[string]os.FileMode{"setup.code": 0o600, "auth.json": 0o600, ".": 0o700} {
+		fi, err := os.Stat(filepath.Join(state, name))
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+		} else if fi.Mode().Perm() != mode {
+			t.Errorf("%s has mode %v, want %v", name, fi.Mode().Perm(), mode)
+		}
+	}
+	stderr := r.stderr.String()
+	if n := strings.Count(stderr, noAdminHint); n != 1 {
+		t.Errorf("stderr has the hint %d times, want once", n)
+	}
+	for _, shown := range []string{code, strings.ReplaceAll(code, "-", "")} {
+		if strings.Contains(stderr, shown) {
+			t.Error("stderr shows the setup code")
+		}
+	}
+
+	// A restart before the claim keeps the code, and says the same.
+	if c := r.stop(t); c != 0 {
+		t.Fatalf("exit %d", c)
+	}
+	r = startServe(t, vars)
+	if again := setupCodeOf(t, data); again != code {
+		t.Error("a restart with no admin changed the setup code")
+	}
+	if n := strings.Count(r.stderr.String(), noAdminHint); n != 1 {
+		t.Errorf("the restart said the hint %d times, want once", n)
+	}
+	if strings.Contains(r.stderr.String(), code) {
+		t.Error("the restart's stderr shows the setup code")
+	}
+
+	// The code claims the admin, and with it the file is gone.
+	cookie := r.claimAdmin(t, code)
+	if _, err := os.Stat(filepath.Join(state, "setup.code")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("setup.code after the claim: %v, want it gone", err)
+	}
+	if need, in := r.authState(t, cookie); need || !in {
+		t.Errorf("after the claim setup_required is %v and signed_in %v, want false and true", need, in)
+	}
+
+	// With an admin there is nothing to hint at, and no code is made again.
+	if c := r.stop(t); c != 0 {
+		t.Fatalf("exit %d", c)
+	}
+	r = startServe(t, vars)
+	if strings.Contains(r.stderr.String(), "no admin yet") {
+		t.Error("serve hints at a setup with an admin")
+	}
+	if _, err := os.Stat(filepath.Join(state, "setup.code")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("setup.code after a restart with an admin: %v, want none", err)
+	}
+	if need, _ := r.authState(t, nil); need {
+		t.Error("the admin was lost in the restart")
+	}
+}
+
 func TestServeStartsAndStops(t *testing.T) {
 	vars, data := serveEnv(t)
 	r := startServe(t, vars)
@@ -142,10 +306,10 @@ func TestServeStartsAndStops(t *testing.T) {
 	}
 	token := string(tokenBytes)
 	if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(token) {
-		t.Fatalf("the token file holds %q, want 64 hex digits", token)
+		t.Fatal("the token file should hold 64 hexadecimal digits")
 	}
 	if strings.Contains(r.stderr.String(), token) {
-		t.Errorf("stderr shows the token:\n%s", r.stderr.String())
+		t.Error("serve stderr showed the root token")
 	}
 	host, port, err := net.SplitHostPort(r.addr)
 	if err != nil || host != "127.0.0.1" || port == "0" || port == "" {
@@ -192,13 +356,13 @@ func TestServeStartsAndStops(t *testing.T) {
 	}
 
 	if code := r.stop(t); code != 0 {
-		t.Errorf("exit %d after the interrupt, want 0; stderr:\n%s", code, r.stderr.String())
+		t.Errorf("exit %d after the interrupt, want 0", code)
 	}
 	if err := cl.Healthz(context.Background()); !errors.Is(err, syscall.ECONNREFUSED) {
 		t.Errorf("healthz after the stop: %v, want connection refused", err)
 	}
 	if strings.Contains(r.stderr.String(), token) {
-		t.Errorf("stderr shows the token:\n%s", r.stderr.String())
+		t.Error("serve stderr showed the root token")
 	}
 }
 
@@ -273,9 +437,9 @@ func TestCLIFindsServeAtItsListenAddress(t *testing.T) {
 // look for.
 func ok2(t *testing.T, vars map[string]string, args ...string) string {
 	t.Helper()
-	code, stdout, stderr := runCLI(t, vars, args...)
+	code, stdout, _ := runCLI(t, vars, args...)
 	if code != 0 {
-		t.Fatalf("tikray %q: exit %d, stderr %q", args, code, stderr)
+		t.Fatalf("CLI command exited with %d", code)
 	}
 	return stdout
 }
@@ -555,7 +719,7 @@ func TestRunnerTokenGetWhileDropped(t *testing.T) {
 			for range 5000 {
 				s, err := tok.get(context.Background())
 				if err != nil || s != testToken {
-					t.Errorf("get = %q, %v; want the token", s, err)
+					t.Error("the token read failed or returned a different credential")
 					return
 				}
 				tok.drop(s) // the runner refused it
@@ -632,7 +796,7 @@ func TestServeUsesTheRunnersDefaultTimeouts(t *testing.T) {
 		t.Errorf("the runner client has an HTTP client of its own: %+v", w.runner.HTTP)
 	}
 	if w.runner.TokenFunc == nil || w.runner.Token != "" {
-		t.Errorf("the runner client has a fixed token (%q) or no way to wait for one", w.runner.Token)
+		t.Error("the runner client has a fixed token or no way to wait for one")
 	}
 }
 

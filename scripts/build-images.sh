@@ -56,7 +56,14 @@ for spec in "${images[@]}"; do
   CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$ctx/$name" "./cmd/$name"
   cp "$ca_bundle" "$ctx/ca-certificates.crt"
   tag="tikray/$name:$arch"
-  docker build -q --platform "linux/$arch" -f "deploy/$dockerfile" -t "$tag" "$ctx" >/dev/null
+  # Buildx resolves the pinned BusyBox index for this platform. The legacy
+  # builder can reuse the host base and still report a successful arm64 build.
+  docker buildx build --load -q --platform "linux/$arch" -f "deploy/$dockerfile" -t "$tag" "$ctx" >/dev/null
+  platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$tag")
+  if [[ $platform != "linux/$arch" ]]; then
+    echo "build-images.sh: $tag is $platform, expected linux/$arch; refusing to export it" >&2
+    exit 1
+  fi
   docker save -o "$outdir/$name-$arch.tar" "$tag"
   rm -rf "$ctx"
   trap - EXIT

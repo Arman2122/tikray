@@ -15,6 +15,12 @@
 //	tikray policy default <direct|smart|full> [--kill-switch]
 //	tikray status [--json]
 //	tikray events [--after N]
+//	tikray token create <name> [--expires 720h]
+//	tikray token list [--json]
+//	tikray token rm <id>
+//
+//	tikray setup-code
+//	tikray admin reset
 //
 //	tikray config render [--core VER]
 //	tikray apply
@@ -29,8 +35,17 @@
 // HTTPS, and fail with "tikray serve is not running" where nothing answers;
 // they never write the state themselves. Their output is for people: a table
 // or a line, with no credential in it (no outbound's, no subscription's URL,
-// never the API token). --json prints what the API answered, as it is,
-// credentials and URLs included. See commands.go and commands_servers.go.
+// never the API token). --json prints the same public data as the API.
+// See commands.go and commands_servers.go.
+//
+// Signing in starts with the setup code, which serve makes at its first start
+// (in <data>/state/setup.code) and never prints: it prints a line that says to
+// run setup-code, which reads the file, so it works while serve runs, takes no
+// token or lock, and writes nothing. admin reset removes the admin and the
+// sessions and makes a new code: through serve, with the root token, when it
+// answers, and, where nothing listens, in its own process under serve.lock.
+// token create prints a named API token once, and token list and token rm go
+// through serve like the commands above; no list has a secret in it.
 //
 // apply, core update and core rollback go through the daemon too when it
 // answers GET /healthz within two seconds: it applies, and the command prints
@@ -77,9 +92,11 @@
 //
 // Environment (see Config): TIKRAY_DATA, TIKRAY_ARCH, TIKRAY_RUNNER_URL,
 // TIKRAY_SOCKS, TIKRAY_XRAY_API, TIKRAY_UPSTREAM, TIKRAY_MIRRORS,
-// TIKRAY_INDEX_URLS, TIKRAY_INDEX_PUBKEY_FILE, TIKRAY_PROBE_URL. The runner's
-// three addresses default to its address on the state's private subnet, and
-// the probe URL to the state's health.probe_url. serve listens on
+// TIKRAY_INDEX_URLS, TIKRAY_INDEX_PUBKEY_FILE, TIKRAY_PROBE_URL, TIKRAY_HOT. The
+// runner's three addresses default to its address on the state's private
+// subnet, and the probe URL to the state's health.probe_url. An apply that
+// changes only the servers goes live through xray api without restarting
+// xray, unless TIKRAY_HOT is off: then every apply is a trial. serve listens on
 // TIKRAY_LISTEN (default :443); the commands reach it at TIKRAY_API, which
 // defaults to the address serve listens on (its IP if TIKRAY_LISTEN names a
 // specific one, else 127.0.0.1, and its port) with TIKRAY_API_TOKEN and
@@ -89,8 +106,8 @@
 // One process owns the state. serve holds an exclusive lock on
 // <data>/state/serve.lock for as long as it runs, and a second serve on the
 // same data root does not start. apply, core update and core rollback, where
-// they run the updater themselves, hold the same lock for as long as they run
-// and refuse when it is held.
+// they run the updater themselves, and admin reset, where it resets the admin
+// itself, hold the same lock for as long as they run and refuse when it is held.
 package main
 
 import (
@@ -133,8 +150,7 @@ commands:
                  TIKRAY_LISTEN. It prints the certificate's fingerprint.
 
 The commands below talk to a running "tikray serve" and fail with "tikray
-serve is not running" without one. --json prints the API's answer as it is,
-credentials and subscription URLs included; the tables leave them out.
+serve is not running" without one. --json prints the API's public data in JSON.
 
   server add <link> | --json FILE [--name N]
                  add a server from a share link, or from an xray outbound
@@ -160,6 +176,13 @@ credentials and subscription URLs included; the tables leave them out.
                  health and each server's
   events [--after N]
                  print what the service has done, oldest first
+  token create <name> [--expires 720h]
+                 make a named API token for a script, and print it: it is
+                 shown only this once, since only a hash of it is kept. It
+                 stops working after --expires, if given.
+  token list [--json]
+                 list the tokens: no secret is in the list
+  token rm <id>  revoke a token
 
   apply          render the config from the state for the active core and put
                  it on trial
@@ -182,11 +205,25 @@ needs the service stopped.
                  list the installed cores
   core status    print the runner's status as JSON
 
+The first admin of the web page is made with a setup code, which "tikray
+serve" makes at its first start and does not print, since its output is logged:
+
+  setup-code     print the setup code. It reads state/setup.code, so it works
+                 while "tikray serve" runs, and needs no token. Once the admin
+                 is made it says so.
+  admin reset    remove the admin and every session, and make a new setup
+                 code, for a lost password (the API tokens stay). It goes
+                 through "tikray serve" with the root token when it answers,
+                 and runs in this process when nothing listens.
+
 Configuration comes from the environment: TIKRAY_DATA, TIKRAY_ARCH,
 TIKRAY_RUNNER_URL, TIKRAY_SOCKS, TIKRAY_XRAY_API, TIKRAY_UPSTREAM,
-TIKRAY_MIRRORS, TIKRAY_INDEX_URLS, TIKRAY_INDEX_PUBKEY_FILE and
-TIKRAY_PROBE_URL. The runner's addresses default to the one the state's
-private subnet gives it, and the probe URL to the state's.
+TIKRAY_MIRRORS, TIKRAY_INDEX_URLS, TIKRAY_INDEX_PUBKEY_FILE,
+TIKRAY_PROBE_URL and TIKRAY_HOT. The runner's addresses default to the one
+the state's private subnet gives it, and the probe URL to the state's. An
+apply that adds, removes or changes servers and nothing else goes live
+through xray api without restarting xray, and falls back to a trial if that
+fails; TIKRAY_HOT=off makes every apply a trial.
 
 serve listens on TIKRAY_LISTEN (default :443). The commands reach it at
 TIKRAY_API, by default the address it listens on (https://127.0.0.1:443, or
@@ -196,8 +233,8 @@ those are unset they come from state/api.token and state/tls.crt in the data
 root, which serve makes.
 
 One process owns the state: serve holds state/serve.lock while it runs, and
-apply, core update and core rollback refuse to run in their own process while
-it is held.
+apply, core update, core rollback and admin reset refuse to run in their own
+process while it is held.
 `
 
 func main() {
@@ -251,6 +288,12 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		return c.statusCommand(ctx, args[1:])
 	case "events":
 		return c.eventsCommand(ctx, args[1:])
+	case "setup-code":
+		return c.setupCodeCommand(args[1:])
+	case "admin":
+		return c.adminCommand(ctx, args[1:])
+	case "token":
+		return c.tokenCommand(ctx, args[1:])
 	}
 	return c.usageError(fmt.Sprintf("unknown command %q", args[0]))
 }
@@ -464,7 +507,7 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, configFile 
 	unlock, err := lockServe(cfg.Data)
 	switch {
 	case errors.Is(err, errServeHeld):
-		return c.refused(cfg, base, fmt.Errorf("tikray serve is running (it holds %s)", filepath.Join(stateDir(cfg.Data), serveLockName)))
+		return c.refused(cfg, base, serveHeld(cfg.Data))
 	case err != nil:
 		return c.refused(cfg, base, err)
 	}
@@ -782,7 +825,8 @@ func healthChecks(cfg Config, runner *runnerapi.Client) (health, proxy artifacts
 // only ever comes from upstream (§4.3), and a health check that needs the
 // proxy to carry traffic (ProxyHealth, if socks) and xray's API to answer
 // (Health). rend renders the config of an update, rollback or apply; nil leaves
-// an update to its --config file.
+// an update to its --config file. An apply that changes only the servers goes
+// live through xray api without a restart unless TIKRAY_HOT is off (Hot).
 func newUpdater(cfg Config, runner *runnerapi.Client, log io.Writer, rend artifacts.Renderer, socks bool) (*artifacts.CoreUpdater, error) {
 	pub, err := indexKey(cfg)
 	if err != nil {
@@ -822,16 +866,20 @@ func buildUpdater(cfg Config, pub []byte, runner *runnerapi.Client, log io.Write
 	if !socks {
 		proxy = nil
 	}
+	// RunnerRun keeps its default, /data/run, the runner image's mount of the
+	// run directory that both containers share.
 	return &artifacts.CoreUpdater{
-		Data:        cfg.Data,
-		Arch:        cfg.Arch,
-		Fetch:       artifacts.Chain{Sources: fetch},
-		Verify:      artifacts.Verifier{Upstream: artifacts.Chain{Sources: upstream}, IndexURLs: slices.Clone(cfg.IndexURLs), IndexPub: slices.Clone(pub)},
-		Runner:      runner,
-		Render:      rend,
-		Health:      health,
-		ProxyHealth: proxy,
-		Log:         log,
+		Data:          cfg.Data,
+		Arch:          cfg.Arch,
+		Fetch:         artifacts.Chain{Sources: fetch},
+		Verify:        artifacts.Verifier{Upstream: artifacts.Chain{Sources: upstream}, IndexURLs: slices.Clone(cfg.IndexURLs), IndexPub: slices.Clone(pub)},
+		Runner:        runner,
+		Render:        rend,
+		Health:        health,
+		ProxyHealth:   proxy,
+		Hot:           cfg.Hot,
+		XrayAPIServer: cfg.XrayAPI,
+		Log:           log,
 	}
 }
 

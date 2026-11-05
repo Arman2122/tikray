@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// The addresses and the cases below were also run through xray 26.10.21:
+// The addresses and the cases below follow xray 26.10.31:
 // `xray run -test` refused the VLESS outbound to each address that
 // PrivateAddress reports false, and accepted the others.
 func TestPrivateAddress(t *testing.T) {
@@ -16,20 +16,23 @@ func TestPrivateAddress(t *testing.T) {
 		host string
 		want bool
 	}{
-		// The private IP list.
+		// Private, loopback and link-local unicast IPs.
 		{"10.1.2.3", true},
-		{"203.0.113.10", true},
-		{"198.18.5.5", true},
-		{"198.19.255.255", true},
-		{"100.64.0.1", true},
-		{"224.0.0.1", true},
-		{"255.255.255.255", true},
-		{"0.0.0.0", true},
+		{"127.0.0.2", true},
+		{"169.254.1.1", true},
+		{"fe80::1", true},
+		{"203.0.113.10", false},
+		{"198.18.5.5", false},
+		{"198.19.255.255", false},
+		{"100.64.0.1", false},
+		{"224.0.0.1", false},
+		{"255.255.255.255", false},
+		{"0.0.0.0", false},
 		{"fd00::1", true},
 		{"fc00::1", true},
-		{"::", true},
+		{"::", false},
 		{"::1", true},
-		{"ff02::1", true},
+		{"ff02::1", false},
 		{"[fd00::1]", true},
 		{"::ffff:10.1.2.3", true},
 		// Outside it.
@@ -227,7 +230,9 @@ func TestCheck(t *testing.T) {
 		{name: "vless none/none with security none to a public IP", outbound: vlessNested("1.2.3.4", "none", secNone), reason: "VLESS"},
 		{name: "vless security none in capitals", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"NONE"}`), reason: "VLESS"},
 		{name: "vless with a transport but no security", outbound: vlessNested("1.2.3.4", "none", noSec), reason: "VLESS"},
-		{name: "vless none/none to a private IP", outbound: vlessNested("203.0.113.10", "none", "")},
+		{name: "vless plaintext to TEST-NET", outbound: vlessNested("203.0.113.10", "none", ""), reason: "203.0.113.0/24 (documentation)"},
+		{name: "trojan plaintext to TEST-NET", outbound: trojanNested("203.0.113.10", ""), reason: "203.0.113.0/24 (documentation)"},
+		{name: "vless none/none to a private IP", outbound: vlessNested("10.77.113.10", "none", "")},
 		{name: "vless none/none to a domain", outbound: vlessNested("example.com", "none", ""), reason: "VLESS"},
 		{name: "vless none/none to a private domain", outbound: vlessNested("foo.test", "none", "")},
 		{name: "vless none/none to a dotless name", outbound: vlessNested("nas", "none", "")},
@@ -239,13 +244,13 @@ func TestCheck(t *testing.T) {
 		{name: "vless post-quantum encryption to a public IP", outbound: vlessNested("1.2.3.4", mlkem, "")},
 		{name: "vless flat none/none to a public IP", outbound: vlessFlat("1.2.3.4", "none", ""), reason: "VLESS"},
 		{name: "vless flat none/none to a domain", outbound: vlessFlat("example.com", "none", noSec), reason: "VLESS"},
-		{name: "vless flat none/none to a private IP", outbound: vlessFlat("203.0.113.10", "none", "")},
+		{name: "vless flat none/none to a private IP", outbound: vlessFlat("10.77.113.10", "none", "")},
 		{name: "vless flat tls to a public IP", outbound: vlessFlat("1.2.3.4", "none", tls)},
 		{name: "vless flat post-quantum encryption", outbound: vlessFlat("1.2.3.4", mlkem, "")},
 		{
 			// xray builds the outbound from the flat settings and ignores vnext.
 			name:     "vless flat address wins over vnext",
-			outbound: `{"protocol":"vless","settings":{"address":"203.0.113.10","port":443,"id":"` + testID + `","encryption":"none","vnext":[{"address":"1.2.3.4","port":443,"users":[{"id":"` + testID + `","encryption":"none"}]}]}}`,
+			outbound: `{"protocol":"vless","settings":{"address":"10.77.113.10","port":443,"id":"` + testID + `","encryption":"none","vnext":[{"address":"1.2.3.4","port":443,"users":[{"id":"` + testID + `","encryption":"none"}]}]}}`,
 		},
 		{
 			// xray reads keys without regard to case, as store does.
@@ -279,7 +284,7 @@ func TestCheck(t *testing.T) {
 		// allowInsecure, for every protocol: xray ≥26.3.27 refuses it once past
 		// 2026-06-01, and 26.1.18 skips the certificate check with it.
 		{name: "vless tls with allowInsecure to a public IP", outbound: vlessNested("1.2.3.4", "none", tlsInsecure), reason: "pinnedPeerCertSha256"},
-		{name: "vless tls with allowInsecure to a private IP", outbound: vlessNested("203.0.113.10", "none", tlsInsecure), reason: "allowInsecure"},
+		{name: "vless tls with allowInsecure to a private IP", outbound: vlessNested("10.77.113.10", "none", tlsInsecure), reason: "allowInsecure"},
 		{name: "vless flat tls with allowInsecure", outbound: vlessFlat("1.2.3.4", "none", tlsInsecure), reason: "allowInsecure"},
 		{name: "trojan tls with allowInsecure", outbound: trojanNested("1.2.3.4", tlsInsecure), reason: "allowInsecure"},
 		{name: "vmess tls with allowInsecure", outbound: vmessWith(tlsInsecure), reason: "allowInsecure"},
@@ -345,7 +350,7 @@ func TestCheck(t *testing.T) {
 		{name: "xdns mask without tlsConfig", outbound: vlessNested("1.2.3.4", "none", finalmaskStream("xdns", `{"domains":[{"names":["t.example.com"]}],"resolvers":[{"addrs":["1.1.1.1"]}]}`))},
 		{name: "realm mask with allowInsecure", outbound: vlessNested("1.2.3.4", "none", finalmaskStream("realm", realmMask(`{"allowInsecure":true}`))), reason: "allowInsecure"},
 		{name: "realm mask with allowInsecure false", outbound: vlessNested("1.2.3.4", "none", finalmaskStream("realm", realmMask(`{"allowInsecure":false}`)))},
-		{name: "mask with allowInsecure in a stream without security", outbound: vlessNested("203.0.113.10", "none", `"streamSettings":{"network":"kcp","finalmask":{"udp":[{"type":"realm","settings":`+realmMask(`{"allowInsecure":true}`)+`}]}}`), reason: "allowInsecure"},
+		{name: "mask with allowInsecure in a stream without security", outbound: vlessNested("10.77.113.10", "none", `"streamSettings":{"network":"kcp","finalmask":{"udp":[{"type":"realm","settings":`+realmMask(`{"allowInsecure":true}`)+`}]}}`), reason: "allowInsecure"},
 		{name: "tlsConfig with allowInsecure under another key of a mask", outbound: vlessNested("1.2.3.4", "none", `"streamSettings":{"security":"tls","finalmask":{"udp":[{"type":"x","settings":{"y":[{"tlsConfig":{"allowInsecure":true}}]}}]}}`), reason: "allowInsecure"},
 		{name: "mask whose tlsConfig is a string", outbound: vlessNested("1.2.3.4", "none", finalmaskStream("realm", realmMask(`"allowInsecure"`)))},
 		{name: "mask whose allowInsecure is a string", outbound: vlessNested("1.2.3.4", "none", finalmaskStream("realm", realmMask(`{"allowInsecure":"true"}`)))},
@@ -437,6 +442,13 @@ func TestCheck(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			err := Check([]byte(tc.outbound))
+			if err != nil {
+				for _, secret := range append([]string{testID, testPassword}, tc.secrets...) {
+					if strings.Contains(err.Error(), secret) {
+						t.Fatal("the refusal repeated a fixture credential")
+					}
+				}
+			}
 			if tc.reason == "" {
 				if err != nil {
 					t.Fatalf("Check = %v, want nil", err)
@@ -463,10 +475,50 @@ func TestCheck(t *testing.T) {
 			if r.Reason == "" || strings.Contains(r.Reason, "xraypolicy") || msg != "xraypolicy: "+r.Reason {
 				t.Errorf("Reason = %q, want the message without its prefix (%q)", r.Reason, msg)
 			}
-			for _, secret := range append([]string{testID, testPassword}, tc.secrets...) {
-				if strings.Contains(msg, secret) {
-					t.Errorf("error %q repeats the secret %q", msg, secret)
-				}
+		})
+	}
+}
+
+// The refusal of a server without transport security states xray's rule, what
+// the server's address is to it and what to do. An address that the rule
+// does not count as private need not be public: it names the reserved range
+// such an address is in, but never the address or the name itself.
+func TestPlainRefusalReason(t *testing.T) {
+	const (
+		vless  = "xray-core 26.10.31 and later refuse VLESS without TLS or encryption unless the server's "
+		trojan = "xray-core 26.10.31 and later refuse Trojan without TLS unless the server's "
+		ip     = "IP address is private, loopback or link-local, and this one is "
+		name   = "name is local, and this one is not (a local name is one label that starts with a letter, or ends in " +
+			".lan, .localdomain, .example, .invalid, .localhost, .test, .local, .home.arpa or .internal)"
+		todo = ": use TLS or REALITY, or a private address"
+	)
+	for _, tc := range []struct {
+		name, outbound, address, reason string
+	}{
+		{"vless at a CGNAT address", vlessNested("100.101.102.103", "none", ""), "100.101.102.103", vless + ip + "in 100.64.0.0/10 (carrier-grade NAT)" + todo},
+		{"trojan at a CGNAT address", trojanFlat("100.64.0.1", ""), "100.64.0.1", trojan + ip + "in 100.64.0.0/10 (carrier-grade NAT)" + todo},
+		{"vless at a mapped CGNAT address", vlessFlat("::ffff:100.127.255.254", "", secNone), "100.127.255.254", vless + ip + "in 100.64.0.0/10 (carrier-grade NAT)" + todo},
+		{"vless at a benchmarking address", vlessNested("198.18.5.5", "none", noSec), "198.18.5.5", vless + ip + "in 198.18.0.0/15 (benchmarking)" + todo},
+		{"trojan at a benchmarking address", trojanNested("198.19.255.255", ""), "198.19.255.255", trojan + ip + "in 198.18.0.0/15 (benchmarking)" + todo},
+		{"vless at TEST-NET-1", vlessNested("192.0.2.10", "none", ""), "192.0.2.10", vless + ip + "in 192.0.2.0/24 (documentation)" + todo},
+		{"trojan at TEST-NET-2", trojanNested("198.51.100.7", ""), "198.51.100.7", trojan + ip + "in 198.51.100.0/24 (documentation)" + todo},
+		{"vless at an IPv6 documentation address", vlessNested("[2001:db8::1]", "none", ""), "2001:db8::1", vless + ip + "in 2001:db8::/32 (documentation)" + todo},
+		{"vless at a public IP", vlessNested("1.2.3.4", "none", ""), "1.2.3.4", vless + ip + "public" + todo},
+		{"trojan at a public IP", trojanNested("8.8.8.8", secNone), "8.8.8.8", trojan + ip + "public" + todo},
+		{"vless at a public IPv6 address", vlessNested("2a00:1450::1", "none", ""), "2a00:1450::1", vless + ip + "public" + todo},
+		{"vless at a public name", vlessNested("vpn.example.com", "none", ""), "vpn.example.com", vless + name + todo},
+		{"trojan at a public name", trojanNested("Edge.Provider.NET.", ""), "provider", trojan + name + todo},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var r *Refusal
+			if err := Check([]byte(tc.outbound)); !errors.As(err, &r) {
+				t.Fatalf("Check = %v, want a refusal", err)
+			}
+			if r.Reason != tc.reason {
+				t.Errorf("Reason = %q\nwant     %q", r.Reason, tc.reason)
+			}
+			if strings.Contains(strings.ToLower(r.Reason), strings.ToLower(tc.address)) {
+				t.Errorf("Reason %q repeats the server's address", r.Reason)
 			}
 		})
 	}

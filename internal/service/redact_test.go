@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -40,6 +41,30 @@ func server(id, outbound string) store.Server {
 	return store.Server{ID: id, Name: "s-" + id, Outbound: json.RawMessage(outbound)}
 }
 
+func TestRedactorProtectsOpaqueHeaders(t *testing.T) {
+	const marker = "fixture-private-part"
+	raw := json.RawMessage(`{"streamSettings":{"headers":{"X-New-Header":"` + marker + `","Cookie":"first=public; session=` + marker + `"}}}`)
+	for _, config := range []json.RawMessage{raw, json.RawMessage(`{"headers":{"cookie":["id=` + marker + `; flag=yes"]}}`)} {
+		if text := RedactorWith(store.Default(), config)("legacy runner repeated " + marker); strings.Contains(text, marker) {
+			t.Fatal("a header or cookie value escaped redaction")
+		}
+	}
+}
+
+func TestRedactorProtectsURLAndHeaderFragments(t *testing.T) {
+	const value = "private-fixture-value"
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"address":"https://name:` + value + `@example.test/"}`),
+		json.RawMessage(`{"headers":{"Authorization":"Bearer ` + value + `"}}`),
+		json.RawMessage(`{"headers":{"proxy-authorization":["Basic ` + value + `"]}}`),
+	} {
+		redact := RedactorWith(store.Default(), raw)
+		if strings.Contains(redact("rejected "+value), value) {
+			t.Error("diagnostic exposed a credential outside the original URL or header")
+		}
+	}
+}
+
 func TestRedactorCoversSecrets(t *testing.T) {
 	const (
 		trojanPW = "trojan-pass-1234"
@@ -67,6 +92,8 @@ func TestRedactorCoversSecrets(t *testing.T) {
 		{"the SS password", ssPW},
 	}
 	wantRedacted(t, got, secrets...)
+	// A credential shorter than 4 bytes is left alone: it would hide every
+	// "abc" in every text without protecting anything.
 	want := "user " + redacted + " rejected; trojan " + redacted + "; ss=" + redacted + `; fetching "` + redacted + `" failed; pw abc`
 	wantText(t, got, want, secrets...)
 	if got := red("nothing secret here"); got != "nothing secret here" {
@@ -205,6 +232,20 @@ func TestRedactorCoversURLForms(t *testing.T) {
 	wantText(t, got, `Get "https://`+redacted+`:***@probe.example.com/generate_204": `+redacted, probe...)
 }
 
+// Earlier diagnostics and peer errors can repeat a probe or DoH API key
+// outside the URL that carried it, in encoded or decoded form.
+func TestRedactorProtectsProbeAndDNSQueryValues(t *testing.T) {
+	st := store.Default()
+	st.Health.ProbeURL = "https://probe.example/ping?token=probe%2Ffixture"
+	st.DNS.Remote = "https://dns.example/dns-query?key=dns%3Dfixture"
+	redact := RedactorFor(st)
+	for _, value := range []string{"probe%2Ffixture", "probe/fixture", "dns%3Dfixture", "dns=fixture"} {
+		if strings.Contains(redact("peer rejected "+value), value) {
+			t.Error("a query credential escaped the redactor")
+		}
+	}
+}
+
 // A server's share link encodes its credentials, an SS password in base64.
 func TestRedactorCoversShareLinks(t *testing.T) {
 	const link = "ss://YWVzLTI1Ni1nY206c2VjcmV0LXBhc3M@192.0.2.7:8388#home"
@@ -227,4 +268,92 @@ func TestServiceRedactorFollowsState(t *testing.T) {
 	if got := red("user " + vlessID); got != "user "+redacted {
 		t.Errorf("after the server is added, the redactor leaves its id")
 	}
+}
+
+// Short query values, such as SSPanel's "?sub=3" or a probe's "?v=2", and
+// short credentials occur in ordinary text: an ID, an address, a revision.
+// They never withhold a message, and the long secrets of the same URLs and
+// outbounds are still replaced where they occur.
+func TestRedactorIgnoresShortSecrets(t *testing.T) {
+	const (
+		token  = "4f9a1c7e2b5d6a8c"
+		subURL = "https://provider.example/link/" + token + "?sub=3"
+	)
+	st := store.Default()
+	st.Servers = []store.Server{
+		server("00000001", `{"protocol":"trojan","settings":{"servers":[{"address":"example.com","port":443,"password":"1"}]}}`),
+		server("00000002", `{"protocol":"trojan","settings":{"servers":[{"address":"example.org","port":443,"password":"trojan-pass-1234"}]}}`),
+	}
+	st.Subscriptions = []store.Subscription{{ID: "9be8f7a6", Name: "provider", URL: subURL}}
+	st.Health.ProbeURL = "https://cp.cloudflare.com/generate_204?v=2"
+	st.DNS.Remote = "https://dns.example/dns-query?k=7"
+	red := RedactorFor(st)
+	for _, text := range []string{
+		"revision 12 applied with xray-core 26.10.31",
+		"revision 13 not applied: no active core: install one with tikray core update",
+		`signed in: "admin" from 192.168.88.30`,
+		"203.0.113.10",
+		"service: not found: server 3fa9c1d2",
+		"server 7cd5e6f7 (HK 03) removed",
+	} {
+		if got := red(text); got != text {
+			t.Errorf("%q became %q", text, got)
+		}
+	}
+	got := red(`GET ` + subURL + ` failed; redirected from https://provider.example/link/` + token + `; trojan trojan-pass-1234 at 203.0.113.10`)
+	secrets := []secret{{"the subscription token", token}, {"the Trojan password", "trojan-pass-1234"}}
+	wantRedacted(t, got, secrets...)
+	wantText(t, got, `GET `+redacted+` failed; redirected from `+redacted+`; trojan `+redacted+` at 203.0.113.10`, secrets...)
+	if got := red("query sub=3"); got != "query "+redacted {
+		t.Errorf("the subscription's whole query string is no longer covered: %q", got)
+	}
+}
+
+// Events go through the same redactor: a 1-byte password or a short probe
+// query value must not wipe routine apply events.
+func TestEventsKeepTextWithShortSecrets(t *testing.T) {
+	e := newEnv(t)
+	e.addServer("weak", `{"protocol":"trojan","settings":{"servers":[{"address":"example.com","port":443,"password":"1"}]},"streamSettings":{"security":"tls"}}`)
+	if _, _, err := e.store.Update(store.AnyRevision, func(st *store.State) error {
+		st.Health.ProbeURL = "https://cp.cloudflare.com/generate_204?v=2"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"revision 12 applied with xray-core 26.10.31",
+		"revision 2 applied with xray-core 26.10.31",
+	}
+	for _, msg := range want {
+		e.s.record(KindApply, msg)
+	}
+	if got := e.eventsOf(KindApply); !slices.Equal(got, want) {
+		t.Errorf("apply events = %q, want %q", got, want)
+	}
+}
+
+// A V2Board-style subscription URL carries a token beside ordinary words:
+// "?token=…&flag=clash&format=base64". The words are not secrets, so the
+// texts that hold them stay readable, while the token, and any long value
+// whatever its key, is still replaced.
+func TestRedactorKeepsOrdinaryQueryWords(t *testing.T) {
+	const (
+		token = "0f3c9a1e7b2d4c6a8e5f1b3d7a9c2e4f"
+		long  = "QmFzZTY0LWxvb2tpbmctdmFsdWU"
+	)
+	st := store.Default()
+	st.Subscriptions = []store.Subscription{{ID: "9be8f7a6", Name: "provider",
+		URL: "https://provider.example/api/v1/client/subscribe?token=" + token + "&flag=clash&format=base64&x=" + long}}
+	red := RedactorFor(st)
+	for _, text := range []string{
+		"vmess link is not base64",
+		"server 1a2b3c4d (clash-HK-01) added",
+		"domain:clash.razord.top",
+	} {
+		if got := red(text); got != text {
+			t.Errorf("%q became %q", text, got)
+		}
+	}
+	got := red("fetching failed for " + token + " and " + long)
+	wantRedacted(t, got, secret{"the token", token}, secret{"the long value", long})
 }

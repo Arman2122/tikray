@@ -1,0 +1,1 @@
+{"outbounds":[{"protocol":"shadowsocks","tag":"srv-0000dddd","settings":{"servers":[{"address":"example.com","port":8388,"method":"2022-blake3-aes-128-gcm","password":"fixture-not-base64!!"}]}}]}

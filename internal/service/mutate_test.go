@@ -401,7 +401,7 @@ func TestAddServerRejectedByXray(t *testing.T) {
 			e.runner.setTestReject("main: failed to load config: infra/conf: bad user " + c.secret.value + " in outbound srv")
 			_, rev, err := e.s.AddServer(bg, 0, c.n)
 			r := wantRefused(t, err, vlessSecret, trojanSecret)
-			if !strings.Contains(r.Reason, "main: failed to load config: infra/conf: bad user "+redacted+" in outbound srv") {
+			if !strings.Contains(r.Reason, "invalid user") {
 				t.Errorf("reason = %q, want xray's output with the secret redacted", show(r.Reason))
 			}
 			if rev != 0 {
@@ -415,18 +415,9 @@ func TestAddServerRejectedByXray(t *testing.T) {
 	}
 }
 
-func TestAddServerRejectedWithNoOutput(t *testing.T) {
-	e := newEnv(t)
-	e.runner.setTestReject(" \n")
-	_, _, err := e.s.AddServer(bg, 0, NewServer{Link: vlessLink})
-	r := wantRefused(t, err, vlessSecret)
-	if !strings.Contains(r.Reason, "rejected") {
-		t.Errorf("reason = %q, want it to say xray rejected the server", r.Reason)
-	}
-}
-
 // A runner that can't test leaves the trial before the apply as the net: the
-// server is saved, with an untested event.
+// server is saved, with an untested event. So does a failed test with no
+// output: only xray's own words of a refusal condemn a server.
 func TestAddServerSavedWithoutARunnerTest(t *testing.T) {
 	down := httptest.NewServer(http.NotFoundHandler())
 	downURL := down.URL
@@ -441,6 +432,7 @@ func TestAddServerSavedWithoutARunnerTest(t *testing.T) {
 		{"the runner is down", func(e *env) { e.runner.setDown(true) }},
 		{"no xray runs", func(e *env) { e.runner.failTest(true, false) }},
 		{"the runner fails", func(e *env) { e.runner.failTest(false, true) }},
+		{"the test failed with no output", func(e *env) { e.runner.setTestReject(" \n") }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			e := newEnv(t)
@@ -637,7 +629,7 @@ func TestUpdateServerRejectedByXray(t *testing.T) {
 	link := vlessLink
 	_, _, err := e.s.UpdateServer(bg, rev, srv.ID, ServerPatch{Link: &link})
 	r := wantRefused(t, err, vlessSecret)
-	if !strings.Contains(r.Reason, "infra/conf: bad user "+redacted) {
+	if !strings.Contains(r.Reason, "invalid user") {
 		t.Errorf("reason = %q, want xray's output with the id redacted", show(r.Reason))
 	}
 	e.wantUnchanged(rev, 0, 1)
@@ -658,6 +650,47 @@ func TestUpdateServerSavedWithoutARunnerTest(t *testing.T) {
 	}
 	if evs := e.eventsOf(KindUntested); len(evs) != 1 || !strings.Contains(evs[0], srv.ID) {
 		t.Errorf("untested events %q, want one that names the server", show(evs))
+	}
+}
+
+func TestUntestedMarked(t *testing.T) {
+	e := newEnv(t)
+	e.runner.failTest(true, false)
+	srv, rev, err := e.s.AddServer(bg, 0, NewServer{Link: vlessLink})
+	if err != nil {
+		t.Fatal(show(err))
+	}
+	if !srv.Untested || !e.serverNamed(srv.Name).Untested {
+		t.Error("a server saved before a core runs should be marked untested")
+	}
+	name := "renamed"
+	srv, rev, err = e.s.UpdateServer(bg, rev, srv.ID, ServerPatch{Name: &name})
+	if err != nil || !srv.Untested {
+		t.Fatalf("rename lost the untested flag: %v", show(err))
+	}
+	e.runner.failTest(false, false)
+	srv, rev, err = e.s.UpdateServer(bg, rev, srv.ID, ServerPatch{Outbound: json.RawMessage(trojanOutbound)})
+	if err != nil || srv.Untested || e.serverNamed(name).Untested {
+		t.Fatalf("a replacement that passed its test should clear the flag: %v", show(err))
+	}
+	e.runner.failTest(false, true)
+	srv, _, err = e.s.UpdateServer(bg, rev, srv.ID, ServerPatch{Outbound: json.RawMessage(vlessOutbound)})
+	if err != nil || !srv.Untested || !e.serverNamed(name).Untested {
+		t.Errorf("a replacement saved while the runner cannot test should set the flag: %v", show(err))
+	}
+}
+
+func TestUntestedEventOmitsShortCredential(t *testing.T) {
+	e := newEnv(t)
+	e.runner.failTest(true, false)
+	const short = "qZx"
+	raw := json.RawMessage(strings.Replace(trojanOutbound, trojanPW, short, 1))
+	if _, _, err := e.s.AddServer(bg, 0, NewServer{Name: short, Outbound: raw}); err != nil {
+		t.Fatal("could not save the untested server")
+	}
+	events := e.eventsOf(KindUntested)
+	if len(events) != 1 || strings.Contains(events[0], short) {
+		t.Error("an untested event must omit a display name that contains a short credential")
 	}
 }
 
@@ -766,6 +799,55 @@ func TestRemoveServerClearsThePinAndDropsRules(t *testing.T) {
 	}
 	if got := kicks(e.s); got != 1 {
 		t.Errorf("kicked %d times, want 1", got)
+	}
+}
+
+func TestWarningOmitsSetupCodeShapedLabel(t *testing.T) {
+	e := newEnv(t)
+	name := "0123-4567-89AB"
+	srv, _, err := e.s.AddServer(bg, store.AnyRevision, NewServer{Name: name, Link: warnLink})
+	if err != nil {
+		t.Fatal("could not add the fixture server")
+	}
+	ev := e.eventsOf(KindWarning)
+	if len(ev) != 1 || !strings.Contains(ev[0], srv.ID) || strings.Contains(ev[0], name) {
+		t.Error("a warning label disclosed a setup-code-shaped value")
+	}
+}
+
+func TestReplacementWarningRedactsOldCredential(t *testing.T) {
+	e := newEnv(t)
+	e.addServer(trojanPW, trojanOutbound)
+	srv := e.serverNamed(trojanPW)
+	link := warnLink
+	if _, _, err := e.s.UpdateServer(bg, store.AnyRevision, srv.ID, ServerPatch{Link: &link}); err != nil {
+		t.Fatal("could not replace the fixture outbound")
+	}
+	ev := e.eventsOf(KindWarning)
+	if len(ev) != 1 || !strings.Contains(ev[0], srv.ID) || strings.Contains(ev[0], trojanPW) {
+		t.Error("a replacement warning should identify the server without the old credential")
+	}
+}
+
+// After deletion, the current state's redactor no longer knows the removed
+// outbound's credentials. A display name must not reintroduce one.
+func TestCleanupRedactsRemovedServerName(t *testing.T) {
+	e := newEnv(t)
+	e.addServer(trojanPW, trojanOutbound)
+	srv := e.serverNamed(trojanPW)
+	_, rev, err := e.store.Update(store.AnyRevision, func(st *store.State) error {
+		st.Routing.Pinned = srv.ID
+		return nil
+	})
+	if err != nil {
+		t.Fatal("could not pin the fixture server")
+	}
+	if _, err := e.s.RemoveServer(bg, rev, srv.ID); err != nil {
+		t.Fatal("could not remove the fixture server")
+	}
+	events := e.eventsOf(KindCleanup)
+	if len(events) != 1 || !strings.Contains(events[0], srv.ID) || strings.Contains(events[0], trojanPW) {
+		t.Error("cleanup should identify the server without its removed credential")
 	}
 }
 

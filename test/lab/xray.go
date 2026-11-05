@@ -2,6 +2,7 @@ package lab
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -148,9 +149,18 @@ func XrayBinaryVersion(ctx context.Context, cacheDir, version, goarch string) (s
 		return "", err
 	}
 	env := append(os.Environ(), "GOTOOLCHAIN=auto", "GOOS=linux", "GOARCH="+goarch, "CGO_ENABLED=0")
-	build := []string{"go", "build", "-trimpath", "-ldflags", "-s -w", "-o", out + ".part"}
-	var dir string
-	var steps [][]string
+	run := func(dir string, env []string, args ...string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+		cmd.Dir, cmd.Env = dir, env
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		b, err := cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %v: %s%s", strings.Join(args, " "), err, b, stderr.String())
+		}
+		return b, nil
+	}
+	var dir, gomod, pkg string
 	if moduleVersion.MatchString(version) {
 		mod, err := os.MkdirTemp("", "labxray-")
 		if err != nil {
@@ -158,11 +168,23 @@ func XrayBinaryVersion(ctx context.Context, cacheDir, version, goarch string) (s
 		}
 		defer os.RemoveAll(mod)
 		dir, env = mod, append(env, "GOFLAGS=-mod=mod")
-		steps = [][]string{
+		for _, s := range [][]string{
 			{"go", "mod", "init", "labxray"},
 			{"go", "get", "github.com/xtls/xray-core@" + version},
-			append(build, "github.com/xtls/xray-core/main"),
+		} {
+			if _, err := run(dir, env, s...); err != nil {
+				return "", err
+			}
 		}
+		b, err := run(dir, env, "go", "mod", "download", "-json", "github.com/xtls/xray-core@"+version)
+		if err != nil {
+			return "", err
+		}
+		var m struct{ GoMod string }
+		if err := json.Unmarshal(b, &m); err != nil || m.GoMod == "" {
+			return "", fmt.Errorf("xray-core %s: no go.mod from go mod download: %v", version, err)
+		}
+		gomod, pkg = m.GoMod, "github.com/xtls/xray-core/main"
 	} else {
 		dir = filepath.Join(cacheDir, "xray-src", version)
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
@@ -173,14 +195,56 @@ func XrayBinaryVersion(ctx context.Context, cacheDir, version, goarch string) (s
 				return "", fmt.Errorf("clone xray-core %s: %v: %s", version, err, b)
 			}
 		}
-		steps = [][]string{append(build, "./main")}
+		gomod, pkg = filepath.Join(dir, "go.mod"), "./main"
 	}
-	for _, s := range steps {
-		cmd := exec.CommandContext(ctx, s[0], s[1:]...)
-		cmd.Dir, cmd.Env = dir, env
-		if b, err := cmd.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("%s: %v: %s", strings.Join(s, " "), err, b)
+	// A release builds with the Go it was released for. GOTOOLCHAIN=auto only
+	// moves up, to the newest Go on PATH, and a newer Go can break a
+	// release's dependencies: v26.1.18's gvisor redeclares names on Go 1.26.
+	b, err := os.ReadFile(gomod)
+	if err != nil {
+		return "", err
+	}
+	tc, err := xrayToolchain(b)
+	if err != nil {
+		return "", fmt.Errorf("xray-core %s: %v", version, err)
+	}
+	if gomod != filepath.Join(dir, "go.mod") {
+		// go mod init wrote the go version on PATH, which tc may predate.
+		if _, err := run(dir, env, "go", "mod", "edit", "-go="+strings.TrimPrefix(tc, "go"), "-toolchain=none"); err != nil {
+			return "", err
 		}
 	}
+	if _, err := run(dir, append(env, "GOTOOLCHAIN="+tc), "go", "build", "-trimpath", "-ldflags", "-s -w", "-o", out+".part", pkg); err != nil {
+		return "", err
+	}
 	return out, os.Rename(out+".part", out)
+}
+
+// xrayToolchain names the Go toolchain an xray-core go.mod asks for: its
+// toolchain line, or else its go line, where 1.22 means go1.22.0.
+func xrayToolchain(gomod []byte) (string, error) {
+	var goVersion, toolchain string
+	for _, line := range strings.Split(string(gomod), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		switch f[0] {
+		case "go":
+			goVersion = f[1]
+		case "toolchain":
+			if f[1] != "default" {
+				toolchain = f[1]
+			}
+		}
+	}
+	switch {
+	case toolchain != "":
+		return toolchain, nil
+	case goVersion == "":
+		return "", fmt.Errorf("go.mod has no go line")
+	case strings.Count(goVersion, ".") == 1:
+		goVersion += ".0"
+	}
+	return "go" + goVersion, nil
 }

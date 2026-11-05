@@ -136,6 +136,10 @@ func TestApplyCommits(t *testing.T) {
 	if len(lines) != 1 || !strings.Contains(lines[0], `"kind":"config"`) {
 		t.Fatalf("history = %q, want one line with \"kind\":\"config\"", lines)
 	}
+	// A trial is no hot change, and its line does not say hot at all.
+	if strings.Contains(lines[0], `"hot"`) {
+		t.Errorf("history = %q, want no \"hot\" in a trial's line", lines)
+	}
 	h := e.history(t)
 	wantResult(t, h[0], want)
 	if got := e.slots(t); !reflect.DeepEqual(got, []string{"26.10.21"}) {
@@ -513,7 +517,7 @@ func TestRedactDetail(t *testing.T) {
 	wantNone := func(t *testing.T, what, s string) {
 		t.Helper()
 		if strings.Contains(s, secret) {
-			t.Errorf("%s holds the secret: %q", what, s)
+			t.Errorf("%s holds the secret", what)
 		}
 	}
 
@@ -530,21 +534,21 @@ func TestRedactDetail(t *testing.T) {
 
 		res, err := e.u.Apply(bg)
 		wantOutcome(t, res, err, runnerapi.OutcomeRejected)
-		wantDetail(t, res, "Failed to start: unknown user ‹redacted›")
+		wantDetail(t, res, "unknown user")
 		wantNone(t, "Detail", res.Detail)
 		wantNone(t, "the error", err.Error())
-		if !strings.Contains(err.Error(), "‹redacted›") {
-			t.Errorf("error = %q, want the redacted text", err)
+		if !strings.Contains(err.Error(), "unknown user") {
+			t.Error("error should retain the public refusal category")
 		}
 		for _, line := range historyLines(t, e) {
 			wantNone(t, "the history line", line)
 		}
-		if h := e.history(t); len(h) != 1 || !strings.Contains(h[0].Detail, "‹redacted›") {
-			t.Errorf("history = %+v, want the redacted detail", h)
+		if h := e.history(t); len(h) != 1 || !strings.Contains(h[0].Detail, "unknown user") {
+			t.Error("history should retain the public refusal category")
 		}
 		wantNone(t, "the log", log.String())
-		if !strings.Contains(log.String(), "‹redacted›") {
-			t.Errorf("log = %q, want the redacted detail", log.String())
+		if !strings.Contains(log.String(), "unknown user") {
+			t.Error("log should retain the public refusal category")
 		}
 		var tf *runnerapi.TestFailedError
 		if !errors.As(err, &tf) {
@@ -601,7 +605,7 @@ func TestRedactDetail(t *testing.T) {
 			t.Errorf("history = %+v, want the redacted note", h)
 		}
 	})
-	t.Run("no Redact keeps the text", func(t *testing.T) {
+	t.Run("no Redact still withholds raw runner text", func(t *testing.T) {
 		e, _ := newRenderEnv(t, "26.10.21")
 		e.runner.script(func(f *fakeRunner) {
 			f.onTrial = func(w http.ResponseWriter, c runnerapi.Candidate) bool {
@@ -612,10 +616,9 @@ func TestRedactDetail(t *testing.T) {
 
 		res, err := e.u.Apply(bg)
 		wantOutcome(t, res, err, runnerapi.OutcomeRejected)
-		wantDetail(t, res, secret)
-		if !strings.Contains(err.Error(), secret) {
-			t.Errorf("error = %q, want it as it was", err)
-		}
+		wantDetail(t, res, "unknown user")
+		wantNone(t, "detail", res.Detail)
+		wantNone(t, "error", err.Error())
 	})
 }
 

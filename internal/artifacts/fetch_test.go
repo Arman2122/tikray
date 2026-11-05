@@ -559,21 +559,25 @@ func TestChainStallWatchdog(t *testing.T) {
 // A slow body that keeps arriving is not a stall, even when the whole of it
 // takes longer than Stall.
 func TestChainSlowButSteady(t *testing.T) {
+	// A byte every 100ms against a 750ms Stall: the 650ms between them
+	// absorbs a busy CI machine's scheduling pauses, which 40ms against
+	// 200ms did not, while the whole body still takes twice the Stall.
+	const gap, stall = 100 * time.Millisecond, 750 * time.Millisecond
 	slow := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		for i := range len(payload) {
 			io.WriteString(w, payload[i:i+1])
 			w.(http.Flusher).Flush()
-			time.Sleep(40 * time.Millisecond)
+			time.Sleep(gap)
 		}
 	})
 	dst := filepath.Join(t.TempDir(), "xray.zip")
-	chain := Chain{Sources: []Source{Direct(slow.URL, slow.Client())}, Stall: 200 * time.Millisecond}
+	chain := Chain{Sources: []Source{Direct(slow.URL, slow.Client())}, Stall: stall}
 	start := time.Now()
 	src, err := chain.Fetch(context.Background(), testReq, dst, payloadCheck(t, dst))
 	if err != nil || src != "direct" {
 		t.Fatalf("Fetch = %q, %v; want the slow body", src, err)
 	}
-	if d := time.Since(start); d < 400*time.Millisecond {
+	if d := time.Since(start); d <= stall {
 		t.Errorf("took only %v: the body was not slower than Stall", d)
 	}
 }

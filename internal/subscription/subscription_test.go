@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Arman2122/tikray/internal/store"
@@ -148,8 +149,50 @@ func TestParseSkipsRefusedLines(t *testing.T) {
 	if got.Line != refused {
 		t.Errorf("Line = %q, want the refused link %q", got.Line, refused)
 	}
-	if !strings.Contains(got.Err, "xray-core refuses VLESS") || strings.Contains(got.Err, secret) {
+	if !strings.Contains(got.Err, "refuse VLESS without TLS or encryption") || strings.Contains(got.Err, secret) {
 		t.Errorf("Err = %q, want the reason without the id", got.Err)
+	}
+}
+
+// A provider's name can hold the placeholder the API's views show,
+// "‹redacted›", which the store refuses to have written into a name. The
+// name loses it, as it loses control characters, so that the line becomes a
+// server and the refresh is stored.
+func TestParseDropsTheViewPlaceholderFromNames(t *testing.T) {
+	const masked = "%E2%80%B9redacted%E2%80%BA" // ‹redacted›, as a link's fragment
+	body := linkVLESS + "\n" +
+		"trojan://pw2@c.example.com:443?security=tls&sni=c.example.com#HK%20" + masked + "%2001\n" +
+		"trojan://pw3@d.example.com:443?security=tls&sni=d.example.com#" + masked + "\n" +
+		"trojan://pw4@e.example.com:443?security=tls&sni=e.example.com#%E2%80%B9red" + masked + "acted%E2%80%BA\n"
+	res := Parse([]byte(body))
+	if len(res.Entries) != 4 || len(res.Skipped) != 0 {
+		t.Fatalf("got %d entries and %+v skipped, want 4 and none", len(res.Entries), res.Skipped)
+	}
+	var names []string
+	for _, e := range res.Entries {
+		names = append(names, e.Server.Name)
+	}
+	if want := []string{"alpha", "HK  01", "d.example.com:443", "e.example.com:443"}; !slices.Equal(names, want) {
+		t.Errorf("names = %q, want %q", names, want)
+	}
+
+	// The refresh is stored.
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _, err := s.Update(store.AnyRevision, func(st *store.State) error {
+		st.Subscriptions = []store.Subscription{{ID: "00ff00ff", Name: "provider", URL: "https://sub.example.com/s/token", Interval: store.Duration(24 * time.Hour)}}
+		st.Servers = Merge(st.Servers, "00ff00ff", res.Entries)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("the store refused the refresh: %v", err)
+	}
+	for _, srv := range st.Servers {
+		if strings.Contains(srv.Name, store.Masked) {
+			t.Errorf("server %s is named %q", srv.ID, srv.Name)
+		}
 	}
 }
 

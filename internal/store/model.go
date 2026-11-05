@@ -44,12 +44,12 @@ type Server struct {
 	Name string `json:"name"`
 	// Disabled keeps the server in the state but out of the generated config.
 	Disabled bool `json:"disabled,omitempty"`
-	// Invalid is why Open disabled the server: it fails this tikray's checks
-	// (see Open), such as an outbound that this tikray's xray-core refuses. It
-	// is the text of the problem without its path, and holds no secret. A
-	// server with a reason must be Disabled, and neither its name nor its
-	// outbound is checked again until a caller replaces the outbound and
-	// clears the reason.
+	// Untested is set when the runner could not test this outbound before it
+	// was saved. The service retries it once a core runs.
+	Untested bool `json:"untested,omitempty"`
+	// Invalid is the redacted reason the store or the runner refused the
+	// server. A server with a reason must be Disabled; its name and outbound
+	// are checked again when a caller replaces the outbound and clears it.
 	Invalid string `json:"invalid,omitempty"`
 	// Link is the share link the server was imported from, if it was.
 	Link string `json:"link,omitempty"`

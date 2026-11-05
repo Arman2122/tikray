@@ -121,7 +121,7 @@ func readOutbound(file string) (json.RawMessage, error) {
 
 func (c *cli) serverList(ctx context.Context, args []string) int {
 	fs := c.newFlagSet("server list", "server list [--json]")
-	asJSON := fs.Bool("json", false, "print the API's JSON, with the servers' credentials, instead of a table")
+	asJSON := fs.Bool("json", false, "print the API's public server metadata as JSON")
 	if _, code, ok := c.parse(fs, args, 0); !ok {
 		return code
 	}
@@ -221,7 +221,7 @@ func (c *cli) subAdd(ctx context.Context, args []string) int {
 
 func (c *cli) subList(ctx context.Context, args []string) int {
 	fs := c.newFlagSet("sub list", "sub list [--json]")
-	asJSON := fs.Bool("json", false, "print the API's JSON, with the subscriptions' URLs, instead of a table")
+	asJSON := fs.Bool("json", false, "print the API's public subscription metadata as JSON")
 	if _, code, ok := c.parse(fs, args, 0); !ok {
 		return code
 	}
@@ -279,7 +279,7 @@ func (c *cli) subRefresh(ctx context.Context, cl *apiclient.Client, id string) i
 	}
 	c.say("refreshed subscription %s via %s: %d added, %d updated, %d removed, %d kept",
 		oneWord(id), oneWord(res.Via), res.Added, res.Updated, res.Removed, res.Kept)
-	// The service words each skipped line as its scheme and name; it is
+	// The service labels a skipped link by its scheme; the safe label is
 	// printed as it is, made one line.
 	for _, s := range res.Skipped {
 		c.say("skipped %s: %s", oneLine(s.Line), oneLine(s.Reason))

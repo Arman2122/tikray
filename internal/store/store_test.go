@@ -1054,7 +1054,7 @@ func TestOpenDegradesEachCheckOfAServer(t *testing.T) {
 		{"no protocol", srv("n", `{"settings":{}}`), "is required"},
 		{"a tag", srv("n", `{"protocol":"vless","tag":"x"}`), "must not be set: tikray tags the outbound itself"},
 		{"not an object", srv("n", `"vless"`), "must be a JSON object"},
-		{"refused by xray-core", srv("n", fmt.Sprintf(vlessPlainTo, "1.2.3.4")), "xray-core refuses VLESS without TLS or encryption to a public address"},
+		{"refused by xray-core", srv("n", fmt.Sprintf(vlessPlainTo, "1.2.3.4")), "xray-core 26.10.31 and later refuse VLESS without TLS or encryption unless the server's IP address is private, loopback or link-local, and this one is public: use TLS or REALITY, or a private address"},
 		{"empty name", srv("", `{"protocol":"vless"}`), "must not be empty"},
 		{"name with an escape", srv("Frank\x1b[2Jfurt", `{"protocol":"vless"}`), "must not hold control characters or bidi overrides"},
 		{"name too long", srv(strings.Repeat("a", MaxNameRunes+1), `{"protocol":"vless"}`), fmt.Sprintf("must be at most %d characters", MaxNameRunes)},
@@ -1078,6 +1078,32 @@ func TestOpenDegradesEachCheckOfAServer(t *testing.T) {
 				t.Errorf("the reason repeats a secret: %q", st.Servers[1].Invalid)
 			}
 		})
+	}
+}
+
+// TestOpenDisablesPlainServerAtCGNATAddress: a server that M2b saved, VLESS
+// without TLS at a carrier-grade NAT address, which xray-core before 26.10.31
+// counts as private, is disabled on upgrade, for tikray refuses what the
+// newest core refuses. The reason is the rule that refuses it, what the
+// address is to that rule and what to do, without the address.
+func TestOpenDisablesPlainServerAtCGNATAddress(t *testing.T) {
+	dir := t.TempDir()
+	tailnet := Server{ID: NewID(), Name: "home via tailnet", Outbound: json.RawMessage(
+		`{"protocol":"vless","settings":{"vnext":[{"address":"100.101.102.103","port":8443,"users":[{"id":"00000000-0000-4000-8000-000000000000","encryption":"none"}]}]}}`)}
+	put(t, dir, "state.v1.json", fileJSON(1, 7, stateWith(t, server("good"), tailnet)))
+
+	s := mustOpen(t, dir)
+	st, _ := s.State()
+	want := "xray-core 26.10.31 and later refuse VLESS without TLS or encryption unless the server's IP address is private, " +
+		"loopback or link-local, and this one is in 100.64.0.0/10 (carrier-grade NAT): use TLS or REALITY, or a private address"
+	if got := st.Servers[1]; !got.Disabled || got.Invalid != want {
+		t.Errorf("the server is disabled=%t invalid=%q, want it disabled for %q", got.Disabled, got.Invalid, want)
+	}
+	if strings.Contains(st.Servers[1].Invalid, "100.101.102.103") {
+		t.Errorf("the reason repeats the address: %q", st.Servers[1].Invalid)
+	}
+	if got := s.Degraded(); !slices.Equal(got, []string{tailnet.ID}) {
+		t.Errorf("Degraded() = %v, want [%s]", got, tailnet.ID)
 	}
 }
 
@@ -1208,5 +1234,103 @@ func TestOpenWritesAMigrationAsItIs(t *testing.T) {
 	}
 	if !bytes.Equal(get(t, dir, "state.v1.json"), v1) {
 		t.Error("the version 1 file changed")
+	}
+}
+
+// A state saved with the views' placeholder in it, before tikray refused it,
+// loads as it is: loading never fails over what a newer tikray refuses, and a
+// server is not disabled for a name.
+func TestOpenAcceptsMaskedPlaceholder(t *testing.T) {
+	dir := t.TempDir()
+	want := withMasked()
+	data, err := encode(Current, 4, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(t, dir, stateName(Current), data)
+	s := mustOpen(t, dir)
+	st, rev := s.State()
+	if rev != 4 {
+		t.Errorf("revision %d, want 4", rev)
+	}
+	sameState(t, st, want)
+	if d := s.Degraded(); len(d) != 0 || st.Servers[0].Disabled || st.Servers[0].Invalid != "" {
+		t.Errorf("Open disabled the server for its name: degraded %v, invalid %q", d, st.Servers[0].Invalid)
+	}
+
+	// A write that leaves what was held as it was is not refused, so that
+	// every other change, and the service's own bookkeeping, still saves.
+	// Removing the placeholder is allowed too.
+	st, _, err = s.Update(AnyRevision, add("beta"))
+	if err != nil {
+		t.Fatalf("Update of another field = %v", err)
+	}
+	st.Servers = st.Servers[:1]
+	sameState(t, st, want)
+	if _, _, err := s.Update(AnyRevision, func(st *State) error {
+		st.Routing.BlockList = st.Routing.BlockList[:1]
+		return nil
+	}); err != nil {
+		t.Errorf("Update that removes a held placeholder = %v", err)
+	}
+}
+
+// The API's views show ‹redacted› in place of a hidden value. A section
+// copied from a GET response and written back would store the placeholder
+// and lose the value it stood for, silently: a block rule of "‹redacted›" is
+// a substring matcher. A write that brings it into any value a view shows is
+// refused, and writes nothing.
+func TestUpdateRefusesMaskedPlaceholder(t *testing.T) {
+	const mask = Masked
+	for _, c := range []struct {
+		name   string
+		mutate func(*State)
+		path   string
+	}{
+		{"server name", func(s *State) { s.Servers[0].Name = mask }, "servers[0].name"},
+		{"server name part", func(s *State) { s.Servers[0].Name = "Frankfurt " + mask }, "servers[0].name"},
+		{"subscription name", func(s *State) { s.Subscriptions[0].Name = mask }, "subscriptions[0].name"},
+		{"device name", func(s *State) { s.Devices[0].Name = "tv " + mask }, "devices[0].name"},
+		{"device MAC", func(s *State) { s.Devices[0].MAC = mask }, "devices[0].mac"},
+		{"block list", func(s *State) { s.Routing.BlockList = []string{"domain:ads.example", mask} }, "routing.block_list[1]"},
+		{"block list regexp", func(s *State) { s.Routing.BlockList = []string{"regexp:" + mask} }, "routing.block_list[0]"},
+		{"domestic domain", func(s *State) { s.Routing.Domestic.Domains = []string{"domain:" + mask} }, "routing.domestic.domains[0]"},
+		{"domestic IP", func(s *State) { s.Routing.Domestic.IPs = []string{mask} }, "routing.domestic.ips[0]"},
+		{"rule domain", func(s *State) { s.Routing.Rules = []Rule{{Domains: []string{"keyword:" + mask}, Action: ActionDirect}} }, "routing.rules[0].domains[0]"},
+		{"rule IP", func(s *State) { s.Routing.Rules = []Rule{{IPs: []string{mask}, Action: ActionDirect}} }, "routing.rules[0].ips[0]"},
+		{"probe URL", func(s *State) { s.Health.ProbeURL = "https://probe.example/" + mask }, "health.probe_url"},
+		{"DNS URL", func(s *State) { s.DNS.Remote = "https://dns.example/" + mask }, "dns.remote"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			s := mustOpen(t, dir)
+			if _, _, err := s.Update(AnyRevision, func(st *State) error {
+				*st = valid()
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			before := get(t, dir, stateName(Current))
+			stBefore, revBefore := s.State()
+			_, rev, err := s.Update(AnyRevision, func(st *State) error {
+				c.mutate(st)
+				return nil
+			})
+			ps := joined(err)
+			if len(ps) != 1 || !strings.HasPrefix(ps[0].Error(), c.path+": ") || !strings.Contains(ps[0].Error(), "masked placeholder from a view") {
+				t.Errorf("Update = %v; want one problem at %s that names the masked placeholder", ps, c.path)
+			}
+			if rev != 0 {
+				t.Errorf("Update returned revision %d with its error", rev)
+			}
+			if after := get(t, dir, stateName(Current)); !bytes.Equal(after, before) {
+				t.Error("Update changed the file")
+			}
+			st, rev := s.State()
+			sameState(t, st, stBefore)
+			if rev != revBefore {
+				t.Errorf("revision %d, want %d", rev, revBefore)
+			}
+		})
 	}
 }

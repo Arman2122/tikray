@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -264,8 +266,8 @@ func TestTrialRejected(t *testing.T) {
 
 	err := g.r.Trial(t.Context())
 	var tf *runnerapi.TestFailedError
-	if !errors.As(err, &tf) || !strings.Contains(tf.Output, "failed to load config") {
-		t.Fatalf("Trial = %v; want a *TestFailedError with xray's output", err)
+	if !errors.As(err, &tf) || tf.Output != "xray rejected the config: invalid config" {
+		t.Fatalf("Trial = %v; want a *TestFailedError with the refusal", err)
 	}
 	g.wantState(t, runnerapi.StateRunning, oldCore)
 	if got := g.r.Status().XrayPID; got != pid || gone(pid) {
@@ -273,6 +275,27 @@ func TestTrialRejected(t *testing.T) {
 	}
 	g.wantLastTrial(t, runnerapi.OutcomeRejected, cand)
 	g.wantNoCandidate(t)
+}
+
+func TestTrialDoesNotPublishXrayCredentials(t *testing.T) {
+	const credential = "private-fixture-value"
+	g := newRig(t, nil)
+	g.active(t, "ok")
+	g.boot(t)
+	cand := g.candidate(t, "badconfig", 5*time.Second)
+	writeFile(t, g.d.ConfigPath(cand.Config), `{"outbounds":[{"settings":{"password":"`+credential+`"}}]}`)
+	var logs syncBuffer
+	old := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(old)
+	err := g.r.Trial(t.Context())
+	last, readErr := ReadLastTrial(g.d)
+	if err == nil || readErr != nil || last == nil || last.Outcome != runnerapi.OutcomeRejected {
+		t.Fatal("expected a recorded config rejection")
+	}
+	if strings.Contains(err.Error(), credential) || strings.Contains(last.Detail, credential) || strings.Contains(logs.String(), credential) {
+		t.Fatal("the runner published the rejected config's credential")
+	}
 }
 
 func TestTrialExitReverts(t *testing.T) {
@@ -836,20 +859,22 @@ func TestTrialCanceled(t *testing.T) {
 }
 
 // TestTrialTestTimeout gives a candidate whose xray run -test takes a second
-// a 300 ms deadline: the test is cut off at the deadline and rejected, and
-// the active xray is left alone.
+// a 300 ms deadline: the test is cut off at the deadline, which is no verdict
+// on the config, so the trial ends with a runner error and is not recorded,
+// and the active xray is left alone.
 func TestTrialTestTimeout(t *testing.T) {
 	g := newRig(t, nil)
 	g.active(t, "ok")
 	g.boot(t)
 	pid := g.r.Status().XrayPID
-	cand := g.candidate(t, "slowtest", 300*time.Millisecond)
+	g.candidate(t, "slowtest", 300*time.Millisecond)
 	start := time.Now()
 	err := g.r.Trial(t.Context())
 	took := time.Since(start)
-	var tf *runnerapi.TestFailedError
-	if !errors.As(err, &tf) || !strings.Contains(tf.Output, "did not finish") {
-		t.Fatalf("Trial = %v; want a *TestFailedError saying the test did not finish", err)
+	wantTestError(t, err, "xray config test did not finish within the trial's ")
+	var te *testError
+	if !errors.As(err, &te) || !runnerapi.PublicTestError(te.text) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Trial = %v; want a public test error that wraps the deadline", err)
 	}
 	if took > 900*time.Millisecond {
 		t.Errorf("Trial took %v; want xray run -test cut off at the 300ms deadline", took)
@@ -858,8 +883,30 @@ func TestTrialTestTimeout(t *testing.T) {
 	if got := g.r.Status().XrayPID; got != pid || gone(pid) {
 		t.Errorf("PID %d (old %d gone = %v); want the active xray untouched", got, pid, gone(pid))
 	}
-	g.wantLastTrial(t, runnerapi.OutcomeRejected, cand)
+	g.wantNoLastTrial(t)
 	g.wantNoCandidate(t)
+}
+
+func TestFailedReloadCannotQualifyAHotChange(t *testing.T) {
+	g := runningRig(t)
+	before := g.r.Status()
+	next := *before.Active
+	next.Config = g.config(t, "other")
+	if err := WriteActive(g.d, next); err != nil {
+		t.Fatal(err)
+	}
+	// Stage fails before stopping the old process, which still runs the
+	// previous config even though Status now reports the new active.json.
+	if err := os.Remove(g.d.CoreBinary(next.Core)); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.r.Reload(t.Context()); err == nil {
+		t.Fatal("reload should fail")
+	}
+	after := g.r.Status()
+	if after.XrayPID != before.XrayPID || after.Active == nil || *after.Active != next || after.XrayInstance != "" {
+		t.Error("a live process running a different config must not qualify a hot change")
+	}
 }
 
 func TestRestartAndReload(t *testing.T) {
@@ -990,20 +1037,21 @@ func TestTestConfigNoCore(t *testing.T) {
 // TestTestConfigFile checks where the config is tested: a file of its own,
 // 0600 in a fresh 0700 directory under the run directory, gone afterwards.
 func TestTestConfigFile(t *testing.T) {
+	report := captureTestReport(t)
 	g := runningRig(t)
 	config := `{"outbounds":[{"protocol":"freedom","tag":"direct"}]}`
 	res, err := g.r.TestConfig(t.Context(), []byte(config))
 	if err != nil || !res.OK {
 		t.Fatalf("TestConfig = %+v, %v; want OK", res, err)
 	}
-	path := testedPath(res.Output)
+	path := testedPath(report())
 	if dir := filepath.Dir(path); filepath.Dir(dir) != g.d.Run() || !strings.HasPrefix(filepath.Base(dir), ".test-") {
 		t.Errorf("xray tested %s, want a file in a .test-* directory of %s", path, g.d.Run())
 	}
-	if !strings.Contains(res.Output, "\n"+config+"\n") {
+	if !strings.Contains(report(), "\n"+config+"\n") {
 		t.Errorf("xray tested\n%s\nwant the config as it was sent", res.Output)
 	}
-	if !strings.Contains(res.Output, "perm file=600 dir=700\n") {
+	if !strings.Contains(report(), "perm file=600 dir=700\n") {
 		t.Errorf("xray tested\n%s\nwant a file with mode 0600 in a directory with mode 0700", res.Output)
 	}
 	if left := testLeftovers(t, g.d); len(left) != 0 {
@@ -1012,17 +1060,19 @@ func TestTestConfigFile(t *testing.T) {
 }
 
 func TestTestConfigRenamesTunDevice(t *testing.T) {
+	report := captureTestReport(t)
 	g := runningRig(t)
 	res, err := g.r.TestConfig(t.Context(), []byte(`{"inbounds":[{"tag":"tun-in","protocol":"tun","settings":{"name":"xray0","MTU":1500}}]}`))
 	if err != nil || !res.OK {
 		t.Fatalf("TestConfig = %+v, %v; want OK", res, err)
 	}
-	if !strings.Contains(res.Output, `"name":"xray-test0"`) || strings.Contains(res.Output, "xray0") {
+	if !strings.Contains(report(), `"name":"xray-test0"`) || strings.Contains(report(), "xray0") {
 		t.Errorf("xray tested\n%s\nwant the TUN device named xray-test0", res.Output)
 	}
 }
 
 func TestTestConfigAssetEnv(t *testing.T) {
+	report := captureTestReport(t)
 	t.Setenv("XRAY_LOCATION_ASSET", "/elsewhere") // the runner's own never reaches xray
 	t.Run("geo", func(t *testing.T) {
 		g := newRig(t, nil)
@@ -1033,17 +1083,27 @@ func TestTestConfigAssetEnv(t *testing.T) {
 		}
 		g.boot(t)
 		res, err := g.r.TestConfig(t.Context(), []byte(`{}`))
-		if want := "env XRAY_LOCATION_ASSET=" + g.d.GeoDir("g1") + "\n"; err != nil || !strings.Contains(res.Output, want) {
+		if want := "env XRAY_LOCATION_ASSET=" + g.d.GeoDir("g1") + "\n"; err != nil || !strings.Contains(report(), want) {
 			t.Errorf("TestConfig = %+v, %v; want xray run with %q", res, err, want)
 		}
 	})
 	t.Run("no geo", func(t *testing.T) {
 		g := runningRig(t)
 		res, err := g.r.TestConfig(t.Context(), []byte(`{}`))
-		if want := "env XRAY_LOCATION_ASSET=\n"; err != nil || !strings.Contains(res.Output, want) {
+		if want := "env XRAY_LOCATION_ASSET=\n"; err != nil || !strings.Contains(report(), want) {
 			t.Errorf("TestConfig = %+v, %v; want xray run with %q", res, err, want)
 		}
 	})
+}
+
+func TestTestConfigHidesCredentials(t *testing.T) {
+	g := runningRig(t)
+	const credential = "private-fixture-value"
+	config := []byte(`{"outbounds":[{"settings":{"password":"` + credential + `"}}]}`)
+	res, err := g.r.TestConfig(t.Context(), config)
+	if err != nil || !res.OK || strings.Contains(res.Output, credential) {
+		t.Error("the passing test should preserve its verdict without repeating a credential")
+	}
 }
 
 func TestTestConfigCapsOutput(t *testing.T) {
@@ -1054,13 +1114,20 @@ func TestTestConfigCapsOutput(t *testing.T) {
 	if err != nil || res.OK {
 		t.Fatalf("TestConfig = %+v, %v; want a rejection", res, err)
 	}
-	if len(res.Output) > 8<<10 {
-		t.Errorf("output is %d bytes, want at most 8 KiB", len(res.Output))
+	if res.Output != "xray rejected the config: invalid config" {
+		t.Errorf("output = %q; want only the fixed refusal", res.Output)
 	}
-	// xray says why first: the start is kept.
-	if !strings.HasPrefix(res.Output, "Failed to start: failed to load config\n") || !strings.HasSuffix(res.Output, truncatedMark) {
-		t.Errorf("output starts %.60q and ends %q; want xray's first line kept and %q at the end",
-			res.Output, res.Output[max(0, len(res.Output)-40):], truncatedMark)
+}
+
+func TestTailBuffer(t *testing.T) {
+	b := &tailBuffer{max: 8}
+	for _, w := range []string{"abc", "defgh", "ij", "", "0123456789abcdef", "xyz"} {
+		if n, err := b.Write([]byte(w)); n != len(w) || err != nil {
+			t.Fatalf("Write(%q) = %d, %v", w, n, err)
+		}
+	}
+	if got := string(b.buf); got != "bcdefxyz" {
+		t.Errorf("kept %q, want the last 8 bytes %q", got, "bcdefxyz")
 	}
 }
 
@@ -1075,8 +1142,8 @@ func TestTestConfigTimeout(t *testing.T) {
 	pid := g.r.Status().XrayPID
 	start := time.Now()
 	res, err := g.r.TestConfig(t.Context(), []byte(`{}`))
-	if err != nil || res.OK || !strings.Contains(res.Output, "did not finish within 100ms") {
-		t.Errorf("TestConfig = %+v, %v; want a rejection that says it did not finish within 100ms", res, err)
+	if !errors.Is(err, context.DeadlineExceeded) || res != (runnerapi.TestResult{}) {
+		t.Error("a timed-out test must return a deadline error and no config verdict")
 	}
 	if d := time.Since(start); d > 800*time.Millisecond {
 		t.Errorf("TestConfig took %v, want it cut off after 100ms", d)
@@ -1119,4 +1186,292 @@ func TestBootRemovesTestLeftovers(t *testing.T) {
 			t.Errorf("Boot removed %s: %v", keep, err)
 		}
 	}
+}
+
+// config writes a config file for the runner to adopt and returns its name. A
+// seed makes a name of its own, as the control plane's content hash does.
+func (g *rig) config(t *testing.T, seed string) string {
+	t.Helper()
+	name := fmt.Sprintf("config/%x.json", sha256.Sum256([]byte(seed)))
+	writeFile(t, g.d.ConfigPath(name), "{}")
+	return name
+}
+
+// wantActive checks the active selection, on disk and in Status.
+func (g *rig) wantActive(t *testing.T, want runnerapi.Selection) {
+	t.Helper()
+	if a, err := ReadActive(g.d); err != nil || a == nil || *a != want {
+		t.Errorf("active.json = %+v, %v; want %+v", a, err, want)
+	}
+	if st := g.r.Status(); st.Active == nil || *st.Active != want {
+		t.Errorf("Status().Active = %+v; want %+v", st.Active, want)
+	}
+}
+
+// TestAdoptOnlyWhileRunning: a hot change has already put a config into the
+// running xray, and Adopt makes it the active one without touching the
+// process. It does so only while an xray runs from the active selection, and
+// not while a trial or a restart is under way.
+// active.json must keep pointing to a real config inside the shared run
+// directory even after a reboot. A link into another mount is not one.
+func TestAdoptRefusesLinkedConfig(t *testing.T) {
+	for _, directory := range []bool{false, true} {
+		g := newRig(t, nil)
+		current := g.active(t, "ok")
+		g.boot(t)
+		name := g.config(t, "linked")
+		path := g.d.ConfigPath(name)
+		if directory {
+			path = filepath.Dir(path)
+		}
+		outside := filepath.Join(t.TempDir(), "elsewhere")
+		if err := os.Rename(path, outside); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, path); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.r.Adopt(t.Context(), name); !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("linked directory=%v: want invalid config", directory)
+		} else {
+			g.wantActive(t, current)
+		}
+	}
+}
+
+func TestAdoptOnlyWhileRunning(t *testing.T) {
+	t.Run("running", func(t *testing.T) {
+		t.Parallel()
+		log := &syncBuffer{}
+		g := newRig(t, func(c *Config) { c.Supervisor.Log = log })
+		sel := g.core(t, oldCore, "ok")
+		sel.Geo = "g1"
+		if err := WriteActive(g.d, sel); err != nil {
+			t.Fatal(err)
+		}
+		g.boot(t)
+		// A finished trial leaves last-trial.json, which Adopt must not touch.
+		cand := g.candidate(t, "ok", 5*time.Second)
+		g.trial(t)
+		if err := g.r.Abort(); err != nil {
+			t.Fatal(err)
+		}
+		g.wantLastTrial(t, runnerapi.OutcomeAborted, cand)
+		g.wantState(t, runnerapi.StateRunning, oldCore)
+		before := g.r.Status()
+		lastTrial, err := os.ReadFile(g.d.LastTrial())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		next := g.config(t, "adopted")
+		if err := g.r.Adopt(t.Context(), next); err != nil {
+			t.Fatalf("Adopt: %v", err)
+		}
+		want := runnerapi.Selection{Core: oldCore, Geo: "g1", Config: next}
+		g.wantActive(t, want)
+		after := g.r.Status()
+		if before.XrayInstance == "" || after.XrayInstance != before.XrayInstance || after.State != runnerapi.StateRunning || after.XrayPID != before.XrayPID || after.XrayVersion != before.XrayVersion {
+			t.Errorf("status after Adopt = %+v; want the same running xray as before, %+v", after, before)
+		}
+		if !reflect.DeepEqual(after.LastTrial, before.LastTrial) {
+			t.Errorf("LastTrial = %+v after Adopt, was %+v", after.LastTrial, before.LastTrial)
+		}
+		if got, err := os.ReadFile(g.d.LastTrial()); err != nil || string(got) != string(lastTrial) {
+			t.Errorf("last-trial.json changed by Adopt (err %v)", err)
+		}
+		g.wantNoCandidate(t)
+		if gone(before.XrayPID) {
+			t.Fatalf("xray %d is gone after Adopt", before.XrayPID)
+		}
+
+		// A crash restarts from the adopted config: the exit of the process,
+		// which was started with the old one, must still be recognised.
+		if err := syscall.Kill(before.XrayPID, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+		waitLog(t, log, "config "+g.d.ConfigPath(next))
+		waitFor(t, 5*time.Second, "xray running again", func() bool {
+			st := g.r.Status()
+			return st.State == runnerapi.StateRunning && st.XrayPID > 0 && st.XrayPID != before.XrayPID && st.XrayInstance != "" && st.XrayInstance != before.XrayInstance
+		})
+		g.wantActive(t, want)
+
+		// And so does a restart.
+		if err := g.r.Restart(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		g.wantState(t, runnerapi.StateRunning, oldCore)
+		g.wantActive(t, want)
+	})
+
+	t.Run("trial", func(t *testing.T) {
+		t.Parallel()
+		g := newRig(t, nil)
+		sel := g.active(t, "ok")
+		g.boot(t)
+		cand := g.candidate(t, "ok", 5*time.Second)
+		g.trial(t)
+		pid := g.r.Status().XrayPID
+		next := g.config(t, "adopted")
+
+		if err := g.r.Adopt(t.Context(), next); !errors.Is(err, runnerapi.ErrBusy) {
+			t.Fatalf("Adopt during a trial = %v, want ErrBusy", err)
+		}
+		g.wantState(t, runnerapi.StateTrial, newCore)
+		if st := g.r.Status(); st.XrayPID != pid || st.Candidate == nil || st.Candidate.Selection != cand.Selection {
+			t.Errorf("status after the refused Adopt = %+v; want the trial of %+v on %d", st, cand.Selection, pid)
+		}
+		g.wantActive(t, sel)
+		g.wantNoLastTrial(t)
+		if _, err := os.Stat(g.d.CandidateFile()); err != nil {
+			t.Errorf("candidate.json of the open trial is gone: %v", err)
+		}
+
+		// The trial ends, and then Adopt may.
+		if err := g.r.Abort(); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.r.Adopt(t.Context(), next); err != nil {
+			t.Fatalf("Adopt after the trial: %v", err)
+		}
+		g.wantActive(t, runnerapi.Selection{Core: oldCore, Config: next})
+	})
+
+	// Adopt goes through the runner's goroutine, so it waits for a trial that
+	// is under way, which has not made its candidate the running xray yet,
+	// and then finds the trial open. It must not slip in and write active.json
+	// between the trial's test and its start.
+	t.Run("queued behind a trial", func(t *testing.T) {
+		t.Parallel()
+		g := newRig(t, nil)
+		sel := g.active(t, "ok")
+		g.boot(t)
+		g.candidate(t, "slowtest", 10*time.Second) // its xray run -test takes a second
+		next := g.config(t, "adopted")
+		errc := make(chan error, 1)
+		go func() { errc <- g.r.Trial(t.Context()) }()
+		// The trial stages the candidate's core right before it tests it.
+		waitFor(t, 5*time.Second, "the candidate's core to be staged", func() bool {
+			_, err := os.Stat(filepath.Join(g.stage, newCore, "xray"))
+			return err == nil
+		})
+
+		if err := g.r.Adopt(t.Context(), next); !errors.Is(err, runnerapi.ErrBusy) {
+			t.Errorf("Adopt while the trial tests its candidate = %v, want ErrBusy", err)
+		}
+		if err := <-errc; err != nil {
+			t.Fatalf("Trial: %v", err)
+		}
+		g.wantState(t, runnerapi.StateTrial, newCore)
+		g.wantActive(t, sel)
+	})
+
+	t.Run("restarting", func(t *testing.T) {
+		t.Parallel()
+		// A backoff that outlasts the test keeps the runner restarting.
+		g := newRig(t, func(c *Config) { c.BackoffMin, c.BackoffMax = time.Hour, time.Hour })
+		sel := g.active(t, "ok")
+		g.boot(t)
+		if err := syscall.Kill(g.r.Status().XrayPID, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, 5*time.Second, "the runner to be restarting", func() bool {
+			return g.r.Status().State == runnerapi.StateRestarting
+		})
+
+		if err := g.r.Adopt(t.Context(), g.config(t, "adopted")); !errors.Is(err, runnerapi.ErrBusy) {
+			t.Fatalf("Adopt while restarting = %v, want ErrBusy", err)
+		}
+		g.wantActive(t, sel)
+		if st := g.r.Status(); st.State != runnerapi.StateRestarting || st.XrayPID != 0 {
+			t.Errorf("status after the refused Adopt = %+v; want restarting with no xray", st)
+		}
+	})
+
+	t.Run("no core", func(t *testing.T) {
+		t.Parallel()
+		g := newRig(t, nil)
+		g.boot(t) // no active.json: the runner stays empty
+		if err := g.r.Adopt(t.Context(), g.config(t, "adopted")); !errors.Is(err, runnerapi.ErrNoCore) {
+			t.Fatalf("Adopt with no xray = %v, want ErrNoCore", err)
+		}
+		if _, err := os.Stat(g.d.Active()); !os.IsNotExist(err) {
+			t.Errorf("active.json exists after the refused Adopt (stat err %v)", err)
+		}
+		if st := g.r.Status(); st.State != runnerapi.StateEmpty || st.Active != nil {
+			t.Errorf("status after the refused Adopt = %+v; want empty", st)
+		}
+	})
+
+	t.Run("bad config", func(t *testing.T) {
+		t.Parallel()
+		g := newRig(t, nil)
+		sel := g.active(t, "ok")
+		g.boot(t)
+		pid := g.r.Status().XrayPID
+		good := g.config(t, "adopted")
+		writeFile(t, g.d.ConfigPath("config/notes.json"), "{}")
+		dirName := fmt.Sprintf("config/%x.json", sha256.Sum256([]byte("a directory")))
+		if err := os.MkdirAll(g.d.ConfigPath(dirName), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		bad := map[string]string{
+			"empty":              "",
+			"not a hash":         "config/notes.json",
+			"short hash":         "config/" + good[len("config/"):len("config/")+63] + ".json",
+			"upper-case hash":    strings.ToUpper(good),
+			"no directory":       strings.TrimPrefix(good, "config/"),
+			"absolute":           g.d.ConfigPath(good),
+			"leaves the run dir": "config/../active.json",
+			"trailing slash":     good + "/",
+			"missing file":       fmt.Sprintf("config/%x.json", sha256.Sum256([]byte("never written"))),
+			"a directory":        dirName,
+		}
+		for name, config := range bad {
+			err := g.r.Adopt(t.Context(), config)
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Errorf("%s: Adopt(%q) = %v, want ErrInvalidConfig", name, config, err)
+			}
+		}
+		g.wantActive(t, sel)
+		g.wantState(t, runnerapi.StateRunning, oldCore)
+		if got := g.r.Status().XrayPID; got != pid {
+			t.Errorf("PID %d after the refused Adopts, want %d", got, pid)
+		}
+
+		// The config is checked before the state: a bad one is the caller's
+		// mistake whatever the runner is doing.
+		g.candidate(t, "ok", 5*time.Second)
+		g.trial(t)
+		if err := g.r.Adopt(t.Context(), "config/notes.json"); !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("Adopt of a bad name during a trial = %v, want ErrInvalidConfig", err)
+		}
+		if err := g.r.Adopt(t.Context(), good); !errors.Is(err, runnerapi.ErrBusy) {
+			t.Errorf("Adopt of a good name during a trial = %v, want ErrBusy", err)
+		}
+	})
+
+	t.Run("write fails", func(t *testing.T) {
+		t.Parallel()
+		g := newRig(t, nil)
+		sel := g.active(t, "ok")
+		g.boot(t)
+		next := g.config(t, "adopted")
+		// A directory with active.json's name makes the rename fail.
+		if err := os.Remove(g.d.Active()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(g.d.Active(), "x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		err := g.r.Adopt(t.Context(), next)
+		if err == nil || errors.Is(err, ErrInvalidConfig) || errors.Is(err, runnerapi.ErrBusy) || errors.Is(err, runnerapi.ErrNoCore) {
+			t.Fatalf("Adopt with an unwritable active.json = %v; want a plain error", err)
+		}
+		// The runner's view stays what xray runs.
+		if st := g.r.Status(); st.Active == nil || *st.Active != sel || st.State != runnerapi.StateRunning {
+			t.Errorf("status after the failed Adopt = %+v; want running %+v", st, sel)
+		}
+	})
 }

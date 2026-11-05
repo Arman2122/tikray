@@ -26,6 +26,7 @@ func TestConfigFromEnv(t *testing.T) {
 		Upstream: "https://github.com/XTLS/Xray-core",
 		Listen:   ":443",
 		API:      "https://127.0.0.1:443",
+		Hot:      true,
 	}
 
 	t.Run("defaults", func(t *testing.T) {
@@ -54,6 +55,7 @@ func TestConfigFromEnv(t *testing.T) {
 			"TIKRAY_API":               "https://10.0.0.2:8443",
 			"TIKRAY_API_TOKEN":         "a-token",
 			"TIKRAY_API_FINGERPRINT":   strings.Repeat("ab", 32),
+			"TIKRAY_HOT":               "off",
 		}))
 		if err != nil {
 			t.Fatal(err)
@@ -76,6 +78,16 @@ func TestConfigFromEnv(t *testing.T) {
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("got %+v\nwant %+v", got, want)
+		}
+	})
+
+	// Only off turns hot changes off.
+	t.Run("TIKRAY_HOT", func(t *testing.T) {
+		for v, want := range map[string]bool{"": true, "on": true, "1": true, "off": false} {
+			got, err := configFromEnv(envOf(map[string]string{"TIKRAY_HOT": v}))
+			if err != nil || got.Hot != want {
+				t.Errorf("TIKRAY_HOT=%q: Hot %v (%v), want %v", v, got.Hot, err, want)
+			}
 		}
 	})
 

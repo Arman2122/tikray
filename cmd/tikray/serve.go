@@ -11,6 +11,7 @@ import (
 
 	"github.com/Arman2122/tikray/internal/api"
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/health"
 	"github.com/Arman2122/tikray/internal/render"
 	"github.com/Arman2122/tikray/internal/runnerapi"
@@ -33,7 +34,10 @@ import (
 // runner may start after it (see runnerToken): the API comes up, and the
 // status says what it waits for. It prints one line on stderr, with the
 // address and the fingerprint of its certificate, which is what a client pins;
-// the token is in no output, only in <data>/state/api.token.
+// the token is in no output, only in <data>/state/api.token. While there is no
+// admin it prints a line before that, which says to run `tikray setup-code`:
+// the setup code itself is in no output either, only in
+// <data>/state/setup.code and in what that command prints.
 func (c *cli) serve(ctx context.Context, args []string) int {
 	fs := c.newFlagSet("serve", "serve")
 	if _, code, ok := c.parse(fs, args, 0); !ok {
@@ -57,6 +61,12 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 	}
 	defer unlock()
 	s, err := store.Open(stateDir(env.Data))
+	if err != nil {
+		return c.fail(err)
+	}
+	// The admin, the sessions and the API tokens: one Store, opened here under
+	// the lock like the state.
+	people, err := auth.OpenStore(stateDir(env.Data))
 	if err != nil {
 		return c.fail(err)
 	}
@@ -90,6 +100,13 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 	if err != nil {
 		return c.fail(err)
 	}
+	// Until the admin is made, say where the setup code is, never what it is:
+	// stderr goes to a log, and the code is shown by `tikray setup-code` and in
+	// setup.code alone. This comes before the startup line, which is what a
+	// reader takes for "up", so that the hint is there when that is.
+	if people.NeedsSetup() {
+		fmt.Fprintln(c.stderr, `tikray: no admin yet: run "tikray setup-code" in this container to get the setup code`)
+	}
 	fmt.Fprintf(c.stderr, "tikray: serving on %s, certificate sha256 %s\n", ln.Addr(), fingerprint)
 
 	// Either one ending is the end of both. Each returns nil once ctx is done.
@@ -112,7 +129,9 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 	}
 	ended := make(chan error, 2)
 	go func() { ended <- svc.Run(ctx) }()
-	go func() { ended <- api.ServeListener(ctx, ln, api.NewHandler(svc, token), cert) }()
+	go func() {
+		ended <- api.ServeListener(ctx, ln, api.NewHandler(svc, token, people, auth.NewLimiter(nil)), cert)
+	}()
 	var first error
 	for range 2 {
 		if err := <-ended; err != nil && first == nil {

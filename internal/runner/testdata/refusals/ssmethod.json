@@ -1,0 +1,1 @@
+{"outbounds":[{"protocol":"shadowsocks","tag":"srv-0000bbbb","settings":{"servers":[{"address":"example.com","port":8388,"method":"fixture-cipher","password":"fixture-ss-pass"}]}}]}

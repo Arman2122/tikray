@@ -2,14 +2,11 @@ package runner
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
-	"unicode/utf8"
 
 	"github.com/Arman2122/tikray/internal/runnerapi"
 )
@@ -17,11 +14,6 @@ import (
 const (
 	// defaultTestTimeout bounds one TestConfig.
 	defaultTestTimeout = 20 * time.Second
-	// maxTestOutput caps the output TestConfig returns. xray says why it
-	// rejects a config first, so the start is what is kept.
-	maxTestOutput = 8 << 10
-	// truncatedMark ends an output that was cut to maxTestOutput.
-	truncatedMark = "\n[output truncated]"
 	// testDirPrefix names TestConfig's directories in the run directory.
 	testDirPrefix = ".test-"
 )
@@ -36,10 +28,11 @@ const (
 // directory, never to run/config, whose files an apply may prune at any time,
 // and that directory is gone when TestConfig returns.
 //
-// A config xray rejects, or a test that takes more than 20 s, is a result with
-// OK false. The output is what xray printed, cut to its first 8 KiB. With no
-// xray running TestConfig returns runnerapi.ErrNoCore, and when ctx ends
-// first, its error.
+// A completed test returns xray's verdict (see runTest). A test that gives no
+// verdict on the config, because xray could not start, a signal killed it,
+// it exited with a status other than runnerapi.ExitConfigRefused, or it
+// took longer than 20 s, is a *testError, so that the caller can retry the
+// same config. With no xray running the error is runnerapi.ErrNoCore.
 func (r *Runner) TestConfig(ctx context.Context, config []byte) (runnerapi.TestResult, error) {
 	sel, ok := r.runningSelection()
 	if !ok {
@@ -47,61 +40,28 @@ func (r *Runner) TestConfig(ctx context.Context, config []byte) (runnerapi.TestR
 	}
 	dir, err := os.MkdirTemp(r.dirs().Run(), testDirPrefix+"*")
 	if err != nil {
-		return runnerapi.TestResult{}, fmt.Errorf("runner: test config: %w", err)
+		return runnerapi.TestResult{}, prepareError(err)
 	}
 	defer os.RemoveAll(dir)
 	path := filepath.Join(dir, "config.json")
 	renamed, _ := testConfig(config)
 	if err := os.WriteFile(path, renamed, 0o600); err != nil {
-		return runnerapi.TestResult{}, fmt.Errorf("runner: test config: %w", err)
+		return runnerapi.TestResult{}, prepareError(err)
 	}
 
 	tctx, cancel := context.WithTimeout(ctx, r.testTimeout)
 	defer cancel()
-	out := &headBuffer{max: maxTestOutput + 1} // a byte more tells a cut
-	err = runTest(tctx, r.sup.stagedPath(sel), r.sup.env(sel), path, out)
-	var exit *exec.ExitError
+	res, err := runTest(tctx, r.sup.stagedPath(sel), r.sup.env(sel), path)
 	switch {
 	case ctx.Err() != nil:
 		return runnerapi.TestResult{}, fmt.Errorf("runner: test config: %w", ctx.Err())
 	case err == nil:
-		return runnerapi.TestResult{OK: true, Output: capOutput(string(out.buf))}, nil
+		return res, nil
 	case tctx.Err() != nil:
-		msg := fmt.Sprintf("xray run -test did not finish within %s\n", r.testTimeout)
-		return runnerapi.TestResult{Output: capOutput(msg + string(out.buf))}, nil
-	case errors.As(err, &exit):
-		return runnerapi.TestResult{Output: capOutput(string(out.buf))}, nil
-	default: // xray did not run at all
+		return runnerapi.TestResult{}, unfinishedError(r.testTimeout.String(), tctx.Err())
+	default:
 		return runnerapi.TestResult{}, err
 	}
-}
-
-// headBuffer keeps the first max bytes written to it and drops the rest, so
-// that an xray that prints without end costs no more memory than that.
-type headBuffer struct {
-	buf []byte
-	max int
-}
-
-func (b *headBuffer) Write(p []byte) (int, error) {
-	if room := b.max - len(b.buf); room > 0 {
-		b.buf = append(b.buf, p[:min(room, len(p))]...)
-	}
-	return len(p), nil
-}
-
-// capOutput returns out when it has at most maxTestOutput bytes, and
-// otherwise its start, cut at a character boundary, and truncatedMark, in
-// maxTestOutput bytes.
-func capOutput(out string) string {
-	if len(out) <= maxTestOutput {
-		return out
-	}
-	cut := maxTestOutput - len(truncatedMark)
-	for cut > 0 && !utf8.RuneStart(out[cut]) {
-		cut--
-	}
-	return out[:cut] + truncatedMark
 }
 
 // cleanTestDirs removes the directories of TestConfig calls that a stopped

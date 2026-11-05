@@ -22,7 +22,7 @@ func TestClientMapsErrors(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/trial":
 			w.WriteHeader(422)
-			w.Write([]byte(`{"error":"test_failed","detail":"failed to load config"}`))
+			w.Write([]byte(`{"error":"test_failed","detail":"Failed to start: failed to load config"}`))
 		case "/v1/commit":
 			w.WriteHeader(409)
 			w.Write([]byte(`{"error":"no_trial"}`))
@@ -31,7 +31,7 @@ func TestClientMapsErrors(t *testing.T) {
 	defer srv.Close()
 	c := &Client{BaseURL: srv.URL, Token: "tok", HTTP: srv.Client()}
 	var tf *TestFailedError
-	if err := c.Trial(context.Background()); !errors.As(err, &tf) || tf.Output != "failed to load config" {
+	if err := c.Trial(context.Background()); !errors.As(err, &tf) || tf.Output != "xray failed to load config" {
 		t.Errorf("Trial: %v", err)
 	}
 	if err := c.Commit(context.Background()); !errors.Is(err, ErrNoTrial) {
@@ -40,6 +40,22 @@ func TestClientMapsErrors(t *testing.T) {
 	c.Token = "wrong"
 	if _, err := c.Status(context.Background()); err == nil {
 		t.Error("bad token accepted")
+	}
+}
+
+func TestLongRunnerErrorDoesNotQuoteAPartialCredential(t *testing.T) {
+	const prefix = "fixture-part"
+	for _, tc := range []struct{ status, limit int }{{500, maxErrText}, {422, maxBody}} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(tc.status)
+			_, _ = io.WriteString(w, strings.Repeat("x", tc.limit-len(prefix))+prefix+"-tail")
+		}))
+		c := &Client{BaseURL: server.URL, Token: "test", HTTP: server.Client()}
+		err := c.Trial(t.Context())
+		server.Close()
+		if err == nil || strings.Contains(err.Error(), prefix) {
+			t.Error("a truncated runner error body exposed part of a value")
+		}
 	}
 }
 
@@ -92,6 +108,11 @@ func TestTestFailedErrorMessage(t *testing.T) {
 	if !strings.Contains(err.Error(), "unknown outbound tag") {
 		t.Errorf("Error() = %q", err.Error())
 	}
+	// A refusal that says what xray rejected is not prefixed with it again.
+	err = &TestFailedError{Output: ConfigRefusal("Failed to start: failed to build outbound config with tag srv-deadbeef > VLESS users: \"flow\" doesn't support \"xtls-rprx-direct\"")}
+	if got, want := err.Error(), "runnerapi: xray rejected the config: outbound srv-deadbeef: unsupported flow"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
 }
 
 func TestClientStatus(t *testing.T) {
@@ -106,7 +127,7 @@ func TestClientStatus(t *testing.T) {
 		LastTrial: &TrialResult{
 			Candidate: Candidate{Selection: Selection{Core: "26.10.20", Config: "config/" + strings.Repeat("c", 64) + ".json"}, Deadline: time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)},
 			Outcome:   OutcomeRejected,
-			Detail:    "bad config",
+			Detail:    "xray failed to load config",
 			At:        time.Date(2026, 10, 24, 8, 59, 0, 0, time.UTC),
 		},
 	}
@@ -170,6 +191,81 @@ func TestClientPostRoutes(t *testing.T) {
 	}
 }
 
+func TestClientAdopt(t *testing.T) {
+	var gotMethod, gotPath, gotAuth, gotType, gotBody string
+	status, answer := http.StatusNoContent, ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		gotAuth, gotType = r.Header.Get("Authorization"), r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(status)
+		w.Write([]byte(answer))
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "tok", HTTP: srv.Client()}
+	config := "config/" + strings.Repeat("ab", 32) + ".json"
+
+	if err := c.Adopt(context.Background(), config); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/v1/adopt" || gotAuth != "Bearer tok" || gotType != "application/json" {
+		t.Errorf("request was %s %s with expected bearer=%v, Content-Type %q", gotMethod, gotPath, gotAuth == "Bearer tok", gotType)
+	}
+	if want := `{"config":"` + config + `"}`; gotBody != want {
+		t.Errorf("body = %s, want %s", gotBody, want)
+	}
+
+	// Every answer the runner gives: only the 409s are sentinels.
+	for _, tc := range []struct {
+		name     string
+		status   int
+		body     string
+		busy     bool
+		noCore   bool
+		inError  string
+		wantNone bool
+	}{
+		{name: "204 with no body", status: 204, wantNone: true},
+		{name: "200 is tolerated", status: 200, body: `{}`, wantNone: true},
+		{name: "busy", status: 409, body: `{"error":"busy"}`, busy: true},
+		{name: "busy with detail", status: 409, body: `{"error":"busy","detail":"a trial is open"}`, busy: true, inError: "a trial is open"},
+		{name: "no_core", status: 409, body: `{"error":"no_core"}`, noCore: true},
+		{name: "no_core with detail", status: 409, body: `{"error":"no_core","detail":"no xray is running"}`, noCore: true, inError: "no xray is running"},
+		{name: "a 409 with another code", status: 409, body: `{"error":"other"}`, inError: "409"},
+		{name: "a 409 that is not JSON", status: 409, body: `conflict`, inError: "conflict"},
+		{name: "bad_request", status: 400, body: `{"error":"bad_request","detail":"runner: invalid config: no such file"}`, inError: "400"},
+		{name: "unauthorized", status: 401, body: `{"error":"unauthorized"}`, inError: "401"},
+		{name: "internal", status: 500, body: `{"error":"internal","detail":"runner: adopt: disk full"}`, inError: "disk full"},
+	} {
+		status, answer = tc.status, tc.body
+		err := c.Adopt(context.Background(), config)
+		if tc.status == 400 && (err == nil || !strings.Contains(err.Error(), "no such file")) {
+			t.Error("missing safe config error detail")
+		}
+		switch {
+		case tc.wantNone:
+			if err != nil {
+				t.Errorf("%s: Adopt = %v, want nil", tc.name, err)
+			}
+			continue
+		case err == nil:
+			t.Errorf("%s: Adopt = nil, want an error", tc.name)
+			continue
+		}
+		if errors.Is(err, ErrBusy) != tc.busy || errors.Is(err, ErrNoCore) != tc.noCore {
+			t.Errorf("%s: Adopt error %v; errors.Is ErrBusy = %v, ErrNoCore = %v; want %v, %v",
+				tc.name, err, errors.Is(err, ErrBusy), errors.Is(err, ErrNoCore), tc.busy, tc.noCore)
+		}
+		if !strings.Contains(err.Error(), tc.inError) {
+			t.Errorf("%s: Adopt error %q, want it to contain %q", tc.name, err, tc.inError)
+		}
+		if !strings.HasPrefix(err.Error(), "runnerapi:") {
+			t.Errorf("%s: Adopt error %q lacks the runnerapi prefix", tc.name, err)
+		}
+	}
+}
+
 func TestClientXrayAPI(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req XrayAPIRequest
@@ -186,8 +282,23 @@ func TestClientXrayAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (XrayAPIResponse{ExitCode: 3, Stdout: "statsquery -s 127.0.0.1:10085", Stderr: "warn"}); got != want {
-		t.Errorf("XrayAPI = %+v, want %+v", got, want)
+	if got != (XrayAPIResponse{ExitCode: 3}) {
+		t.Error("a failed command should expose its exit code only")
+	}
+}
+
+func TestOldRunnerCommandOutputRemainsPrivate(t *testing.T) {
+	const marker = "fixture-private-fragment"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(XrayAPIResponse{Stdout: `{"outbounds":[{"tag":"srv-bbbbbbbb","opaque":"` + marker + `"}]}`, Stderr: marker})
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "test", HTTP: srv.Client()}
+	for _, cmd := range []string{"lso", "ado", "lsi"} {
+		got, err := c.XrayAPI(t.Context(), cmd)
+		if err != nil || strings.Contains(got.Stdout+got.Stderr, marker) || (cmd == "lso" && !strings.Contains(got.Stdout, "srv-bbbbbbbb")) {
+			t.Errorf("%s exposed an old runner's command output or lost the public tag", cmd)
+		}
 	}
 }
 
@@ -257,11 +368,11 @@ func TestClientTest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (TestResult{OK: true, Output: "Configuration OK.\n"}); got != want {
+	if want := (TestResult{OK: true, Output: "Configuration OK."}); got != want {
 		t.Errorf("Test = %+v, want %+v", got, want)
 	}
 	if gotMethod != http.MethodPost || gotPath != "/v1/test" || gotAuth != "Bearer tok" || gotType != "application/json" {
-		t.Errorf("request was %s %s with Authorization %q, Content-Type %q", gotMethod, gotPath, gotAuth, gotType)
+		t.Errorf("request was %s %s with expected bearer=%v, Content-Type %q", gotMethod, gotPath, gotAuth == "Bearer tok", gotType)
 	}
 	if gotBody != config {
 		t.Errorf("body = %q, want the config %q as it is", gotBody, config)
@@ -273,8 +384,90 @@ func TestClientTest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Test of a rejected config: %v", err)
 	}
-	if want := (TestResult{OK: false, Output: "Failed to start: failed to load config"}); got != want {
+	if want := (TestResult{OK: false, Output: "xray failed to load config"}); got != want {
 		t.Errorf("Test = %+v, want %+v", got, want)
+	}
+}
+
+func TestOldRunnerFailedCommandDoesNotEchoResponse(t *testing.T) {
+	const marker = "fixture-private-fragment"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(errBody{Error: "internal", Detail: "config contains " + marker})
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: "test", HTTP: srv.Client()}
+	_, testErr := c.Test(t.Context(), []byte("{}"))
+	_, apiErr := c.XrayAPI(t.Context(), "ado")
+	for _, err := range []error{testErr, apiErr, c.Trial(t.Context())} {
+		if err == nil || strings.Contains(err.Error(), marker) || !strings.Contains(err.Error(), "500") {
+			t.Error("an unsuccessful runner operation should expose its status without its body")
+		}
+	}
+}
+
+func TestOldRunnerRejectionsCannotEchoOpaqueConfig(t *testing.T) {
+	const marker = "fixture-private-fragment"
+	for _, ok := range []bool{false, true} {
+		res := TestResult{OK: ok, Output: "worker echoed " + marker}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/test":
+				json.NewEncoder(w).Encode(res)
+			case "/v1/trial":
+				w.WriteHeader(422)
+				json.NewEncoder(w).Encode(errBody{Error: "test_failed", Detail: res.Output})
+			case "/v1/status":
+				json.NewEncoder(w).Encode(Status{LastTrial: &TrialResult{Outcome: OutcomeRejected, Detail: res.Output}})
+			}
+		}))
+		c := &Client{BaseURL: srv.URL, Token: "test", HTTP: srv.Client()}
+		got, err := c.Test(t.Context(), []byte(`{"outbounds":[{"protocol":"future"}]}`))
+		switch {
+		case ok && (err != nil || !got.OK || strings.Contains(got.Output, marker)):
+			t.Error("old runner test answer exposed a private fragment or lost its verdict")
+		case !ok && (err == nil || strings.Contains(err.Error(), marker)):
+			// No xray refusal in its words: an error, never a verdict.
+			t.Error("old runner's unknown failure became a verdict or exposed a private fragment")
+		}
+		var tf *TestFailedError
+		if err := c.Trial(t.Context()); !errors.As(err, &tf) || strings.Contains(err.Error(), marker) {
+			t.Error("old runner trial rejection exposed a private fragment or lost its type")
+		}
+		st, err := c.Status(t.Context())
+		if err != nil || st.LastTrial == nil || strings.Contains(st.LastTrial.Detail, marker) {
+			t.Error("old runner last trial exposed a private fragment")
+		}
+		srv.Close()
+	}
+}
+
+func TestClientTestOlderRunnerTimeout(t *testing.T) {
+	const partial = "untrusted process output"
+	for _, tc := range []struct {
+		name    string
+		result  TestResult
+		timeout bool
+	}{
+		{"timeout", TestResult{Output: "xray run -test did not finish within 20s\n" + partial}, true},
+		{"short timeout", TestResult{Output: "xray run -test did not finish within 100ms\n"}, true},
+		{"accepted config", TestResult{OK: true, Output: "xray run -test did not finish within 20s\n"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(tc.result)
+			}))
+			defer srv.Close()
+			c := &Client{BaseURL: srv.URL, Token: "tok", HTTP: srv.Client()}
+			res, err := c.Test(t.Context(), []byte(`{}`))
+			if tc.timeout {
+				if !errors.Is(err, context.DeadlineExceeded) || res != (TestResult{}) || strings.Contains(err.Error(), partial) {
+					t.Error("a legacy timeout should give a deadline error without the incomplete output")
+				}
+			} else if err != nil || res.OK != tc.result.OK || strings.Contains(res.Output, partial) {
+				t.Error("the completed verdict should be preserved without carrying child output")
+			}
+		})
 	}
 }
 
@@ -426,5 +619,132 @@ func TestClientUnauthorized(t *testing.T) {
 	}
 	if want := []string{"stale", "stale"}; !reflect.DeepEqual(refused, want) {
 		t.Errorf("Unauthorized heard of %q, want %q", refused, want)
+	}
+}
+
+// A runner reports a test that ended without xray's verdict as an error in
+// fixed words. The client passes those on, and nothing else a runner says.
+func TestClientPassesOnRunnerTestErrors(t *testing.T) {
+	for _, tc := range []struct {
+		detail string
+		passed bool
+	}{
+		{"xray was killed by a signal (SIGKILL)", true},
+		{"xray was killed by a signal", true},
+		{"xray exited with status 2", true},
+		{"staging the core failed: no space left on device", true},
+		{"staging the core failed", true},
+		{"xray could not be started: exec format error", true},
+		{"preparing the test config failed: read-only file system", true},
+		{"xray config test did not finish within 20s", true},
+		{"xray config test did not finish within the trial's 1m30s", true},
+		{"runner: stage core 26.10.21: open /data/cores/26.10.21/xray: no such file or directory", false},
+		{"staging the core failed: open /data/cores/26.10.21/xray", false},
+		{"staging the core failed: fixture-private-fragment", false},
+		{"xray exited with status 2: fixture-private-fragment", false},
+		{"xray was killed by a signal (fixture-private-fragment)", false},
+		{"xray exited with status 23", false}, // that is a verdict, not an error
+		{"xray exited with status 0", false},
+		{"xray config test did not finish within fixture-private-fragment", false},
+	} {
+		t.Run(tc.detail, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(errBody{Error: "internal", Detail: tc.detail})
+			}))
+			defer srv.Close()
+			c := &Client{BaseURL: srv.URL, Token: "test", HTTP: srv.Client()}
+			_, testErr := c.Test(t.Context(), []byte(`{}`))
+			for name, err := range map[string]error{"Test": testErr, "Trial": c.Trial(t.Context())} {
+				var tf *TestFailedError
+				if err == nil || errors.As(err, &tf) || !strings.Contains(err.Error(), "HTTP 500") {
+					t.Fatalf("%s = %v; want an HTTP 500 runner error", name, err)
+				}
+				if got := strings.Contains(err.Error(), tc.detail); got != tc.passed {
+					t.Errorf("%s = %q; detail passed on = %v, want %v", name, err, got, tc.passed)
+				}
+				if strings.Contains(err.Error(), "fixture-private-fragment") || strings.Contains(err.Error(), "/data/") {
+					t.Errorf("%s = %q repeats what the runner said", name, err)
+				}
+			}
+			if !tc.passed && PublicTestError(tc.detail) {
+				t.Errorf("PublicTestError(%q) = true", tc.detail)
+			}
+		})
+	}
+}
+
+// An older runner reported any test that failed, for whatever reason, as a
+// refusal with what xray printed. Only xray's own words of a refusal ("Failed
+// to start:", an outbound it could not build, a known diagnostic) make that a
+// refusal of the config: anything else gets neutral words, and a cut output
+// never gives its last, partial line.
+func TestPublicRefusalNeverGuessesAConfigVerdict(t *testing.T) {
+	const private = "fixture-private-fragment"
+	for _, tc := range []struct{ name, text, want string }{
+		{"empty", "", ""},
+		{"blank", " \n", ""},
+		{"xray's refusal", "Xray 26.1.18 (Xray, Penetrates Everything.)\nFailed to start: main: failed to load config files: [/x] > " + private, "xray failed to load config"},
+		{"an outbound xray could not build", "infra/conf: failed to build outbound config with tag srv-0123abcd > " + private, "outbound srv-0123abcd: xray failed to load config"},
+		{"a known diagnostic", "Failed to start: unknown user " + private, "unknown user"},
+		{"a known diagnostic without the marker", "infra/conf: bad user " + private, "the runner reported an error"},
+		{"unknown words", "worker echoed " + private, "the runner reported an error"},
+		{"a killed test", "runner: xray run -test: signal: killed", "the runner reported an error"},
+		{"a partial diagnostic", "partial diagnostic\n" + private, "the runner reported an error"},
+		{"a stage failure", "runner: stage core 26.10.21: open /data/cores/26.10.21/xray: no such file or directory", "the runner reported an error"},
+		{"a lone truncation mark", TestOutputTruncated, "the runner reported an error"},
+		{"a cut refusal", "Failed to start: main: failed to load config files\n" + strings.Repeat("x", 40) + "\n" + private + TestOutputTruncated, "xray failed to load config"},
+		{"a cut diagnostic", "unknown user " + private + TestOutputTruncated, "the runner reported an error"},
+		{"the previous verdict", "xray failed to load config (exit 23)", "xray failed to load config (exit 23)"},
+		{"the previous verdict for a crash", "xray failed to load config (exit 2)", "xray exited with status 2"},
+		{"the previous timeout", "xray run -test did not finish within the trial's 2m0s\n" + private, "xray config test did not finish"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := publicRefusal(tc.text); got != tc.want {
+				t.Errorf("publicRefusal(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+			if got := publicRefusal(tc.want); got != tc.want {
+				t.Errorf("publicRefusal(%q) = %q; want its own texts kept", tc.want, got)
+			}
+		})
+	}
+}
+
+// An older runner reported any test that failed as a refusal: a killed or
+// crashed test, a core it could not stage, an empty output. Only xray's own
+// words of a refusal ("Failed to start:", or the exit status 23 the previous
+// runner named) condemn the servers in a config; anything else is an error,
+// so that a good server is never disabled for the runner's fault.
+func TestClientTestOlderRunnerNonVerdicts(t *testing.T) {
+	const private = "fixture-private-fragment"
+	for _, tc := range []struct {
+		name, output string
+		verdict      string // "" when the answer must be an error
+	}{
+		{"empty", "", ""},
+		{"exit 2", "xray failed to load config (exit 2)", ""},
+		{"killed", "runner: xray run -test: signal: killed " + private, ""},
+		{"a panic with a rule's words", "panic: invalid user " + private + "\ngoroutine 1 [running]:", ""},
+		{"a warning alone", `[Warning] "allowInsecure" is deprecated ` + private, ""},
+		{"similar words", "xray run -test did not finish within this release\n", ""},
+		{"exit 23", "xray failed to load config (exit 23)", "xray failed to load config"},
+		{"xray's refusal", "Failed to start: main: failed to load config files: [/c.json] > infra/conf: failed to build outbound config with tag srv-0000000a > infra/conf: VLESS users: \"flow\" doesn't support \"xtls-rprx-direct\" in this version " + private, "srv-0000000a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(TestResult{Output: tc.output})
+			}))
+			defer srv.Close()
+			c := &Client{BaseURL: srv.URL, Token: "tok", HTTP: srv.Client()}
+			res, err := c.Test(t.Context(), []byte(`{}`))
+			switch {
+			case tc.verdict == "" && (err == nil || res != (TestResult{})):
+				t.Errorf("Test = %+v, %v; want an error, not a verdict", res, err)
+			case tc.verdict != "" && (err != nil || res.OK || !strings.Contains(res.Output, tc.verdict)):
+				t.Errorf("Test = %+v, %v; want a refusal naming %q", res, err, tc.verdict)
+			case err != nil && strings.Contains(err.Error(), private), strings.Contains(res.Output, private):
+				t.Error("the runner's output leaked into the result")
+			}
+		})
 	}
 }

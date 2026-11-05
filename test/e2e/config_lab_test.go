@@ -7,9 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -54,7 +54,7 @@ func badServer() store.Server {
 	return store.Server{
 		ID:   store.NewID(),
 		Name: "bad-raw",
-		Outbound: json.RawMessage(`{"protocol":"vless","settings":{"vnext":[{"address":"203.0.113.10","port":443,` +
+		Outbound: json.RawMessage(`{"protocol":"vless","settings":{"vnext":[{"address":"10.77.113.10","port":443,` +
 			`"users":[{"id":"` + strings.Repeat("x", 40) + `","encryption":"none"}]}]},` +
 			`"streamSettings":{"network":"tcp","security":"none"}}`),
 	}
@@ -108,29 +108,44 @@ func wantConfig(t *testing.T, note func(string, ...any), status runnerapi.Status
 	}
 }
 
-// directValueRE finds the value in the output of xray api stats.
-var directValueRE = regexp.MustCompile(`"value"\s*:\s*"?(\d+)`)
-
-// directBytes is how many bytes xray's direct outbound has received, from the
-// stats the rendered config turns on. A counter xray has not made yet, before
-// anything went direct, counts 0, as does one whose zero value the output
-// leaves out.
+// A known zero counter can omit its protobuf value. Require its name: empty
+// or malformed output, or the value of another counter, proves nothing.
 func directBytes(ctx context.Context) (int64, error) {
-	out, err := runnerAPI.XrayAPI(ctx, "stats", "--server="+xrayAPI, "-name", "outbound>>>"+render.TagDirect+">>>traffic>>>downlink")
+	const name = "outbound>>>" + render.TagDirect + ">>>traffic>>>downlink"
+	out, err := runnerAPI.XrayAPI(ctx, "stats", "--server="+xrayAPI, "-name", name)
 	if err != nil {
-		return 0, err
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		return 0, fmt.Errorf("lab: direct counter request failed (%T)", err)
 	}
 	if out.ExitCode != 0 {
-		if strings.Contains(out.Stdout+out.Stderr, "not found") {
+		if out.Stderr == "counter not found" {
 			return 0, nil
 		}
-		return 0, fmt.Errorf("xray api stats: exit %d: %s%s", out.ExitCode, out.Stdout, out.Stderr)
+		return 0, fmt.Errorf("lab: direct counter command exited %d", out.ExitCode)
 	}
-	m := directValueRE.FindStringSubmatch(out.Stdout)
-	if m == nil {
+	var result struct {
+		Stat struct {
+			Name  string          `json:"name"`
+			Value json.RawMessage `json:"value"`
+		} `json:"stat"`
+	}
+	if json.Unmarshal([]byte(out.Stdout), &result) != nil || result.Stat.Name != name {
+		return 0, errors.New("lab: stats did not return the named direct downlink counter")
+	}
+	if result.Stat.Value == nil {
 		return 0, nil
 	}
-	return strconv.ParseInt(m[1], 10, 64)
+	var number json.Number
+	if json.Unmarshal(result.Stat.Value, &number) != nil {
+		return 0, errors.New("lab: direct downlink counter is not numeric")
+	}
+	n, err := strconv.ParseUint(number.String(), 10, 63)
+	if err != nil {
+		return 0, errors.New("lab: direct downlink counter is outside its numeric range")
+	}
+	return int64(n), nil
 }
 
 // viaDirect runs f and returns how many bytes xray's direct outbound received

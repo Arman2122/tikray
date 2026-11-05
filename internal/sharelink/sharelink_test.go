@@ -165,6 +165,13 @@ func TestName(t *testing.T) {
 		{"", strings.Repeat("h", 200), 443, strings.Repeat("h", 128)},
 		{"", strings.Repeat("é", 200), 443, strings.Repeat("é", 128)},
 		{"", "bad\xffhost", 1, "bad�host:1"},
+		// The placeholder of the API's views, which the store refuses to
+		// have written into a name, goes like a control character, also
+		// when dropping one of those or another placeholder would make it.
+		{"HK ‹redacted› 01", "h", 1, "HK  01"},
+		{"‹redacted›", "example.com", 443, "example.com:443"},
+		{"‹red\x1bacted›", "h", 1, "h:1"},
+		{"‹red‹redacted›acted›x", "h", 1, "x"},
 	}
 	for _, tc := range tests {
 		if got := name(tc.fragment, tc.host, tc.port); got != tc.want {

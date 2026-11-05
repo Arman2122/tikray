@@ -1,0 +1,1 @@
+{"outbounds":[{"protocol":"hysteria","tag":"srv-00005555","settings":{"version":1,"address":"example.com","port":443}}]}

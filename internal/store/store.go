@@ -265,17 +265,19 @@ func (s *Store) Degraded() []string { return append([]string{}, s.degraded...) }
 
 // Update changes the state. It calls fn with a copy of the state, checks that
 // the result passes Validate, writes it as the next revision and makes it the
-// state, and returns it with its revision.
+// state, and returns it with its revision. A result that brings the views'
+// placeholder, Masked, into a value they show is refused as well, though a
+// loaded state that already holds it is no fault (see checkMasked).
 //
 // A rev of AnyRevision skips the check on the revision. Any other value, 0
 // included, must be the current revision, as State returned it, or Update
 // fails with ErrConflict without calling fn: a store that nothing has been
 // written to is at revision 0, and a caller that read it passes 0 back. When
-// fn or Validate fails, nothing is written or changed, and Update returns
-// their error as it is. When the write fails the error starts with "store: "
-// and the file's name; the state is as it was, though if the failure was the
-// final sync of the directory, the new file may already be in place. On any
-// error the state and revision returned are zero.
+// fn, the placeholder check or Validate fails, nothing is written or changed,
+// and Update returns their error as it is. When the write fails the error
+// starts with "store: " and the file's name; the state is as it was, though if
+// the failure was the final sync of the directory, the new file may already
+// be in place. On any error the state and revision returned are zero.
 //
 // Update holds the store's lock while fn runs and while the file is written,
 // so fn must not call the store.
@@ -290,6 +292,11 @@ func (s *Store) Update(rev uint64, fn func(*State) error) (State, uint64, error)
 		return State{}, 0, err
 	}
 	next.normalize()
+	// The placeholder first: Validate would refuse a masked IP only as no
+	// address, without saying where it came from.
+	if err := checkMasked(next, s.state); err != nil {
+		return State{}, 0, err
+	}
 	if err := next.Validate(); err != nil {
 		return State{}, 0, err
 	}

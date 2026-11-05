@@ -2,11 +2,11 @@ package api
 
 import (
 	"encoding/json"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -55,6 +55,78 @@ type coreUpdateRequest struct {
 	AllowUnverified bool   `json:"allow_unverified"`
 }
 
+// setupRequest is the body of POST /v1/auth/setup: the setup code, and the
+// username and password of the admin it makes.
+type setupRequest struct {
+	Code     string `json:"code"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// loginRequest is the body of POST /v1/auth/login.
+type loginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// passwordRequest is the body of PUT /v1/auth/password.
+type passwordRequest struct {
+	Current string `json:"current"`
+	New     string `json:"new"`
+}
+
+// authStateResponse is the answer of GET /v1/auth/state, which anyone may
+// ask: whether the admin is yet to be made with the setup code, and whether
+// this request is from a caller that is signed in.
+type authStateResponse struct {
+	SetupRequired bool `json:"setup_required"`
+	SignedIn      bool `json:"signed_in"`
+}
+
+// sessionResponse is what setup and login answer with (the session itself
+// is the cookie): the CSRF token its mutations carry, and when it ends if it
+// is not used.
+type sessionResponse struct {
+	CSRFToken string    `json:"csrf_token"`
+	Expires   time.Time `json:"expires"`
+}
+
+// whoamiResponse is the answer of GET /v1/auth/session: sessionResponse and
+// the admin's username.
+type whoamiResponse struct {
+	Username  string    `json:"username"`
+	CSRFToken string    `json:"csrf_token"`
+	Expires   time.Time `json:"expires"`
+}
+
+// newTokenRequest is the body of POST /v1/tokens: a name, and ExpiresIn as
+// text such as "720h" (left out, the token does not expire).
+type newTokenRequest struct {
+	Name      string `json:"name"`
+	ExpiresIn string `json:"expires_in"`
+}
+
+// newTokenResponse is the answer to a new token: the token, which is shown
+// this once, and what is known of it.
+type newTokenResponse struct {
+	Token string    `json:"token"`
+	Info  tokenInfo `json:"info"`
+}
+
+// tokenInfo is an API token as the list shows it: never its secret. Expires
+// and LastUsed are left out when the token never expires or was never used.
+type tokenInfo struct {
+	ID       string    `json:"id"`
+	Name     string    `json:"name"`
+	Created  time.Time `json:"created"`
+	Expires  time.Time `json:"expires,omitzero"`
+	LastUsed time.Time `json:"last_used,omitzero"`
+}
+
+func newTokenInfo(t auth.TokenInfo) tokenInfo {
+	return tokenInfo{ID: t.ID, Name: t.Name, Created: t.Created, Expires: t.Expires, LastUsed: t.LastUsed}
+}
+
 // refreshResponse is service.RefreshResult on the wire.
 type refreshResponse struct {
 	Added   int           `json:"added"`
@@ -80,52 +152,17 @@ func newRefreshResponse(r service.RefreshResult, redact func(string) string) ref
 	return out
 }
 
-// lineLabel says which line of a subscription was skipped without showing it.
-// A share link that did not parse holds a credential that is in no state, so
-// that no redactor knows it: the label is the link's scheme, "://…", and
-// "#<name>" when the link has a fragment, which is the name it shows (as the
-// parser reads it: unescaped, without the characters a name may not hold).
-// A line that is no URL is "…".
-//
-// The fragment starts at the first "#", as in any URL. A link that is broken
-// by a raw "#" in its credential shows what follows it; this is the one
-// place the label can show part of one.
+// A malformed link can contain a credential on either side of a '#'. Only
+// its recognized protocol is safe to identify in the refresh response.
 func lineLabel(line string) string {
-	const none = "…"
-	i := strings.Index(line, "://")
-	if i <= 0 || !isScheme(line[:i]) {
-		return none
-	}
-	label := line[:i] + "://…"
-	if _, frag, ok := strings.Cut(line[i:], "#"); ok {
-		if name, err := url.PathUnescape(frag); err == nil {
-			frag = name
-		}
-		frag = strings.Map(func(r rune) rune {
-			if store.ForbiddenInName(r) {
-				return -1
-			}
-			return r
-		}, frag)
-		if frag != "" {
-			label += "#" + frag
+	scheme, _, ok := strings.Cut(line, "://")
+	if ok {
+		switch strings.ToLower(scheme) {
+		case "vless", "vmess", "trojan", "ss":
+			return strings.ToLower(scheme) + "://…"
 		}
 	}
-	return label
-}
-
-// isScheme reports whether s is a URL scheme: a letter, then letters,
-// digits, "+", "-" or ".".
-func isScheme(s string) bool {
-	for i, c := range s {
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
-		case i > 0 && (c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.'):
-		default:
-			return false
-		}
-	}
-	return s != ""
+	return "…"
 }
 
 // coreResponse is service.CoreInfo on the wire.

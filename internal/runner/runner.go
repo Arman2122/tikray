@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -25,6 +27,10 @@ const (
 // ErrInvalidCandidate is wrapped around every reason Trial refuses
 // candidate.json before testing it.
 var ErrInvalidCandidate = errors.New("runner: invalid candidate")
+
+// ErrInvalidConfig is wrapped around every reason Adopt refuses the config it
+// is given: an invalid name, or a missing or non-regular file.
+var ErrInvalidConfig = errors.New("runner: invalid config")
 
 var errClosed = errors.New("runner: closed")
 
@@ -88,7 +94,10 @@ type view struct {
 	active  *runnerapi.Selection // mirrors active.json
 	cand    *runnerapi.Candidate // the open trial
 	running *runnerapi.Selection // what the current xray runs; nil when none should
-	version string               // xray version of running
+	// process is the process for which this view was published. It is nil
+	// when a failed reload leaves the prior config live.
+	process *process
+	version string // xray version of running
 	last    *runnerapi.TrialResult
 }
 
@@ -139,9 +148,11 @@ func (r *Runner) Boot() error { return r.do(context.Background(), r.boot) }
 // Trial tests candidate.json with xray run -test and switches to it. It
 // returns once the candidate runs; the trial then lasts until Commit, Abort,
 // the deadline or the candidate's exit. A second trial gets ErrBusy, a bad
-// candidate.json ErrInvalidCandidate, and a config xray rejects, or a test
-// that outlasts the trial's deadline, a *runnerapi.TestFailedError, with the
-// active xray left running.
+// candidate.json ErrInvalidCandidate, and a config xray refuses a
+// *runnerapi.TestFailedError, recorded as rejected. A test that gives no
+// verdict on the config (see runTest), or outlasts the trial's deadline, is
+// another error, and the trial is not recorded. Either way candidate.json is
+// removed and the active xray is left running.
 func (r *Runner) Trial(ctx context.Context) error {
 	return r.do(ctx, func() error { return r.trial(ctx) })
 }
@@ -193,6 +204,22 @@ func (r *Runner) Reload(ctx context.Context) error {
 	})
 }
 
+// Adopt records config, a file under the run directory, as the config of the
+// active selection without restarting xray. The caller has already put that
+// config into the running xray another way (xray api), and Adopt makes a
+// later restart or crash recovery give the same xray: active.json then names
+// the running xray's core and geo and config. Neither the process nor
+// last-trial.json changes.
+//
+// It records the running core and geo, including after a failed Reload. During a trial or a
+// restart it returns ErrBusy, with no xray runnerapi.ErrNoCore, and for a name
+// that is not config/<64 hex>.json, or a missing or non-regular file,
+// ErrInvalidConfig, whatever the state. Like Commit, it runs on the runner's
+// goroutine, so it never interleaves with a trial.
+func (r *Runner) Adopt(ctx context.Context, config string) error {
+	return r.do(ctx, func() error { return r.adopt(config) })
+}
+
 // Status reports the runner's state. It never waits for the runner's
 // goroutine, so a slow xray run -test does not hold it up.
 func (r *Runner) Status() runnerapi.Status {
@@ -203,12 +230,15 @@ func (r *Runner) Status() runnerapi.Status {
 		State:     v.state,
 		Active:    clone(v.active),
 		Candidate: clone(v.cand),
-		XrayPID:   r.sup.PID(),
 		RoutesOK:  routesOK,
 		GatewayUp: gatewayUp,
 		LastTrial: clone(v.last),
 	}
-	if st.XrayPID > 0 {
+	if p := r.sup.running(); p != nil {
+		st.XrayPID = p.cmd.Process.Pid
+		if p == v.process {
+			st.XrayInstance = p.instance
+		}
 		st.XrayVersion = v.version
 	}
 	return st
@@ -372,30 +402,33 @@ func (r *Runner) trial(ctx context.Context) error {
 	// keeps it open.
 	deadline := time.NewTimer(window)
 	// The loop supervises the active xray, so -test may not hold it for
-	// longer than the trial could last: a test that outlasts the window is
-	// a rejection.
+	// longer than the trial could last.
 	tctx, cancel := context.WithTimeout(ctx, window)
-	out, err := r.sup.Test(tctx, cand.Selection)
+	res, err := r.sup.Test(tctx, cand.Selection)
 	timedOut := tctx.Err() != nil
 	cancel()
 	if cerr := ctx.Err(); cerr != nil {
 		deadline.Stop()
 		return fmt.Errorf("runner: trial: %w", cerr)
 	}
-	if err != nil {
+	switch {
+	case err != nil:
+		// No verdict on the config: the trial ends untried and unrecorded,
+		// so that the control plane can try the same candidate again.
 		deadline.Stop()
-		switch {
-		case timedOut:
-			out = fmt.Sprintf("xray run -test did not finish within the trial's %s\n%s", window, out)
-		case out == "":
-			out = err.Error()
+		if timedOut {
+			err = unfinishedError("the trial's "+window.Round(time.Millisecond).String(), err)
 		}
+		r.endUntested(*cand, err)
+		return err
+	case !res.OK:
+		deadline.Stop()
 		if err := RemoveCandidate(r.dirs()); err != nil {
 			log.Printf("runner: %v", err)
 		}
-		r.record(*cand, runnerapi.OutcomeRejected, out)
+		r.record(*cand, runnerapi.OutcomeRejected, res.Output)
 		r.cleanStage()
-		return &runnerapi.TestFailedError{Output: out}
+		return &runnerapi.TestFailedError{Output: res.Output}
 	}
 
 	stopTimer(&r.restart)
@@ -407,6 +440,22 @@ func (r *Runner) trial(ctx context.Context) error {
 	}
 	log.Printf("runner: trial of core %s for %s", cand.Core, window)
 	return nil
+}
+
+// endUntested ends a trial whose test gave no verdict: candidate.json goes,
+// so that a later boot does not record the trial as interrupted, and so does
+// the staged candidate core, which may be what filled the disk.
+func (r *Runner) endUntested(cand runnerapi.Candidate, err error) {
+	if err := RemoveCandidate(r.dirs()); err != nil {
+		log.Printf("runner: %v", err)
+	}
+	// The log may name the cause's path; the API only gets the fixed words.
+	cause := ""
+	if c := errors.Unwrap(err); c != nil {
+		cause = " (" + c.Error() + ")"
+	}
+	log.Printf("runner: trial of core %s not started: %v%s", cand.Core, err, cause)
+	r.cleanStage()
 }
 
 func (r *Runner) commit() error {
@@ -428,6 +477,54 @@ func (r *Runner) commit() error {
 	}
 	r.record(cand, runnerapi.OutcomeCommitted, "")
 	r.cleanStage()
+	return nil
+}
+
+func (r *Runner) adopt(config string) error {
+	if err := runnerapi.ValidateConfig(config); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+	}
+	// A content-addressed file is created under run/config. Following a link
+	// here could commit a target outside the shared mount for the next boot.
+	path := r.dirs().ConfigPath(config)
+	fi, err := os.Lstat(filepath.Dir(path))
+	if err == nil {
+		if !fi.IsDir() {
+			return fmt.Errorf("%w: config directory must be a directory", ErrInvalidConfig)
+		}
+		fi, err = os.Lstat(path)
+	}
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("%w: %s does not exist", ErrInvalidConfig, config)
+	case err != nil:
+		return fmt.Errorf("runner: adopt: %w", err)
+	case !fi.Mode().IsRegular():
+		return fmt.Errorf("%w: %s is not a regular file", ErrInvalidConfig, config)
+	}
+	switch r.v.state {
+	case runnerapi.StateRunning:
+	case runnerapi.StateEmpty:
+		return runnerapi.ErrNoCore
+	default: // a trial or a restart
+		return runnerapi.ErrBusy
+	}
+	if r.v.running == nil || r.sup.PID() == 0 {
+		// xray has died and its exit has not been read yet: a restart is
+		// coming, and no running xray has this config.
+		return runnerapi.ErrBusy
+	}
+	// A new selection, never a change to *r.v.active, which Status may be
+	// cloning. r.v.running stays what the process was started with: its exit,
+	// which reports that selection, must still match it, or a crash would go
+	// unnoticed. The restart after a crash then starts r.v.active.
+	sel := *r.v.running
+	sel.Config = config
+	if err := WriteActive(r.dirs(), sel); err != nil {
+		return fmt.Errorf("runner: adopt: %w", err)
+	}
+	r.v.active = &sel
+	log.Printf("runner: adopted config %s for core %s", config, sel.Core)
 	return nil
 }
 
@@ -494,10 +591,12 @@ func (r *Runner) startActive() error {
 }
 
 func (r *Runner) start(sel runnerapi.Selection) error {
+	r.v.process = nil
 	if err := r.sup.Start(sel); err != nil {
 		return err
 	}
 	r.v.running = &sel
+	r.v.process = r.sup.running()
 	r.v.version = r.versionOf(sel)
 	return nil
 }

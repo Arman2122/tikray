@@ -411,6 +411,18 @@ func TestRoutes(t *testing.T) {
 		{"CoreUpdate allow", func(c *Client, ctx context.Context) error { _, err := c.CoreUpdate(ctx, "latest", true); return err },
 			"POST", "/v1/core/update", "", `{"version":"latest","allow_unverified":true}`},
 		{"CoreRollback", func(c *Client, ctx context.Context) error { _, err := c.CoreRollback(ctx); return err }, "POST", "/v1/core/rollback", "", ""},
+		{"Tokens", func(c *Client, ctx context.Context) error { _, err := c.Tokens(ctx); return err }, "GET", "/v1/tokens", "", ""},
+		{"CreateToken", func(c *Client, ctx context.Context) error {
+			_, err := c.CreateToken(ctx, NewToken{Name: "ci runner", ExpiresIn: "720h"})
+			return err
+		}, "POST", "/v1/tokens", "", `{"name":"ci runner","expires_in":"720h"}`},
+		{"CreateToken that does not expire", func(c *Client, ctx context.Context) error {
+			_, err := c.CreateToken(ctx, NewToken{Name: "ci"})
+			return err
+		}, "POST", "/v1/tokens", "", `{"name":"ci"}`},
+		{"RevokeToken", func(c *Client, ctx context.Context) error { _, err := c.RevokeToken(ctx, "3fa9c1d2"); return err }, "DELETE", "/v1/tokens/3fa9c1d2", "", ""},
+
+		{"ResetAdmin", func(c *Client, ctx context.Context) error { _, err := c.ResetAdmin(ctx); return err }, "POST", "/v1/auth/reset", "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -463,6 +475,50 @@ func TestNoContentGivesAnEmptyBodyAndTheRevision(t *testing.T) {
 	}
 	if resp.Revision != 9 || len(resp.Body) != 0 {
 		t.Errorf("got revision %d, body %q; want 9 and none", resp.Revision, resp.Body)
+	}
+}
+
+// The token types read what the API answers: a created token is the token and
+// what is known of it, and a listed one has no token at all; a token that never
+// expires or was never used has no such field.
+func TestTokenAnswersDecode(t *testing.T) {
+	rec := newRecorder(t)
+	rec.reply = func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+			io.WriteString(w, `{"token":"tkr_3fa9c1d2_secret","info":{"id":"3fa9c1d2","name":"ci","created":"2026-10-26T10:00:00Z","expires":"2026-11-25T10:00:00Z"}}`)
+			return
+		}
+		io.WriteString(w, `[{"id":"3fa9c1d2","name":"ci","created":"2026-10-26T10:00:00Z","expires":"2026-11-25T10:00:00Z","last_used":"2026-10-26T11:00:00Z"},{"id":"0b1c2d3e","name":"old","created":"2026-10-01T00:00:00Z"}]`)
+	}
+	created, err := rec.client().CreateToken(context.Background(), NewToken{Name: "ci", ExpiresIn: "720h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got CreatedToken
+	if err := created.Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	made := time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
+	want := CreatedToken{Token: "tkr_3fa9c1d2_secret", Info: TokenInfo{ID: "3fa9c1d2", Name: "ci", Created: made, Expires: made.Add(30 * 24 * time.Hour)}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("a created token decodes to %+v, want %+v", got, want)
+	}
+
+	listed, err := rec.client().Tokens(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list []TokenInfo
+	if err := listed.Decode(&list); err != nil {
+		t.Fatal(err)
+	}
+	wantList := []TokenInfo{
+		{ID: "3fa9c1d2", Name: "ci", Created: made, Expires: made.Add(30 * 24 * time.Hour), LastUsed: made.Add(time.Hour)},
+		{ID: "0b1c2d3e", Name: "old", Created: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)},
+	}
+	if !reflect.DeepEqual(list, wantList) {
+		t.Errorf("the list decodes to %+v, want %+v", list, wantList)
 	}
 }
 
@@ -553,14 +609,37 @@ func TestFingerprintOfPEM(t *testing.T) {
 // call, so that no resumed session skips the pin.
 func TestTLSConfig(t *testing.T) {
 	c := &Client{BaseURL: "https://127.0.0.1:1", Fingerprint: strings.Repeat("ab", 32)}
-	tr, ok := c.httpClient().Transport.(*http.Transport)
+	tr, ok := c.HTTPClient().Transport.(*http.Transport)
 	if !ok {
-		t.Fatalf("transport %T", c.httpClient().Transport)
+		t.Fatalf("transport %T", c.HTTPClient().Transport)
 	}
 	if tr.TLSClientConfig.MinVersion < tls.VersionTLS12 {
 		t.Errorf("MinVersion %x, want TLS 1.2 or newer", tr.TLSClientConfig.MinVersion)
 	}
 	if !tr.DisableKeepAlives {
 		t.Error("connections are kept alive: each call should be pinned afresh")
+	}
+}
+
+// A failing transport includes its request URL in the error. Validate
+// the public id before sending, including when an operator pastes a token.
+func TestRevokeTokenKeepsSecretOutOfPath(t *testing.T) {
+	rec := newRecorder(t)
+	var path string
+	rec.reply = func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}
+	const id = "3fa9c1d2"
+	token := "tkr_" + id + "_" + strings.Repeat("A", 43)
+	_, err := rec.client().RevokeToken(t.Context(), token)
+	if err != nil || path != "/v1/tokens/"+id {
+		t.Fatal("a pasted token must send only its public id")
+	}
+	path = ""
+	bad := "a/../b?private-fixture-value"
+	_, err = rec.client().RevokeToken(t.Context(), bad)
+	if err == nil || strings.Contains(err.Error(), bad) || path != "" {
+		t.Error("an invalid id must be refused locally without echoing it")
 	}
 }

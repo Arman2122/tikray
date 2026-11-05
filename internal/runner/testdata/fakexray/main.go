@@ -6,7 +6,12 @@
 // Modes: ok (serves until SIGTERM, then exits 0), badconfig (rejects "run
 // -test"), exit2s and exit15s (exit 1 after 2 s or 15 s), stubborn (ignores
 // SIGTERM, so only SIGKILL stops it), slowtest (takes 1 s to accept "run
-// -test"), noisytest (rejects "run -test" after 20 KiB of output). A "run
+// -test"), noisytest (rejects "run -test" after 20 KiB of output), killedtest
+// (the test process is killed after producing incomplete output), crashtest
+// ("run -test" dies as a Go runtime fatal error does, with exit status 2,
+// after printing the config), flowtest ("run -test" refuses the config as
+// xray 26.10.21 refuses an outbound srv-deadbeef with a legacy VLESS flow,
+// then prints the config). A "run
 // -test" that accepts the config prints "config <path>" and the file's
 // contents first, then the permissions of the file and its directory and the
 // XRAY_LOCATION_ASSET it runs with. In every mode "api <args>" echoes its
@@ -35,9 +40,22 @@ func main() {
 	case len(args) == 3 && args[0] == "run" && args[1] == "-c":
 		serve(args[2])
 	case len(args) == 4 && args[0] == "run" && args[1] == "-test" && args[2] == "-c":
+		// Only file-layout tests opt into this observation channel. The
+		// real runner discards both streams from the process under test.
+		if path := os.Getenv("TIKRAY_FAKE_TEST_REPORT"); path != "" {
+			report, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+			if err != nil {
+				panic(err)
+			}
+			defer report.Close()
+			os.Stdout = report
+		}
 		switch mode {
 		case "badconfig":
 			fmt.Println("Failed to start: failed to load config")
+			if config, err := os.ReadFile(args[3]); err == nil {
+				fmt.Print(string(config))
+			}
 			os.Exit(23)
 		case "noisytest":
 			fmt.Println("Failed to start: failed to load config")
@@ -45,6 +63,27 @@ func main() {
 				fmt.Println(strings.Repeat("x", 49)) // 50 bytes a line
 			}
 			os.Exit(23)
+		case "crashtest":
+			fmt.Println("fatal error: runtime: out of memory")
+			if config, err := os.ReadFile(args[3]); err == nil {
+				fmt.Print(string(config))
+			}
+			os.Exit(2)
+		case "flowtest":
+			fmt.Println("Xray 26.10.21 (Xray, Penetrates Everything.) 1b1647c (go1.27.0 linux/amd64)")
+			fmt.Println("A unified platform for anti-censorship.")
+			fmt.Printf("Failed to start: main: failed to load config files: [%s] > infra/conf: "+
+				"failed to build outbound config with tag srv-deadbeef > infra/conf: failed to build outbound handler "+
+				"for protocol vless > infra/conf: VLESS users: \"flow\" doesn't support \"xtls-rprx-direct\" in this version\n", args[3])
+			if config, err := os.ReadFile(args[3]); err == nil {
+				fmt.Print(string(config))
+			}
+			os.Exit(23)
+		case "killedtest":
+			fmt.Println("partial diagnostic")
+			if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+				panic(err)
+			}
 		case "slowtest":
 			time.Sleep(time.Second)
 		}

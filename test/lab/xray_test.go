@@ -5,6 +5,23 @@ import (
 	"testing"
 )
 
+func TestXrayToolchain(t *testing.T) {
+	for _, tc := range []struct{ gomod, want string }{
+		{"module github.com/xtls/xray-core\n\ngo 1.25.6\n\nrequire (\n\tgo.uber.org/mock v0.5.0\n)\n", "go1.25.6"},
+		{"module m\n\ngo 1.24.0\n\ntoolchain go1.24.7\n", "go1.24.7"},
+		{"module m\n\ngo 1.22\n", "go1.22.0"},
+		{"module m\n\ngo 1.23.4 // a comment\n\ntoolchain default\n", "go1.23.4"},
+	} {
+		got, err := xrayToolchain([]byte(tc.gomod))
+		if err != nil || got != tc.want {
+			t.Errorf("xrayToolchain(%q) = %q, %v; want %q", tc.gomod, got, err, tc.want)
+		}
+	}
+	if got, err := xrayToolchain([]byte("module m\n")); err == nil {
+		t.Errorf("xrayToolchain without a go line = %q, want an error", got)
+	}
+}
+
 func TestXrayCoreVersion(t *testing.T) {
 	for in, want := range map[string]string{
 		"v1.260327.0": "26.3.27",

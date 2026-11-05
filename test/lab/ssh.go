@@ -2,6 +2,7 @@ package lab
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -100,10 +101,21 @@ func (c *CHR) dropClient() {
 
 // Run executes one RouterOS command over SSH and returns its output. Output
 // that RouterOS uses to report a failure is returned as an error.
-func (c *CHR) Run(ctx context.Context, cmd string) (out string, err error) {
+func (c *CHR) Run(ctx context.Context, cmd string) (string, error) {
+	return c.run(ctx, cmd, false)
+}
+
+// RunPrivate runs a command whose output may contain credentials. A success
+// goes only to the caller. A failed read can include partial output, so the
+// harness records neither the command nor its diagnostic.
+func (c *CHR) RunPrivate(ctx context.Context, cmd string) (string, error) {
+	return c.run(ctx, cmd, true)
+}
+
+func (c *CHR) run(ctx context.Context, cmd string, private bool) (out string, err error) {
 	start := time.Now()
 	defer func() {
-		if err != nil {
+		if err != nil && !private {
 			c.logf("run %q: %v (%.1fs)", cmd, err, time.Since(start).Seconds())
 		}
 	}()
@@ -123,17 +135,28 @@ func (c *CHR) Run(ctx context.Context, cmd string) (out string, err error) {
 	}()
 	select {
 	case <-ctx.Done():
+		if private {
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("%s: %w", cmd, ctx.Err())
 	case r := <-done:
-		out := strings.ReplaceAll(string(r.out), "\r", "")
-		if r.err != nil {
-			return out, fmt.Errorf("%s: %w: %s", cmd, r.err, out)
-		}
-		if rosError.MatchString(out) {
-			return out, fmt.Errorf("%s: %s", cmd, strings.TrimSpace(out))
-		}
-		return out, nil
+		return commandOutput(cmd, r.out, r.err, private)
 	}
+}
+
+func commandOutput(cmd string, raw []byte, exit error, private bool) (string, error) {
+	out := strings.ReplaceAll(string(raw), "\r", "")
+	rosFailed := rosError.MatchString(out)
+	if private && (exit != nil || rosFailed) {
+		return "", errors.New("lab: private RouterOS command failed")
+	}
+	if exit != nil {
+		return out, fmt.Errorf("%s: %w: %s", cmd, exit, out)
+	}
+	if rosFailed {
+		return out, fmt.Errorf("%s: %s", cmd, strings.TrimSpace(out))
+	}
+	return out, nil
 }
 
 // Get evaluates a RouterOS expression with :put and returns it trimmed.
