@@ -19,7 +19,7 @@ const serverSecret = "b831381d-6324-4d53-ad4f-8cda48b30811"
 // direct paths, as in the daemon, what the commands print and what they record
 // has the state's secrets redacted.
 func TestDirectPathsRedactWhatXrayQuotes(t *testing.T) {
-	quote := "bad outbound with id " + serverSecret
+	quote := "Failed to start: bad outbound with id " + serverSecret
 
 	for _, tc := range []struct {
 		name  string
@@ -150,7 +150,7 @@ func TestConfigFileCredentialsAreRedactedToo(t *testing.T) {
 			installSlot(t, data, "26.10.21")
 			setup(t, data)
 			runner.mu.Lock()
-			runner.reject, runner.rejected = true, "bad outbounds: id "+fileSecret+", password "+filePassword
+			runner.reject, runner.rejected = true, "Failed to start: bad outbounds: id "+fileSecret+", password "+filePassword
 			runner.mu.Unlock()
 
 			code, stdout, stderr := runFast(t, vars, "core", "update", "26.10.21", "--config", file)

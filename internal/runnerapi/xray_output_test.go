@@ -194,7 +194,7 @@ func TestConfigRefusalNeverQuotesTheConfig(t *testing.T) {
 		}
 		categories[category] = true
 		for _, got := range []string{ConfigRefusal(output), publicRefusal(output)} {
-			if !publicRefusalRE.MatchString(got) {
+			if !publicRefusalRE.MatchString(got) && got != unknownRefusal && (got != "" || strings.TrimSpace(output) != "") {
 				t.Fatalf("case %d: %q is not a fixed refusal; output %q", i, got, output)
 			}
 			for _, c := range credentials {

@@ -2,7 +2,6 @@ package runnerapi
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -142,35 +141,59 @@ func (c *Client) Test(ctx context.Context, config []byte) (TestResult, error) {
 	return res, nil
 }
 
+// Words publicRefusal gives an older runner's output that names no category.
+const (
+	// unknownRefusal is for a text that shows no sign that xray refused the
+	// config: older runners reported any test that failed, a killed one or
+	// one whose core they could not stage too, as a refusal.
+	unknownRefusal = "the runner reported an error"
+	// unfinishedRefusal is for an older runner's own timeout.
+	unfinishedRefusal = "xray config test did not finish"
+)
+
 // publicRefusal is the public form of a runner's reason for a refusal. A
 // runner's own reasons, from ConfigRefusal, are fixed words and public tags
 // and stay as they are. Older runners returned raw child output, sometimes
 // containing escaped or transformed credentials: project it onto the same
 // tags and fixed categories (see classifyRefusal) before it can enter an
-// error, a persisted verdict or history.
+// error, a persisted verdict or history. Only xray's own words of a refusal
+// make it a refusal of the config.
 func publicRefusal(text string) string {
-	if text == "" {
+	switch {
+	case strings.TrimSpace(text) == "":
 		return ""
-	}
-	if publicRefusalRE.MatchString(text) {
+	case publicRefusalRE.MatchString(text), text == unknownRefusal, text == unfinishedRefusal, PublicTestError(text):
 		return text
 	}
+	// The previous runner named the exit status, and took any for a refusal.
 	const prefix = "xray failed to load config (exit "
 	if n, ok := strings.CutPrefix(text, prefix); ok {
 		if n, ok := strings.CutSuffix(n, ")"); ok {
 			if code, err := strconv.Atoi(n); err == nil && code > 0 && code <= 255 {
+				if code != ExitConfigRefused {
+					return FaultExited + " " + n
+				}
 				return ConfigVerdict(code).Output
 			}
 		}
 	}
-	switch {
-	case strings.Contains(text, TestOutputTruncated):
-		return TestOutputTruncated
-	case strings.Contains(text, "xray run -test did not finish within"):
-		return "xray config test did not finish"
+	// Older runners cut a long output to its first 8 KiB. The last line can
+	// be the start of a credential, which no redactor can recognise, and is
+	// no evidence of anything: only the whole lines before it are read.
+	if head, _, cut := strings.Cut(text, TestOutputTruncated); cut {
+		text = head[:max(strings.LastIndexByte(head, '\n'), 0)]
+	}
+	if strings.Contains(text, "xray run -test did not finish within") {
+		return unfinishedRefusal
 	}
 	tags, category := classifyRefusal(text)
-	return refusalText(tags, cmp.Or(category, refusalLegacy))
+	if category == "" {
+		if len(tags) == 0 && !strings.Contains(text, "Failed to start:") {
+			return unknownRefusal
+		}
+		category = refusalLegacy
+	}
+	return refusalText(tags, category)
 }
 
 // The previous runner sent its own timeout as a rejection, with this line

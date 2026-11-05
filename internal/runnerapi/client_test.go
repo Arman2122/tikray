@@ -22,7 +22,7 @@ func TestClientMapsErrors(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/trial":
 			w.WriteHeader(422)
-			w.Write([]byte(`{"error":"test_failed","detail":"failed to load config"}`))
+			w.Write([]byte(`{"error":"test_failed","detail":"Failed to start: failed to load config"}`))
 		case "/v1/commit":
 			w.WriteHeader(409)
 			w.Write([]byte(`{"error":"no_trial"}`))
@@ -662,6 +662,42 @@ func TestClientPassesOnRunnerTestErrors(t *testing.T) {
 			}
 			if !tc.passed && PublicTestError(tc.detail) {
 				t.Errorf("PublicTestError(%q) = true", tc.detail)
+			}
+		})
+	}
+}
+
+// An older runner reported any test that failed, for whatever reason, as a
+// refusal with what xray printed. Only xray's own words of a refusal ("Failed
+// to start:", an outbound it could not build, a known diagnostic) make that a
+// refusal of the config: anything else gets neutral words, and a cut output
+// never gives its last, partial line.
+func TestPublicRefusalNeverGuessesAConfigVerdict(t *testing.T) {
+	const private = "fixture-private-fragment"
+	for _, tc := range []struct{ name, text, want string }{
+		{"empty", "", ""},
+		{"blank", " \n", ""},
+		{"xray's refusal", "Xray 26.1.18 (Xray, Penetrates Everything.)\nFailed to start: main: failed to load config files: [/x] > " + private, "xray failed to load config"},
+		{"an outbound xray could not build", "infra/conf: failed to build outbound config with tag srv-0123abcd > " + private, "outbound srv-0123abcd: xray failed to load config"},
+		{"a known diagnostic", "Failed to start: unknown user " + private, "unknown user"},
+		{"a known diagnostic without the marker", "infra/conf: bad user " + private, "invalid user"},
+		{"unknown words", "worker echoed " + private, "the runner reported an error"},
+		{"a killed test", "runner: xray run -test: signal: killed", "the runner reported an error"},
+		{"a partial diagnostic", "partial diagnostic\n" + private, "the runner reported an error"},
+		{"a stage failure", "runner: stage core 26.10.21: open /data/cores/26.10.21/xray: no such file or directory", "the runner reported an error"},
+		{"a lone truncation mark", TestOutputTruncated, "the runner reported an error"},
+		{"a cut refusal", "Failed to start: main: failed to load config files\n" + strings.Repeat("x", 40) + "\n" + private + TestOutputTruncated, "xray failed to load config"},
+		{"a cut diagnostic", "unknown user " + private + TestOutputTruncated, "the runner reported an error"},
+		{"the previous verdict", "xray failed to load config (exit 23)", "xray failed to load config (exit 23)"},
+		{"the previous verdict for a crash", "xray failed to load config (exit 2)", "xray exited with status 2"},
+		{"the previous timeout", "xray run -test did not finish within the trial's 2m0s\n" + private, "xray config test did not finish"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := publicRefusal(tc.text); got != tc.want {
+				t.Errorf("publicRefusal(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+			if got := publicRefusal(tc.want); got != tc.want {
+				t.Errorf("publicRefusal(%q) = %q; want its own texts kept", tc.want, got)
 			}
 		})
 	}
