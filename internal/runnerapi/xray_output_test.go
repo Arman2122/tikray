@@ -230,3 +230,36 @@ func TestRefusalCategoriesAreDistinct(t *testing.T) {
 		}
 	}
 }
+
+// A failed xray api call keeps why it failed, in fixed words: a counter
+// that is not there, an API that could not be reached, the gRPC status code
+// name, or the runner's own bound. Nothing else of what xray printed.
+func TestPublicXrayResultNamesTheCause(t *testing.T) {
+	const private = "fixture-private-fragment"
+	for _, tc := range []struct {
+		name, command string
+		exit          int
+		stderr, want  string
+	}{
+		{"no counter", "stats", 1, "failed to get stats: rpc error: code = NotFound desc = outbound>>>srv-0123abcd>>>traffic>>>uplink not found.\n", "counter not found"},
+		{"no API", "statssys", 1, "failed to dial 127.0.0.1:10085\n", "failed to dial xray's API"},
+		{"a gRPC status", "statssys", 1, "failed to get sys stats: rpc error: code = Unimplemented desc = unknown service xray.app.stats.command.StatsService\n", "rpc error: code = Unimplemented"},
+		{"unavailable", "statssys", 1, "rpc error: code = Unavailable desc = connection refused " + private, "rpc error: code = Unavailable"},
+		{"deadline", "ado", 1, "failed to add outbound: rpc error: code = DeadlineExceeded desc = context deadline exceeded", "rpc error: code = DeadlineExceeded"},
+		{"not a gRPC code", "statssys", 1, "rpc error: code = " + private, ""},
+		{"the runner's bound", "statssys", -1, "context deadline exceeded", "context deadline exceeded"},
+		{"no xray", "statssys", -1, "no xray is running", "no xray is running"},
+		{"anything else", "ado", 1, "failed to add " + private + "\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := PublicXrayResult(tc.command, XrayAPIResponse{ExitCode: tc.exit, Stdout: private, Stderr: tc.stderr})
+			if got != (XrayAPIResponse{ExitCode: tc.exit, Stderr: tc.want}) {
+				t.Errorf("PublicXrayResult = %+v, want exit %d and stderr %q", got, tc.exit, tc.want)
+			}
+			// The client applies it to what the runner already reduced.
+			if again := PublicXrayResult(tc.command, got); again != got {
+				t.Errorf("again = %+v, want %+v", again, got)
+			}
+		})
+	}
+}

@@ -11,13 +11,12 @@ import (
 
 // PublicXrayResult exposes only the diagnostics tikray consumes. A listing
 // can contain entire outbounds, a user counter can contain an account name,
-// and any command can echo its arguments on stderr.
+// and any command can echo its arguments on stderr. A failed command keeps
+// only why it failed in fixed words (see xrayAPICause).
 func PublicXrayResult(command string, raw XrayAPIResponse) XrayAPIResponse {
 	res := XrayAPIResponse{ExitCode: raw.ExitCode}
 	if raw.ExitCode != 0 {
-		if command == "stats" && strings.Contains(raw.Stdout+raw.Stderr, "not found") {
-			res.Stderr = "counter not found"
-		}
+		res.Stderr = xrayAPICause(command, raw.Stdout+raw.Stderr)
 		return res
 	}
 	var value any
@@ -62,6 +61,38 @@ func PublicXrayResult(command string, raw XrayAPIResponse) XrayAPIResponse {
 		}
 	}
 	return res
+}
+
+// xrayAPICause is why an "xray api" call failed, as one of a few fixed texts
+// that each name themselves again, so that the client can reduce what the
+// runner reduced: a counter that is not there, an API xray did not let it
+// dial, the gRPC status code name, or the runner's own words for a call it
+// cut off or could not make. "" when output says none of these.
+func xrayAPICause(command, output string) string {
+	switch {
+	case command == "stats" && strings.Contains(output, "not found"):
+		return "counter not found"
+	case strings.Contains(output, "failed to dial"):
+		return "failed to dial xray's API"
+	}
+	if m := grpcCode.FindStringSubmatch(output); m != nil && slices.Contains(grpcCodes, m[1]) {
+		return "rpc error: code = " + m[1]
+	}
+	for _, s := range []string{"context deadline exceeded", "no xray is running"} {
+		if strings.Contains(output, s) {
+			return s
+		}
+	}
+	return ""
+}
+
+var grpcCode = regexp.MustCompile(`rpc error: code = ([A-Za-z]+)`)
+
+// grpcCodes are the names of gRPC's status codes but OK.
+var grpcCodes = []string{
+	"Canceled", "Unknown", "InvalidArgument", "DeadlineExceeded", "NotFound", "AlreadyExists",
+	"PermissionDenied", "ResourceExhausted", "FailedPrecondition", "Aborted", "OutOfRange",
+	"Unimplemented", "Internal", "Unavailable", "DataLoss", "Unauthenticated",
 }
 
 // The renderer assigns these tags. Hand-written tags can be credentials.

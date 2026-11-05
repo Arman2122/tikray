@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -344,7 +345,12 @@ func (m *Monitor) observe(ctx context.Context) ([]xray.OutboundStatus, error) {
 }
 
 // A retained probe result can quote credentials from an older outbound
-// that the service has never seen. Publish a cause, never the raw text.
+// that the service has never seen. Publish a cause, never the raw text. The
+// observatory wraps net/http's error in the same words for every failure
+// ("outbound failed to relay connection > ... underlying connection
+// failed"), so the causes are told apart by net/http's words alone, tried in
+// order: a lookup that timed out is a timeout, and a TLS handshake cut short
+// is EOF.
 func probeFailure(detail string) string {
 	s := strings.ToLower(detail)
 	switch {
@@ -354,14 +360,27 @@ func probeFailure(detail string) string {
 		return "probe timed out"
 	case strings.Contains(s, "refused"):
 		return "connection refused"
+	case strings.Contains(s, "connection reset"), strings.Contains(s, "reset by peer"):
+		return "connection reset"
+	case strings.Contains(s, "no such host"), strings.Contains(s, "server misbehaving"), strings.Contains(s, "lookup "):
+		return "DNS lookup failed"
+	case eof.MatchString(s), strings.Contains(s, "server closed idle connection"):
+		return "connection closed (EOF)"
 	case strings.Contains(s, "handshake"), strings.Contains(s, "certificate"):
 		return "handshake failed"
-	case strings.Contains(s, "unreachable"), strings.Contains(s, "no route to host"), strings.Contains(s, "no such host"):
+	case strings.Contains(s, "unreachable"), strings.Contains(s, "no route to host"):
 		return "destination unreachable"
+	case strings.Contains(s, "status code"), strings.Contains(s, "http status"), strings.Contains(s, "unexpected status"):
+		return "unexpected HTTP status"
 	default:
 		return "probe failed"
 	}
 }
+
+// eof matches EOF, as net/http and io give it, in lowercase text. The
+// observatory puts its "with outbound handler" right after the error, so the
+// word's end is not marked.
+var eof = regexp.MustCompile(`(?:^|[^a-z])eof`)
 
 // selected returns the ID of the member that proxy-open picks, or "". A
 // failed query is recorded in r.Err.

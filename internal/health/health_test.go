@@ -312,6 +312,41 @@ func TestFirstObservationAfterReplacement(t *testing.T) {
 	}
 }
 
+// xray's observatory says why a probe failed in its own words, which quote
+// the probe URL and the outbound's peer: the snapshot keeps a category.
+func TestObservatoryFailureCategories(t *testing.T) {
+	const retired = "retired-fixture-value"
+	// How the observatory words a dead outbound (app/observatory/observer.go).
+	dead := func(why string) string {
+		return "the outbound srv-0123abcd is dead: GET request failed:outbound failed to relay connection > " + why +
+			"with outbound handler report underlying connection failed"
+	}
+	for _, tc := range []struct{ detail, want string }{
+		{dead(`Get "https://probe.example/generate_204": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`), "probe timed out"},
+		{dead(`Get "https://probe.example/generate_204": dial tcp 192.0.2.1:443: connect: connection refused`), "connection refused"},
+		{dead(`Get "https://probe.example/generate_204": read tcp 10.0.0.2:40000->192.0.2.1:443: read: connection reset by peer`), "connection reset"},
+		{dead(`Get "https://probe.example/generate_204": EOF`), "connection closed (EOF)"},
+		{dead(`Get "https://probe.example/generate_204": unexpected EOF`), "connection closed (EOF)"},
+		{dead(`Get "https://probe.example/generate_204": dial tcp: lookup probe.example on 127.0.0.11:53: no such host`), "DNS lookup failed"},
+		{dead(`Get "https://probe.example/generate_204": dial tcp: lookup probe.example: server misbehaving`), "DNS lookup failed"},
+		{dead(`Get "https://probe.example/generate_204": dial tcp: lookup probe.example: i/o timeout`), "probe timed out"},
+		{dead(`Get "https://probe.example/generate_204": remote error: tls: handshake failure`), "handshake failed"},
+		{dead(`Get "https://probe.example/generate_204": dial tcp 192.0.2.1:443: connect: network is unreachable`), "destination unreachable"},
+		{"unexpected HTTP status 503", "unexpected HTTP status"},
+		{dead("unexpected status code 502 "), "unexpected HTTP status"},
+		{dead("something new "), "probe failed"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			r := newRig(t, stateOf(srv(idA)))
+			tried := r.clock.Now().UTC()
+			r.xray.status = []xray.OutboundStatus{{Tag: tag(idA), LastTry: tried, LastError: tc.detail + ": " + retired}}
+			if got := r.tick().Servers[0]; got.LastError != tc.want {
+				t.Errorf("LastError = %q, want %q", got.LastError, tc.want)
+			}
+		})
+	}
+}
+
 func TestSnapshotServers(t *testing.T) {
 	// State order is C, A, (disabled B), D; xray lists them in another order,
 	// with an outbound the state doesn't have and without D.
