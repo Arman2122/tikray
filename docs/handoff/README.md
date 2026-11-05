@@ -144,6 +144,11 @@ scripts/dev-setup.sh         # installs make, git, gcc and Go (if missing), then
 scripts/dev-setup.sh --lab   # also installs the RouterOS lab's tools and Docker, and checks for KVM
 ```
 
+Some countries can't reach Google's Go servers (go.dev, proxy.golang.org).
+- The script installs Ubuntu's own Go package first.
+- When proxy.golang.org is unreachable, it sets `GOPROXY=https://goproxy.io,direct` with `go env -w`.
+- `go.sum` and Go's checksum database, reached through the mirror, still verify every module and toolchain download.
+
 The owner's Windows checkout is `C:\Users\Arman\Desktop\hakir\Projects\tikray`. In WSL that same folder is `/mnt/c/Users/Arman/Desktop/hakir/Projects/tikray`.
 - Clone it from inside WSL (`git clone -b claude/serene-goldberg-1as8mu https://github.com/Arman2122/tikray.git`).
 - An editor or AI tool running on Windows edits the files in place, but must run every build or test command through WSL, e.g.:

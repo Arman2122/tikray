@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Sets up a Debian or Ubuntu machine, or WSL2 Ubuntu on Windows, to build and
-# test tikray. It installs make, git, gcc (for -race) and, when none or one
-# older than 1.21 is on PATH, the Go toolchain go.mod names, under
-# /usr/local/go. A newer Go fetches go.mod's toolchain by itself. Then it runs
-# the unit tests. With --lab it also installs what the RouterOS lab needs
-# (scripts/lab-deps.sh, Docker) and says whether KVM is there. Safe to re-run.
+# test tikray. It installs make, git and gcc (for -race), and Go when none, or
+# one older than 1.21, is on PATH: the distribution's golang-go first, else
+# the toolchain go.mod names from go.dev, under /usr/local/go. Go 1.21 and
+# later fetch go.mod's toolchain by themselves. Where Google's Go servers
+# aren't reachable, as in some countries, Go modules then come through a
+# mirror. Then it runs the unit tests. With --lab it also installs what the
+# RouterOS lab needs (scripts/lab-deps.sh, Docker) and says whether KVM is
+# there. Safe to re-run.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -42,6 +45,13 @@ go_ok() {
   [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -ge 21 ]; }
 }
 if ! go_ok; then
+  # The distribution's Go comes from the same mirror as everything else here;
+  # go.dev's downloads are blocked in some countries.
+  DEBIAN_FRONTEND=noninteractive $sudo apt-get install -y golang-go ||
+    echo "dev-setup: no golang-go package: trying go.dev" >&2
+  hash -r
+fi
+if ! go_ok; then
   want=$(awk '$1 == "toolchain" { sub(/^go/, "", $2); print $2 }' go.mod)
   case "$(uname -m)" in
     x86_64) arch=amd64 ;;
@@ -59,7 +69,19 @@ if ! go_ok; then
     echo 'export PATH="$PATH:/usr/local/go/bin:$HOME/go/bin"' >>"$HOME/.profile"
   fi
 fi
-echo "dev-setup: $(go version)"
+echo "dev-setup: $(GOTOOLCHAIN=local go version)"
+
+# Modules, and the toolchain go.mod names, come from proxy.golang.org, which
+# some countries can't reach. Then they come through goproxy.io instead. go.sum
+# and the checksum database, which go reaches through the mirror, still verify
+# every download. A GOPROXY someone set is left alone.
+mirror=https://goproxy.io
+# GOTOOLCHAIN=local: in this module, go would fetch go.mod's toolchain first.
+if [ "$(GOTOOLCHAIN=local go env GOPROXY)" = "https://proxy.golang.org,direct" ] &&
+  ! curl -fsS -o /dev/null --max-time 15 https://proxy.golang.org/golang.org/x/net/@v/list; then
+  GOTOOLCHAIN=local go env -w GOPROXY="$mirror,direct"
+  echo "dev-setup: proxy.golang.org is unreachable: Go modules now come through $mirror (go env -w GOPROXY)"
+fi
 
 if $lab; then
   scripts/lab-deps.sh
