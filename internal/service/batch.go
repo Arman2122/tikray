@@ -319,11 +319,25 @@ func batchRedactor(st store.State, documents []json.RawMessage) func(string) str
 	for _, doc := range documents {
 		outboundSecrets(doc, check)
 	}
+	// The runner's refusals are fixed words and public tags: they hold no
+	// credential, short or long, and keep naming the server and the cause.
+	public := func(detail string) (string, bool) {
+		detail = strings.TrimSpace(detail)
+		return detail, runnerapi.IsPublicRefusal(detail)
+	}
 	if short {
-		return func(string) string { return "" }
+		return func(detail string) string {
+			if d, ok := public(detail); ok {
+				return d
+			}
+			return ""
+		}
 	}
 	red := RedactorWith(st, documents...)
 	return func(detail string) string {
+		if d, ok := public(detail); ok {
+			return d
+		}
 		if strings.Contains(detail, runnerapi.TestOutputTruncated) {
 			// A cut can leave part of a credential that no longer matches
 			// the full value in the state.

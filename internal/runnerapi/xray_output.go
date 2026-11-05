@@ -261,6 +261,11 @@ func ConfigRefusal(output string) string {
 	return refusalPrefix + refusalText(tags, cmp.Or(category, refusalInvalidConfig))
 }
 
+// IsPublicRefusal reports whether s is a refusal in the public form that
+// ConfigRefusal and publicRefusal give, fixed words and srv- tags only, and
+// so needs no redaction.
+func IsPublicRefusal(s string) bool { return publicRefusalRE.MatchString(s) }
+
 // RefusalReason is s without the "xray rejected the config: " that starts
 // a ConfigRefusal, for a message that already says what xray rejected. Any
 // other text is returned as it is.

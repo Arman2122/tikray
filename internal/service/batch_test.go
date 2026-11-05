@@ -435,3 +435,26 @@ func TestBatchSingletonRefusalReadsOnce(t *testing.T) {
 		t.Errorf("reason = %q, want %q", got, want)
 	}
 }
+
+// A credential under 4 bytes anywhere withholds a diagnostic that could hold
+// it, but not a refusal the runner names in fixed words and public tags.
+func TestBatchShortCredentialKeepsPublicRefusal(t *testing.T) {
+	input := batchInputs(3)
+	input["00000001"] = json.RawMessage(`{"protocol":"trojan","settings":{"servers":[{"address":"example.com","port":443,"password":"1"}]}}`)
+	refusal := runnerapi.ConfigRefusal("Failed to start: main: failed to load config files: [/tmp/c.json] > infra/conf: failed to build outbound config with tag srv-00000001 > infra/conf: VLESS users: \"flow\" doesn't support \"xtls-rprx-direct\" in this version")
+	r := &batchRunner{t: t, test: func(ids []string) (runnerapi.TestResult, error) {
+		if slices.Contains(ids, "00000001") {
+			return runnerapi.TestResult{Output: refusal}, nil
+		}
+		return runnerapi.TestResult{OK: true}, nil
+	}}
+	e := newEnv(t)
+	e.s.runner = r
+	rejected, err := e.s.testOutbounds(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rejected["00000001"], "xray rejected the server: outbound srv-00000001: unsupported flow"; got != want {
+		t.Errorf("reason = %q, want %q", got, want)
+	}
+}
