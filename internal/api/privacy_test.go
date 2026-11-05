@@ -166,7 +166,7 @@ func TestRoutingRoundTripRefusesMaskedValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Equal(got.Routing.Domestic.Domains, f.state.Routing.Domestic.Domains) || !slices.Equal(got.Routing.BlockList[:2], f.state.Routing.BlockList[:2]) {
-		t.Errorf("the view masked ordinary routing values: %q, %q", got.Routing.BlockList, got.Routing.Domestic.Domains)
+		t.Errorf("the view masked ordinary routing values: %q, %q", fixtureText(got.Routing.BlockList...), got.Routing.Domestic.Domains)
 	}
 	r := request(t, srv, "PUT", "/v1/routing", mustJSON(t, got.Routing), authed())
 	code, detail := errorOf(t, r)
@@ -202,13 +202,11 @@ func TestViewsShowOrdinaryNames(t *testing.T) {
 		t.Errorf("the state view masked ordinary values: %q, %q, %q, %q", st.Servers[0].Name, st.Subscriptions[0].Name, st.Devices[0].Name, st.Routing.BlockList)
 	}
 	if st.Devices[1].Name != "‹redacted›" || st.Devices[2].Name != "id ‹redacted›" || strings.Contains(string(r.body), testToken) || strings.Contains(string(r.body), secretID) {
-		t.Errorf("the state view shows a real secret: %q, %q", st.Devices[1].Name, st.Devices[2].Name)
+		t.Errorf("the state view shows a real secret: %q", fixtureText(st.Devices[1].Name, st.Devices[2].Name))
 	}
-	for _, path := range []string{"/v1/servers", "/v1/subscriptions", "/v1/devices"} {
-		r := request(t, srv, "GET", path, "", authed())
-		body := string(r.body)
-		if r.status != 200 || !strings.Contains(body, "VMESS-HTTP-WS01") && !strings.Contains(body, "test-test-test") && !strings.Contains(body, "https://provider.example") {
-			t.Errorf("GET %s masked an ordinary name: %s", path, body)
+	for path, name := range map[string]string{"/v1/servers": "VMESS-HTTP-WS01", "/v1/subscriptions": "test-test-test", "/v1/devices": "https://provider.example"} {
+		if r := request(t, srv, "GET", path, "", authed()); r.status != 200 || !strings.Contains(string(r.body), `"name":"`+name+`"`) {
+			t.Errorf("GET %s: status %d, the name %q is masked", path, r.status, name)
 		}
 	}
 	r = request(t, srv, "PUT", "/v1/devices/192.168.88.20", `{"name":"test-test-test","policy":{"mode":"smart"}}`, authed())
@@ -254,10 +252,22 @@ func TestViewsStripProbeAndDNSURLs(t *testing.T) {
 			t.Fatal(err)
 		}
 		if h.ProbeURL != c.wantProbe || st.Health.ProbeURL != c.wantProbe {
-			t.Errorf("probe_url = %q and %q in the state, want %q", h.ProbeURL, st.Health.ProbeURL, c.wantProbe)
+			t.Errorf("probe_url of the health and the state views = %q, want %q", fixtureText(h.ProbeURL, st.Health.ProbeURL), c.wantProbe)
 		}
 		if st.DNS.Remote != c.wantDNS || d.Remote != c.wantDNS {
-			t.Errorf("dns.remote = %q and %q from a PUT, want %q", st.DNS.Remote, d.Remote, c.wantDNS)
+			t.Errorf("dns.remote of the state view and a PUT's = %q, want %q", fixtureText(st.DNS.Remote, d.Remote), c.wantDNS)
 		}
 	}
+}
+
+// fixtureText is values for a failure message, with the fixture's secrets
+// shown by their names: a test that fails because a view leaked one must not
+// print it.
+func fixtureText(values ...string) []string {
+	hide := strings.NewReplacer(testToken, "<root token>", secretID, "<VLESS id>", "4f9a1c7e2b", "<subscription path>")
+	out := make([]string, len(values))
+	for i, v := range values {
+		out[i] = hide.Replace(v)
+	}
+	return out
 }

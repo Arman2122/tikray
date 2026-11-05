@@ -230,11 +230,11 @@ func TestServerListWithShortSubscriptionQuery(t *testing.T) {
 		{"6bc4d5e6", "HK", "03", "trojan", "b.example.com:8443", "disabled"},
 		{"7cd5e6f7", "lab-c", "shadowsocks", "[2001:db8::1]:8388", "enabled"},
 	}
+	if strings.Contains(out, token) {
+		t.Fatal("the table shows the subscription token")
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("table\n%s\nwant rows %q", out, want)
-	}
-	if strings.Contains(out, token) {
-		t.Error("the table shows the subscription token")
 	}
 }
 

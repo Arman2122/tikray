@@ -109,12 +109,17 @@ func TestHoldsSecretFindsOnlyRealSecrets(t *testing.T) {
 	if !s.HoldsSecret("x"+sess.CSRF, sess) || s.HoldsSecret("x"+sess.CSRF, Session{}) {
 		t.Error("the caller's CSRF token is found only with the caller's session")
 	}
-	for _, text := range []string{
-		"VMESS-HTTP-WS01", "test-test-test", "ABCD-EFGH-JKMN", "https://provider.example",
-		strings.Repeat("a", 64), "tkr_00000000_" + strings.Repeat("A", 43), strings.Repeat("b", 10000),
+	for name, text := range map[string]string{
+		"a server name":                "VMESS-HTTP-WS01",
+		"a routing value":              "keyword:test-test-test",
+		"a setup code's shape":         "ABCD-EFGH-JKMN",
+		"a link":                       "https://provider.example",
+		"a root bearer's shape":        strings.Repeat("a", 64),
+		"a token's shape":              "tkr_00000000_" + strings.Repeat("A", 43),
+		"a long run of base64url text": strings.Repeat("b", 10000),
 	} {
 		if s.HoldsSecret(text, sess) {
-			t.Errorf("%q is taken for a secret", text)
+			t.Errorf("%s is taken for a secret", name)
 		}
 	}
 }
