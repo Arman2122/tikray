@@ -114,7 +114,7 @@ func TestRetestDiscardsStaleVerdict(t *testing.T) {
 	e.inSync()
 	e.s.runner = duringTest{e.runner.client(), func() {
 		_, _, err := e.store.Update(rev, func(st *store.State) error {
-			st.Servers[0].Outbound = json.RawMessage(strings.Replace(vlessOutbound, "203.0.113.10", "203.0.113.11", 1))
+			st.Servers[0].Outbound = json.RawMessage(strings.Replace(vlessOutbound, "10.77.113.10", "10.77.113.11", 1))
 			return nil
 		})
 		if err != nil {

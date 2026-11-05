@@ -54,7 +54,7 @@ func badServer() store.Server {
 	return store.Server{
 		ID:   store.NewID(),
 		Name: "bad-raw",
-		Outbound: json.RawMessage(`{"protocol":"vless","settings":{"vnext":[{"address":"203.0.113.10","port":443,` +
+		Outbound: json.RawMessage(`{"protocol":"vless","settings":{"vnext":[{"address":"10.77.113.10","port":443,` +
 			`"users":[{"id":"` + strings.Repeat("x", 40) + `","encryption":"none"}]}]},` +
 			`"streamSettings":{"network":"tcp","security":"none"}}`),
 	}

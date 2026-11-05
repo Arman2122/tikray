@@ -69,9 +69,9 @@ var vlessCases = []parseCase{
 	},
 	{
 		name:     "no tls does not take the host for a server name",
-		link:     "vless://" + vlessID + "@203.0.113.10:443?type=ws&host=a.example.com",
-		wantName: "203.0.113.10:443",
-		wantJSON: vlessOut("203.0.113.10", "443", plainUser,
+		link:     "vless://" + vlessID + "@10.77.113.10:443?type=ws&host=a.example.com",
+		wantName: "10.77.113.10:443",
+		wantJSON: vlessOut("10.77.113.10", "443", plainUser,
 			`{"network":"ws","wsSettings":{"host":"a.example.com","path":"/"}}`),
 	},
 	{
@@ -420,9 +420,9 @@ var vlessCases = []parseCase{
 	},
 	{
 		name:     "security none to a private IP",
-		link:     "vless://" + vlessID + "@203.0.113.10:443?security=none",
-		wantName: "203.0.113.10:443",
-		wantJSON: vlessOut("203.0.113.10", "443", plainUser, `{"network":"tcp"}`),
+		link:     "vless://" + vlessID + "@10.77.113.10:443?security=none",
+		wantName: "10.77.113.10:443",
+		wantJSON: vlessOut("10.77.113.10", "443", plainUser, `{"network":"tcp"}`),
 	},
 	{
 		name:     "security none to a private domain",

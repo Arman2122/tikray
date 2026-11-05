@@ -137,10 +137,10 @@ func FingerprintOfPEM(pemBytes []byte) (string, error) {
 	}
 }
 
-// httpClient is the client that makes the requests: c.HTTP, or one that trusts
+// HTTPClient is the client that makes the requests: c.HTTP, or one that trusts
 // the pinned certificate alone, with a connection of its own for each call (a
 // resumed session would skip the pin), and that follows no redirect.
-func (c *Client) httpClient() *http.Client {
+func (c *Client) HTTPClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
@@ -217,7 +217,7 @@ func (c *Client) do(ctx context.Context, method, path string, in any, auth bool)
 	if auth {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
-	resp, err := c.httpClient().Do(req)
+	resp, err := c.HTTPClient().Do(req)
 	if err != nil {
 		return Response{}, fmt.Errorf("apiclient: %w", err)
 	}

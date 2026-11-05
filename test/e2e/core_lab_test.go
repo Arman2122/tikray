@@ -342,18 +342,14 @@ func wantResult(t *testing.T, got, want artifacts.Result) {
 		{"verified", got.Verified, want.Verified},
 	} {
 		if f.want != "" && f.got != f.want {
-			t.Errorf("result %s %q, want %q (detail %q)", f.name, f.got, f.want, got.Detail)
+			t.Errorf("result %s %q, want %q", f.name, f.got, f.want)
 		}
 	}
 }
 
 // describe is a one-line summary of a result.
 func describe(r artifacts.Result) string {
-	d := r.Detail
-	if len(d) > 300 {
-		d = d[:300] + "..."
-	}
-	return fmt.Sprintf("outcome=%s from=%s to=%s source=%q verified=%s detail=%q", r.Outcome, r.From, r.To, r.Source, r.Verified, d)
+	return fmt.Sprintf("outcome=%s from=%s to=%s source=%q verified=%s", r.Outcome, r.From, r.To, r.Source, r.Verified)
 }
 
 // uptimeLine picks the Uptime line out of xray api statssys output.

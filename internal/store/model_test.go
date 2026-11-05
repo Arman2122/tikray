@@ -639,7 +639,7 @@ func TestValidateRefusedOutboundsNameTheReason(t *testing.T) {
 
 func TestValidateAccepts(t *testing.T) {
 	for _, tt := range []struct{ name, outbound string }{
-		{"vless without tls or encryption to a private IP", fmt.Sprintf(vlessPlainTo, "203.0.113.10")},
+		{"vless without tls or encryption to a private IP", fmt.Sprintf(vlessPlainTo, "10.77.113.10")},
 		{"vless without tls or encryption to a private domain", fmt.Sprintf(vlessPlainTo, "foo.test")},
 		{"vless with tls to a public IP", fmt.Sprintf(vlessTLSTo, "1.2.3.4")},
 		{"trojan without tls to a private IP", fmt.Sprintf(trojanPlain, "10.1.2.3")},

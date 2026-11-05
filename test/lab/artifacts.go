@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -47,9 +48,14 @@ func CacheDir() string {
 	return filepath.Join(os.Getenv("HOME"), ".cache", "tikray-lab")
 }
 
-// ResolveChannel returns the current RouterOS v7 version of a release channel
-// ("stable" or "long-term").
+var pinnedVersion = regexp.MustCompile(`^7\.[0-9]+(\.[0-9]+)?$`)
+
+// ResolveChannel returns the current stable or long-term RouterOS version.
+// A numbered v7 release pins a repeat run after the channel has moved.
 func ResolveChannel(ctx context.Context, baseURL, channel string) (string, error) {
+	if pinnedVersion.MatchString(channel) {
+		return channel, nil
+	}
 	if channel != "stable" && channel != "long-term" {
 		return "", fmt.Errorf("unknown RouterOS channel %q", channel)
 	}

@@ -65,6 +65,15 @@ func TestResolveChannel(t *testing.T) {
 	}
 }
 
+func TestPinnedCHRVersion(t *testing.T) {
+	for _, version := range []string{"7.25", "7.23.8"} {
+		got, err := ResolveChannel(t.Context(), "http://127.0.0.1:1", version)
+		if err != nil || got != version {
+			t.Errorf("pinned release %q = %q, %v", version, got, err)
+		}
+	}
+}
+
 func fetchServer(t *testing.T, files map[string][]byte, hits *atomic.Int32) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

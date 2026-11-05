@@ -246,15 +246,29 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 	return l
 }
 
-// buildImages builds the tikray-runner and tikray images for goarch with
-// scripts/build-images.sh into out/ and returns their archives.
+// buildImages uses the archives from make images when TIKRAY_LAB_IMAGES
+// names their directory. This lets the lab run with dockerd stopped.
 func buildImages(ctx context.Context, goarch string) (runnerTar, tikrayTar string, err error) {
-	out := filepath.Join(repoRoot(), "out")
-	cmd := exec.CommandContext(ctx, "bash", filepath.Join(repoRoot(), "scripts", "build-images.sh"), goarch, out)
-	if b, err := cmd.CombinedOutput(); err != nil {
-		return "", "", fmt.Errorf("build images: %v\n%s", err, b)
+	out := os.Getenv("TIKRAY_LAB_IMAGES")
+	if out == "" {
+		out = filepath.Join(repoRoot(), "out")
+		cmd := exec.CommandContext(ctx, "bash", filepath.Join(repoRoot(), "scripts", "build-images.sh"), goarch, out)
+		if b, err := cmd.CombinedOutput(); err != nil {
+			return "", "", fmt.Errorf("build images: %v\n%s", err, b)
+		}
 	}
-	return filepath.Join(out, "tikray-runner-"+goarch+".tar"), filepath.Join(out, "tikray-"+goarch+".tar"), nil
+	runnerTar = filepath.Join(out, "tikray-runner-"+goarch+".tar")
+	tikrayTar = filepath.Join(out, "tikray-"+goarch+".tar")
+	for _, path := range []string{runnerTar, tikrayTar} {
+		fi, err := os.Stat(path)
+		if err != nil {
+			return "", "", err
+		}
+		if !fi.Mode().IsRegular() || fi.Size() == 0 {
+			return "", "", fmt.Errorf("lab: expected a nonempty image archive at %s", path)
+		}
+	}
+	return runnerTar, tikrayTar, nil
 }
 
 // moduleVersion is the Go module version of an xray-core release, which the
@@ -396,8 +410,8 @@ func (l *Lab) startContainers(ctx context.Context) error {
 	c := l.CHR
 	for {
 		if runnerAPI == nil {
-			if tok, err := c.Get(ctx, fileContents(runnerToken)); err == nil && tok != "" {
-				runnerAPI = &runnerapi.Client{BaseURL: runnerURL, Token: tok, HTTP: &http.Client{Timeout: 30 * time.Second}}
+			if tok, err := c.RunPrivate(ctx, ":put ["+fileContents(runnerToken)+"]"); err == nil && strings.TrimSpace(tok) != "" {
+				runnerAPI = &runnerapi.Client{BaseURL: runnerURL, Token: strings.TrimSpace(tok), HTTP: &http.Client{Timeout: 30 * time.Second}}
 			}
 		}
 		if runnerAPI != nil {
@@ -513,7 +527,7 @@ func (l *Lab) startServe(ctx context.Context) error {
 		return err
 	}
 	if err := waitContainer(ctx, c, "tikray", "running"); err != nil {
-		return fmt.Errorf("tikray serve: %w; container log:\n%s", err, containerLog(c, 30))
+		return fmt.Errorf("tikray serve: %w", err)
 	}
 	return nil
 }
@@ -529,46 +543,59 @@ func (l *Lab) stopServe(ctx context.Context) error {
 	return waitContainer(ctx, l.CHR, "tikray", "stopped")
 }
 
-// serveFingerprintRE finds the fingerprint in the line tikray serve prints on
-// stderr when it starts ("tikray: serving on <addr>, certificate sha256
-// <fingerprint>"), which RouterOS logs under the container topic.
-var serveFingerprintRE = regexp.MustCompile(`certificate sha256 ([0-9a-f]{64})`)
+// Each RouterOS log entry has an ID. Keep it with the listener's fingerprint
+// so a second check after restarting cannot match the first start's line.
+var serveFingerprintRE = regexp.MustCompile(`(?m)^([^[:space:]]+) [^\n]*tikray: serving on [^\n]*, certificate sha256 ([0-9a-f]{64})[[:blank:]]*$`)
 
-// serveFingerprints are the certificate fingerprints that tikray serve
-// printed in the container log, oldest first: one for each start that the log
-// still holds.
-func serveFingerprints(c *lab.CHR) []string {
-	var fps []string
-	for _, m := range serveFingerprintRE.FindAllStringSubmatch(containerLog(c, 1000), -1) {
-		fps = append(fps, m[1])
+func (l *Lab) checkServeFingerprint(ctx context.Context, pin, previous string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	logs, err := l.CHR.RunPrivate(ctx, `:foreach item in=[/log/find where topics~"container"] do={ :put ($item . " " . [/log/get $item message]) }`)
+	if err != nil {
+		return "", errors.New("lab: could not read service startup logs")
 	}
-	return fps
+	return matchServeFingerprint(logs, pin, previous)
 }
 
-// cmdParamRE finds a cmd parameter in the console's syntax of a command.
+func matchServeFingerprint(logs, pin, previous string) (string, error) {
+	matches := serveFingerprintRE.FindAllStringSubmatch(logs, -1)
+	if len(matches) == 0 {
+		return "", errors.New("lab: no service startup fingerprint in the container log")
+	}
+	last := matches[len(matches)-1]
+	if last[1] == previous {
+		return "", errors.New("lab: no new service startup fingerprint after restart")
+	}
+	if last[2] != pin {
+		return "", errors.New("lab: service startup fingerprint differs from the pinned certificate")
+	}
+	return last[1], nil
+}
+
 var cmdParamRE = regexp.MustCompile(`\bcmd\b`)
 
-// shellCLI runs `tikray status` in the tikray container through
-// /container/shell, which runs it with the container's own PATH, and returns
-// what it printed, or why it could not run it. RouterOS passes the shell a
-// command only in versions whose /container/shell takes cmd=, which the
-// console's syntax tells; without one the shell is interactive only, which an
-// SSH exec can't drive.
-func (l *Lab) shellCLI(ctx context.Context) (out string, ran bool) {
+// statusCLI checks that the fresh service's CLI prints revision 0 and exits
+// successfully. Only a successful syntax lookup can establish that this
+// RouterOS version has an interactive-only shell.
+func statusCLI(ctx context.Context, run func(context.Context, string) (string, error)) (supported bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	syntax, err := l.CHR.Run(ctx, "/console/inspect request=child path=container,shell")
-	if err != nil {
-		return fmt.Sprintf("reading the syntax of /container/shell: %v", err), false
+	syntax, err := run(ctx, "/console/inspect request=child path=container,shell")
+	if err != nil || strings.TrimSpace(syntax) == "" {
+		return false, errors.New("lab: could not determine /container/shell command support")
 	}
 	if !cmdParamRE.MatchString(syntax) {
-		return "/container/shell takes no command (its parameters: " + strings.Join(strings.Fields(syntax), " ") + ")", false
+		return false, nil
 	}
-	out, err = l.CHR.Run(ctx, `/container/shell [find name=tikray] cmd="tikray status"`)
+	out, err := run(ctx, `/container/shell [find name=tikray] cmd="tikray status && echo cli-succeeded"`)
 	if err != nil {
-		return fmt.Sprintf("/container/shell cmd=\"tikray status\": %v", err), false
+		return true, errors.New("lab: could not execute tikray status")
 	}
-	return out, true
+	fields := strings.Fields(out)
+	if len(fields) < 3 || fields[0] != "revision" || fields[1] != "0" || fields[len(fields)-1] != "cli-succeeded" {
+		return true, errors.New("lab: tikray status did not report revision 0 and exit successfully")
+	}
+	return true, nil
 }
 
 // tikray runs the tikray CLI with args (see runTikray), notes its result and
@@ -680,12 +707,19 @@ func waitContainer(ctx context.Context, c *lab.CHR, name, want string) error {
 func containerLog(c *lab.CHR, n int) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	out, err := c.Run(ctx, `/log/print where topics~"container"`)
+	out, err := readContainerLog(ctx, c)
 	if err != nil {
 		return err.Error()
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	return strings.Join(lines[max(0, len(lines)-n):], "\n")
+}
+
+// Read each message value in RouterOS log order. /log/print formats a table
+// for the terminal: its column widths cannot establish what serve wrote.
+// Keep even a failed command's partial output out of the SSH harness log.
+func readContainerLog(ctx context.Context, c *lab.CHR) (string, error) {
+	return c.RunPrivate(ctx, `:foreach item in=[/log/find where topics~"container"] do={ :put [/log/get $item message] }`)
 }
 
 // fileContents is the RouterOS expression for the contents of a file.
@@ -824,12 +858,13 @@ func (l *Lab) api(ctx context.Context) (*apiclient.Client, error) {
 // apiFiles reads the API token and the certificate from the router; an error
 // means one is not there yet.
 func (l *Lab) apiFiles(ctx context.Context) (token, cert string, err error) {
-	if token, err = l.CHR.Get(ctx, fileContents(apiToken)); err != nil {
+	if token, err = l.CHR.RunPrivate(ctx, ":put ["+fileContents(apiToken)+"]"); err != nil {
 		return "", "", err
 	}
-	if cert, err = l.CHR.Get(ctx, fileContents(apiCert)); err != nil {
+	if cert, err = l.CHR.RunPrivate(ctx, ":put ["+fileContents(apiCert)+"]"); err != nil {
 		return "", "", err
 	}
+	token, cert = strings.TrimSpace(token), strings.TrimSpace(cert)
 	if token == "" || cert == "" {
 		return "", "", errors.New("a file is empty")
 	}
@@ -860,11 +895,11 @@ func (l *Lab) toInbox(ctx context.Context, version string) error {
 }
 
 // The share links of the fake internet's two VLESS servers. Plain VLESS
-// without TLS is refused by xray-core 26.7.11 and later for a public address,
-// but 203.0.113.0/24 is on its private list (see internal/xraypolicy).
+// needs a private listener on newer cores. Each server sends on with its
+// original TEST-NET address, so whoami still identifies the egress.
 const (
-	linkA = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@203.0.113.10:443?type=tcp&security=none#lab-a"
-	linkB = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@203.0.113.11:443?type=tcp&security=none#lab-b"
+	linkA = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@10.77.113.10:443?type=tcp&security=none#lab-a"
+	linkB = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@10.77.113.11:443?type=tcp&security=none#lab-b"
 )
 
 // labProbeURL is the state's probe URL in the lab: the observatory fetches it

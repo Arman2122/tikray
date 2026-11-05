@@ -89,6 +89,18 @@ if $lab; then
   scripts/lab-deps.sh
   dpkg -s docker.io >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 ||
     { $sudo apt-get update -qq && DEBIAN_FRONTEND=noninteractive $sudo apt-get install -y docker.io; }
+  if ! docker buildx version >/dev/null 2>&1; then
+    $sudo apt-get update -qq
+    # Ubuntu ships Buildx separately from docker.io. Docker's own apt
+    # repository uses a different package name for the same CLI plugin.
+    if apt-cache show docker-buildx >/dev/null 2>&1; then
+      plugin=docker-buildx
+    else
+      plugin=docker-buildx-plugin
+    fi
+    DEBIAN_FRONTEND=noninteractive $sudo apt-get install -y "$plugin"
+    docker buildx version
+  fi
 fi
 
 make test

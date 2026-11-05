@@ -25,7 +25,7 @@ var bg = context.Background()
 // vlessID is a server credential that the tests' xray output repeats.
 const vlessID = "b831381d-6324-4d53-ad4f-8cda48b30811"
 
-const vlessOutbound = `{"protocol":"vless","settings":{"vnext":[{"address":"203.0.113.10","port":443,"users":[{"encryption":"none","id":"` + vlessID + `"}]}]}}`
+const vlessOutbound = `{"protocol":"vless","settings":{"vnext":[{"address":"10.77.113.10","port":443,"users":[{"encryption":"none","id":"` + vlessID + `"}]}]}}`
 
 // hideID is v as %+v prints it, with vlessID in place of the id, so that a
 // failure message never shows it.

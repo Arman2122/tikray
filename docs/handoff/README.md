@@ -24,7 +24,7 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M1: runner and artifacts | Done, merged (PR #3) | |
 | M2a: state model and render | Done, merged (PR #4) | |
 | M2b: the service (`tikray serve`, HTTPS API, health, subscriptions) | Done, merged (PR #5) | |
-| **M2c: human sign-in and hot server changes** | **In progress: Tasks 1–8 complete, Task 9 and the final review left** | this branch |
+| **M2c: human sign-in and hot server changes** | **In progress: Tasks 1–9 complete, final review underway** | this branch |
 | M3: RouterOS (installer, reconciler, version adapters, watchdog, uninstall, CHR e2e) | Not started | |
 | M4: web UI | Not started | |
 | M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
@@ -46,20 +46,22 @@ Roughly half of the total effort is done.
 | 6 | Hot server changes through `xray api` (rmo/ado), with a trial fallback and a crash-safe pending marker | fdf5577, 55e3ad1, c103901, 791ce92 | done, reviewed (2 fix rounds) |
 | 7 | Compat test of hot changes against real xray releases | fb76752, 79f8582, 5a5c2cd | done, reviewed |
 | 8 | Re-test servers saved untested; batched first-refresh tests | b3038ab | done, reviewed |
-| 9 | End-to-end `TestAuth` and `TestHot` on CHR (3 platforms), spec update | — | not run yet |
+| 9 | End-to-end `TestAuth` and `TestHot` on CHR (3 platforms), spec update | see the M2c ledger | done on all three CHRs |
 | — | Final whole-branch review, one fix wave, PR to `main` | — | not started |
 
 ### Next steps, in order
 
-Tasks 7 and 8 are complete. Task 7's reviewed compatibility test passed on six real xray releases from 26.1.18 through 26.10.31. Task 8 persists pending server tests, batches subscription refreshes, and retries when a core is running. The [ledger](m2c/ledger.md) records the evidence and compatibility limits.
+All nine tasks are implemented and tested. In WSL2 Ubuntu, QEMU's TCG ran
+`TestAuth` (6/6) and `TestHot` (4/4) on CHR 7.25 x86_64, 7.23.8 x86_64
+and 7.25 arm64. The root-token `TestService` rerun on 7.25 x86_64 passed
+8/8. The [results](../../test/e2e/results/) and [ledger](m2c/ledger.md)
+record the runs and the fixes needed to reproduce them.
 
-1. **Task 9:** [`m2c/task-9-brief.md`](m2c/task-9-brief.md) plus [`m2c/task-9-carries.md`](m2c/task-9-carries.md). The carries amend the brief and are binding: the check order, the results file names, the Task 7 findings and the lab rules. It needs the lab (see "Testing").
-   - **No KVM is needed.** The lab runs CHR under QEMU's own emulation (TCG). `test/lab/chr.go` starts `qemu-system-x86_64` and `qemu-system-aarch64` without `-enable-kvm`, and every lab run from M0 to M2b ran that way. An earlier version of this guide said KVM was required; that was wrong. On 2026-11-05 Task 9 stopped at that mistaken KVM check in WSL2; resume it there. The lab hasn't run in WSL2 before, so a failure there is a finding to root-cause, not proof that WSL2 can't run it. Expect an x86_64 CHR boot to take about two minutes, and arm64 much longer.
-2. **Final whole-branch review** of `main..HEAD`.
+1. **Final whole-branch review** of `main..HEAD`.
    - Use the plan's Review Focus section and the ledger's `Ruling:` lines.
    - Decide each `minor (deferred)` line in the ledger: fix it or keep deferring it.
    - Then do one fix wave, each fix test-first.
-3. **Update draft PR #6** to `main`, get CI green, and ask the owner before merging.
+2. **Update draft PR #6** to `main`, get CI green, and ask the owner before merging.
 
 ### Key M2c facts
 
@@ -165,12 +167,18 @@ The owner's Windows checkout is `C:\Users\Arman\Desktop\hakir\Projects\tikray`. 
 | Race | `go test -race ./cmd/... ./internal/...` | Go |
 | Compat against real xray releases | `sudo --preserve-env=PATH,HOME,GOPATH,GOMODCACHE,GOCACHE go test -tags compat -count=1 ./test/compat/...` | Network (downloads releases into `~/.cache/tikray-lab/xray`), root for TUN on releases before 26.10. `TIKRAY_COMPAT_VERSIONS` overrides the versions. |
 | Images | `make images` | Docker with the **classic** image store (`{"features":{"containerd-snapshotter":false}}`); RouterOS can't import containerd archives |
-| Lab, end to end on RouterOS CHR | `make lab-deps`, then e.g. `TIKRAY_LAB_CHANNEL=stable go test -tags lab -p 1 -count=1 -v -timeout 240m -run 'TestService' ./test/e2e/` | Linux host or WSL2 (the lab hasn't run in WSL2 yet), root, QEMU, Docker. No KVM: CHR runs under QEMU's TCG emulation, x86_64 in minutes and arm64 slower. `TIKRAY_LAB_ARCH` picks the architecture. |
+| Lab, end to end on RouterOS CHR | `make lab-deps`, then e.g. `TIKRAY_LAB_CHANNEL=stable go test -tags lab -p 1 -count=1 -v -timeout 240m -run 'TestService' ./test/e2e/` | Linux host or WSL2 Ubuntu, root, QEMU, Docker. No KVM: CHR runs under QEMU's TCG emulation, x86_64 in minutes and arm64 slower. `TIKRAY_LAB_ARCH` picks the architecture. |
+
+To repeat an exact RouterOS run after the channel moves, set
+`TIKRAY_LAB_CHANNEL` to the version, for example `7.25` or `7.23.8`. After
+`make images`, set `TIKRAY_LAB_IMAGES` to the absolute path of `out/` so each
+suite uses those archives with dockerd stopped. Leave it unset to build at
+deploy time. The build uses Buildx and checks the image platform before export.
 
 How the lab works:
 - **What it builds:** `test/lab` fetches CHR images and builds a fake LAN and a fake internet from bridges and network namespaces. CHR boots in QEMU between them.
 - **Addresses:** the bridge is 172.31.255.0/29, with the router at .1, tikray at .2 and the runner at .3. The runner listens on control :8080, SOCKS 1080 and the xray API 10085.
-- **The fake internet:** `labinet` serves VLESS servers lab-a (203.0.113.10) and lab-b (203.0.113.11), plus whoami and subscriptions at 203.0.113.30:80.
+- **The fake internet:** `labinet` serves VLESS servers lab-a and lab-b (listen on 10.77.113.10 and .11, exit through 203.0.113.10 and .11), plus whoami and subscriptions at 203.0.113.30:80.
 - **Results:** they are written to `test/e2e/results/<ros>-<arch>-<suite>.json`. A filtered run writes `-partial.json`, which is git-ignored.
 
 Lab habits that saved time:

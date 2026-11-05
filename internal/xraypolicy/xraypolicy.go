@@ -4,7 +4,7 @@
 // holds it makes every later apply fail `xray run -test`. Check finds those
 // outbounds when a server is added, from a share link or from raw JSON, so
 // that they never reach a config. The rules are xray's own, read from
-// v26.10.21: infra/conf/xray.go (validateOutboundTransportSecurity, since
+// v26.10.31: infra/conf/xray.go (validateOutboundTransportSecurity, since
 // 26.7.11), infra/conf/shadowsocks.go, proxy/shadowsocks_2022 and, for
 // allowInsecure (since 26.3.27, once past 2026-06-01),
 // infra/conf/transport_security.go and, for the TLS that finalmask's masks
@@ -44,32 +44,8 @@ func (r *Refusal) Unwrap() error { return ErrRefused }
 
 func refuse(reason string) error { return &Refusal{Reason: reason} }
 
-// privateIPRules is the list of private IP ranges, copied from
-// common/geodata/consts.go of xray-core v26.10.21 (GetPrivateIPMatcher). Keep
-// the entries as they are there.
-var privateIPRules = []string{
-	"0.0.0.0/8",
-	"10.0.0.0/8",
-	"100.64.0.0/10",
-	"127.0.0.0/8",
-	"169.254.0.0/16",
-	"172.16.0.0/12",
-	"192.0.0.0/24",
-	"192.0.2.0/24",
-	"192.88.99.0/24",
-	"192.168.0.0/16",
-	"198.18.0.0/15",
-	"198.51.100.0/24",
-	"203.0.113.0/24",
-	"224.0.0.0/3",
-	"::/127",
-	"fc00::/7",
-	"fe80::/10",
-	"ff00::/8",
-}
-
 // privateDomainRules is the list of private domains, copied from
-// common/geodata/consts.go of xray-core v26.10.21 (GetPrivateDomainMatcher). A
+// common/geodata/consts.go of xray-core v26.10.31 (GetPrivateDomainMatcher). A
 // rule without a prefix is a domain suffix, as in a routing rule's "domain:".
 // Keep the entries as they are there.
 var privateDomainRules = []string{
@@ -86,7 +62,6 @@ var privateDomainRules = []string{
 }
 
 var (
-	privatePrefixes []netip.Prefix
 	// privateSuffixes are the domain rules without a prefix.
 	privateSuffixes []string
 	// privatePatterns are the rules with the regexp: prefix.
@@ -94,9 +69,6 @@ var (
 )
 
 func init() {
-	for _, rule := range privateIPRules {
-		privatePrefixes = append(privatePrefixes, netip.MustParsePrefix(rule))
-	}
 	for _, rule := range privateDomainRules {
 		if pattern, ok := strings.CutPrefix(rule, "regexp:"); ok {
 			privatePatterns = append(privatePatterns, regexp.MustCompile(pattern))
@@ -107,8 +79,8 @@ func init() {
 }
 
 // PrivateAddress reports whether xray lets a server at host take plain
-// traffic: whether host is an IP address in its list of private ranges, or a
-// domain its list of private domains matches. A dotless name, which is a single
+// traffic: a private, loopback or link-local unicast IP, or a name matched by
+// its private domain list. A dotless name, which is a single
 // label that starts with a letter and has only letters, digits and hyphens,
 // matches too. It is xray's requiresTransportSecurity, inverted.
 //
@@ -126,12 +98,9 @@ func PrivateAddress(host string) bool {
 	}
 	if a, err := netip.ParseAddr(host); err == nil && a.Zone() == "" {
 		a = a.Unmap()
-		for _, p := range privatePrefixes {
-			if p.Contains(a) {
-				return true
-			}
-		}
-		return false
+		// Since 26.10.31 the transport check uses Go's IP predicates. The
+		// broader geodata routing list also contains public reserved ranges.
+		return a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast()
 	}
 
 	domain := strings.TrimSuffix(strings.ToLower(host), ".")

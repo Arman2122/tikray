@@ -609,9 +609,9 @@ func TestFingerprintOfPEM(t *testing.T) {
 // call, so that no resumed session skips the pin.
 func TestTLSConfig(t *testing.T) {
 	c := &Client{BaseURL: "https://127.0.0.1:1", Fingerprint: strings.Repeat("ab", 32)}
-	tr, ok := c.httpClient().Transport.(*http.Transport)
+	tr, ok := c.HTTPClient().Transport.(*http.Transport)
 	if !ok {
-		t.Fatalf("transport %T", c.httpClient().Transport)
+		t.Fatalf("transport %T", c.HTTPClient().Transport)
 	}
 	if tr.TLSClientConfig.MinVersion < tls.VersionTLS12 {
 		t.Errorf("MinVersion %x, want TLS 1.2 or newer", tr.TLSClientConfig.MinVersion)

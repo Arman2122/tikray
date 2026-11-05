@@ -62,6 +62,7 @@ func TestService(t *testing.T) {
 	// cl is the service's API, pinned to its certificate and with its token,
 	// once serve_starts has them.
 	var cl *apiclient.Client
+	var firstFingerprintID string
 	need := func(t *testing.T) *apiclient.Client {
 		t.Helper()
 		if cl == nil {
@@ -98,7 +99,7 @@ func TestService(t *testing.T) {
 			err = resp.Decode(out)
 		}
 		if err != nil {
-			t.Fatalf("%s: %v; container log:\n%s", what, err, containerLog(c, 30))
+			t.Fatalf("%s: %s", what, apiEvidence(err))
 		}
 		return resp
 	}
@@ -135,24 +136,23 @@ func TestService(t *testing.T) {
 		if err := l.startServe(ctx); err != nil {
 			t.Fatal(err)
 		}
-		props, err := c.Run(ctx, "/container/print detail where name=tikray")
-		note("tikray container running %.0fs after the start (RouterOS imported the busybox-based archive): %s (%v)", time.Since(start).Seconds(), strings.Join(strings.Fields(props), " "), err)
+		note("tikray container running %.0fs after start (RouterOS imported the busybox-based archive)", time.Since(start).Seconds())
 
 		deadline := start.Add(60 * time.Second)
 		wctx, cancel := context.WithDeadline(ctx, deadline)
 		defer cancel()
 		api, err := l.api(wctx)
 		if err != nil {
-			t.Fatalf("%v; container log:\n%s", err, containerLog(c, 30))
+			t.Fatalf("service credentials unavailable: %s", apiEvidence(err))
 		}
 		var herr error
 		_, up := poll(wctx, time.Until(deadline), time.Second, func() bool {
 			herr = api.Healthz(wctx)
 			return herr == nil
 		})
-		note("GET /healthz with the pinned certificate (sha256 %s) %.0fs after the start: %v (%v)", api.Fingerprint, time.Since(start).Seconds(), up, herr)
+		note("GET /healthz with the pinned certificate (sha256 %s) %.0fs after the start: %v (%s)", api.Fingerprint, time.Since(start).Seconds(), up, apiEvidence(herr))
 		if !up {
-			t.Fatalf("/healthz did not answer within 60 s of the start: %v; container log:\n%s", herr, containerLog(c, 30))
+			t.Fatalf("/healthz did not answer within 60 s of the start: %s", apiEvidence(herr))
 		}
 		var st service.Status
 		var serr error
@@ -175,29 +175,31 @@ func TestService(t *testing.T) {
 		wrong.Token = strings.Repeat("0", 64)
 		_, err = wrong.Status(ctx)
 		var ae *apiclient.Error
-		note("GET /v1/status with another token: %v", err)
+		note("GET /v1/status with another token: %s", apiEvidence(err))
 		if !errors.As(err, &ae) || ae.Status != http.StatusUnauthorized {
-			t.Errorf("GET /v1/status with another token: %v, want 401", err)
+			t.Errorf("GET /v1/status with another token: %s, want 401", apiEvidence(err))
 		}
 
 		// What Lab.api pinned is what serve printed: the PEM that /file/get
 		// gave is the certificate the service serves.
-		fps := serveFingerprints(c)
-		note("fingerprints serve printed in the container log: %q", fps)
-		if len(fps) == 0 {
-			note("the container log holds no fingerprint line: the match with what serve printed is unverified")
-		} else if last := fps[len(fps)-1]; last != api.Fingerprint {
-			t.Errorf("serve printed the certificate sha256 %s, and Lab.api pinned %s from state/tls.crt", last, api.Fingerprint)
+		firstFingerprintID, err = l.checkServeFingerprint(ctx, api.Fingerprint, "")
+		if err != nil {
+			t.Fatal(err)
 		}
+		note("startup log fingerprint matched the pinned certificate")
 
-		// The CLI is on the container's PATH, for /container/shell: what the
-		// shell ran is the status, and not "sh: tikray: not found".
-		out, ran := l.shellCLI(ctx)
-		line := strings.Join(strings.Fields(out), " ")
-		note("tikray status in /container/shell (ran: %v): %q", ran, line)
-		if ran && !strings.Contains(out, "revision") {
-			t.Errorf("tikray status in /container/shell printed %q, want the status, which starts with its revision", line)
+		supported, err := statusCLI(ctx, c.RunPrivate)
+		if err != nil {
+			t.Fatal(err)
 		}
+		if !supported {
+			if l.Version == "7.25" || l.Version == "7.23.8" {
+				t.Fatal("expected /container/shell cmd support on this RouterOS release")
+			}
+			note("RouterOS reported an interactive-only /container/shell")
+			return
+		}
+		note("tikray status in /container/shell reported revision 0 and exited successfully")
 	})
 
 	check("bootstrap_core", func(t *testing.T, note func(string, ...any)) {
@@ -212,7 +214,7 @@ func TestService(t *testing.T) {
 		}
 		note("POST /v1/core/update latest: %s (%.0fs)", describe(res), time.Since(start).Seconds())
 		if err != nil {
-			t.Fatalf("POST /v1/core/update latest: %v; container log:\n%s", err, containerLog(c, 30))
+			t.Fatalf("POST /v1/core/update latest: %s", apiEvidence(err))
 		}
 		wantResult(t, res, artifacts.Result{Outcome: runnerapi.OutcomeCommitted, To: l.Newest, Source: "direct", Verified: "dgst"})
 		rs := checkCore(ctx, t, note, l.Newest)
@@ -295,9 +297,9 @@ func TestService(t *testing.T) {
 		if err == nil {
 			err = resp.Decode(&rr)
 		}
-		note("POST /v1/subscriptions/%s/refresh: added %d, updated %d, removed %d, kept %d, skipped %d, via %q (%.0fs, %v)", sub.ID, rr.Added, rr.Updated, rr.Removed, rr.Kept, len(rr.Skipped), rr.Via, time.Since(start).Seconds(), err)
+		note("POST /v1/subscriptions/%s/refresh: added %d, updated %d, removed %d, kept %d, skipped %d, via %q (%.0fs, %s)", sub.ID, rr.Added, rr.Updated, rr.Removed, rr.Kept, len(rr.Skipped), rr.Via, time.Since(start).Seconds(), apiEvidence(err))
 		if err != nil {
-			t.Fatalf("refresh: %v; container log:\n%s", err, containerLog(c, 30))
+			t.Fatalf("refresh: %s", apiEvidence(err))
 		}
 		// A new subscription is due at the scheduler's next look, once a
 		// minute, which can come between the two calls: the manual refresh
@@ -316,7 +318,7 @@ func TestService(t *testing.T) {
 			if i < 0 {
 				t.Errorf("the refresh kept 1 server and added none, and no refresh event says another added it, want added 1")
 			} else {
-				note("the scheduler's refresh added lab-b first: event %q", evs[i].Message)
+				note("the scheduler's refresh event reported lab-b added first")
 			}
 		default:
 			t.Errorf("refresh added %d servers and kept %d, want added 1", rr.Added, rr.Kept)
@@ -407,16 +409,18 @@ func TestService(t *testing.T) {
 		_, err := api.RefreshSubscription(octx, subID)
 		var ae *apiclient.Error
 		if !errors.As(err, &ae) {
-			t.Fatalf("refresh of a block page: %v, want 502 fetch_failed", err)
+			t.Fatalf("refresh of a block page: %s, want 502 fetch_failed", apiEvidence(err))
 		}
-		note("POST /v1/subscriptions/%s/refresh: %d %s %q (%.0fs)", subID, ae.Status, ae.Code, ae.Detail, time.Since(start).Seconds())
+		note("POST /v1/subscriptions/%s/refresh: HTTP %d, fetch_failed=%v (%.0fs)", subID, ae.Status, ae.Code == "fetch_failed", time.Since(start).Seconds())
 		if ae.Status != http.StatusBadGateway || ae.Code != "fetch_failed" {
-			t.Errorf("refresh of a block page: %d %s, want 502 fetch_failed", ae.Status, ae.Code)
+			t.Errorf("refresh of a block page: HTTP %d, want 502 fetch_failed", ae.Status)
 		}
 		// Both paths got the page, and refused it: direct, and through the
 		// proxy, which is the one that matters where direct is blocked.
 		for _, path := range []string{"direct", "proxy"} {
-			if !strings.Contains(ae.Detail, path+": body refused") {
+			refused := strings.Contains(ae.Detail, path+": body refused")
+			note("%s fetch refused the body: %v", path, refused)
+			if !refused {
 				t.Errorf("the detail does not say the %s fetch got the page and refused it (%q)", path, path+": body refused")
 			}
 		}
@@ -431,7 +435,7 @@ func TestService(t *testing.T) {
 		if i < 0 {
 			t.Fatalf("subscription %s is gone", subID)
 		}
-		note("last_error %q", subs[i].LastError)
+		note("subscription last_error was set: %v", subs[i].LastError != "")
 		if subs[i].LastError == "" {
 			t.Error("the subscription's last_error is empty after the failed refresh")
 		}
@@ -462,7 +466,7 @@ func TestService(t *testing.T) {
 			return st.Applied && st.Revision >= rev
 		})
 		if !ok {
-			t.Fatalf("within 90 s of the device: %s; want applied; container log:\n%s", describeStatus(st, nil), containerLog(c, 30))
+			t.Fatalf("within 90 s of the device: %s; want applied", describeStatus(st, nil))
 		}
 		if r := st.LastApply; r == nil {
 			t.Error("no last apply in the status")
@@ -482,7 +486,7 @@ func TestService(t *testing.T) {
 				answers = append(answers, got)
 			}
 			if rs, err := runnerStatus(ctx); err != nil || rs.State != runnerapi.StateRunning || !rs.GatewayUp {
-				offAir = append(offAir, fmt.Sprintf("%s gateway_up=%v (%v)", rs.State, rs.GatewayUp, err))
+				offAir = append(offAir, fmt.Sprintf("%s gateway_up=%v (%s)", rs.State, rs.GatewayUp, apiEvidence(err)))
 			}
 			sleep(ctx, time.Second)
 		}
@@ -508,29 +512,27 @@ func TestService(t *testing.T) {
 		api := need(t)
 		before, err := status(ctx, api)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatal(apiEvidence(err))
 		}
 		bad := badServer()
 		id := strings.Repeat("x", 40) // its VLESS id
 		_, err = api.AddServer(ctx, apiclient.NewServer{Name: bad.Name, Outbound: bad.Outbound})
 		var ae *apiclient.Error
 		if !errors.As(err, &ae) {
-			t.Fatalf("POST /v1/servers with a VLESS id of 40 characters: %v, want 422 refused", err)
+			t.Fatalf("POST /v1/servers with a VLESS id of 40 characters: %s, want 422 refused", apiEvidence(err))
 		}
 		leaks := strings.Contains(ae.Detail, id)
+		note("POST /v1/servers with an invalid VLESS id: HTTP %d, refused=%v, credential omitted=%v", ae.Status, ae.Code == "refused", !leaks)
 		if leaks {
-			note("POST /v1/servers with a raw outbound whose VLESS id is 40 characters: %d %s, the detail naming the id", ae.Status, ae.Code)
 			t.Error("the refusal's detail holds the server's id")
-		} else {
-			note("POST /v1/servers with a raw outbound whose VLESS id is 40 characters: %d %s %q", ae.Status, ae.Code, ae.Detail)
 		}
 		if ae.Status != http.StatusUnprocessableEntity || ae.Code != "refused" {
-			t.Errorf("%d %s, want 422 refused", ae.Status, ae.Code)
+			t.Errorf("HTTP %d, want 422 refused", ae.Status)
 		}
 		after, err := status(ctx, api)
-		note("revision %d before, %d after (%v)", before.Revision, after.Revision, err)
+		note("revision %d before, %d after (%s)", before.Revision, after.Revision, apiEvidence(err))
 		if err != nil || after.Revision != before.Revision {
-			t.Errorf("revision %d after the refusal (%v), want %d as before", after.Revision, err, before.Revision)
+			t.Errorf("revision %d after the refusal (%s), want %d as before", after.Revision, apiEvidence(err), before.Revision)
 		}
 		if slices.ContainsFunc(servers(t, api), func(srv store.Server) bool { return srv.Name == bad.Name }) {
 			t.Errorf("server %s is in the state after the refusal", bad.Name)
@@ -541,7 +543,7 @@ func TestService(t *testing.T) {
 		api := need(t)
 		before, err := status(ctx, api)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatal(apiEvidence(err))
 		}
 		note("before: %s", describeStatus(before, nil))
 		if !before.Applied {
@@ -549,7 +551,7 @@ func TestService(t *testing.T) {
 		}
 		rsBefore, err := runnerStatus(ctx)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatal(apiEvidence(err))
 		}
 		if err := l.stopServe(ctx); err != nil {
 			t.Fatal(err)
@@ -565,9 +567,9 @@ func TestService(t *testing.T) {
 			herr = api.Healthz(ctx)
 			return herr == nil
 		})
-		note("GET /healthz pinned to the certificate of before after %.0fs: %v (%v)", took.Seconds(), up, herr)
+		note("GET /healthz pinned to the original certificate after %.0fs: %v (%s)", took.Seconds(), up, apiEvidence(herr))
 		if !up {
-			t.Fatalf("/healthz did not answer within 60 s of the start with the certificate of before: %v; container log:\n%s", herr, containerLog(c, 30))
+			t.Fatalf("/healthz did not answer with the original pin within 60 s: %s", apiEvidence(herr))
 		}
 		tok, crt, err := l.apiFiles(ctx)
 		if err != nil {
@@ -584,9 +586,10 @@ func TestService(t *testing.T) {
 		if now.Token != api.Token {
 			t.Error("state/api.token changed in the restart")
 		}
-		if fps := serveFingerprints(c); len(fps) > 0 && fps[len(fps)-1] != api.Fingerprint {
-			t.Errorf("serve printed the certificate sha256 %s at the restart, want %s", fps[len(fps)-1], api.Fingerprint)
+		if _, err := l.checkServeFingerprint(ctx, api.Fingerprint, firstFingerprintID); err != nil {
+			t.Fatal(err)
 		}
+		note("the restarted service logged the original pinned fingerprint again")
 
 		after, err := status(ctx, api)
 		note("after %.0fs: %s", time.Since(start).Seconds(), describeStatus(after, err))
@@ -599,30 +602,31 @@ func TestService(t *testing.T) {
 		sleep(ctx, 20*time.Second)
 		var evs []service.Event
 		call(t, "GET /v1/events", &evs, func(ctx context.Context) (apiclient.Response, error) { return api.Events(ctx, 0) })
-		var kinds, applies []string
+		var kinds []string
+		var applies int
 		for _, e := range evs {
 			kinds = append(kinds, e.Kind)
 			if e.Kind == service.KindApply {
-				applies = append(applies, e.Message)
+				applies++
 			}
 		}
 		note("events since the restart: %q", kinds)
-		if len(applies) > 0 {
-			t.Errorf("apply events after the restart: %q, want none", applies)
+		if applies > 0 {
+			t.Errorf("%d apply events after the restart, want none", applies)
 		}
 		rsAfter, err := runnerStatus(ctx)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatal(apiEvidence(err))
 		}
 		// No trial is open, and none ran: the runner runs what it ran before.
-		note("the runner %s, candidate %+v", rsAfter.State, rsAfter.Candidate)
+		note("the runner %s, candidate present=%v", rsAfter.State, rsAfter.Candidate != nil)
 		if rsAfter.State != runnerapi.StateRunning || rsAfter.Candidate != nil {
-			t.Errorf("the runner is %s with candidate %+v 20 s after the restart, want running with none", rsAfter.State, rsAfter.Candidate)
+			t.Errorf("the runner is %s, candidate present=%v 20 s after the restart, want running with none", rsAfter.State, rsAfter.Candidate != nil)
 		}
 		same := reflect.DeepEqual(rsAfter.LastTrial, rsBefore.LastTrial) && reflect.DeepEqual(rsAfter.Active, rsBefore.Active)
 		note("the runner's active selection and last trial as before: %v", same)
 		if !same {
-			t.Errorf("runner active %+v and last trial %+v after the restart, want %+v and %+v as before (no trial)", rsAfter.Active, rsAfter.LastTrial, rsBefore.Active, rsBefore.LastTrial)
+			t.Error("the runner changed its active selection or last trial during the service restart")
 		}
 	})
 }
@@ -632,11 +636,23 @@ func aliveIn(h health.Snapshot, id string) bool {
 	return slices.ContainsFunc(h.Servers, func(s health.ServerHealth) bool { return s.ID == id && s.Alive })
 }
 
+// API errors may echo a credential when the redaction under test regresses.
+func apiEvidence(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	var ae *apiclient.Error
+	if errors.As(err, &ae) {
+		return fmt.Sprintf("HTTP %d", ae.Status)
+	}
+	return fmt.Sprintf("failed (%T)", err)
+}
+
 // describeStatus is a one-line summary of the service's status, or of the
 // error that came instead.
 func describeStatus(st service.Status, err error) string {
 	if err != nil {
-		return "no status: " + err.Error()
+		return "no status: " + apiEvidence(err)
 	}
 	var servers []string
 	for _, s := range st.Health.Servers {
@@ -645,7 +661,7 @@ func describeStatus(st service.Status, err error) string {
 	s := fmt.Sprintf("revision %d, applied %v, pending %v, core %q, level %s, runner reachable=%v state=%q gateway_up=%v, servers %q, selected %q",
 		st.Revision, st.Applied, st.Pending, st.Core, st.Health.Level, st.Health.Runner.Reachable, st.Health.Runner.State, st.Health.Runner.GatewayUp, servers, st.Health.Selected)
 	if e := st.Health.Runner.Err; e != "" {
-		s += fmt.Sprintf(", runner error %q", e)
+		s += ", runner reported an error"
 	}
 	return s
 }

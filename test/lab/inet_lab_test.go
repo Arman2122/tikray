@@ -50,8 +50,8 @@ func TestInetFixtures(t *testing.T) {
 
 	// Through a VLESS server, targets must see its egress address.
 	const portA, portB = 18808, 18809
-	socksClient(ctx, t, xray, portA, "203.0.113.10")
-	socksClient(ctx, t, xray, portB, "203.0.113.11")
+	socksClient(ctx, t, xray, portA, "10.77.113.10")
+	socksClient(ctx, t, xray, portB, "10.77.113.11")
 	for port, want := range map[int]string{portA: "203.0.113.10", portB: "203.0.113.11"} {
 		if got := viaSocks(ctx, t, port); got != want {
 			t.Errorf("whoami through VLESS server %s = %q, want %s", want, got, want)
@@ -63,8 +63,8 @@ func TestInetFixtures(t *testing.T) {
 	if err := inet.SetServer("a", false); err != nil {
 		t.Fatal(err)
 	}
-	if !refuses("203.0.113.10:443") {
-		t.Error("203.0.113.10:443 accepts or times out after SetServer(a, false), want connection refused")
+	if !refuses("10.77.113.10:443") {
+		t.Error("10.77.113.10:443 accepts or times out after SetServer(a, false), want connection refused")
 	}
 	if got := viaSocks(ctx, t, portB); got != "203.0.113.11" {
 		t.Errorf("whoami through server b with a down = %q, want 203.0.113.11", got)
@@ -82,7 +82,7 @@ func TestInetFixtures(t *testing.T) {
 	if err := inet.SetServer("a", true); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitTCP(ctx, "203.0.113.10:443", time.Second); err != nil {
+	if err := waitTCP(ctx, "10.77.113.10:443", time.Second); err != nil {
 		t.Errorf("after SetServer(a, true): %v", err)
 	}
 	if got := viaSocks(ctx, t, portA); got != "203.0.113.10" {
@@ -96,8 +96,8 @@ func TestInetFixtures(t *testing.T) {
 	if err := inet.SetServer("b", false); err != nil {
 		t.Fatal(err)
 	}
-	if !refuses("203.0.113.11:443") {
-		t.Error("203.0.113.11:443 accepts or times out after SetServer(b, false), want connection refused")
+	if !refuses("10.77.113.11:443") {
+		t.Error("10.77.113.11:443 accepts or times out after SetServer(b, false), want connection refused")
 	}
 	if err := inet.SetServer("b", true); err != nil {
 		t.Fatal(err)
@@ -115,7 +115,7 @@ func TestInetFixtures(t *testing.T) {
 	// Stop stops a server that was restarted, and a second Stop (the cleanup)
 	// is harmless.
 	inet.Stop()
-	for _, addr := range []string{"203.0.113.10:443", "203.0.113.11:443", "203.0.113.30:80"} {
+	for _, addr := range []string{"10.77.113.10:443", "10.77.113.11:443", "203.0.113.30:80"} {
 		if !refuses(addr) {
 			t.Errorf("%s still accepts after Stop, want connection refused", addr)
 		}

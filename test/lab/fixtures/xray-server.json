@@ -3,7 +3,7 @@
   "inbounds": [
     {
       "tag": "vless-in",
-      "listen": "203.0.113.10",
+      "listen": "10.77.113.10",
       "port": 443,
       "protocol": "vless",
       "settings": {

@@ -113,7 +113,7 @@ The runner does only what is needed to carry traffic safely:
   0755 and runs that copy (M0).
 - **Control API**, listening only on the runner's bridge address, port 8080, and
   protected by a bearer token (`/data/run/runner.token`): `status`, `reload`,
-  `restart`, `trial`, `commit`, `abort`, and `xray-api` (runs `xray api <cmd>`
+  `restart`, `test`, `trial`, `commit`, `abort`, `adopt`, and `xray-api` (runs `xray api <cmd>`
   with the active core binary, so JSON → protobuf conversion always matches the
   running version).
 - **Trial protocol (A/B slots):**
@@ -198,18 +198,30 @@ M2 builds the control plane in three parts:
   subscriptions refreshed on their interval (a failed fetch, a block page
   included, keeps the servers and sets `last_error`), and the CLI over the
   API. Hot changes are not in M2b: every change is a full trial.
-- **M2c**, next: human sign-in on the same listener (the setup code,
-  argon2id, sessions, CSRF, rate limiting and API tokens; §7). Hot changes
-  through `xray api` move to M2c or later.
+- **M2c** adds human sign-in and named API tokens on the same HTTPS listener
+  (§7). Subscription refreshes test up to 32 server outbounds at a time and
+  isolate refusals before dropping individual entries. If the runner cannot
+  test an outbound, the service saves it as untested. Once a core runs, it
+  clears the marker on a pass or disables a refused server with a redacted
+  reason. A stale test cannot disable a concurrent replacement.
 
 **How tikray talks to xray:**
 - **Config:** JSON, xray's stable public format. tikray never compiles xray
   code in, so it stays decoupled from any one xray version.
-- **Hot changes** (adding/removing servers, rule edits): `xray api ado/rmo/adrules/rmrules`
-  through the runner, using the running binary. Each hot change is also written
-  to the rendered config so a restart gives the same result. If a hot change
-  fails, tikray falls back to a full trial restart. (M2c or later: until then
-  every change is a full trial restart.)
+- **Hot changes** apply only when the running core and geo stay the same and
+  the render changes only the `srv-` outbounds. The runner tests the entire
+  candidate first. After a proxy probe of the active config, tikray uses the
+  running binary's `xray api rmo` and `ado` to remove and add the changed
+  outbounds. If the baseline probe passed, the new config must pass it too.
+  The runner then adopts the tested config in `active.json`. The xray PID
+  stays the same, and a restart loads that config from disk.
+- A rejected candidate leaves the live process alone. A failure during the
+  live change falls back to a full trial. A durable `run/hot/pending` marker
+  makes the next apply resynchronize xray after an interruption. Rule edits,
+  device policy changes, changes to the balancer or observatory, and
+  `TIKRAY_HOT=off` use the full trial. Before xray 26.4.13, a removed
+  server's observatory entry can linger until restart. The balancer drops
+  the outbound, and tikray reports health only for tags in the current state.
 - **Monitoring:** gRPC (StatsService, ObservatoryService, balancer info), as
   unary calls over h2c without the gRPC library. The services are
   `xray.app.stats.command.StatsService`,
@@ -229,7 +241,7 @@ roughly 150 MB:
   state/                 tikray only: state.v<N>.json, TLS cert, secrets (0600)
   cores/<ver>/           xray binary + meta.json (source, sha256, installed-at)
   geo/<ver>/             geoip.dat, geosite.dat, domestic-v4.txt, meta.json
-  run/                   active.json, candidate.json, config/<hash>.json, runner.token
+  run/                   active.json, candidate.json, config/<hash>.json, hot/, runner.token
   images/                tikray-<ver>.tar, tikray-runner-<ver>.tar (current + previous, for rollback)
   inbox/                 manual uploads (cores, geo bundles, images)
 ```
@@ -381,8 +393,11 @@ Runner updates are rare because the runner holds no xray or geo code.
     2026-06-01. A share link never brings it in (§4.3); a raw-JSON outbound
     of any protocol that holds it, in any `tlsSettings` under its
     `streamSettings`, is refused.
-  - xray ≥ 26.7.11 refuses VLESS without TLS or VLESS encryption, and Trojan
-    without TLS, to an address outside xray's private lists, and refuses
+  - xray ≥ 26.7.11 restricts VLESS without TLS or VLESS encryption and
+    Trojan without TLS. As of 26.10.31 the IP exceptions are private,
+    loopback and link-local unicast addresses; the private domain matcher
+    also permits local names. TEST-NET addresses need transport security.
+    xray also refuses
     Shadowsocks `none` (and `plain`). tikray also refuses 2022-blake3 keys
     that aren't padded base64 of the cipher's key length, the one form every
     supported release accepts.
@@ -641,11 +656,35 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
 
 - **Web UI:** HTTPS with a self-signed certificate generated on first start
   (fingerprint shown by the installer). Reachable only from LAN.
-- **First admin:** claimed with the one-time setup code from the installer.
-- **Authentication:** argon2id password hashing, secure cookies, CSRF protection,
-  login rate limiting.
+- **First admin:** `tikray serve` creates a 12-symbol Crockford base32
+  code in `state/setup.code` (0600) and logs how to retrieve it. The
+  in-container `tikray setup-code` prints it as `XXXX-XXXX-XXXX`. Claiming
+  the admin consumes it. Only the root bearer in `state/api.token` may reset
+  the admin over HTTPS. Reset ends all sessions, keeps named tokens and generates a new code.
+- **Passwords:** 10–256 bytes, distinct from the username. Argon2id uses
+  19,456 KiB, two iterations, parallelism one, a 16-byte salt and a 32-byte
+  key. At most two hashes run concurrently. An unknown user costs one hash,
+  as does a wrong password.
+- **Sessions:** a 32-byte random ID is sent in the `tikray_session` cookie
+  with `Secure; HttpOnly; SameSite=Strict; Path=/`. The service persists only
+  its SHA-256 hash. Sessions expire after 12 hours idle or seven days total.
+  Creating a 21st session ends the oldest. Signing out ends the current
+  session; a password change ends the others.
+- **CSRF:** cookie-authenticated requests other than GET and HEAD require
+  `X-Tikray-CSRF`, the base64url HMAC-SHA256 of that session ID with the
+  service's CSRF key. Bearer requests are exempt.
+- **Rate limiting:** failed setup and sign-in attempts share a bucket of
+  five per IPv4 address or IPv6 /64, refilling once per minute, and a
+  global bucket of 100, refilling once per nine seconds. An exhausted
+  bucket returns HTTP 429 with `Retry-After` before hashing.
+- **API tokens:** up to 50 named, optionally expiring tokens use
+  `tkr_<8 hex id>_<43 base64url characters>`. Creation returns the random
+  secret once. The service keeps its SHA-256 hash and saves last use at most
+  every ten minutes. Revocation takes effect immediately. Admin, session,
+  token and CSRF records live in `state/auth.json` (0600), separate from the
+  desired state and the config rendered for xray.
 - **Secrets:** server credentials and the RouterOS password are kept in the
-  `0600` state directory. The rendered xray configs hold the servers'
+  `0700` state directory in files with mode `0600`. The rendered xray configs hold the servers'
   credentials too, so they are `0600` in a `0700` `run/config/`; both images
   run as root. Backup exports are encrypted with a user passphrase.
 - **Runner:** control API requires a token; SOCKS, DNS and control listen only on
@@ -690,8 +729,9 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
 - The `test/lab` harness from M0 is the base: fake LAN and internet in network
   namespaces, serial/SSH provisioning, device-mode confirmed by a power cycle, and
   a cached "ready" image per RouterOS version so each run skips the package install
-  and device-mode reboots. Runners need KVM for practical boot times (TCG takes
-  minutes per boot). ARM64 CHR needs QEMU's `-cpu cortex-a72`: on `-cpu max` its
+  and device-mode reboots. The harness uses QEMU's TCG emulation for both
+  architectures, including under WSL2. ARM64 CHR needs QEMU's
+  `-cpu cortex-a72`: on `-cpu max` its
   kernel hangs right after the EFI stub (M0). CHR's free license caps each
   interface at ~1 Mbps, so CI checks correctness only; throughput comes from §8.5.
 - Setup: a LAN client network namespace → CHR → runner/xray → a test VLESS
@@ -741,6 +781,13 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
     without its credential in the answer; and a restart that keeps the
     revision, the applied config, the certificate and the token, and runs no
     trial;
+  - sign-in and hot server changes. `TestAuth` claims a fresh admin, exercises
+    cookie and bearer mutations, rejects missing CSRF, revokes a named token,
+    restarts the container with the original session and a surviving token, and
+    checks login before and after the rate-limit refill. `TestHot` adds and
+    removes a VLESS server without a PID change, follows LAN traffic to the
+    remaining server, verifies a policy change replaces the process, and boots
+    the runner from a subsequently adopted config with the control plane stopped;
   - geo update and address-list diff;
   - tikray self-update and watchdog rollback;
   - uninstall leaves zero `tikray:` objects.
@@ -788,7 +835,7 @@ docs/
 |---|---|
 | **M0: data-path spike** | **Lab done:** all 22 checks pass on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25) with the newest xray; the real-hardware benchmark is pending. See `docs/superpowers/findings/2026-10-24-m0-data-path.md`. On RouterOS CHR ARM64 and real hardware, prove: xray TUN inbound inside a RouterOS container, mangle routing into it, no source NAT, sniffing with `routeOnly`, UDP, DNS redirect, fallback. Measure throughput and RAM. If something blocks this path, we change the design before building on it. (QUIC sniffing moved to M3: no QUIC fixture in M0.) |
 | **M1: runner + artifacts** | **Done:** the real `tikray-runner` and `tikray` images take xray-core through all nine lifecycle scenarios of `TestCoreLifecycle` (`test/e2e/core_lab_test.go`, §8.4) on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25), with 26.1.18, 26.3.27 and the newest release, 26.10.21. Results: `test/e2e/results/`. Runner with trial protocol; fetch chain, verification, slots; xray update and rollback end to end. |
-| **M2: control-plane core** | **M2a done** (§3.4): the desired state in versioned files (`store`), share links (`sharelink`), the outbound policy of the newest xray (`xraypolicy`), subscriptions without the schedule (`subscription`), the config renderer (`render`, its golden scenarios accepted by xray 26.1.18, 26.3.27, 26.9.30 and 26.10.21, §8.2), and `tikray config render` and `tikray apply`, with core updates and rollbacks rendering for their core. `TestConfigApply` (`test/e2e/config_lab_test.go`, §8.4) passes all eight checks on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25) with the newest xray, 26.10.21, and 26.3.27, after the final fix wave; `TestCoreLifecycle` still passes all nine on rendered configs on the same three (x86_64 long-term 7.23.8 and ARM64 stable 7.25 after the final fix wave, x86_64 stable 7.25 just before it). Results: `test/e2e/results/*-m2a.json` and `*-m1.json`. **M2b done** (§3.4): `tikray serve` as the image's default command, owning the state and keeping xray applied to it (each change tested by the runner's xray where it adds or changes a server, then applied through a trial, with the proxy probe waived when it fails on the active config too); the HTTPS API with a pinned self-signed certificate and a bearer token; the `xray` gRPC client without the gRPC library; the `health` monitor; subscriptions refreshed on schedule; redacted events; and the CLI over the API. `TestService` (`test/e2e/service_lab_test.go`, §8.4) passes all eight checks on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25) with the newest xray, 26.10.21, and on the same runs RouterOS imports the busybox-based image, `/file/get` gives the PEM whose fingerprint `serve` printed, and `tikray status` runs at `/container/shell`. With the new default command, `TestConfigApply` still passes all eight checks and `TestCoreLifecycle` all nine on x86_64 stable 7.25. Results: `test/e2e/results/*-m2b.json`, and the re-runs in `7.25-x86_64-m2a.json` and `7.25-x86_64-m1.json`. **M2c:** human sign-in (the setup code, argon2id, sessions, CSRF, rate limiting and API tokens, §7); hot changes through `xray api` in M2c or later. |
+| **M2: control-plane core** | **M2a done** (§3.4): the desired state in versioned files (`store`), share links (`sharelink`), the outbound policy of the newest xray (`xraypolicy`), subscriptions without the schedule (`subscription`), the config renderer (`render`, its golden scenarios accepted by xray 26.1.18, 26.3.27, 26.9.30 and 26.10.21, §8.2), and `tikray config render` and `tikray apply`, with core updates and rollbacks rendering for their core. `TestConfigApply` (`test/e2e/config_lab_test.go`, §8.4) passes all eight checks on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25) with the newest xray, 26.10.21, and 26.3.27, after the final fix wave; `TestCoreLifecycle` still passes all nine on rendered configs on the same three (x86_64 long-term 7.23.8 and ARM64 stable 7.25 after the final fix wave, x86_64 stable 7.25 just before it). Results: `test/e2e/results/*-m2a.json` and `*-m1.json`. **M2b done** (§3.4): `tikray serve` as the image's default command, owning the state and keeping xray applied to it (each change tested by the runner's xray where it adds or changes a server, then applied through a trial, with the proxy probe waived when it fails on the active config too); the HTTPS API with a pinned self-signed certificate and a bearer token; the `xray` gRPC client without the gRPC library; the `health` monitor; subscriptions refreshed on schedule; redacted events; and the CLI over the API. `TestService` (`test/e2e/service_lab_test.go`, §8.4) passes all eight checks on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25) with the newest xray, 26.10.21, and on the same runs RouterOS imports the busybox-based image, `/file/get` gives the PEM whose fingerprint `serve` printed, and `tikray status` runs at `/container/shell`. With the new default command, `TestConfigApply` still passes all eight checks and `TestCoreLifecycle` all nine on x86_64 stable 7.25. Results: `test/e2e/results/*-m2b.json`, and the re-runs in `7.25-x86_64-m2a.json` and `7.25-x86_64-m1.json`. **M2c done** (§3.4, §7): human sign-in, hot changes to server outbounds with trial fallback, and batched validation of servers saved untested. `TestAuth` passed 6/6 and `TestHot` passed 4/4 on CHR 7.25 x86_64, 7.23.8 x86_64 and 7.25 arm64 under WSL2/QEMU TCG. `TestHot` ran xray 26.10.31. The root-bearer `TestService` rerun passed 8/8 on 7.25 x86_64. Results: `test/e2e/results/*-m2c-auth.json`, `*-m2c-hot.json` and `7.25-x86_64-m2b.json`. |
 | **M3: RouterOS** | `install.rsc`, reconciler, version adapters, watchdog, uninstall, CHR e2e suite. |
 | **M4: web UI** | Dashboard, servers and subscriptions, devices and policies, routing, updates (history and rollback), settings, logs. |
 | **M5: v1.0** | Hardening, full e2e matrix, hardware benchmarks, docs, signed release. |

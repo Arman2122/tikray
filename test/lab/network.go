@@ -24,6 +24,8 @@ const (
 var hostRoutes = [][]string{
 	{"172.31.255.0/29", "via", "198.51.100.2"},
 	{"203.0.113.0/24", "via", "198.51.100.254"},
+	{"10.77.113.10/32", "via", "198.51.100.254"},
+	{"10.77.113.11/32", "via", "198.51.100.254"},
 }
 
 // Network is the host side of the lab: a WAN bridge shared by the host, the
@@ -64,7 +66,7 @@ func SetupNetwork(ctx context.Context) (*Network, error) {
 		{"ip", "-n", nsClient, "link", "set", "lo", "up"},
 		{"ip", "-n", nsClient, "route", "add", "default", "via", "192.168.88.1"},
 	}
-	for _, a := range []string{"203.0.113.10", "203.0.113.11", "203.0.113.20", "203.0.113.30", "203.0.113.40", "203.0.113.41", "203.0.113.53", "203.0.113.54"} {
+	for _, a := range []string{"10.77.113.10", "10.77.113.11", "203.0.113.10", "203.0.113.11", "203.0.113.20", "203.0.113.30", "203.0.113.40", "203.0.113.41", "203.0.113.53", "203.0.113.54"} {
 		steps = append(steps, []string{"ip", "-n", nsInet, "addr", "add", a + "/32", "dev", "lo"})
 	}
 	for _, r := range hostRoutes {

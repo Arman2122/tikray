@@ -33,7 +33,7 @@ func TestNetworkSetupTeardown(t *testing.T) {
 	out(t, n.Inet(ctx, "ping", "-c1", "-W2", "198.51.100.1"))
 
 	lo := out(t, n.Inet(ctx, "ip", "-4", "addr", "show", "lo"))
-	for _, a := range []string{"203.0.113.10", "203.0.113.11", "203.0.113.20", "203.0.113.30", "203.0.113.40", "203.0.113.41", "203.0.113.53", "203.0.113.54"} {
+	for _, a := range []string{"10.77.113.10", "10.77.113.11", "203.0.113.10", "203.0.113.11", "203.0.113.20", "203.0.113.30", "203.0.113.40", "203.0.113.41", "203.0.113.53", "203.0.113.54"} {
 		if !strings.Contains(lo, a) {
 			t.Errorf("tklab-inet lo lacks %s:\n%s", a, lo)
 		}
@@ -44,7 +44,7 @@ func TestNetworkSetupTeardown(t *testing.T) {
 	}
 
 	hostRoutes := out(t, exec.Command("ip", "-4", "route"))
-	for _, r := range []string{"172.31.255.0/29 via 198.51.100.2", "203.0.113.0/24 via 198.51.100.254"} {
+	for _, r := range []string{"172.31.255.0/29 via 198.51.100.2", "203.0.113.0/24 via 198.51.100.254", "10.77.113.10 via 198.51.100.254", "10.77.113.11 via 198.51.100.254"} {
 		if !strings.Contains(hostRoutes, r) {
 			t.Errorf("host routes lack %q:\n%s", r, hostRoutes)
 		}
@@ -60,7 +60,7 @@ func TestNetworkSetupTeardown(t *testing.T) {
 		t.Errorf("netns left after teardown:\n%s", ns)
 	}
 	hostRoutes = out(t, exec.Command("ip", "-4", "route"))
-	if strings.Contains(hostRoutes, "172.31.255.0/29") || strings.Contains(hostRoutes, "203.0.113.0/24") {
+	if strings.Contains(hostRoutes, "172.31.255.0/29") || strings.Contains(hostRoutes, "203.0.113.0/24") || strings.Contains(hostRoutes, "10.77.113.10 via 198.51.100.254") || strings.Contains(hostRoutes, "10.77.113.11 via 198.51.100.254") {
 		t.Errorf("host routes left after teardown:\n%s", hostRoutes)
 	}
 	if err := n.Teardown(); err != nil {
