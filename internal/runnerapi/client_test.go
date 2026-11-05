@@ -108,6 +108,11 @@ func TestTestFailedErrorMessage(t *testing.T) {
 	if !strings.Contains(err.Error(), "unknown outbound tag") {
 		t.Errorf("Error() = %q", err.Error())
 	}
+	// A refusal that says what xray rejected is not prefixed with it again.
+	err = &TestFailedError{Output: ConfigRefusal("Failed to start: failed to build outbound config with tag srv-deadbeef > VLESS users: \"flow\" doesn't support \"xtls-rprx-direct\"")}
+	if got, want := err.Error(), "runnerapi: xray rejected the config: outbound srv-deadbeef: unsupported flow"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
 }
 
 func TestClientStatus(t *testing.T) {

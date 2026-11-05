@@ -250,5 +250,9 @@ var ErrNoToken = errors.New("waiting for the runner token")
 type TestFailedError struct{ Output string }
 
 func (e *TestFailedError) Error() string {
+	if strings.HasPrefix(e.Output, refusalPrefix) {
+		// ConfigRefusal already says what xray rejected.
+		return "runnerapi: " + e.Output
+	}
 	return "runnerapi: xray run -test failed: " + e.Output
 }
