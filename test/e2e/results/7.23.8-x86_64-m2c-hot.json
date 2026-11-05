@@ -2,25 +2,25 @@
   {
     "id": "hot_add",
     "pass": true,
-    "detail": "LAN whoami reached lab-a (203.0.113.10) after 0s; active config config/969e2b94e1056e736dd22586e318855a29d1039d91255ba525a9fbc4647f77f8.json, the render for 26.10.31: true; observatory reported lab-b alive after 14s; revision 2 applied, hot=true (observed after 14s); applied without restarting xray: added 1, removed 0, changed 0; xray PID before 18, after 18; active config config/37bbac2878913610b1e6f91dd804abad1501c2a67cce2da0dcf0f9734ec04ccb.json, the render for 26.10.31: true; run/hot/pending absent",
-    "seconds": 14.5
+    "detail": "LAN whoami reached lab-a (203.0.113.10) after 0s; active config config/8cf999f75da35991bfa65b693f0330ea2e8f518b5821c02c9a1aa994a2530d47.json, the render for 26.10.31: true; observatory reported lab-b alive after 17s; revision 2 applied, hot=true (observed after 17s); applied without restarting xray: added 1, removed 0, changed 0; xray PID before 16, after 16; same process start: true; active config config/ccbcb095ecbafea27a3500ddc5d22ef5ce3f9f6a611a5b7f3977e70671606bda.json, the render for 26.10.31: true; run/hot/pending absent",
+    "seconds": 17.5
   },
   {
     "id": "hot_remove",
     "pass": true,
-    "detail": "revision 3 applied, hot=true (observed after 3s); applied without restarting xray: added 0, removed 1, changed 0; xray PID before 18, after 18; active config config/737724a9c691616b3447e18c74ae5379c3a1b81a9a98028cd65b7ae9a328b797.json, the render for 26.10.31: true; lso lists lab-b and no longer lists lab-a; LAN whoami reached lab-b (203.0.113.11) after 0s; run/hot/pending absent",
+    "detail": "revision 3 applied, hot=true (observed after 3s); applied without restarting xray: added 0, removed 1, changed 0; xray PID before 16, after 16; same process start: true; active config config/a51db1f7f5d588d65ac547a4567e975e718927e3ed635c52cf13623ff8a36d63.json, the render for 26.10.31: true; lso lists lab-b and no longer lists lab-a; LAN whoami reached lab-b (203.0.113.11) after 0s; run/hot/pending absent",
     "seconds": 3.2
   },
   {
     "id": "not_hot",
     "pass": true,
-    "detail": "revision 4 applied, hot=false (observed after 13s); xray PID before 18, after 83; active config config/fd6a5fd1609b9242ffe29b07ac54d48f5c3ae347d489e3f7521b08486aa338de.json, the render for 26.10.31: true; runner committed a trial for the full policy; LAN whoami reached lab-b (203.0.113.11) after 0s; run/hot/pending absent",
+    "detail": "revision 4 applied, hot=false (observed after 13s); xray PID before 16, after 81; same process start: false; active config config/07f350637bbba8233d76e7977e164c4d416a774ae2e0b3e9a850ce0474f33b4b.json, the render for 26.10.31: true; runner committed a trial for the full policy; LAN whoami reached lab-b (203.0.113.11) after 0s; run/hot/pending absent",
     "seconds": 13.3
   },
   {
     "id": "hot_survives_runner_restart",
     "pass": true,
-    "detail": "revision 5 applied, hot=true (observed after 3s); applied without restarting xray: added 0, removed 0, changed 1; xray PID before 83, after 83; active config config/0571ae868e973fee825e36a6d21a574a801f237c61fd6aa435dad7f76bde994f.json, the render for 26.10.31: true; runner restarted from active.json with core 26.10.31 and config config/0571ae868e973fee825e36a6d21a574a801f237c61fd6aa435dad7f76bde994f.json; LAN whoami reached lab-b (203.0.113.11) after 2s; run/hot/pending absent",
+    "detail": "revision 5 applied, hot=true (observed after 3s); applied without restarting xray: added 0, removed 0, changed 1; xray PID before 81, after 81; same process start: true; active config config/454b8af57b33c5daf80ec3a66fdb43a705206d9cce8bfa4b2ccdf751f8042b78.json, the render for 26.10.31: true; runner restarted from active.json with core 26.10.31 and config config/454b8af57b33c5daf80ec3a66fdb43a705206d9cce8bfa4b2ccdf751f8042b78.json; LAN whoami reached lab-b (203.0.113.11) after 2s; run/hot/pending absent",
     "seconds": 12.5
   }
 ]

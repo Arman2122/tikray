@@ -41,6 +41,54 @@ const subURL = "http://203.0.113.30/sub/lab"
 // (artifacts' baselineSkipped).
 const baselineSkipped = "the proxy probe fails on the active config too"
 
+// The router's WAN fallback has the same external address as an xray direct
+// connection. Bracket each request with counter reads so both signals must
+// agree on one attempt before accepting it.
+type directProof struct {
+	took                                time.Duration
+	attempts, wanSamples, counterErrors int
+	bytes                               int64
+	wan, ok                             bool
+	err                                 error
+}
+
+func waitDirect(ctx context.Context, within, interval time.Duration, whoami func(context.Context) string) (proof directProof) {
+	ctx, cancel := context.WithTimeout(ctx, within)
+	defer cancel()
+	proof.took, proof.ok = poll(ctx, within, interval, func() bool {
+		proof.attempts++
+		proof.wan = false
+		proof.bytes, proof.err = viaDirect(ctx, func() {
+			proof.wan = whoami(ctx) == egressDirect
+			if proof.wan {
+				proof.wanSamples++
+			}
+		})
+		if proof.err != nil {
+			proof.counterErrors++
+		}
+		return proof.err == nil && proof.wan && proof.bytes > 0 && ctx.Err() == nil
+	})
+	return proof
+}
+
+// Record route selection at the edges of the check for diagnosis. Only the
+// measured bytes and egress decide whether the request actually went direct.
+func (l *Lab) openRunnerRoute(ctx context.Context) string {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	count, err := l.CHR.Get(ctx, `:len [/ip/route/find where comment="tikray:route-open-runner" and active]`)
+	if err == nil {
+		switch count {
+		case "1":
+			return "active"
+		case "0":
+			return "inactive"
+		}
+	}
+	return "unknown"
+}
+
 // TestService deploys the real images once, starts the tikray container with
 // its default command, tikray serve, and drives the service through its HTTPS
 // API as a client would, in order: the service comes up with its pinned
@@ -227,15 +275,14 @@ func TestService(t *testing.T) {
 		}
 		// The default policy is direct: xray sends the LAN client's traffic,
 		// which the router still routes to it, out direct.
-		took, direct := poll(ctx, l.proxiedWithin(), 2*time.Second, func() bool { return l.whoami(ctx) == egressDirect })
-		var got string
-		n, err := viaDirect(ctx, func() { got = l.whoami(ctx) })
-		if err != nil {
-			t.Fatal(err)
-		}
-		note("LAN direct after %.0fs: %v; whoami %q, xray direct downlink +%d bytes", took.Seconds(), direct, got, n)
-		if !direct || got != egressDirect || n <= 0 {
-			t.Errorf("whoami %q with %d bytes through xray's direct outbound, want %s (direct, through xray)", got, n, egressDirect)
+		before := l.openRunnerRoute(ctx)
+		proof := waitDirect(ctx, l.proxiedWithin(), 2*time.Second, l.whoami)
+		after := l.openRunnerRoute(ctx)
+		note("LAN direct after %.0fs: %v; WAN replies %d/%d, last direct downlink delta %d bytes, counter read errors %d; open runner route before %s, after %s",
+			proof.took.Seconds(), proof.ok, proof.wanSamples, proof.attempts, proof.bytes, proof.counterErrors, before, after)
+		if !proof.ok {
+			t.Errorf("WAN egress and positive direct downlink did not coincide: %d/%d WAN replies, last WAN=%v, delta %d, counter errors %d (last %v), route before %s, after %s",
+				proof.wanSamples, proof.attempts, proof.wan, proof.bytes, proof.counterErrors, proof.err, before, after)
 		}
 	})
 

@@ -2,37 +2,37 @@
   {
     "id": "serve_starts",
     "pass": true,
-    "detail": "tikray container running 3s after start (RouterOS imported the busybox-based archive); GET /healthz with the pinned certificate (sha256 c86114cfd5d5480579ce3b5ff035ceb394618178ff5430b972df47755db9c5b2) 3s after the start: true (ok); GET /v1/status with the token 3s after the start: revision 0, applied false, pending false, core \"\", level down, runner reachable=true state=\"empty\" gateway_up=false, servers [], selected \"\"; GET /v1/status with another token: HTTP 401; startup log fingerprint matched the pinned certificate; tikray status in /container/shell reported revision 0 and exited successfully",
-    "seconds": 3.8
+    "detail": "tikray container running 3s after start (RouterOS imported the busybox-based archive); GET /healthz with the pinned certificate (sha256 4baecf2b877cc94d0d0551808e5d26584db6eb0e519b0a08f199ab664d0215fd) 3s after the start: true (ok); GET /v1/status with the token 3s after the start: revision 0, applied false, pending false, core \"\", level down, runner reachable=true state=\"empty\" gateway_up=false, servers [], selected \"\"; GET /v1/status with another token: HTTP 401; startup log fingerprint matched the pinned certificate; tikray status in /container/shell reported revision 0 and exited successfully",
+    "seconds": 3.7
   },
   {
     "id": "bootstrap_core",
     "pass": true,
-    "detail": "POST /v1/core/update latest: outcome=committed from= to=26.10.31 source=\"direct\" verified=dgst (157s); runner running, active 26.10.31, xray_version \"Xray 26.10.31 (Xray, Penetrates Everything.) a4a3dff (go1.27.3 linux/amd64)\", gateway_up true; active config config/c8f2ab31dee35e4f98e4f0df90aa0f64b8f89f8b67fc956b952c3f2bbcf05ba1.json, the render for 26.10.31: true; status: revision 0, applied true, pending false, core \"26.10.31\", level idle, runner reachable=true state=\"running\" gateway_up=true, servers [], selected \"\"; LAN direct after 0s: true; whoami \"198.51.100.2\", xray direct downlink +129 bytes",
-    "seconds": 157.4
+    "detail": "POST /v1/core/update latest: outcome=committed from= to=26.10.31 source=\"direct\" verified=dgst (124s); runner running, active 26.10.31, xray_version \"Xray 26.10.31 (Xray, Penetrates Everything.) a4a3dff (go1.27.3 linux/amd64)\", gateway_up true; active config config/c8f2ab31dee35e4f98e4f0df90aa0f64b8f89f8b67fc956b952c3f2bbcf05ba1.json, the render for 26.10.31: true; status: revision 0, applied true, pending false, core \"26.10.31\", level idle, runner reachable=true state=\"running\" gateway_up=true, servers [], selected \"\"; LAN direct after 0s: true; WAN replies 1/1, last direct downlink delta 129 bytes, counter read errors 0; open runner route before active, after active",
+    "seconds": 124
   },
   {
     "id": "add_server_applies",
     "pass": true,
-    "detail": "PUT /v1/health probe_url http://203.0.113.30/whoami: revision 1; POST /v1/servers lab-a's link: server 25f9dace (lab-a), revision 2; PUT /v1/devices/192.168.88.10/32 smart: revision 3; applied, through server a, lab-a alive and selected after 14s: true; revision 3, applied true, pending false, core \"26.10.31\", level ok, runner reachable=true state=\"running\" gateway_up=true, servers [\"25f9dace alive=true\"], selected \"25f9dace\"; last apply: outcome=committed from=26.10.31 to=26.10.31 source=\"\" verified=",
+    "detail": "PUT /v1/health probe_url http://203.0.113.30/whoami: revision 1; POST /v1/servers lab-a's link: server 01e2690f (lab-a), revision 2; PUT /v1/devices/192.168.88.10/32 smart: revision 3; applied, through server a, lab-a alive and selected after 14s: true; revision 3, applied true, pending false, core \"26.10.31\", level ok, runner reachable=true state=\"running\" gateway_up=true, servers [\"01e2690f alive=true\"], selected \"01e2690f\"; last apply: outcome=committed from=26.10.31 to=26.10.31 source=\"\" verified=",
     "seconds": 14.3
   },
   {
     "id": "subscription_refresh",
     "pass": true,
-    "detail": "the subscription lists lab-b, base64; POST /v1/subscriptions: cd2c732b (lab), revision 4; POST /v1/subscriptions/cd2c732b/refresh: added 1, updated 0, removed 0, kept 0, skipped 0, via \"direct\" (0s, ok); the manual refresh added lab-b; lab-b is server \"81efc434\"; applied with lab-a and lab-b alive after 16s: true; revision 5, applied true, pending false, core \"26.10.31\", level ok, runner reachable=true state=\"running\" gateway_up=true, servers [\"25f9dace alive=true\" \"81efc434 alive=true\"], selected \"25f9dace\"; the status names server \"a\" as selected and the LAN goes through \"a\" (0s): true; server a (203.0.113.10) up: false; through server b 6s after a stopped: true; lab-b, the subscription's server, carried the LAN's traffic: true (before the stop: false)",
-    "seconds": 22.4
+    "detail": "the subscription lists lab-b, base64; POST /v1/subscriptions: 96162cbb (lab), revision 4; POST /v1/subscriptions/96162cbb/refresh: added 1, updated 0, removed 0, kept 0, skipped 0, via \"direct\" (0s, ok); the manual refresh added lab-b; lab-b is server \"20f016ca\"; applied with lab-a and lab-b alive after 10s: true; revision 5, applied true, pending false, core \"26.10.31\", level ok, runner reachable=true state=\"running\" gateway_up=true, servers [\"01e2690f alive=true\" \"20f016ca alive=true\"], selected \"01e2690f\"; the status names server \"a\" as selected and the LAN goes through \"a\" (0s): true; server a (203.0.113.10) up: false; through server b 9s after a stopped: true; lab-b, the subscription's server, carried the LAN's traffic: true (before the stop: false)",
+    "seconds": 19.4
   },
   {
     "id": "subscription_block_page",
     "pass": true,
-    "detail": "the proxy healthy through server b after 4s: true; revision 5, applied true, pending false, core \"26.10.31\", level degraded, runner reachable=true state=\"running\" gateway_up=true, servers [\"25f9dace alive=false\" \"81efc434 alive=true\"], selected \"81efc434\"; the subscription answers a block page; POST /v1/subscriptions/cd2c732b/refresh: HTTP 502, fetch_failed=true (0s); direct fetch refused the body: true; proxy fetch refused the body: true; subscription last_error was set: true; servers: [\"25f9dace lab-a\" \"81efc434 lab-b\"]",
-    "seconds": 4.1
+    "detail": "the proxy healthy through server b after 10s: true; revision 5, applied true, pending false, core \"26.10.31\", level degraded, runner reachable=true state=\"running\" gateway_up=true, servers [\"01e2690f alive=false\" \"20f016ca alive=true\"], selected \"20f016ca\"; the subscription answers a block page; POST /v1/subscriptions/96162cbb/refresh: HTTP 502, fetch_failed=true (0s); direct fetch refused the body: true; proxy fetch refused the body: true; subscription last_error was set: true; servers: [\"01e2690f lab-a\" \"20f016ca lab-b\"]",
+    "seconds": 10.1
   },
   {
     "id": "outage_apply",
     "pass": true,
-    "detail": "server a (203.0.113.10) up: false; server b (203.0.113.11) up: false; PUT /v1/devices/192.168.88.10/32 smart with the kill switch: revision 7; applied after 16s: true; revision 7, applied true, pending false, core \"26.10.31\", level outage, runner reachable=true state=\"running\" gateway_up=true, servers [\"25f9dace alive=false\" \"81efc434 alive=false\"], selected \"\"; last apply: outcome=committed from=26.10.31 to=26.10.31 source=\"\" verified=; 30 requests in 30 s with both servers down, answers []; runner not running with gateway_up at 0 of them []; server a (203.0.113.10) up: true; proxied 6s after server a started: true",
+    "detail": "server a (203.0.113.10) up: false; server b (203.0.113.11) up: false; PUT /v1/devices/192.168.88.10/32 smart with the kill switch: revision 7; applied after 16s: true; revision 7, applied true, pending false, core \"26.10.31\", level outage, runner reachable=true state=\"running\" gateway_up=true, servers [\"01e2690f alive=false\" \"20f016ca alive=false\"], selected \"\"; last apply: outcome=committed from=26.10.31 to=26.10.31 source=\"\" verified=; 30 requests in 30 s with both servers down, answers []; runner not running with gateway_up at 0 of them []; server a (203.0.113.10) up: true; proxied 6s after server a started: true",
     "seconds": 52.8
   },
   {
@@ -44,7 +44,7 @@
   {
     "id": "restart_persists",
     "pass": true,
-    "detail": "before: revision 7, applied true, pending false, core \"26.10.31\", level outage, runner reachable=true state=\"running\" gateway_up=true, servers [\"25f9dace alive=false\" \"81efc434 alive=false\"], selected \"\"; tikray container stopped; GET /healthz pinned to the original certificate after 0s: true (ok); certificate sha256 c86114cfd5d5480579ce3b5ff035ceb394618178ff5430b972df47755db9c5b2 after the restart, the same: true; the token the same: true; the restarted service logged the original pinned fingerprint again; after 4s: revision 7, applied true, pending false, core \"26.10.31\", level degraded, runner reachable=true state=\"running\" gateway_up=true, servers [\"25f9dace alive=true\" \"81efc434 alive=false\"], selected \"25f9dace\"; events since the restart: []; the runner running, candidate present=false; the runner's active selection and last trial as before: true",
-    "seconds": 27.5
+    "detail": "before: revision 7, applied true, pending false, core \"26.10.31\", level outage, runner reachable=true state=\"running\" gateway_up=true, servers [\"01e2690f alive=false\" \"20f016ca alive=false\"], selected \"\"; tikray container stopped; GET /healthz pinned to the original certificate after 0s: true (ok); certificate sha256 4baecf2b877cc94d0d0551808e5d26584db6eb0e519b0a08f199ab664d0215fd after the restart, the same: true; the token the same: true; the restarted service logged the original pinned fingerprint again; after 4s: revision 7, applied true, pending false, core \"26.10.31\", level degraded, runner reachable=true state=\"running\" gateway_up=true, servers [\"01e2690f alive=true\" \"20f016ca alive=false\"], selected \"01e2690f\"; events since the restart: []; the runner running, candidate present=false; the runner's active selection and last trial as before: true",
+    "seconds": 26.8
   }
 ]

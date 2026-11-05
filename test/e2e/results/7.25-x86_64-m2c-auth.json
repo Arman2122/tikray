@@ -3,7 +3,7 @@
     "id": "setup_required",
     "pass": true,
     "detail": "container log read=true lines=15; hint start=true command=true end=true complete=true; listener=true; order correct=true; setup code exposed=false; fresh API requires setup; file and CLI agreed on a 12-symbol code; CLI exited 0",
-    "seconds": 3.6
+    "seconds": 3.5
   },
   {
     "id": "claim_admin",
@@ -21,18 +21,18 @@
     "id": "api_token",
     "pass": true,
     "detail": "two tokens created and used; list returned both names without their secrets; revoked token received 401",
-    "seconds": 0.1
+    "seconds": 0.2
   },
   {
     "id": "restart_keeps_auth",
     "pass": true,
     "detail": "after a container stop and start the old session and token each received 200; signed in, setup not required",
-    "seconds": 6.3
+    "seconds": 6.4
   },
   {
     "id": "login_rate_limit",
     "pass": true,
-    "detail": "five bad passwords received 401; the sixth and the right password received 429; login succeeded after Retry-After 60 s",
-    "seconds": 62.2
+    "detail": "five bad passwords received 401; the sixth and the right password received 429; login succeeded after Retry-After 59 s",
+    "seconds": 61.3
   }
 ]

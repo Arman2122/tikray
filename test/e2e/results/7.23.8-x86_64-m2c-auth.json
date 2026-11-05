@@ -3,13 +3,13 @@
     "id": "setup_required",
     "pass": true,
     "detail": "container log read=true lines=15; hint start=true command=true end=true complete=true; listener=true; order correct=true; setup code exposed=false; fresh API requires setup; file and CLI agreed on a 12-symbol code; CLI exited 0",
-    "seconds": 4.5
+    "seconds": 3.6
   },
   {
     "id": "claim_admin",
     "pass": true,
     "detail": "three wrong codes returned 401 bad_code; claim returned 200 with a secure, HttpOnly, SameSite=Strict cookie for / with a 7-day Max-Age; setup file consumed",
-    "seconds": 0.7
+    "seconds": 0.8
   },
   {
     "id": "session_and_csrf",
@@ -27,7 +27,7 @@
     "id": "restart_keeps_auth",
     "pass": true,
     "detail": "after a container stop and start the old session and token each received 200; signed in, setup not required",
-    "seconds": 6.3
+    "seconds": 6.4
   },
   {
     "id": "login_rate_limit",

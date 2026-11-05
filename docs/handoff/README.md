@@ -24,14 +24,14 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M1: runner and artifacts | Done, merged (PR #3) | |
 | M2a: state model and render | Done, merged (PR #4) | |
 | M2b: the service (`tikray serve`, HTTPS API, health, subscriptions) | Done, merged (PR #5) | |
-| **M2c: human sign-in and hot server changes** | **In progress: Tasks 1–9 complete; whole-branch fixes under final validation** | this branch |
+| **M2c: human sign-in and hot server changes** | **Implemented, reviewed and validated; awaiting owner review of PR #6** | this branch |
 | M3: RouterOS (installer, reconciler, version adapters, watchdog, uninstall, CHR e2e) | Not started | |
 | M4: web UI | Not started | |
 | M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
 
 Roughly half of the total effort is done.
 
-## M2c: where it stopped
+## M2c handoff
 
 - **Plan:** [`docs/superpowers/plans/2026-10-26-m2c-auth-hot.md`](../superpowers/plans/2026-10-26-m2c-auth-hot.md).
 - **Ledger:** [`m2c/ledger.md`](m2c/ledger.md). It is the record of everything decided. Each `Ruling:` line binds later work the way the plan does.
@@ -47,7 +47,7 @@ Roughly half of the total effort is done.
 | 7 | Compat test of hot changes against real xray releases | fb76752, 79f8582, 5a5c2cd | done, reviewed |
 | 8 | Re-test servers saved untested; batched first-refresh tests | b3038ab | done, reviewed |
 | 9 | End-to-end `TestAuth` and `TestHot` on CHR (3 platforms), spec update | 4ad5f3c | done on all three CHRs |
-| — | Final whole-branch review and fix wave | see the M2c ledger | validating reviewed images |
+| — | Final whole-branch review and fix wave | bf6b119 | reviewed; all three targets and the service rerun passed |
 
 ### Next steps, in order
 
@@ -57,11 +57,12 @@ and 7.25 arm64. The root-token `TestService` rerun on 7.25 x86_64 passed
 8/8. The [results](../../test/e2e/results/) and [ledger](m2c/ledger.md)
 record the runs and the fixes needed to reproduce them.
 
-1. **Final whole-branch review** of `main..HEAD`.
-   - Use the plan's Review Focus section and the ledger's `Ruling:` lines.
-   - Decide each `minor (deferred)` line in the ledger: fix it or keep deferring it.
-   - Then do one fix wave, each fix test-first.
-2. **Update draft PR #6** to `main`, get CI green, and ask the owner before merging.
+The final matrix used binaries built from clean commit `bf6b119`. The stable
+service check measured a 129-byte increase through xray on the same request
+that reached the expected direct WAN egress. Every `minor (deferred)` item
+was decided in the ledger. The next step is the owner's review of
+[draft PR #6](https://github.com/Arman2122/tikray/pull/6). M3 is the next
+implementation milestone.
 
 ### Key M2c facts
 
