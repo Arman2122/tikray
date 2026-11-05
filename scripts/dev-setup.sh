@@ -3,12 +3,11 @@
 # test tikray. It installs make, git, gcc and the C headers (for -race), and
 # Go when none, or one older than 1.21, is on PATH: the distribution's
 # golang-go first, else the toolchain go.mod names from go.dev, under
-# /usr/local/go. Go 1.21 and
-# later fetch go.mod's toolchain by themselves. Where Google's Go servers
-# aren't reachable, as in some countries, Go modules then come through a
-# mirror. Then it runs the unit tests. With --lab it also installs what the
-# RouterOS lab needs (scripts/lab-deps.sh, Docker) and says whether KVM is
-# there. Safe to re-run.
+# /usr/local/go. Go 1.21 and later fetch go.mod's toolchain by themselves.
+# Where Google's Go servers aren't reachable, as in some countries, Go modules
+# then come through a mirror. Then it runs the unit tests. With --lab it also
+# installs what the RouterOS lab needs (scripts/lab-deps.sh, Docker) and says
+# whether KVM is there. Safe to re-run.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
