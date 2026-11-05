@@ -16,4 +16,42 @@ Ruling: Keep DHCP lease discovery read-only in M3 and defer reservation creation
 
 The amendments and four rulings were pushed in `53976c5` after a passing `make test`. Task 0 uses cached x86_64 CHR ready images under QEMU TCG in WSL2, a separate copy-on-write overlay per run, and an ephemeral account restricted to the simulated control IP (.2). The real group policy readback was exactly `read,write,api`. No product code or live router is involved.
 
-Both owners could create and sign the API-SSL certificate and establish the pinned connection. On **both 7.23.8 and 7.25**, the owner API refused a certificate template with `comment=tikray:…`, accepted the identical template without the comment, and refused to set a comment on the existing signed certificate. This disproves C for the installer-created certificate. The preflight fixture initially mistook RouterOS's explicit denied rights (such as `!policy`) for grants. It was corrected to compare only the positive grants and rerun.
+On each router, the owner account could create and sign the API-SSL certificate and establish the pinned connection. On **both 7.23.8 and 7.25**, the owner API refused a certificate template with `comment=tikray:…`, accepted the identical template without the comment, and refused to set a comment on the existing signed certificate. This disproves C for the installer-created certificate. The preflight fixture initially mistook RouterOS's explicit denied rights (such as `!policy`) for grants. It was corrected to compare only the positive grants and rerun.
+
+### Results and scope
+
+Probe source: [`fb28bc8`](https://github.com/Arman2122/tikray/commit/fb28bc85168050bb94fad9e69e3fb61b426bfb77). Reproduction instructions: [spike/m3/README.md](../../../spike/m3/README.md). The real probe returns a nonzero exit when a claim fails or remains unproven. On each target it recorded **61 PASS, 3 FAIL and 2 INCONCLUSIVE** across 66 checks. The three failures were restricted user removal, restricted group removal and certificate ownership. The two inconclusive results were route and conntrack notifications. The gate is **closed**.
+
+| Claim | 7.23.8 x86_64 | 7.25 x86_64 | What the router demonstrated |
+|---|---|---|---|
+| A. Bounded binary SHA-512 | Pass | Pass | A real tar, including NULs and every byte value, matched the independent Go SHA-512 values for all seven ordered chunks (16 KiB maximum, short last chunk). The router rejected a flipped byte, one-byte truncation and two swapped chunks. |
+| B. Traffic menus and tagged teardown under `read,write,api` | **Fail for full teardown** | **Fail for full teardown** | All nine traffic/config menus passed create/read/set/remove. The four ordered firewall menus also passed move and relative-order readback. The restricted client could not remove either a tagged RouterOS user or a tagged group; the owner successfully issued the same removals and verified absence. |
+| C. Every managed object accepts the ownership tag | **Fail for certificates** | **Fail for certificates** | Twenty ordinary object classes retained the exact tag. The independent signed-certificate control failed even as owner, both on template creation and when setting the signed row. |
+| D. Netwatch changes only open DNS rules | Pass | Pass | Real up/down/up transitions enabled, disabled and re-enabled exactly the open UDP/TCP DNS NAT rules. Closed rules and unowned look-alikes retained their states. The complete NAT ID sequence remained identical. |
+
+**B by operation.** The results below match on both targets. Verified by readback after mutation. “Deletion observed” means an event for the exact deleted row ID. A separately correlated edit was not proven in these runs.
+
+| Native menu | Restricted writes / readback | Native listener |
+|---|---|---|
+| `/ip/firewall/mangle`, `/ip/firewall/filter`, `/ipv6/firewall/filter`, `/ip/firewall/nat` | Add, read, edit, move relative to a distinct anchor, remove | Deletion observed on each |
+| `/ip/firewall/address-list`, `/ipv6/firewall/address-list` | Add, read, edit, remove | Deletion observed on both |
+| `/routing/table` | Add, read, edit, remove a FIB table | Deletion observed |
+| `/ip/route` | Add, read, change comment and distance, remove an isolated active route | Inconclusive. Neither restricted nor owner session yielded a correlated edit/deletion within the observation windows. |
+| `/tool/netwatch` | Add, read, set both script bodies, verify them, remove | Deletion observed |
+| `/ip/firewall/connection` | Read two actual LAN-to-WAN UDP five-tuples, remove only the target by ID. The witness kept its session-local ID and the same socket returned a fresh, nonce-matched echo. | Inconclusive. Subscriptions preceded traffic. Neither session delivered a correlated event for the new target within the bounded observation. |
+
+**C and teardown by class.** Bridge, veth, bridge port, bridge IP, table, route, IPv4/IPv6 list members and filters, IPv4 mangle/NAT, user, group, env, mount, script, scheduler, netwatch and a stopped amd64 container all passed tagged-add/readback. The restricted identity removed rows in eighteen classes. Only user and group required the owner. The signed certificate lacked a usable ownership comment. In a separate permission control, the restricted user could remove a disposable **unsigned template** by ID. That result does not establish a safe way to identify or remove a signed certificate. Neither session removed the live TLS certificate.
+
+**Verification.** The owner independently observed the restricted account at the allowed control IP. A forbidden group creation failed under the restricted account and succeeded as owner. Private checks inspected router log/history and host VM diagnostics for both generated canaries. No credential is included in the evidence. `make test` and `go vet -tags lab ./spike/m3/...` passed. An independent review checked exact-ID controls, listener evidence, error classifications, privacy, and the same-socket witness. Earlier fixture-only errors (mount syntax, field name for imported architecture, and conntrack observation timing) were corrected and are excluded from the results.
+
+The final serial runs took 54.80 s on 7.23.8 and 63.77 s on 7.25. All 66 public verdicts and reasons matched. Both tests exited 1 at the capability gate. The final host check found no remaining lab QEMU process, namespace or interface.
+
+### Decision needed before Task 1
+
+The following is a proposal, not an approved change to the design.
+
+1. Treat the router's API-SSL certificate as an **owner-managed prerequisite**. Reuse and pin a suitable existing certificate. Otherwise stop before router changes and show the owner how to provide one. Never adopt/delete a certificate by name or fingerprint alone. Trade-off: a router without a suitable certificate needs one manual setup step.
+2. Keep the control account at exactly `read,write,api`. Let the local, owner-run `uninstall.rsc` remove the tagged user and group by verified ID, along with their tagged dependencies, even with both containers down. Trade-off: a complete uninstall requires an owner session; the daemon cannot perform it remotely with its own account.
+3. Treat native object notifications as hints wherever measured. Use startup/settings-change reads and a periodic route check (propose 30 s) for route drift; read conntrack directly on policy changes and verify targeted invalidations. Keep closed traffic protected independently during the route polling interval and test deletion of an essential route with a WAN-side leak witness. Trade-off: some externally induced drift is detected on the next check and the router incurs the periodic reads. The experiments do not establish that RouterOS can never emit these events.
+
+No Task 1 or M3b implementation is authorized by these findings. Resume only after the owner decides on the proposed changes.
