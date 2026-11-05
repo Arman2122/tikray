@@ -261,6 +261,11 @@ func ConfigRefusal(output string) string {
 	return refusalPrefix + refusalText(tags, cmp.Or(category, refusalInvalidConfig))
 }
 
+// RefusalReason is s without the "xray rejected the config: " that starts
+// a ConfigRefusal, for a message that already says what xray rejected. Any
+// other text is returned as it is.
+func RefusalReason(s string) string { return strings.TrimPrefix(s, refusalPrefix) }
+
 // publicRefusalRE matches the refusals ConfigRefusal makes and those
 // publicRefusal makes of an older runner's xray output, and nothing else.
 var publicRefusalRE = func() *regexp.Regexp {

@@ -413,3 +413,25 @@ func TestBatchGroupOnlyConflictBlamesNoOne(t *testing.T) {
 		}
 	}
 }
+
+// A runner that names the refusal itself (ConfigRefusal) makes a server's
+// reason read once: "xray rejected the server: outbound srv-…: <category>".
+func TestBatchSingletonRefusalReadsOnce(t *testing.T) {
+	input := batchInputs(5)
+	refusal := runnerapi.ConfigRefusal("Failed to start: main: failed to load config files: [/tmp/c.json] > infra/conf: failed to build outbound config with tag srv-00000001 > infra/conf: VLESS users: \"flow\" doesn't support \"xtls-rprx-direct\" in this version")
+	r := &batchRunner{t: t, test: func(ids []string) (runnerapi.TestResult, error) {
+		if slices.Contains(ids, "00000001") {
+			return runnerapi.TestResult{Output: refusal}, nil
+		}
+		return runnerapi.TestResult{OK: true}, nil
+	}}
+	e := newEnv(t)
+	e.s.runner = r
+	rejected, err := e.s.testOutbounds(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rejected["00000001"], "xray rejected the server: outbound srv-00000001: unsupported flow"; got != want {
+		t.Errorf("reason = %q, want %q", got, want)
+	}
+}

@@ -103,7 +103,7 @@ func (s *Service) testOutboundSet(ctx context.Context, outbounds map[string]json
 				results[out.id] = ""
 			}
 		} else if len(group) == 1 {
-			results[group[0].id] = "xray rejected the server" + redactDetail(res.Output)
+			results[group[0].id] = "xray rejected the server" + redactDetail(runnerapi.RefusalReason(res.Output))
 		}
 		return res.OK, nil
 	}
