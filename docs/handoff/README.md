@@ -48,6 +48,7 @@ Roughly half of the total effort is done.
 | 8 | Re-test servers saved untested; batched first-refresh tests | b3038ab | done, reviewed |
 | 9 | End-to-end `TestAuth` and `TestHot` on CHR (3 platforms), spec update | 4ad5f3c | done on all three CHRs |
 | — | Final whole-branch review and fix wave | bf6b119 | reviewed; all three targets and the service rerun passed |
+| — | Independent review (three fresh reviewers) and its fix wave | 332393f..HEAD | approved by all three re-reviews; CHR 7.25 x86_64 re-run passed |
 
 ### Next steps, in order
 
@@ -60,9 +61,19 @@ record the runs and the fixes needed to reproduce them.
 The final matrix used binaries built from clean commit `bf6b119`. The stable
 service check measured a 129-byte increase through xray on the same request
 that reached the expected direct WAN egress. Every `minor (deferred)` item
-was decided in the ledger. The next step is the owner's review of
-[draft PR #6](https://github.com/Arman2122/tikray/pull/6). M3 is the next
-implementation milestone.
+was decided in the ledger.
+
+The handed-off work then had an independent review: three fresh reviewers
+for sign-in and the API, hot changes and the runner, and the service and
+the policy. Their findings were fixed test-first, the reviewers approved the
+fixes, and the ledger's `Review:` lines record every ruling and deferred
+minor. With those fixes, `TestAuth` (6/6), `TestHot` (4/4) and `TestService`
+(8/8) passed again on CHR 7.25 x86_64 under QEMU TCG (xray 26.10.31). The
+7.23.8 x86_64 and 7.25 arm64 results are still from `bf6b119`.
+
+M2c is complete with [PR #6](https://github.com/Arman2122/tikray/pull/6).
+M3 (RouterOS: installer, reconciler, version adapters, watchdog, uninstall)
+is the next milestone: write its plan from spec §10 and the carries below.
 
 ### Key M2c facts
 

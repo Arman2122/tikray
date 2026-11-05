@@ -2,25 +2,25 @@
   {
     "id": "hot_add",
     "pass": true,
-    "detail": "LAN whoami reached lab-a (203.0.113.10) after 0s; active config config/fe342d61f2430bd2b97590944739b9fee17503723070995e9d12e2845d92df2e.json, the render for 26.10.31: true; observatory reported lab-b alive after 17s; revision 2 applied, hot=true (observed after 17s); applied without restarting xray: added 1, removed 0, changed 0; xray PID before 14, after 14; same process start: true; active config config/14463dfa8c447fa0f9f9fbd6aae0ee94d66e4ce2b3a7a6abbde47e537dfe2baa.json, the render for 26.10.31: true; run/hot/pending absent",
-    "seconds": 17.5
+    "detail": "LAN whoami reached lab-a (203.0.113.10) after 0s; active config config/61121cfa113da58590636ac0f7c40090312f41d3313f5813517ac52255f81050.json, the render for 26.10.31: true; observatory reported lab-b alive after 10s; revision 2 applied, hot=true (observed after 10s); applied without restarting xray: added 1, removed 0, changed 0; xray PID before 17, after 17; same process start: true; active config config/c50882dc037bdf3192007c54ee028e9e922aafb6fb6e05dd689250f8387929ef.json, the render for 26.10.31: true; run/hot/pending absent",
+    "seconds": 11
   },
   {
     "id": "hot_remove",
     "pass": true,
-    "detail": "revision 3 applied, hot=true (observed after 4s); applied without restarting xray: added 0, removed 1, changed 0; xray PID before 14, after 14; same process start: true; active config config/05b36247c1d121897ca82223e46b91989725a71dfb4b9561e70efd39380cf579.json, the render for 26.10.31: true; lso lists lab-b and no longer lists lab-a; LAN whoami reached lab-b (203.0.113.11) after 0s; run/hot/pending absent",
-    "seconds": 4.3
+    "detail": "revision 3 applied, hot=true (observed after 3s); applied without restarting xray: added 0, removed 1, changed 0; xray PID before 17, after 17; same process start: true; active config config/7a0b1438c7438a82456c86f615b4bebde6f3d2ae7bed524ca8d33d46877872b1.json, the render for 26.10.31: true; lso lists lab-b and no longer lists lab-a; LAN whoami reached lab-b (203.0.113.11) after 0s; run/hot/pending absent",
+    "seconds": 3.6
   },
   {
     "id": "not_hot",
     "pass": true,
-    "detail": "revision 4 applied, hot=false (observed after 13s); xray PID before 14, after 80; same process start: false; active config config/44d9c7ffb8d868052ccb0af235546f9c86d5bde176d9305703e2d127dbd0fc6e.json, the render for 26.10.31: true; runner committed a trial for the full policy; LAN whoami reached lab-b (203.0.113.11) after 0s; run/hot/pending absent",
-    "seconds": 13.3
+    "detail": "revision 4 applied, hot=false (observed after 13s); xray PID before 17, after 87; same process start: false; active config config/f6feb4a6e97a102cee153045900eae9a2352041f2e9ea275f3f9b2480c480640.json, the render for 26.10.31: true; runner committed a trial for the full policy; LAN whoami reached lab-b (203.0.113.11) after 0s; run/hot/pending absent",
+    "seconds": 13.6
   },
   {
     "id": "hot_survives_runner_restart",
     "pass": true,
-    "detail": "revision 5 applied, hot=true (observed after 3s); applied without restarting xray: added 0, removed 0, changed 1; xray PID before 80, after 80; same process start: true; active config config/985b1fd3480ba1807ecb5c702ff9816066f7e28b1bcb297f37c792bb42dacefc.json, the render for 26.10.31: true; runner restarted from active.json with core 26.10.31 and config config/985b1fd3480ba1807ecb5c702ff9816066f7e28b1bcb297f37c792bb42dacefc.json; LAN whoami reached lab-b (203.0.113.11) after 2s; run/hot/pending absent",
-    "seconds": 12.6
+    "detail": "revision 5 applied, hot=true (observed after 4s); applied without restarting xray: added 0, removed 0, changed 1; xray PID before 87, after 87; same process start: true; active config config/9b4863339b54d48ab8dd8ea7400b85c6539c20f72488e1c3dee41d6cfbcf0bda.json, the render for 26.10.31: true; runner restarted from active.json with core 26.10.31 and config config/9b4863339b54d48ab8dd8ea7400b85c6539c20f72488e1c3dee41d6cfbcf0bda.json; LAN whoami reached lab-b (203.0.113.11) after 2s; run/hot/pending absent",
+    "seconds": 14.4
   }
 ]
