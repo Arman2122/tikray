@@ -6,8 +6,8 @@
 # /usr/local/go. Go 1.21 and later fetch go.mod's toolchain by themselves.
 # Where Google's Go servers aren't reachable, as in some countries, Go modules
 # then come through a mirror. Then it runs the unit tests. With --lab it also
-# installs what the RouterOS lab needs (scripts/lab-deps.sh, Docker) and says
-# whether KVM is there. Safe to re-run.
+# installs what the RouterOS lab needs (scripts/lab-deps.sh, Docker); the lab
+# runs CHR under QEMU's emulation, so it needs no KVM. Safe to re-run.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -89,11 +89,6 @@ if $lab; then
   scripts/lab-deps.sh
   dpkg -s docker.io >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 ||
     { $sudo apt-get update -qq && DEBIAN_FRONTEND=noninteractive $sudo apt-get install -y docker.io; }
-  if [ -e /dev/kvm ]; then
-    echo "dev-setup: /dev/kvm is there: the x86_64 lab can run"
-  else
-    echo "dev-setup: no /dev/kvm: the x86_64 lab needs KVM (on WSL2, nested virtualization)" >&2
-  fi
 fi
 
 make test
