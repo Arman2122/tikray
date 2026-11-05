@@ -177,9 +177,13 @@ func (s *server) test(w http.ResponseWriter, req *http.Request) {
 // writeFailure maps an error from the runner to its status code.
 func writeFailure(w http.ResponseWriter, err error) {
 	var tf *runnerapi.TestFailedError
+	var te *testError
 	switch {
 	case errors.As(err, &tf):
 		writeError(w, http.StatusUnprocessableEntity, "test_failed", tf.Output)
+	case errors.As(err, &te):
+		// Fixed words the client passes on; the cause can name a path.
+		writeError(w, http.StatusInternalServerError, "internal", te.text)
 	case errors.Is(err, ErrInvalidCandidate), errors.Is(err, ErrInvalidConfig):
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 	case errors.Is(err, runnerapi.ErrBusy):

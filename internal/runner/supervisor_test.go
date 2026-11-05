@@ -227,24 +227,20 @@ func captureTestReport(t *testing.T) func() string {
 
 func TestTestReportsFailure(t *testing.T) {
 	f := newFixture(t, "badconfig", nil)
-	out, err := f.sup.Test(t.Context(), f.sel)
-	if err == nil {
-		t.Fatal("Test accepted a bad config")
+	res, err := f.sup.Test(t.Context(), f.sel)
+	if err != nil || res.OK {
+		t.Fatalf("Test = %+v, %v; want xray's refusal and no error", res, err)
 	}
-	if !strings.Contains(out, "failed to load config") {
-		t.Errorf("output = %q, want it to contain %q", out, "failed to load config")
-	}
-	var ee *exec.ExitError
-	if !errors.As(err, &ee) || ee.ExitCode() != 23 {
-		t.Errorf("err = %v, want an *exec.ExitError with code 23", err)
+	if !strings.Contains(res.Output, "failed to load config") {
+		t.Errorf("output = %q, want it to contain %q", res.Output, "failed to load config")
 	}
 }
 
 func TestTestAcceptsGoodConfig(t *testing.T) {
 	f := newFixture(t, "ok", nil)
-	out, err := f.sup.Test(t.Context(), f.sel)
-	if err != nil || !strings.Contains(out, "Configuration OK.") {
-		t.Fatalf("Test = %q, %v; want Configuration OK. and no error", out, err)
+	res, err := f.sup.Test(t.Context(), f.sel)
+	if err != nil || !res.OK || res.Output != "Configuration OK." {
+		t.Fatalf("Test = %+v, %v; want Configuration OK. and no error", res, err)
 	}
 	if f.sup.PID() != 0 {
 		t.Errorf("Test started a supervised process (PID %d)", f.sup.PID())
@@ -465,8 +461,8 @@ func TestStageWhileForking(t *testing.T) {
 		sel := f.sel
 		sel.Core = fmt.Sprintf("26.10.%d", 100+i)
 		writeFile(t, f.d.CoreBinary(sel.Core), string(src))
-		if _, err := f.sup.Test(t.Context(), sel); err != nil {
-			t.Fatalf("core %s: %v", sel.Core, err)
+		if res, err := f.sup.Test(t.Context(), sel); err != nil || !res.OK {
+			t.Fatalf("core %s: %+v, %v", sel.Core, res, err)
 		}
 	}
 }

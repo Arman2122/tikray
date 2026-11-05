@@ -148,9 +148,11 @@ func (r *Runner) Boot() error { return r.do(context.Background(), r.boot) }
 // Trial tests candidate.json with xray run -test and switches to it. It
 // returns once the candidate runs; the trial then lasts until Commit, Abort,
 // the deadline or the candidate's exit. A second trial gets ErrBusy, a bad
-// candidate.json ErrInvalidCandidate, and a config xray rejects, or a test
-// that outlasts the trial's deadline, a *runnerapi.TestFailedError, with the
-// active xray left running.
+// candidate.json ErrInvalidCandidate, and a config xray refuses a
+// *runnerapi.TestFailedError, recorded as rejected. A test that gives no
+// verdict on the config (see runTest), or outlasts the trial's deadline, is
+// another error, and the trial is not recorded. Either way candidate.json is
+// removed and the active xray is left running.
 func (r *Runner) Trial(ctx context.Context) error {
 	return r.do(ctx, func() error { return r.trial(ctx) })
 }
@@ -400,30 +402,33 @@ func (r *Runner) trial(ctx context.Context) error {
 	// keeps it open.
 	deadline := time.NewTimer(window)
 	// The loop supervises the active xray, so -test may not hold it for
-	// longer than the trial could last: a test that outlasts the window is
-	// a rejection.
+	// longer than the trial could last.
 	tctx, cancel := context.WithTimeout(ctx, window)
-	out, err := r.sup.Test(tctx, cand.Selection)
+	res, err := r.sup.Test(tctx, cand.Selection)
 	timedOut := tctx.Err() != nil
 	cancel()
 	if cerr := ctx.Err(); cerr != nil {
 		deadline.Stop()
 		return fmt.Errorf("runner: trial: %w", cerr)
 	}
-	if err != nil {
+	switch {
+	case err != nil:
+		// No verdict on the config: the trial ends untried and unrecorded,
+		// so that the control plane can try the same candidate again.
 		deadline.Stop()
-		switch {
-		case timedOut:
-			out = fmt.Sprintf("xray run -test did not finish within the trial's %s\n%s", window, out)
-		case out == "":
-			out = err.Error()
+		if timedOut {
+			err = unfinishedError("the trial's "+window.Round(time.Millisecond).String(), err)
 		}
+		r.endUntested(*cand, err)
+		return err
+	case !res.OK:
+		deadline.Stop()
 		if err := RemoveCandidate(r.dirs()); err != nil {
 			log.Printf("runner: %v", err)
 		}
-		r.record(*cand, runnerapi.OutcomeRejected, out)
+		r.record(*cand, runnerapi.OutcomeRejected, res.Output)
 		r.cleanStage()
-		return &runnerapi.TestFailedError{Output: out}
+		return &runnerapi.TestFailedError{Output: res.Output}
 	}
 
 	stopTimer(&r.restart)
@@ -435,6 +440,22 @@ func (r *Runner) trial(ctx context.Context) error {
 	}
 	log.Printf("runner: trial of core %s for %s", cand.Core, window)
 	return nil
+}
+
+// endUntested ends a trial whose test gave no verdict: candidate.json goes,
+// so that a later boot does not record the trial as interrupted, and so does
+// the staged candidate core, which may be what filled the disk.
+func (r *Runner) endUntested(cand runnerapi.Candidate, err error) {
+	if err := RemoveCandidate(r.dirs()); err != nil {
+		log.Printf("runner: %v", err)
+	}
+	// The log may name the cause's path; the API only gets the fixed words.
+	cause := ""
+	if c := errors.Unwrap(err); c != nil {
+		cause = " (" + c.Error() + ")"
+	}
+	log.Printf("runner: trial of core %s not started: %v%s", cand.Core, err, cause)
+	r.cleanStage()
 }
 
 func (r *Runner) commit() error {

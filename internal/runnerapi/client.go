@@ -259,9 +259,11 @@ func statusError(method, path string, resp *http.Response, raw []byte) error {
 	var eb errBody
 	_ = json.Unmarshal(raw, &eb) // a body that is not JSON leaves eb empty
 	// Older runners sometimes put process diagnostics in error bodies.
-	// Only the config refusal code or a busy/no-core sentinel is meaningful.
+	// Only the config refusal code, a busy/no-core sentinel, or the fixed
+	// words of a test that ended without a verdict is meaningful.
 	command := path == "/v1/test" || path == "/v1/trial" || path == "/v1/xray-api"
-	if command && resp.StatusCode != http.StatusUnprocessableEntity {
+	fault := path != "/v1/xray-api" && resp.StatusCode == http.StatusInternalServerError && PublicTestError(eb.Detail)
+	if command && resp.StatusCode != http.StatusUnprocessableEntity && !fault {
 		eb.Detail = ""
 	}
 	switch {
@@ -277,6 +279,9 @@ func statusError(method, path string, resp *http.Response, raw []byte) error {
 			out = strings.TrimSpace(string(raw))
 		}
 		return &TestFailedError{Output: publicRefusal(out)}
+	}
+	if fault {
+		return fmt.Errorf("runnerapi: %s %s: HTTP %d: %s", method, path, resp.StatusCode, eb.Detail)
 	}
 	if command {
 		return fmt.Errorf("runnerapi: %s %s: HTTP %d", method, path, resp.StatusCode)

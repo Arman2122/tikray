@@ -614,3 +614,55 @@ func TestClientUnauthorized(t *testing.T) {
 		t.Errorf("Unauthorized heard of %q, want %q", refused, want)
 	}
 }
+
+// A runner reports a test that ended without xray's verdict as an error in
+// fixed words. The client passes those on, and nothing else a runner says.
+func TestClientPassesOnRunnerTestErrors(t *testing.T) {
+	for _, tc := range []struct {
+		detail string
+		passed bool
+	}{
+		{"xray was killed by a signal (SIGKILL)", true},
+		{"xray was killed by a signal", true},
+		{"xray exited with status 2", true},
+		{"staging the core failed: no space left on device", true},
+		{"staging the core failed", true},
+		{"xray could not be started: exec format error", true},
+		{"preparing the test config failed: read-only file system", true},
+		{"xray config test did not finish within 20s", true},
+		{"xray config test did not finish within the trial's 1m30s", true},
+		{"runner: stage core 26.10.21: open /data/cores/26.10.21/xray: no such file or directory", false},
+		{"staging the core failed: open /data/cores/26.10.21/xray", false},
+		{"staging the core failed: fixture-private-fragment", false},
+		{"xray exited with status 2: fixture-private-fragment", false},
+		{"xray was killed by a signal (fixture-private-fragment)", false},
+		{"xray exited with status 23", false}, // that is a verdict, not an error
+		{"xray exited with status 0", false},
+		{"xray config test did not finish within fixture-private-fragment", false},
+	} {
+		t.Run(tc.detail, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(errBody{Error: "internal", Detail: tc.detail})
+			}))
+			defer srv.Close()
+			c := &Client{BaseURL: srv.URL, Token: "test", HTTP: srv.Client()}
+			_, testErr := c.Test(t.Context(), []byte(`{}`))
+			for name, err := range map[string]error{"Test": testErr, "Trial": c.Trial(t.Context())} {
+				var tf *TestFailedError
+				if err == nil || errors.As(err, &tf) || !strings.Contains(err.Error(), "HTTP 500") {
+					t.Fatalf("%s = %v; want an HTTP 500 runner error", name, err)
+				}
+				if got := strings.Contains(err.Error(), tc.detail); got != tc.passed {
+					t.Errorf("%s = %q; detail passed on = %v, want %v", name, err, got, tc.passed)
+				}
+				if strings.Contains(err.Error(), "fixture-private-fragment") || strings.Contains(err.Error(), "/data/") {
+					t.Errorf("%s = %q repeats what the runner said", name, err)
+				}
+			}
+			if !tc.passed && PublicTestError(tc.detail) {
+				t.Errorf("PublicTestError(%q) = true", tc.detail)
+			}
+		})
+	}
+}

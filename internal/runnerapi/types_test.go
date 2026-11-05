@@ -2,7 +2,11 @@ package runnerapi
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -89,5 +93,29 @@ func TestAdoptRequestWireName(t *testing.T) {
 	}
 	if want := `{"config":"config/x.json"}`; string(b) != want {
 		t.Errorf("AdoptRequest JSON = %s, want %s", b, want)
+	}
+}
+
+// The causes a runner may name are the texts Linux's errnos have in Go.
+func TestTestCause(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the errno texts are Linux's")
+	}
+	for _, errno := range []syscall.Errno{
+		syscall.ENOSPC, syscall.EDQUOT, syscall.EROFS, syscall.EIO, syscall.ENOENT, syscall.EACCES, syscall.EPERM,
+		syscall.ENOMEM, syscall.EMFILE, syscall.ENFILE, syscall.ENOEXEC, syscall.ETXTBSY, syscall.EAGAIN,
+	} {
+		err := &fs.PathError{Op: "open", Path: "/data/cores/26.10.21/xray", Err: errno}
+		if got := TestCause(err); got != errno.Error() {
+			t.Errorf("TestCause(%v) = %q, want %q", err, got, errno.Error())
+		}
+	}
+	for _, err := range []error{nil, errors.New("no space left on device"), syscall.EBADMSG} {
+		if got := TestCause(err); got != "" {
+			t.Errorf("TestCause(%v) = %q, want none", err, got)
+		}
+	}
+	if len(testCauses) != 13 {
+		t.Errorf("%d causes; the list above checks 13", len(testCauses))
 	}
 }

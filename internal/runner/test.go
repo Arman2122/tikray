@@ -2,11 +2,9 @@ package runner
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -30,9 +28,11 @@ const (
 // directory, never to run/config, whose files an apply may prune at any time,
 // and that directory is gone when TestConfig returns.
 //
-// A completed test returns its verdict and a diagnostic derived from its exit status. A
-// timeout or signal interrupts the test: the caller gets an error so it can
-// retry the same config. With no xray running the error is runnerapi.ErrNoCore.
+// A completed test returns xray's verdict (see runTest). A test that gives no
+// verdict on the config, because xray could not start, a signal killed it,
+// it exited with a status other than runnerapi.ExitConfigRefused, or it
+// took longer than 20 s, is a *testError, so that the caller can retry the
+// same config. With no xray running the error is runnerapi.ErrNoCore.
 func (r *Runner) TestConfig(ctx context.Context, config []byte) (runnerapi.TestResult, error) {
 	sel, ok := r.runningSelection()
 	if !ok {
@@ -40,29 +40,26 @@ func (r *Runner) TestConfig(ctx context.Context, config []byte) (runnerapi.TestR
 	}
 	dir, err := os.MkdirTemp(r.dirs().Run(), testDirPrefix+"*")
 	if err != nil {
-		return runnerapi.TestResult{}, fmt.Errorf("runner: test config: %w", err)
+		return runnerapi.TestResult{}, prepareError(err)
 	}
 	defer os.RemoveAll(dir)
 	path := filepath.Join(dir, "config.json")
 	renamed, _ := testConfig(config)
 	if err := os.WriteFile(path, renamed, 0o600); err != nil {
-		return runnerapi.TestResult{}, fmt.Errorf("runner: test config: %w", err)
+		return runnerapi.TestResult{}, prepareError(err)
 	}
 
 	tctx, cancel := context.WithTimeout(ctx, r.testTimeout)
 	defer cancel()
-	err = runTest(tctx, r.sup.stagedPath(sel), r.sup.env(sel), path)
-	var exit *exec.ExitError
+	res, err := runTest(tctx, r.sup.stagedPath(sel), r.sup.env(sel), path)
 	switch {
 	case ctx.Err() != nil:
 		return runnerapi.TestResult{}, fmt.Errorf("runner: test config: %w", ctx.Err())
 	case err == nil:
-		return runnerapi.ConfigVerdict(0), nil
+		return res, nil
 	case tctx.Err() != nil:
-		return runnerapi.TestResult{}, fmt.Errorf("runner: test config exceeded %s: %w", r.testTimeout, tctx.Err())
-	case errors.As(err, &exit) && exit.ExitCode() > 0:
-		return runnerapi.ConfigVerdict(exit.ExitCode()), nil
-	default: // xray could not start or a signal killed it before it finished
+		return runnerapi.TestResult{}, unfinishedError(r.testTimeout.String(), tctx.Err())
+	default:
 		return runnerapi.TestResult{}, err
 	}
 }

@@ -859,20 +859,22 @@ func TestTrialCanceled(t *testing.T) {
 }
 
 // TestTrialTestTimeout gives a candidate whose xray run -test takes a second
-// a 300 ms deadline: the test is cut off at the deadline and rejected, and
-// the active xray is left alone.
+// a 300 ms deadline: the test is cut off at the deadline, which is no verdict
+// on the config, so the trial ends with a runner error and is not recorded,
+// and the active xray is left alone.
 func TestTrialTestTimeout(t *testing.T) {
 	g := newRig(t, nil)
 	g.active(t, "ok")
 	g.boot(t)
 	pid := g.r.Status().XrayPID
-	cand := g.candidate(t, "slowtest", 300*time.Millisecond)
+	g.candidate(t, "slowtest", 300*time.Millisecond)
 	start := time.Now()
 	err := g.r.Trial(t.Context())
 	took := time.Since(start)
-	var tf *runnerapi.TestFailedError
-	if !errors.As(err, &tf) || !strings.Contains(tf.Output, "did not finish") {
-		t.Fatalf("Trial = %v; want a *TestFailedError saying the test did not finish", err)
+	wantTestError(t, err, "xray config test did not finish within the trial's ")
+	var te *testError
+	if !errors.As(err, &te) || !runnerapi.PublicTestError(te.text) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Trial = %v; want a public test error that wraps the deadline", err)
 	}
 	if took > 900*time.Millisecond {
 		t.Errorf("Trial took %v; want xray run -test cut off at the 300ms deadline", took)
@@ -881,7 +883,7 @@ func TestTrialTestTimeout(t *testing.T) {
 	if got := g.r.Status().XrayPID; got != pid || gone(pid) {
 		t.Errorf("PID %d (old %d gone = %v); want the active xray untouched", got, pid, gone(pid))
 	}
-	g.wantLastTrial(t, runnerapi.OutcomeRejected, cand)
+	g.wantNoLastTrial(t)
 	g.wantNoCandidate(t)
 }
 

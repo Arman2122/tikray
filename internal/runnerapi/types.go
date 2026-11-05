@@ -9,15 +9,20 @@
 //
 // Errors are JSON bodies {"error": "<code>", "detail": "<text>"} with the
 // codes busy, no_trial and no_core (409), test_failed (422), too_large (413),
-// bad_request and unauthorized. Adopt answers 400 bad_request for a config
-// name that is invalid or a file that does not exist.
+// bad_request, unauthorized and internal (500). Adopt answers 400 bad_request
+// for a config name that is invalid or a file that does not exist. A trial or
+// test whose xray run -test gave no verdict on the config is a 500 whose
+// detail is one of the Fault phrases (see PublicTestError).
 package runnerapi
 
 import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Arman2122/tikray/internal/xrayver"
@@ -138,6 +143,77 @@ const TestOutputTruncated = "\n[output truncated]"
 type TestResult struct {
 	OK     bool   `json:"ok"`
 	Output string `json:"output"`
+}
+
+// ExitConfigRefused is the status "xray run -test" exits with when it refuses
+// the config, after printing "Failed to start: <why>": main/run.go of every
+// xray release from 26.1.18 to 26.10.31. A test that ends any other way (with
+// another status, by a signal, or not at all) says nothing about the config.
+const ExitConfigRefused = 23
+
+// A runner reports a test of a config that ended without xray's verdict as an
+// error, never as a refusal, in one of these phrases: the core could not be
+// staged, the config could not be written for the test, xray could not be
+// started, a signal killed it, it exited with a status other than
+// ExitConfigRefused, or it did not finish in time. Only a signal name, an exit
+// status, a duration or a TestCause follows the phrase, never xray's output or
+// a path, so the client can pass such a text on (PublicTestError).
+const (
+	FaultStage   = "staging the core failed"
+	FaultPrepare = "preparing the test config failed"
+	FaultStart   = "xray could not be started"
+	FaultKilled  = "xray was killed by a signal"
+	FaultExited  = "xray exited with status"
+	FaultTimeout = "xray config test did not finish within"
+)
+
+// testCauses are the errno texts (Linux's, as syscall.Errno gives them) that a
+// runner may name after a fault: the ones a router owner can act on.
+var testCauses = []string{
+	"no space left on device",
+	"disk quota exceeded",
+	"read-only file system",
+	"input/output error",
+	"no such file or directory",
+	"permission denied",
+	"operation not permitted",
+	"cannot allocate memory",
+	"too many open files",
+	"too many open files in system",
+	"exec format error",
+	"text file busy",
+	"resource temporarily unavailable",
+}
+
+// TestCause is the errno text of err when it is one a runner may name after a
+// fault, and "" otherwise.
+func TestCause(err error) string {
+	var errno syscall.Errno
+	if errors.As(err, &errno) && slices.Contains(testCauses, errno.Error()) {
+		return errno.Error()
+	}
+	return ""
+}
+
+var testFaultRE = func() *regexp.Regexp {
+	causes := make([]string, len(testCauses))
+	for i, c := range testCauses {
+		causes[i] = regexp.QuoteMeta(c)
+	}
+	cause := `(?:: (?:` + strings.Join(causes, "|") + `))?`
+	return regexp.MustCompile(`^(?:` +
+		`(?:` + FaultStage + `|` + FaultPrepare + `|` + FaultStart + `)` + cause +
+		`|` + FaultKilled + `(?: \(SIG[A-Z0-9]{2,8}\))?` +
+		`|` + FaultExited + ` (?:[1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])` +
+		`|` + FaultTimeout + ` (?:the trial's )?(?:[0-9]{1,9}(?:\.[0-9]{1,9})?(?:h|m|s|ms|µs|ns)){1,3}` +
+		`)$`)
+}()
+
+// PublicTestError reports whether text is a runner's report of a test that
+// ended without xray's verdict, in the form the Fault phrases describe. Exit
+// status 23 is a verdict and never such a report.
+func PublicTestError(text string) bool {
+	return testFaultRE.MatchString(text) && text != FaultExited+" "+strconv.Itoa(ExitConfigRefused)
 }
 
 // ConfigVerdict reports a completed xray test. Child output is unconstrained:

@@ -197,39 +197,112 @@ func (s *Supervisor) CleanStage(keep ...string) error {
 }
 
 // Test runs "xray run -test" on the selection's config with the staged core
-// and returns the process verdict. A rejected config is an error wrapping
-// the *exec.ExitError. The config's TUN devices are renamed
-// for the test (see testConfig), so that it can run beside the active xray.
-func (s *Supervisor) Test(ctx context.Context, sel runnerapi.Selection) (string, error) {
+// and returns xray's verdict, see runTest. A core that cannot be staged, or a
+// config copy that cannot be written, is a *testError. The config's TUN
+// devices are renamed for the test (see testConfig), so that it can run
+// beside the active xray.
+func (s *Supervisor) Test(ctx context.Context, sel runnerapi.Selection) (runnerapi.TestResult, error) {
 	path, err := s.Stage(sel)
 	if err != nil {
-		return "", err
+		return runnerapi.TestResult{}, stageError(err)
 	}
 	config, cleanup, err := s.testConfigFile(sel)
 	if err != nil {
-		return "", err
+		return runnerapi.TestResult{}, prepareError(err)
 	}
 	defer cleanup()
-	err = runTest(ctx, path, s.env(sel), config)
-	if err == nil {
-		return runnerapi.ConfigVerdict(0).Output, nil
-	}
-	var exit *exec.ExitError
-	if errors.As(err, &exit) && exit.ExitCode() > 0 {
-		return runnerapi.ConfigVerdict(exit.ExitCode()).Output, err
-	}
-	return "", err
+	return runTest(ctx, path, s.env(sel), config)
 }
 
-// Child output can contain an entire outbound in a protocol-specific encoding.
-// The runner uses the exit status and discards both output streams.
-func runTest(ctx context.Context, bin string, env []string, config string) error {
+// runTest runs "<bin> run -test -c <config>" with env. Only exit status
+// runnerapi.ExitConfigRefused is xray's refusal of the config, a result with
+// OK false. Any other end is a *testError: xray could not be started, a
+// signal killed it (an OOM kill on a small router), or it exited with
+// another status (a Go runtime fatal error exits 2). When ctx ends first,
+// the error wraps ctx's, and the caller, who set the limit, says which it
+// was. Child output can contain an entire outbound in a protocol-specific
+// encoding, so both output streams are discarded.
+func runTest(ctx context.Context, bin string, env []string, config string) (runnerapi.TestResult, error) {
 	cmd := exec.CommandContext(ctx, bin, "run", "-test", "-c", config)
 	cmd.Env = env
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("runner: xray run -test: %w", err)
+	err := cmd.Run()
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return runnerapi.ConfigVerdict(0), nil
+	case ctx.Err() != nil:
+		return runnerapi.TestResult{}, fmt.Errorf("runner: xray run -test: %w", ctx.Err())
+	case !errors.As(err, &exit):
+		return runnerapi.TestResult{}, startError(err)
+	case exit.ExitCode() == runnerapi.ExitConfigRefused:
+		return runnerapi.ConfigVerdict(exit.ExitCode()), nil
+	case exit.ExitCode() > 0:
+		return runnerapi.TestResult{}, exitedError(exit.ExitCode())
 	}
-	return nil
+	if ws, ok := exit.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return runnerapi.TestResult{}, killedError(ws.Signal())
+	}
+	return runnerapi.TestResult{}, &testError{text: runnerapi.FaultKilled, err: err}
+}
+
+// testError is a test of a config that ended without xray's verdict. Its
+// text is a runnerapi Fault phrase and what may follow it, which the API
+// shows as it is; the cause, which can name a path, is there only for
+// errors.Is and As.
+type testError struct {
+	text string
+	err  error
+}
+
+func (e *testError) Error() string { return "runner: " + e.text }
+func (e *testError) Unwrap() error { return e.err }
+
+// faultError is the testError of fault, followed by err's errno text when
+// it is one a runner may name.
+func faultError(fault string, err error) *testError {
+	text := fault
+	if cause := runnerapi.TestCause(err); cause != "" {
+		text += ": " + cause
+	}
+	return &testError{text: text, err: err}
+}
+
+func stageError(err error) *testError   { return faultError(runnerapi.FaultStage, err) }
+func prepareError(err error) *testError { return faultError(runnerapi.FaultPrepare, err) }
+func startError(err error) *testError   { return faultError(runnerapi.FaultStart, err) }
+
+func exitedError(status int) *testError {
+	return &testError{text: fmt.Sprintf("%s %d", runnerapi.FaultExited, status)}
+}
+
+// killedError names the signal when it is one that ends a process on Linux
+// by default.
+func killedError(sig syscall.Signal) *testError {
+	text := runnerapi.FaultKilled
+	if name, ok := signalNames[sig]; ok {
+		text += " (" + name + ")"
+	}
+	return &testError{text: text}
+}
+
+var signalNames = map[syscall.Signal]string{
+	syscall.SIGABRT: "SIGABRT",
+	syscall.SIGBUS:  "SIGBUS",
+	syscall.SIGFPE:  "SIGFPE",
+	syscall.SIGHUP:  "SIGHUP",
+	syscall.SIGILL:  "SIGILL",
+	syscall.SIGINT:  "SIGINT",
+	syscall.SIGKILL: "SIGKILL",
+	syscall.SIGPIPE: "SIGPIPE",
+	syscall.SIGQUIT: "SIGQUIT",
+	syscall.SIGSEGV: "SIGSEGV",
+	syscall.SIGTERM: "SIGTERM",
+	syscall.SIGTRAP: "SIGTRAP",
+}
+
+// unfinishedError is a test cut off at a limit, which within describes.
+func unfinishedError(within string, err error) *testError {
+	return &testError{text: runnerapi.FaultTimeout + " " + within, err: err}
 }
 
 // testConfigFile returns the config file Test hands to xray: a copy of the

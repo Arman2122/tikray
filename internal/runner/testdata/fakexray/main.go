@@ -7,7 +7,9 @@
 // -test"), exit2s and exit15s (exit 1 after 2 s or 15 s), stubborn (ignores
 // SIGTERM, so only SIGKILL stops it), slowtest (takes 1 s to accept "run
 // -test"), noisytest (rejects "run -test" after 20 KiB of output), killedtest
-// (the test process is killed after producing incomplete output). A "run
+// (the test process is killed after producing incomplete output), crashtest
+// ("run -test" dies as a Go runtime fatal error does, with exit status 2,
+// after printing the config). A "run
 // -test" that accepts the config prints "config <path>" and the file's
 // contents first, then the permissions of the file and its directory and the
 // XRAY_LOCATION_ASSET it runs with. In every mode "api <args>" echoes its
@@ -59,6 +61,12 @@ func main() {
 				fmt.Println(strings.Repeat("x", 49)) // 50 bytes a line
 			}
 			os.Exit(23)
+		case "crashtest":
+			fmt.Println("fatal error: runtime: out of memory")
+			if config, err := os.ReadFile(args[3]); err == nil {
+				fmt.Print(string(config))
+			}
+			os.Exit(2)
 		case "killedtest":
 			fmt.Println("partial diagnostic")
 			if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {

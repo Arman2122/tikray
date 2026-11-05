@@ -11,7 +11,7 @@ import (
 )
 
 // fakeModes are the behaviours of testdata/fakexray the tests use.
-var fakeModes = []string{"ok", "badconfig", "exit2s", "exit15s", "stubborn", "slowtest", "noisytest", "killedtest"}
+var fakeModes = []string{"ok", "badconfig", "exit2s", "exit15s", "stubborn", "slowtest", "noisytest", "killedtest", "crashtest"}
 
 // fakeDir holds one built fake xray per mode, named after its mode.
 var fakeDir string
