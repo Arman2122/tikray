@@ -94,13 +94,20 @@ func validSetupCode(norm string) bool {
 const hiddenName = store.Masked
 
 var credentialLabel = regexp.MustCompile(
-	`(?i:(?:https?|vless|vmess|trojan|ss)://|[0-9A-HJKMNP-TV-Z]{4}(?:-[0-9A-HJKMNP-TV-Z]{4}){2})` +
+	`(?i:(?:https?|vless|vmess|trojan|ss)://` +
+		// A standalone setup code in its display form, in either case:
+		// dashed groups inside a longer word, such as "VMESS-HTTP-WS01" or
+		// a UUID, are none.
+		`|(?:^|[^A-Za-z0-9_-])[0-9A-HJKMNP-TV-Z]{4}(?:-[0-9A-HJKMNP-TV-Z]{4}){2}(?:$|[^A-Za-z0-9_-]))` +
 		`|[0-9a-f]{64}|tkr_[0-9a-f]{8}_[A-Za-z0-9_-]{43}` +
 		// A standalone, canonical base64url encoding of 32 bytes.
 		`|(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048](?:$|[^A-Za-z0-9_-])`)
 
 // PublicName returns the label safe to display, including for older auth.json
-// files that already contain a credential as an admin or token name.
+// files that already contain a credential as an admin or token name. The rule
+// is for those names only, where a credential written as a label is refused:
+// the names and values of the desired state are hidden only when they hold a
+// real secret (see Store.HoldsSecret).
 func PublicName(name string) string {
 	if credentialLabel.MatchString(name) {
 		return hiddenName

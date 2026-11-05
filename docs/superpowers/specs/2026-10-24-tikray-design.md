@@ -678,8 +678,11 @@ tables, routes, user, group, scheduler). Asks whether to keep `/data`.
   `X-Tikray-CSRF`, the base64url HMAC-SHA256 of that session ID with the
   service's CSRF key. Bearer requests are exempt.
 - Admin and token names are public metadata. Credential-shaped labels are
-  refused on creation or masked when reading older records. Session and token
-  expiry use UTC wall time across restarts; the router needs an accurate clock.
+  refused on creation or masked when reading older records: a link, a token
+  or a bearer, and a setup code only as a standalone `XXXX-XXXX-XXXX`. The
+  label rule is for these names only (see the API data views). Session and
+  token expiry use UTC wall time across restarts; the router needs an
+  accurate clock.
 - **Rate limiting:** failed setup and sign-in attempts share a bucket of
   five per IPv4 address or IPv6 /64, refilling once per minute, and a
   global bucket of 100, refilling once per nine seconds. An exhausted

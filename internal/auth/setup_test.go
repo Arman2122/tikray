@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/base64"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -115,5 +116,40 @@ func TestHoldsSecretFindsOnlyRealSecrets(t *testing.T) {
 		if s.HoldsSecret(text, sess) {
 			t.Errorf("%q is taken for a secret", text)
 		}
+	}
+}
+
+// The label rule hides a setup code only as a standalone token of 14
+// characters, XXXX-XXXX-XXXX, in either case: dashed groups inside a longer
+// name, such as a server's "VMESS-HTTP-WS01" or a UUID, are no setup code.
+func TestPublicNameMatchesStandaloneSetupCodes(t *testing.T) {
+	for _, name := range []string{
+		"ABCD-EFGH-JKMN",
+		"abcd-efgh-jkmn",
+		"code: ABCD-EFGH-JKMN.",
+		"admin (0123-4567-89AB)",
+	} {
+		if got := PublicName(name); got != hiddenName {
+			t.Errorf("PublicName(%q) = %q, want it hidden", name, got)
+		}
+	}
+	for _, name := range []string{
+		"VMESS-HTTP-WS01",
+		"node 5fdc6e8a-4a2b-4a3c",
+		"ABCD-EFGH-JKMN-PQRS",
+		"xABCD-EFGH-JKMN",
+		"ABCD-EFGH-JKMN_2",
+		"backup script",
+	} {
+		if got := PublicName(name); got != name {
+			t.Errorf("PublicName(%q) = %q, want it shown", name, got)
+		}
+	}
+	s, _ := openTest(t)
+	if info, _, err := s.CreateToken("VMESS-HTTP-WS01 deploy", time.Time{}); err != nil || info.Name != "VMESS-HTTP-WS01 deploy" {
+		t.Errorf("CreateToken of an ordinary name = %+v, %v", info, err)
+	}
+	if _, _, err := s.CreateToken("ci ABCD-EFGH-JKMN", time.Time{}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("CreateToken with a setup code in its name = %v, want ErrInvalid", err)
 	}
 }
