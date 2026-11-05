@@ -139,24 +139,23 @@ func (h *handler) visibleSub(s store.Subscription, redact func(string) string) s
 		Disabled: s.Disabled, LastFetch: s.LastFetch, LastError: redact(s.LastError)}
 }
 
-// Userinfo and queries can carry passwords or tokens. The operator still sees
-// the host and path of ordinary DNS and probe URLs.
+// publicURL is a probe or resolver URL as a view shows it: its scheme, host,
+// port and path, without the userinfo, query and fragment, which can carry
+// passwords or tokens. It is empty when what is left still holds a secret:
+// the path of a probe can be the private account path of a subscription,
+// whose full URL the redactor knows, or hold the root bearer.
 func (h *handler) publicURL(raw string, redact func(string) string) string {
-	// Removing a query before redaction can expose the private path of a
-	// subscription whose full URL was known to the original redactor.
-	if redact(raw) != raw {
-		return ""
-	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Opaque != "" || h.publicName(redact(u.Host), auth.Session{}) != u.Host {
+	if err != nil || u.Opaque != "" {
 		return ""
 	}
-	if path := h.publicName(redact(u.Path), auth.Session{}); path != u.Path {
-		u.Path, u.RawPath = "", ""
-	}
-	u.User, u.RawQuery, u.Fragment = nil, "", ""
+	u.User, u.RawQuery, u.Fragment, u.RawFragment = nil, "", "", ""
 	u.ForceQuery = false
-	return redact(u.String())
+	public := u.String()
+	if h.shown(public, redact, auth.Session{}) != public {
+		return ""
+	}
+	return public
 }
 
 func (h *handler) visibleServers(st store.State, redact func(string) string) []store.Server {

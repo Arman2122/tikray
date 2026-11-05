@@ -220,3 +220,44 @@ func TestViewsShowOrdinaryNames(t *testing.T) {
 		t.Errorf("PUT of the routing: status %d, %s", r.status, r.body)
 	}
 }
+
+// Probe and resolver URLs are shown without userinfo, query and fragment, and
+// with their scheme, host, port and path: those are blanked only when what is
+// left still holds a secret.
+func TestViewsStripProbeAndDNSURLs(t *testing.T) {
+	for _, c := range []struct{ probe, dns, wantProbe, wantDNS string }{
+		{"https://probe.example/generate_204?client=router", "https://dns.example/dns-query?key=dns-api-key",
+			"https://probe.example/generate_204", "https://dns.example/dns-query"},
+		{"https://user:password-fixture@probe.example/generate_204", "https://name:dns-password@dns.example:8443/q#frag",
+			"https://probe.example/generate_204", "https://dns.example:8443/q"},
+		{"http://probe.example:8080/204#private-fragment", "1.1.1.1",
+			"http://probe.example:8080/204", "1.1.1.1"},
+		// What is left holds the root bearer, or the account path of a
+		// subscription.
+		{"https://probe.example/" + testToken + "?key=private-query", "https://" + testToken + ".example/dns", "", ""},
+		{"https://sub.example.com/feed/4f9a1c7e2b?probe=1", "https://sub.example.com/feed/4f9a1c7e2b?format=other", "", ""},
+	} {
+		f := newFake()
+		f.state.Health = store.Health{ProbeURL: c.probe}
+		f.state.DNS = store.DNS{Remote: c.dns}
+		srv := serve(t, f)
+		var h store.Health
+		if err := json.Unmarshal(request(t, srv, "GET", "/v1/health", "", authed()).body, &h); err != nil {
+			t.Fatal(err)
+		}
+		var st store.State
+		if err := json.Unmarshal(request(t, srv, "GET", "/v1/state", "", authed()).body, &st); err != nil {
+			t.Fatal(err)
+		}
+		var d store.DNS
+		if err := json.Unmarshal(request(t, srv, "PUT", "/v1/dns", mustJSON(t, f.state.DNS), authed()).body, &d); err != nil {
+			t.Fatal(err)
+		}
+		if h.ProbeURL != c.wantProbe || st.Health.ProbeURL != c.wantProbe {
+			t.Errorf("probe_url = %q and %q in the state, want %q", h.ProbeURL, st.Health.ProbeURL, c.wantProbe)
+		}
+		if st.DNS.Remote != c.wantDNS || d.Remote != c.wantDNS {
+			t.Errorf("dns.remote = %q and %q from a PUT, want %q", st.DNS.Remote, d.Remote, c.wantDNS)
+		}
+	}
+}
