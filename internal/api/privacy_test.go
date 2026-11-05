@@ -2,9 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 )
 
@@ -114,5 +117,35 @@ func TestProbeCannotRevealPartOfSubscriptionURL(t *testing.T) {
 		if res.status != 200 || strings.Contains(string(res.body), path) {
 			t.Errorf("%s %s exposed an account path or refused the settings", tc.method, tc.route)
 		}
+	}
+}
+
+// A subscription URL of the SSPanel form ".../link/<token>?sub=3" has a
+// one-character query value, which is no secret: an error's detail and the
+// views keep their "3"s, and the token stays hidden.
+func TestShortQueryValueKeepsDetailsAndViews(t *testing.T) {
+	const token = "4f9a1c7e2b5d6a8c"
+	f := newFake()
+	f.state.Subscriptions[0].URL = "https://provider.example/link/" + token + "?sub=3"
+	f.state.Servers[0].Name = "HK 03"
+	f.state.Routing.BlockList = []string{"domain:ads.example", "domain:tracker3.example"}
+	f.state.Routing.Domestic.Domains = []string{"domain:163.com"}
+	f.err = fmt.Errorf("%w: server 3fa9c1d2", service.ErrNotFound)
+	srv := serve(t, f)
+
+	r := request(t, srv, "PATCH", "/v1/servers/3fa9c1d2", `{"disabled":true}`, authed())
+	if _, detail := errorOf(t, r); r.status != 404 || detail != "service: not found: server 3fa9c1d2" {
+		t.Errorf("PATCH of a missing server: status %d, detail %q", r.status, detail)
+	}
+	var got store.State
+	r = request(t, srv, "GET", "/v1/state", "", authed())
+	if err := json.Unmarshal(r.body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(r.body), token) {
+		t.Error("the state view shows the subscription token")
+	}
+	if got.Servers[0].Name != "HK 03" || !slices.Equal(got.Routing.BlockList, f.state.Routing.BlockList) || !slices.Equal(got.Routing.Domestic.Domains, f.state.Routing.Domestic.Domains) {
+		t.Errorf("the view masked ordinary values: name %q, block_list %q, domestic %q", got.Servers[0].Name, got.Routing.BlockList, got.Routing.Domestic.Domains)
 	}
 }

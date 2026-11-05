@@ -15,8 +15,12 @@ import (
 // redacted is what a secret is replaced with.
 const redacted = "‹redacted›"
 
-// Credentials shorter than minSecret occur in ordinary words too. Withhold
-// an affected diagnostic rather than repeatedly replacing individual letters.
+// minSecret is the length, in bytes, below which a string is not taken for a
+// secret: replacing every "abc" would make a text unreadable without
+// protecting anything, and withholding every text that holds a "3" (an
+// SSPanel URL's "?sub=3") would hide addresses, IDs and revisions. The
+// runner's batch diagnostics withhold their detail instead (batchRedactor),
+// since a verdict there can quote a short credential and is kept.
 const minSecret = 4
 
 // RedactorFor returns a function that replaces every secret of st in a text
@@ -31,12 +35,15 @@ const minSecret = 4
 //   - each subscription URL, as it is, as its parsed form, with its password
 //     masked the way net/http and url.URL.Redacted show it, and without its
 //     userinfo, and that userinfo's user name and password;
-//   - the userinfo and query values of probe and resolver URLs. Earlier
+//   - the query string of each of these URLs and its values, encoded and
+//     decoded, and the userinfo of probe and resolver URLs. Earlier
 //     diagnostics can contain these values even after their URL is shortened.
 //
-// A message that can expose a short credential is withheld. Where secrets overlap in the
+// A string shorter than 4 bytes is left alone. Where secrets overlap in the
 // text, as when one holds another, the whole stretch they cover is replaced
-// once, so that no part of either is left.
+// once, so that no part of either is left. A text that holds the runner's
+// truncation marker is withheld whole: the cut can leave only the prefix of a
+// secret.
 func RedactorFor(st store.State) func(string) string { return RedactorWith(st) }
 
 // RedactorWith is RedactorFor(st) that also hides the credentials in the JSON
@@ -47,13 +54,9 @@ func RedactorFor(st store.State) func(string) string { return RedactorWith(st) }
 // not JSON has none to find.
 func RedactorWith(st store.State, documents ...json.RawMessage) func(string) string {
 	set := map[string]bool{}
-	short := map[string]bool{}
 	add := func(s string) {
-		switch {
-		case len(s) >= minSecret:
+		if len(s) >= minSecret {
 			set[s] = true
-		case s != "":
-			short[s] = true
 		}
 	}
 	for _, doc := range documents {
@@ -79,13 +82,7 @@ func RedactorWith(st store.State, documents ...json.RawMessage) func(string) str
 		if strings.Contains(text, runnerapi.TestOutputTruncated) {
 			return redacted // the cut can leave only the prefix of a secret
 		}
-		text = redact(text, secrets)
-		for s := range short {
-			if strings.Contains(text, s) {
-				return redacted
-			}
-		}
-		return text
+		return redact(text, secrets)
 	}
 }
 
@@ -129,9 +126,11 @@ func outboundSecrets(raw json.RawMessage, add func(string)) {
 	secrettext.Credentials(raw, add)
 }
 
-// urlSecrets calls add with the user name and password of raw's userinfo
-// and, when whole is set, with the forms of raw that a client's error can
-// show (see RedactorFor). raw that does not parse adds nothing.
+// urlSecrets calls add with the user name and password of raw's userinfo, its
+// query string and each query value, and, when whole is set, with the forms
+// of raw that a client's error can show (see RedactorFor). add drops what is
+// too short to be a secret, such as the "3" of "?sub=3". raw that does not
+// parse adds nothing.
 func urlSecrets(raw string, whole bool, add func(string)) {
 	u, err := url.Parse(raw)
 	if err != nil {

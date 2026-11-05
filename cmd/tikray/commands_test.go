@@ -212,6 +212,32 @@ func TestServerList(t *testing.T) {
 	}
 }
 
+// A subscription URL of the common SSPanel form ".../link/<token>?sub=3"
+// has a one-character query value. A value that short is no secret the
+// redactor looks for: the table keeps every name and endpoint with a "3".
+func TestServerListWithShortSubscriptionQuery(t *testing.T) {
+	const token = "4f9a1c7e2b5d6a8c"
+	fake := newFake()
+	fake.state.Subscriptions[0].URL = "https://provider.example/link/" + token + "?sub=3"
+	fake.state.Servers[1].Name = "HK 03"
+	vars := startDaemon(t, fake).env(t)
+
+	out := ok(t, vars, "server", "list")
+	got := rows(out)
+	want := [][]string{
+		{"ID", "NAME", "PROTOCOL", "ADDRESS", "STATE"},
+		{"5ab3c4d5", "lab-a", "vless", "203.0.113.10:443", "enabled"},
+		{"6bc4d5e6", "HK", "03", "trojan", "b.example.com:8443", "disabled"},
+		{"7cd5e6f7", "lab-c", "shadowsocks", "[2001:db8::1]:8388", "enabled"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("table\n%s\nwant rows %q", out, want)
+	}
+	if strings.Contains(out, token) {
+		t.Error("the table shows the subscription token")
+	}
+}
+
 func TestServerRemoveEnableDisable(t *testing.T) {
 	fake := newFake()
 	vars := startDaemon(t, fake).env(t)

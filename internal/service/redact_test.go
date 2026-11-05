@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -89,10 +90,11 @@ func TestRedactorCoversSecrets(t *testing.T) {
 		{"the VLESS id", vlessID},
 		{"the Trojan password", trojanPW},
 		{"the SS password", ssPW},
-		{"the short password", short},
 	}
 	wantRedacted(t, got, secrets...)
-	want := redacted
+	// A credential shorter than 4 bytes is left alone: it would hide every
+	// "abc" in every text without protecting anything.
+	want := "user " + redacted + " rejected; trojan " + redacted + "; ss=" + redacted + `; fetching "` + redacted + `" failed; pw abc`
 	wantText(t, got, want, secrets...)
 	if got := red("nothing secret here"); got != "nothing secret here" {
 		t.Errorf("text with no secret became %q", got)
@@ -265,5 +267,67 @@ func TestServiceRedactorFollowsState(t *testing.T) {
 	e.addServer("v", vlessOutbound)
 	if got := red("user " + vlessID); got != "user "+redacted {
 		t.Errorf("after the server is added, the redactor leaves its id")
+	}
+}
+
+// Short query values, such as SSPanel's "?sub=3" or a probe's "?v=2", and
+// short credentials occur in ordinary text: an ID, an address, a revision.
+// They never withhold a message, and the long secrets of the same URLs and
+// outbounds are still replaced where they occur.
+func TestRedactorIgnoresShortSecrets(t *testing.T) {
+	const (
+		token  = "4f9a1c7e2b5d6a8c"
+		subURL = "https://provider.example/link/" + token + "?sub=3"
+	)
+	st := store.Default()
+	st.Servers = []store.Server{
+		server("00000001", `{"protocol":"trojan","settings":{"servers":[{"address":"example.com","port":443,"password":"1"}]}}`),
+		server("00000002", `{"protocol":"trojan","settings":{"servers":[{"address":"example.org","port":443,"password":"trojan-pass-1234"}]}}`),
+	}
+	st.Subscriptions = []store.Subscription{{ID: "9be8f7a6", Name: "provider", URL: subURL}}
+	st.Health.ProbeURL = "https://cp.cloudflare.com/generate_204?v=2"
+	st.DNS.Remote = "https://dns.example/dns-query?k=7"
+	red := RedactorFor(st)
+	for _, text := range []string{
+		"revision 12 applied with xray-core 26.10.31",
+		"revision 13 not applied: no active core: install one with tikray core update",
+		`signed in: "admin" from 192.168.88.30`,
+		"203.0.113.10",
+		"service: not found: server 3fa9c1d2",
+		"server 7cd5e6f7 (HK 03) removed",
+	} {
+		if got := red(text); got != text {
+			t.Errorf("%q became %q", text, got)
+		}
+	}
+	got := red(`GET ` + subURL + ` failed; redirected from https://provider.example/link/` + token + `; trojan trojan-pass-1234 at 203.0.113.10`)
+	secrets := []secret{{"the subscription token", token}, {"the Trojan password", "trojan-pass-1234"}}
+	wantRedacted(t, got, secrets...)
+	wantText(t, got, `GET `+redacted+` failed; redirected from `+redacted+`; trojan `+redacted+` at 203.0.113.10`, secrets...)
+	if got := red("query sub=3"); got != "query "+redacted {
+		t.Errorf("the subscription's whole query string is no longer covered: %q", got)
+	}
+}
+
+// Events go through the same redactor: a 1-byte password or a short probe
+// query value must not wipe routine apply events.
+func TestEventsKeepTextWithShortSecrets(t *testing.T) {
+	e := newEnv(t)
+	e.addServer("weak", `{"protocol":"trojan","settings":{"servers":[{"address":"example.com","port":443,"password":"1"}]},"streamSettings":{"security":"tls"}}`)
+	if _, _, err := e.store.Update(store.AnyRevision, func(st *store.State) error {
+		st.Health.ProbeURL = "https://cp.cloudflare.com/generate_204?v=2"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"revision 12 applied with xray-core 26.10.31",
+		"revision 2 applied with xray-core 26.10.31",
+	}
+	for _, msg := range want {
+		e.s.record(KindApply, msg)
+	}
+	if got := e.eventsOf(KindApply); !slices.Equal(got, want) {
+		t.Errorf("apply events = %q, want %q", got, want)
 	}
 }
