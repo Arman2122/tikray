@@ -383,18 +383,29 @@ func TestAnonymousSeesOnlyThePublicRoutes(t *testing.T) {
 		}
 	}
 	// A path that is not clean is redirected by the mux; for a route that
-	// needs a credential, not before the credential is asked for.
+	// needs a credential, not before the credential is asked for. The
+	// redirect's status is the mux's own: 301 before Go 1.26, 307 from it.
+	bare := http.NewServeMux()
+	bare.HandleFunc("GET /v1/auth/state", func(http.ResponseWriter, *http.Request) {})
+	muxRedirect := serveAs(bare, "192.0.2.1:1", "GET", "/v1//auth/state", "", nil).status
+	if muxRedirect/100 != 3 {
+		t.Fatalf("a bare mux answers GET /v1//auth/state with %d, not a redirect", muxRedirect)
+	}
 	for _, c := range []struct {
 		method, path string
 		status       int
+		location     string
 	}{
-		{"GET", "/v1//status", 401},
-		{"GET", "/v1/auth/../status", 401},
-		{"GET", "/v1//auth/state", 301},
+		{"GET", "/v1//status", 401, ""},
+		{"GET", "/v1/auth/../status", 401, ""},
+		{"GET", "/v1//auth/state", muxRedirect, "/v1/auth/state"},
 	} {
 		r := serveAs(e.h, "192.0.2.1:1", c.method, c.path, "", nil)
 		if r.status != c.status {
 			t.Errorf("%s %s (the mux's own redirect): status = %d, want %d", c.method, c.path, r.status, c.status)
+		}
+		if loc := r.header.Get("Location"); loc != c.location {
+			t.Errorf("%s %s: Location = %q, want %q", c.method, c.path, loc, c.location)
 		}
 		if r.header.Get("ETag") != "" {
 			t.Errorf("%s %s: an anonymous answer carries an ETag", c.method, c.path)

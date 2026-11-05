@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Sets up a Debian or Ubuntu machine, or WSL2 Ubuntu on Windows, to build and
-# test tikray. It installs make, git and gcc (for -race), and Go when none, or
-# one older than 1.21, is on PATH: the distribution's golang-go first, else
-# the toolchain go.mod names from go.dev, under /usr/local/go. Go 1.21 and
+# test tikray. It installs make, git, gcc and the C headers (for -race), and
+# Go when none, or one older than 1.21, is on PATH: the distribution's
+# golang-go first, else the toolchain go.mod names from go.dev, under
+# /usr/local/go. Go 1.21 and
 # later fetch go.mod's toolchain by themselves. Where Google's Go servers
 # aren't reachable, as in some countries, Go modules then come through a
 # mirror. Then it runs the unit tests. With --lab it also installs what the
@@ -23,7 +24,9 @@ if [ "$(id -u)" -ne 0 ]; then
   sudo="sudo"
 fi
 
-pkgs=(make git gcc curl ca-certificates tar)
+# libc6-dev: with gcc there, go builds with cgo, which needs the C headers;
+# Ubuntu doesn't always pull them in with gcc.
+pkgs=(make git gcc libc6-dev curl ca-certificates tar)
 missing=()
 for p in "${pkgs[@]}"; do
   dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p")
