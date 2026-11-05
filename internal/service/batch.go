@@ -139,8 +139,8 @@ func batchSlack(n int) int {
 	return bits.Len(uint(max(min(n, maxBatch), 1)-1)) + 1
 }
 
-// errOverBudget ends a batch search when one more grouped call could make it
-// cost more than testing each remaining server alone.
+// errOverBudget ends a batch search when one more grouped call could take it
+// past its budget, so that each remaining server is tested alone.
 var errOverBudget = errors.New("service: batch test over budget")
 
 // batchSearch is the account of one testBatchGroups.

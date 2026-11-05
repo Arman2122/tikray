@@ -51,8 +51,9 @@ var ErrUnsupported = errors.New("sharelink: unsupported")
 // tikray cannot use gives an error that wraps ErrUnsupported.
 //
 // That includes a link whose outbound the newest xray-core refuses, such as
-// VLESS with no TLS and no encryption to a public address: one such server
-// would make every config that holds it fail to load. The error then wraps
+// VLESS with no TLS and no encryption to a server whose address is neither a
+// private, loopback or link-local IP nor a local name: one such server would
+// make every config that holds it fail to load. The error then wraps
 // xraypolicy.ErrRefused as well, and its text names the protocol and the reason.
 func Parse(link string) (Server, error) {
 	link = strings.TrimSpace(link)
