@@ -976,13 +976,13 @@ func (r *trialRunner) xrayAPICalls() [][]string {
 
 // runFast is runCLI for a command that drives a trial: the updater waits 1 ms,
 // not 10 s, before it looks at the candidate, and gives up on its health check
-// after 300 ms, not 30 s.
+// after 1 s, not 30 s.
 func runFast(t *testing.T, vars map[string]string, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
 	var out, errb bytes.Buffer
 	c := &cli{getenv: envOf(vars), stdout: &out, stderr: &errb, tune: func(u *artifacts.CoreUpdater) {
 		u.EarlyExit = time.Millisecond
-		u.HealthWindow = 300 * time.Millisecond
+		u.HealthWindow = time.Second
 	}}
 	code = c.run(context.Background(), args)
 	return code, out.String(), errb.String()

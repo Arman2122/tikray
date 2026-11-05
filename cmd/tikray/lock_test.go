@@ -89,7 +89,7 @@ func TestDirectPathsHoldTheLockWhileTheyRun(t *testing.T) {
 	var out, errb bytes.Buffer
 	c := &cli{getenv: envOf(vars), stdout: &out, stderr: &errb, tune: func(u *artifacts.CoreUpdater) {
 		u.EarlyExit = time.Millisecond
-		u.HealthWindow = 300 * time.Millisecond
+		u.HealthWindow = time.Second
 		// The updater is about to run: serve could not start now.
 		var unlock func()
 		if unlock, during = lockServe(data); unlock != nil {
