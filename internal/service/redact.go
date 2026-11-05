@@ -36,7 +36,8 @@ const minSecret = 4
 //   - each subscription URL, as it is, as its parsed form, with its password
 //     masked the way net/http and url.URL.Redacted show it, and without its
 //     userinfo, and that userinfo's user name and password;
-//   - the query string of each of these URLs and its values, encoded and
+//   - the query string of each of these URLs and those of its values that
+//     can be credentials (under a credential's key, or long), encoded and
 //     decoded, and the userinfo of probe and resolver URLs. Earlier
 //     diagnostics can contain these values even after their URL is shortened.
 //
@@ -127,6 +128,25 @@ func outboundSecrets(raw json.RawMessage, add func(string)) {
 	secrettext.Credentials(raw, add)
 }
 
+// longQueryValue is the length from which a URL's query value counts as a
+// secret whatever its key: tokens, UUIDs and signatures are this long, the
+// words a provider's URL selects a format with are not.
+const longQueryValue = 16
+
+// credentialKeys are the parts of a query key that mark its value as a
+// credential, matched without regard to case: "token", "access_key",
+// "password", "uuid", "sign"...
+var credentialKeys = []string{"token", "key", "secret", "pass", "pwd", "auth", "uuid", "sig", "hash"}
+
+// credentialKey reports whether a URL query key names a credential.
+func credentialKey(key string) bool {
+	if k, err := url.QueryUnescape(key); err == nil {
+		key = k
+	}
+	key = strings.ToLower(key)
+	return slices.ContainsFunc(credentialKeys, func(part string) bool { return strings.Contains(key, part) })
+}
+
 // urlSecrets calls add with the user name and password of raw's userinfo, its
 // query string and each query value, and, when whole is set, with the forms
 // of raw that a client's error can show (see RedactorFor). add drops what is
@@ -144,15 +164,25 @@ func urlSecrets(raw string, whole bool, add func(string)) {
 		}
 	}
 	// HTTP errors and stored diagnostics can echo an individual value in
-	// its original URL encoding or after decoding it.
+	// its original URL encoding or after decoding it. Only a value that can
+	// be a credential counts: one under a credential's key, or a long one.
+	// The rest are ordinary words, such as V2Board's "flag=clash" and
+	// "format=base64", that ordinary text holds too.
 	add(u.RawQuery)
 	for pair := range strings.SplitSeq(u.RawQuery, "&") {
-		if _, encoded, ok := strings.Cut(pair, "="); ok {
-			add(encoded)
-			if decoded, err := url.QueryUnescape(encoded); err == nil {
-				add(decoded)
-			}
+		key, encoded, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
 		}
+		decoded, err := url.QueryUnescape(encoded)
+		if err != nil {
+			decoded = encoded
+		}
+		if !credentialKey(key) && len(decoded) < longQueryValue {
+			continue
+		}
+		add(encoded)
+		add(decoded)
 	}
 	if !whole {
 		return

@@ -331,3 +331,29 @@ func TestEventsKeepTextWithShortSecrets(t *testing.T) {
 		t.Errorf("apply events = %q, want %q", got, want)
 	}
 }
+
+// A V2Board-style subscription URL carries a token beside ordinary words:
+// "?token=…&flag=clash&format=base64". The words are not secrets, so the
+// texts that hold them stay readable, while the token, and any long value
+// whatever its key, is still replaced.
+func TestRedactorKeepsOrdinaryQueryWords(t *testing.T) {
+	const (
+		token = "0f3c9a1e7b2d4c6a8e5f1b3d7a9c2e4f"
+		long  = "QmFzZTY0LWxvb2tpbmctdmFsdWU"
+	)
+	st := store.Default()
+	st.Subscriptions = []store.Subscription{{ID: "9be8f7a6", Name: "provider",
+		URL: "https://provider.example/api/v1/client/subscribe?token=" + token + "&flag=clash&format=base64&x=" + long}}
+	red := RedactorFor(st)
+	for _, text := range []string{
+		"vmess link is not base64",
+		"server 1a2b3c4d (clash-HK-01) added",
+		"domain:clash.razord.top",
+	} {
+		if got := red(text); got != text {
+			t.Errorf("%q became %q", text, got)
+		}
+	}
+	got := red("fetching failed for " + token + " and " + long)
+	wantRedacted(t, got, secret{"the token", token}, secret{"the long value", long})
+}
