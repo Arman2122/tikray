@@ -770,17 +770,23 @@ func (u *CoreUpdater) healthy(ctx context.Context, cand runnerapi.Candidate, pro
 }
 
 // within retries check until it passes or HealthWindow ends, and returns the
-// last failure.
+// last failure. A check that the window's end cut off says nothing about why
+// the candidate was failing, so the failure before it is returned instead.
 func (u *CoreUpdater) within(ctx context.Context, check func(context.Context) error) error {
 	window := u.healthWindow()
 	hctx, cancel := context.WithTimeout(ctx, window)
 	defer cancel()
 	retry := min(time.Second, window/10)
+	var last error
 	for {
 		err := check(hctx)
 		if err == nil {
 			return nil
 		}
+		if hctx.Err() != nil && ctx.Err() == nil && last != nil {
+			err = last
+		}
+		last = err
 		if sleep(hctx, retry) != nil {
 			return fmt.Errorf("health check failing for %s: %w", window, err)
 		}

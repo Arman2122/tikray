@@ -611,7 +611,7 @@ func newCoreEnv(t *testing.T, active string) *coreEnv {
 		Runner:       e.runner.client(),
 		Health:       e.health,
 		EarlyExit:    10 * time.Millisecond,
-		HealthWindow: 200 * time.Millisecond,
+		HealthWindow: time.Second,
 		Now:          func() time.Time { return t0 },
 	}
 	return e
@@ -1787,4 +1787,24 @@ func TestUpdateCanceled(t *testing.T) {
 	}
 	// The abort still reaches the runner, so it reverts now, not at the deadline.
 	wantActions(t, e.runner, "trial", "abort")
+}
+
+// On a slow router the window can end in the middle of a check: the check it
+// cut off says nothing about why the candidate was failing, the one before
+// it does.
+func TestWithinReportsTheLastRealFailure(t *testing.T) {
+	u := &CoreUpdater{HealthWindow: 100 * time.Millisecond}
+	cause := errors.New("socks probe: connection refused")
+	calls := 0
+	err := u.within(t.Context(), func(ctx context.Context) error {
+		calls++
+		if calls == 1 {
+			return cause
+		}
+		<-ctx.Done() // a check the window's end cuts off
+		return ctx.Err()
+	})
+	if !errors.Is(err, cause) {
+		t.Errorf("within = %v, want the last real failure, %v", err, cause)
+	}
 }
