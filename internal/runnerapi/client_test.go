@@ -418,8 +418,12 @@ func TestOldRunnerRejectionsCannotEchoOpaqueConfig(t *testing.T) {
 		}))
 		c := &Client{BaseURL: srv.URL, Token: "test", HTTP: srv.Client()}
 		got, err := c.Test(t.Context(), []byte(`{"outbounds":[{"protocol":"future"}]}`))
-		if err != nil || got.OK != ok || strings.Contains(got.Output, marker) {
+		switch {
+		case ok && (err != nil || !got.OK || strings.Contains(got.Output, marker)):
 			t.Error("old runner test answer exposed a private fragment or lost its verdict")
+		case !ok && (err == nil || strings.Contains(err.Error(), marker)):
+			// No xray refusal in its words: an error, never a verdict.
+			t.Error("old runner's unknown failure became a verdict or exposed a private fragment")
 		}
 		var tf *TestFailedError
 		if err := c.Trial(t.Context()); !errors.As(err, &tf) || strings.Contains(err.Error(), marker) {
@@ -442,8 +446,6 @@ func TestClientTestOlderRunnerTimeout(t *testing.T) {
 	}{
 		{"timeout", TestResult{Output: "xray run -test did not finish within 20s\n" + partial}, true},
 		{"short timeout", TestResult{Output: "xray run -test did not finish within 100ms\n"}, true},
-		{"empty rejection", TestResult{}, false},
-		{"similar rejection", TestResult{Output: "xray run -test did not finish within this release\n"}, false},
 		{"accepted config", TestResult{OK: true, Output: "xray run -test did not finish within 20s\n"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -680,7 +682,7 @@ func TestPublicRefusalNeverGuessesAConfigVerdict(t *testing.T) {
 		{"xray's refusal", "Xray 26.1.18 (Xray, Penetrates Everything.)\nFailed to start: main: failed to load config files: [/x] > " + private, "xray failed to load config"},
 		{"an outbound xray could not build", "infra/conf: failed to build outbound config with tag srv-0123abcd > " + private, "outbound srv-0123abcd: xray failed to load config"},
 		{"a known diagnostic", "Failed to start: unknown user " + private, "unknown user"},
-		{"a known diagnostic without the marker", "infra/conf: bad user " + private, "invalid user"},
+		{"a known diagnostic without the marker", "infra/conf: bad user " + private, "the runner reported an error"},
 		{"unknown words", "worker echoed " + private, "the runner reported an error"},
 		{"a killed test", "runner: xray run -test: signal: killed", "the runner reported an error"},
 		{"a partial diagnostic", "partial diagnostic\n" + private, "the runner reported an error"},
@@ -698,6 +700,45 @@ func TestPublicRefusalNeverGuessesAConfigVerdict(t *testing.T) {
 			}
 			if got := publicRefusal(tc.want); got != tc.want {
 				t.Errorf("publicRefusal(%q) = %q; want its own texts kept", tc.want, got)
+			}
+		})
+	}
+}
+
+// An older runner reported any test that failed as a refusal: a killed or
+// crashed test, a core it could not stage, an empty output. Only xray's own
+// words of a refusal ("Failed to start:", or the exit status 23 the previous
+// runner named) condemn the servers in a config; anything else is an error,
+// so that a good server is never disabled for the runner's fault.
+func TestClientTestOlderRunnerNonVerdicts(t *testing.T) {
+	const private = "fixture-private-fragment"
+	for _, tc := range []struct {
+		name, output string
+		verdict      string // "" when the answer must be an error
+	}{
+		{"empty", "", ""},
+		{"exit 2", "xray failed to load config (exit 2)", ""},
+		{"killed", "runner: xray run -test: signal: killed " + private, ""},
+		{"a panic with a rule's words", "panic: invalid user " + private + "\ngoroutine 1 [running]:", ""},
+		{"a warning alone", `[Warning] "allowInsecure" is deprecated ` + private, ""},
+		{"similar words", "xray run -test did not finish within this release\n", ""},
+		{"exit 23", "xray failed to load config (exit 23)", "xray failed to load config"},
+		{"xray's refusal", "Failed to start: main: failed to load config files: [/c.json] > infra/conf: failed to build outbound config with tag srv-0000000a > infra/conf: VLESS users: \"flow\" doesn't support \"xtls-rprx-direct\" in this version " + private, "srv-0000000a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(TestResult{Output: tc.output})
+			}))
+			defer srv.Close()
+			c := &Client{BaseURL: srv.URL, Token: "tok", HTTP: srv.Client()}
+			res, err := c.Test(t.Context(), []byte(`{}`))
+			switch {
+			case tc.verdict == "" && (err == nil || res != (TestResult{})):
+				t.Errorf("Test = %+v, %v; want an error, not a verdict", res, err)
+			case tc.verdict != "" && (err != nil || res.OK || !strings.Contains(res.Output, tc.verdict)):
+				t.Errorf("Test = %+v, %v; want a refusal naming %q", res, err, tc.verdict)
+			case err != nil && strings.Contains(err.Error(), private), strings.Contains(res.Output, private):
+				t.Error("the runner's output leaked into the result")
 			}
 		})
 	}

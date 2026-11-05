@@ -1034,7 +1034,8 @@ func TestHotWithholdsUnsafeTestOutput(t *testing.T) {
 			}
 			var log bytes.Buffer
 			e.u.Log = &log
-			output := private
+			// xray's refusal, with what it quotes of the config below it.
+			output := "Failed to start: main: failed to load config files\n" + private
 			if redactor {
 				output += runnerapi.TestOutputTruncated
 			}

@@ -2,6 +2,7 @@ package runnerapi
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -138,7 +139,19 @@ func (c *Client) Test(ctx context.Context, config []byte) (TestResult, error) {
 		return ConfigVerdict(0), nil
 	}
 	res.Output = publicRefusal(res.Output)
+	if !refusalVerdict(res.Output) {
+		// An older runner's test that failed for its own reasons: only a
+		// completed test can condemn a server.
+		return TestResult{}, fmt.Errorf("runnerapi: xray run -test: %s", cmp.Or(res.Output, unknownRefusal))
+	}
 	return res, nil
+}
+
+// refusalVerdict reports whether text, a public refusal (see
+// publicRefusal), is xray's verdict on a config rather than a test that
+// failed for another reason.
+func refusalVerdict(text string) bool {
+	return text != "" && text != unknownRefusal && text != unfinishedRefusal && !PublicTestError(text)
 }
 
 // Words publicRefusal gives an older runner's output that names no category.
@@ -186,14 +199,14 @@ func publicRefusal(text string) string {
 	if strings.Contains(text, "xray run -test did not finish within") {
 		return unfinishedRefusal
 	}
-	tags, category := classifyRefusal(text)
-	if category == "" {
-		if len(tags) == 0 && !strings.Contains(text, "Failed to start:") {
-			return unknownRefusal
-		}
-		category = refusalLegacy
+	// Without xray's own words of a refusal, its "Failed to start:" or an
+	// outbound it failed to build, words that match a category, such as a
+	// warning's or a panic's, are no evidence of one.
+	if !strings.Contains(text, "Failed to start:") && !refusalTag.MatchString(text) {
+		return unknownRefusal
 	}
-	return refusalText(tags, category)
+	tags, category := classifyRefusal(text)
+	return refusalText(tags, cmp.Or(category, refusalLegacy))
 }
 
 // The previous runner sent its own timeout as a rejection, with this line

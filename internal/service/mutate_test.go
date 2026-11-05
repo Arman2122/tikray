@@ -415,18 +415,9 @@ func TestAddServerRejectedByXray(t *testing.T) {
 	}
 }
 
-func TestAddServerRejectedWithNoOutput(t *testing.T) {
-	e := newEnv(t)
-	e.runner.setTestReject(" \n")
-	_, _, err := e.s.AddServer(bg, 0, NewServer{Link: vlessLink})
-	r := wantRefused(t, err, vlessSecret)
-	if !strings.Contains(r.Reason, "rejected") {
-		t.Errorf("reason = %q, want it to say xray rejected the server", r.Reason)
-	}
-}
-
 // A runner that can't test leaves the trial before the apply as the net: the
-// server is saved, with an untested event.
+// server is saved, with an untested event. So does a failed test with no
+// output: only xray's own words of a refusal condemn a server.
 func TestAddServerSavedWithoutARunnerTest(t *testing.T) {
 	down := httptest.NewServer(http.NotFoundHandler())
 	downURL := down.URL
@@ -441,6 +432,7 @@ func TestAddServerSavedWithoutARunnerTest(t *testing.T) {
 		{"the runner is down", func(e *env) { e.runner.setDown(true) }},
 		{"no xray runs", func(e *env) { e.runner.failTest(true, false) }},
 		{"the runner fails", func(e *env) { e.runner.failTest(false, true) }},
+		{"the test failed with no output", func(e *env) { e.runner.setTestReject(" \n") }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			e := newEnv(t)
