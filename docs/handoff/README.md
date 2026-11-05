@@ -133,6 +133,26 @@ You don't need any particular tool for this; any assistant can follow it. Claude
 
 The copied files mention absolute paths such as `/home/user/tikray/.claude/worktrees/m2c-auth` and `/tmp/claude-0/...`. Those belonged to the original cloud machine; read them relative to the repository root. Branch `m2c-auth` in those files is now `claude/serene-goldberg-1as8mu`. The "Bash tool refuses loops" rule in `context.md` was specific to that machine.
 
+## Setting up a machine
+
+tikray builds and tests **only on Linux**. It runs in RouterOS's Linux containers and uses Linux system calls (`flock`, netlink), so `go test` doesn't compile on plain Windows or macOS. On Windows, use **WSL2 with Ubuntu**.
+
+On Linux or WSL2 Ubuntu, from the repository root:
+
+```
+scripts/dev-setup.sh         # installs make, git, gcc and Go (if missing), then runs make test
+scripts/dev-setup.sh --lab   # also installs the RouterOS lab's tools and Docker, and checks for KVM
+```
+
+The owner's Windows checkout is `C:\Users\Arman\Desktop\hakir\Projects\tikray`. In WSL that same folder is `/mnt/c/Users/Arman/Desktop/hakir/Projects/tikray`.
+- Clone it from inside WSL (`git clone -b claude/serene-goldberg-1as8mu https://github.com/Arman2122/tikray.git`).
+- An editor or AI tool running on Windows edits the files in place, but must run every build or test command through WSL, e.g.:
+  ```
+  wsl -e bash -lc "cd /mnt/c/Users/Arman/Desktop/hakir/Projects/tikray && make test"
+  ```
+- `.gitattributes` keeps every file on Unix line endings, even in a checkout made by Git for Windows. The scripts and the byte-compared test files break with CRLF.
+- Builds on `/mnt/c` are slower than in WSL's own filesystem, but they work.
+
 ## Testing
 
 | What | Command | Needs |
@@ -184,6 +204,7 @@ CI (`.github/workflows/ci.yml`) runs `make test`, the compat suite on the oldest
 ## Files in this folder
 
 - `README.md`: this page.
+- `PROMPT.md`: a ready-to-paste first message for the next AI assistant.
 - `m2c/ledger.md`: the M2c execution ledger, holding the pre-flight table, every ruling, deferred minors and progress lines.
 - `m2c/context.md`: M2c global constraints and fixed values.
 - `m2c/reviewer-instructions.md`: what a task reviewer checks and how it reports.

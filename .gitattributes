@@ -1,0 +1,4 @@
+# Unix line endings everywhere, on Windows checkouts too: the shell scripts
+# and the golden and fixture files that tests compare byte for byte break
+# with CRLF.
+* text=auto eol=lf

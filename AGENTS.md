@@ -14,6 +14,7 @@ Start with [`docs/handoff/README.md`](docs/handoff/README.md). It covers the pro
   - API and root tokens, passwords and hashes;
   - the setup code, session ids, CSRF tokens and keys.
 - **Tests:** work test-first. Run `make test` (vet + unit tests) before every commit; it must stay green.
+- **Linux only:** the code builds and tests only on Linux. On Windows, run every command in WSL2 Ubuntu. `scripts/dev-setup.sh` installs the tools.
 - **Decisions:**
   - Make decisions yourself, as a senior engineer would.
   - Record every departure from the plan in the milestone's ledger as `Ruling: <what> — <why> — <cost if wrong>`. For M2c that is `docs/handoff/m2c/ledger.md`.
