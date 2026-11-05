@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"testing"
@@ -206,6 +207,195 @@ func TestBatchOmitsTruncatedCredential(t *testing.T) {
 			}
 		} else if err != nil || out["00000000"] != "xray rejected the server" {
 			t.Error("truncated refusal kept unsafe runner text or lost the verdict")
+		}
+	}
+}
+
+// A provider-wide template that the installed core refuses makes every new
+// entry of a refresh fail. Testing each entry alone costs 200 runner calls;
+// the batches may add only their first round to that.
+func TestRefreshAllRefusedCallCount(t *testing.T) {
+	e, feed := newSubEnv(t)
+	sub, _ := e.addSub("provider", feedLink(1, "seed"))
+	var links []string
+	for n := 2; n < 202; n++ {
+		links = append(links, feedLink(n, fmt.Sprintf("entry-%d", n)))
+	}
+	feed.setDirect(okFeed(feedBody(links...)))
+	e.runner.setTestReject("xray failed to load config (exit 23)")
+
+	_, err := e.s.RefreshSubscription(bg, sub.ID)
+	if err == nil || !strings.Contains(err.Error(), "rejected every server") {
+		t.Fatalf("want the every-server refusal, got %v", show(err))
+	}
+	if got, limit := len(e.runner.gotTests()), callLimit(200); got > limit {
+		t.Errorf("%d runner tests for 200 refused entries; want at most %d", got, limit)
+	}
+}
+
+// callLimit is what testBatchGroups may spend on n small servers: one call per
+// server, as testing each alone costs, and the first round of groups.
+func callLimit(n int) int { return n + (n+maxBatch-1)/maxBatch }
+
+// batchSim runs testBatchGroups on n small servers.
+type batchSim struct {
+	outs  []testOutbound
+	index map[string]int
+}
+
+func newBatchSim(n int) *batchSim {
+	s := &batchSim{outs: make([]testOutbound, n), index: make(map[string]int, n)}
+	for i := range s.outs {
+		s.outs[i] = testOutbound{id: fmt.Sprintf("%08x", i), json: []byte(`{"protocol":"trojan"}`)}
+		s.index[s.outs[i].id] = i
+	}
+	return s
+}
+
+// run tests the servers with a runner that refuses a config that holds a
+// server in bad or both servers of a conflict: it refuses a bad server alone,
+// but neither server of a conflict.
+func (s *batchSim) run(t *testing.T, bad map[int]bool, conflicts [][2]int) (calls int, results map[string]string) {
+	t.Helper()
+	results = make(map[string]string, len(s.outs))
+	refused, in := make([]bool, len(s.outs)), make([]bool, len(s.outs))
+	for i, b := range bad {
+		refused[i] = b
+	}
+	test := func(group []testOutbound) (bool, error) {
+		calls++
+		ok := true
+		for _, out := range group {
+			i := s.index[out.id]
+			in[i] = true
+			ok = ok && !refused[i]
+		}
+		for _, c := range conflicts {
+			ok = ok && !(in[c[0]] && in[c[1]])
+		}
+		for _, out := range group {
+			in[s.index[out.id]] = false
+		}
+		if ok {
+			for _, out := range group {
+				results[out.id] = ""
+			}
+		} else if len(group) == 1 {
+			results[group[0].id] = "rejected"
+		}
+		return ok, nil
+	}
+	if err := testBatchGroups(slices.Clone(s.outs), results, test); err != nil {
+		t.Fatal(err)
+	}
+	return calls, results
+}
+
+// check fails unless every server has a result and exactly those in bad are
+// refused.
+func (s *batchSim) check(t *testing.T, bad map[int]bool, results map[string]string, setting string) {
+	t.Helper()
+	if len(results) != len(s.outs) {
+		t.Fatalf("%s: %d of %d servers classified", setting, len(results), len(s.outs))
+	}
+	for i, out := range s.outs {
+		if refused := results[out.id] != ""; refused != bad[i] {
+			t.Fatalf("%s: server %d refused=%t, want %t", setting, i, refused, bad[i])
+		}
+	}
+}
+
+// Whatever the share of refused servers and wherever they are, batching costs
+// at most testing each server alone plus the first round of groups.
+func TestBatchCallBound(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	for _, n := range []int{1, 2, 5, 31, 32, 33, 64, 200} {
+		sim := newBatchSim(n)
+		// Twenty or so densities from none refused to all of them.
+		var densities []int
+		for k := 0; k < n; k += max(1, n/20) {
+			densities = append(densities, k)
+		}
+		for _, k := range append(densities, n) {
+			for trial := range 20 {
+				bad := make(map[int]bool, k)
+				for _, i := range rng.Perm(n)[:k] {
+					bad[i] = true
+				}
+				calls, results := sim.run(t, bad, nil)
+				setting := fmt.Sprintf("n=%d bad=%d trial %d", n, k, trial)
+				sim.check(t, bad, results, setting)
+				if calls > callLimit(n) {
+					t.Fatalf("%s: %d runner calls; want at most %d", setting, calls, callLimit(n))
+				}
+			}
+		}
+	}
+}
+
+// Sparse refusals keep their small cost: one refused server among 200 in at
+// most 17 calls and two, wherever they are, in at most 20.
+func TestBatchSparseRefusalsCost(t *testing.T) {
+	sim := newBatchSim(200)
+	for a := range 200 {
+		bad := map[int]bool{a: true}
+		calls, results := sim.run(t, bad, nil)
+		sim.check(t, bad, results, fmt.Sprintf("bad %d", a))
+		if calls > 17 {
+			t.Fatalf("%d runner calls for server %d refused among 200; want at most 17", calls, a)
+		}
+	}
+	for a := range 200 {
+		for b := a + 1; b < 200; b++ {
+			bad := map[int]bool{a: true, b: true}
+			calls, results := sim.run(t, bad, nil)
+			sim.check(t, bad, results, fmt.Sprintf("bad %d and %d", a, b))
+			if calls > 20 {
+				t.Fatalf("%d runner calls for servers %d and %d refused among 200; want at most 20", calls, a, b)
+			}
+		}
+	}
+}
+
+// A pair that the runner refuses only together blames neither server, alone
+// or beside a server that is refused on its own, and the bound still holds.
+func TestBatchGroupOnlyConflictBlamesNoOne(t *testing.T) {
+	for _, n := range []int{2, 5, 32, 33, 64, 200} {
+		sim := newBatchSim(n)
+		for a := range n {
+			for b := a + 1; b < n; b++ {
+				calls, results := sim.run(t, nil, [][2]int{{a, b}})
+				setting := fmt.Sprintf("n=%d conflict %d,%d", n, a, b)
+				sim.check(t, nil, results, setting)
+				if calls > callLimit(n) {
+					t.Fatalf("%s: %d runner calls; want at most %d", setting, calls, callLimit(n))
+				}
+			}
+		}
+	}
+	rng := rand.New(rand.NewPCG(7, 7))
+	sims := make(map[int]*batchSim)
+	for trial := range 20000 {
+		n := 2 + rng.IntN(199)
+		perm := rng.Perm(n)
+		bad := map[int]bool{}
+		var conflicts [][2]int
+		if n >= 3 {
+			bad[perm[0]] = true
+			conflicts = append(conflicts, [2]int{perm[1], perm[2]})
+		}
+		if n >= 6 {
+			bad[perm[3]] = true
+			conflicts = append(conflicts, [2]int{perm[4], perm[5]})
+		}
+		if sims[n] == nil {
+			sims[n] = newBatchSim(n)
+		}
+		calls, results := sims[n].run(t, bad, conflicts)
+		setting := fmt.Sprintf("trial %d: n=%d bad=%v conflicts=%v", trial, n, bad, conflicts)
+		sims[n].check(t, bad, results, setting)
+		if calls > callLimit(n) {
+			t.Fatalf("%s: %d runner calls; want at most %d", setting, calls, callLimit(n))
 		}
 	}
 }

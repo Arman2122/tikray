@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"slices"
 	"strings"
@@ -113,7 +114,81 @@ func (s *Service) testOutboundSet(ctx context.Context, outbounds map[string]json
 // testBatchGroups partitions the outbounds into configs the runner can take.
 // Test records passes and singleton refusals in results. A failed group alone
 // never identifies which member was refused.
+//
+// It costs at most what testing each server alone does, one call per server,
+// and the first round of groups. After that round, a call that may classify
+// nobody is made only while servers that passing groups classified pay for
+// it; once none is left to, the rest are tested alone. Dense refusals would
+// otherwise cost several probes for each refused server.
 func testBatchGroups(remaining []testOutbound, results map[string]string, test func([]testOutbound) (bool, error)) error {
+	b := &batchSearch{results: results, test: test}
+	err := b.search(remaining)
+	if errors.Is(err, errOverBudget) {
+		err = b.alone(remaining)
+	}
+	return err
+}
+
+// errOverBudget ends a batch search when one more grouped call could make it
+// cost more than testing each remaining server alone.
+var errOverBudget = errors.New("service: batch test over budget")
+
+// batchSearch is the account of one testBatchGroups.
+type batchSearch struct {
+	results map[string]string
+	test    func([]testOutbound) (bool, error)
+	// charged is set once the first round of groups is over.
+	charged bool
+	// spare is the servers classified so far less the calls charged: how
+	// many more calls may classify nobody without the charged calls
+	// outnumbering the servers.
+	spare int
+}
+
+func (b *batchSearch) done(out testOutbound) bool {
+	_, done := b.results[out.id]
+	return done
+}
+
+func (b *batchSearch) open(group []testOutbound) int {
+	n := 0
+	for _, out := range group {
+		if !b.done(out) {
+			n++
+		}
+	}
+	return n
+}
+
+// call tests group, or returns errOverBudget if the account cannot pay for a
+// call that may classify nobody. A server without a result that is tested
+// alone always gets one, so that call pays for itself.
+func (b *batchSearch) call(group []testOutbound) (bool, error) {
+	open := b.open(group)
+	if b.charged && b.spare < 1 && (len(group) != 1 || open != 1) {
+		return false, errOverBudget
+	}
+	ok, err := b.test(group)
+	b.spare += open - b.open(group)
+	if b.charged {
+		b.spare--
+	}
+	return ok, err
+}
+
+// alone tests each server of group that has no result on its own.
+func (b *batchSearch) alone(group []testOutbound) error {
+	for i := range group {
+		if !b.done(group[i]) {
+			if _, err := b.call(group[i : i+1]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (b *batchSearch) search(remaining []testOutbound) error {
 	for len(remaining) > 0 {
 		limit := maxBatch
 		// For a large list, balance the groups without adding a runner
@@ -124,7 +199,7 @@ func testBatchGroups(remaining []testOutbound, results map[string]string, test f
 		}
 		var failed [][]testOutbound
 		check := func(group []testOutbound) error {
-			ok, err := test(group)
+			ok, err := b.call(group)
 			if err == nil && !ok && len(group) > 1 {
 				failed = append(failed, group)
 			}
@@ -141,6 +216,7 @@ func testBatchGroups(remaining []testOutbound, results map[string]string, test f
 			}
 			rest = rest[end:]
 		}
+		b.charged = true
 		// While only one group has failed, testing both halves either finds
 		// the other failure or confirms the entire good half in one call.
 		for len(failed) == 1 {
@@ -155,27 +231,35 @@ func testBatchGroups(remaining []testOutbound, results map[string]string, test f
 			}
 		}
 		for _, group := range failed {
-			if err := isolateOutbound(group, results, test); err != nil {
+			if err := b.isolate(group); err != nil {
 				return err
 			}
 		}
 		// A server that has not yet passed or failed on its own is tried
-		// again, alongside the other groups' remaining candidates.
-		remaining = slices.DeleteFunc(remaining, func(out testOutbound) bool {
-			_, done := results[out.id]
-			return done
-		})
+		// again, alongside the other groups' remaining candidates. The
+		// caller's slice stays whole, for testing the rest alone.
+		var next []testOutbound
+		for _, out := range remaining {
+			if !b.done(out) {
+				next = append(next, out)
+			}
+		}
+		remaining = next
 	}
 	return nil
 }
 
-// isolateOutbound probes the half of the original group with each index bit
-// set. With one bad server, the failed probes give its index; every passing
-// probe also clears servers outside the search for that index. With several
-// bad servers or an interaction, the index can be wrong. Always test the
-// candidate as a singleton, and leave every unproven sibling for another pass.
-func isolateOutbound(group []testOutbound, results map[string]string, test func([]testOutbound) (bool, error)) error {
-	index := 0
+// isolate probes the half of the original group with each index bit set. With
+// one bad server, the failed probes give its index; every passing probe also
+// clears servers outside the search for that index. With several bad servers
+// or an interaction, the index can be wrong. Always test the candidate as a
+// singleton, and leave every unproven sibling for another pass.
+//
+// When every probe fails, one bad server explains it only as the last of a
+// group whose size is a power of two. Otherwise the group holds several, and
+// finding each would take another pass of probes: test its servers alone.
+func (b *batchSearch) isolate(group []testOutbound) error {
+	index, every := 0, true
 	for bit := 1; bit < len(group); bit <<= 1 {
 		var half []testOutbound
 		for i, out := range group {
@@ -183,25 +267,28 @@ func isolateOutbound(group []testOutbound, results map[string]string, test func(
 				half = append(half, out)
 			}
 		}
-		ok, err := test(half)
+		ok, err := b.call(half)
 		if err != nil {
 			return err
 		}
-		if !ok {
+		if ok {
+			every = false
+		} else {
 			index |= bit
 		}
 	}
 	if index >= len(group) {
-		index = slices.IndexFunc(group, func(out testOutbound) bool {
-			_, done := results[out.id]
-			return !done
-		})
-	}
-	if index >= 0 {
-		if _, done := results[group[index].id]; !done {
-			_, err := test(group[index : index+1])
-			return err
+		if every {
+			return b.alone(group)
 		}
+		index = slices.IndexFunc(group, func(out testOutbound) bool { return !b.done(out) })
+	}
+	if index >= 0 && !b.done(group[index]) {
+		ok, err := b.call(group[index : index+1])
+		if err == nil && ok && every {
+			err = b.alone(group)
+		}
+		return err
 	}
 	return nil
 }
