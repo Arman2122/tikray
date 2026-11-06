@@ -69,3 +69,31 @@ Ruling: Reconcile routes every 30 s and on changes using router-side filters, an
 Only tikray's own routing tables and `tikray:`-tagged routes may be read in those passes. Connection invalidation reads select the affected client addresses on the router before results are returned. Filtering a downloaded full table in Go does not satisfy this rule. Closed traffic keeps an independent protection while routes are stale. The CHR WAN-side leak witness must demonstrate this throughout the polling window.
 
 These decisions open Task 1. M3b still waits for the owner-approved M3a merge.
+
+## Task 1 — native transport and version adapters
+
+The approved receipt, owner-run teardown and router-filtered read plan was committed and pushed in `4fe9623`, after `make test`.
+
+Ruling: Validate the installed release and platform on each authenticated native connection before exposing it to writers, and admit only the two measured releases for now — a reconnect can follow a RouterOS upgrade, and the adapter must not silently promise an unmeasured command shape — cost if wrong: another release needs adapter evidence before installation.
+
+Ruling: Keep session framing/demultiplexing and read-only profile detection in `session.go` and `detect.go` beside `client.go`, and share adapter examples in `adapters/testdata/profiles.json` — concurrency ownership and detection are independently reviewable, and the later installer must consume the same selector cases — cost if wrong: two extra source files and one fixture.
+
+Ruling: Return nonempty final native `!done` properties as the last `Command` row, accept complete router-filtered `Listen` sentences, and emit generation-labelled ready/disconnected changes — adds return their new ID in `ret`, while reconnect recovery must ask the caller for scoped state instead of downloading full tables or replaying mutations — cost if wrong: callers must observe generation changes before writing.
+
+The initial client and codec tests failed to compile before implementation. A TLS peer then exercised pin-before-login, shared commands/listeners, targeted cancellation, login backoff and uncertain mutations. A valid 2,048-row reply failed before the command queue fix. The slow-callback overflow test reproduced a stale observation after failure before the generation checks were added. Independent review found and corrected the shutdown/install race, lost subscription on send failure, cumulative stream-row counting and small command queue.
+
+The first real 7.23.8 transport check reached the adapter and refused the fixture. Its installed release is `7.23.8 (long-term)`, its independently configured update preference is `stable`, and its board label has a `CHR ` prefix followed by the QEMU machine description.
+
+Ruling: Derive the installed release's channel from the exact verified release catalog and accept the read-only CHR board prefix with a validated hypervisor suffix — the upgrade preference does not identify the running release, and genuine CHR reports include the virtual machine description — cost if wrong: a newly formatted hardware label needs an adapter update. Raw hardware labels are not retained in a profile or public diagnostic.
+
+Ruling: Treat filtered notifications as hints and re-read every owned collection with router-side filters at least every 30 s — a comment-filtered stream on real CHR delivered changed rows but did not deliver the deleted row's tombstone, so reliable deletion repair needs the spec's periodic check — cost if wrong: more filtered reads and up to one polling interval before repair. The independent closed-policy guard remains mandatory during that interval.
+
+Ruling: Provide `CommandAt(ctx, generation, words)` for a reconciler plan bound to an observed connection — a separate generation check followed by an unbound command could cross a reconnect — cost if wrong: a stale plan must be rebuilt from scoped reads. The transport compares the selected session before any write and never switches it mid-command.
+
+The final targeted unit/race suite passes. Regression coverage includes valid large replies, listener lifetimes beyond 32,768 events with drained queues, callback reentrancy and overflow, close versus replacement-session installation, partial mutation writes without replay, listener-send recovery, stale-generation refusal, and the unfiltered `getall` alias. The codec also passed 161,064 fuzz executions in its isolated test run. Private peer errors and connection configuration stay out of public diagnostics.
+
+`TestM3NativeClient` passed on CHR 7.23.8 x86_64 and 7.25 x86_64 under QEMU TCG. On each it used the production client with the restricted account to detect and pin the router, add/read/change/remove a precisely filtered fixture, observe its changed row while excluding a separately changed foreign row, cancel only the subscription, and perform a subsequent read on generation 1. Both generated credential canaries passed the router/host privacy audits. Filtered tombstones remain an explicitly unproven signal and are not required by that positive observation test.
+
+Task 1 implementation is committed and pushed as [`4e4d116`](https://github.com/Arman2122/tikray/commit/4e4d11655b504cb7f4d2979722d9a877e9b3831b). A fresh reviewer approved the final source and independently passed the routeros race suite and lab vet. `make test` passed before the commit. Task 4 must explicitly preflight the 7.23.8 memory/restart fields, which the adapter represents as unproven; that label does not mean the fields are absent. Task 3 must use `CommandAt` for mutation plans and scoped reads after every generation change.
+
+Task 1 complete. The committed source was rerun serially with `TIKRAY_LAB_CHANNEL=7.23.8` and `7.25`, `TIKRAY_LAB_ARCH=x86_64`, and `go test -tags lab -p 1 -count=1 -v -timeout 14m -run '^TestM3NativeClient$' ./spike/m3/`, under bounded background wrappers. Both exited 0 (14.29 s and 25.98 s), with two private canary audits per run. The final source review was approved and the full repository gate passed again for this evidence update. No lab QEMU process, interface or namespace remained. Tasks 2–4, 6a, 7 and the remaining M3a acceptance work are pending.
