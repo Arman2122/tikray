@@ -46,7 +46,7 @@ Probe source: [`fb28bc8`](https://github.com/Arman2122/tikray/commit/fb28bc85168
 
 The final serial runs took 54.80 s on 7.23.8 and 63.77 s on 7.25. All 66 public verdicts and reasons matched. Both tests exited 1 at the capability gate. The final host check found no remaining lab QEMU process, namespace or interface.
 
-### Decision needed before Task 1
+### Proposed changes after the spike (superseded by the owner's decision below)
 
 The following is a proposal, not an approved change to the design.
 
@@ -54,4 +54,18 @@ The following is a proposal, not an approved change to the design.
 2. Keep the control account at exactly `read,write,api`. Let the local, owner-run `uninstall.rsc` remove the tagged user and group by verified ID, along with their tagged dependencies, even with both containers down. Trade-off: a complete uninstall requires an owner session; the daemon cannot perform it remotely with its own account.
 3. Treat native object notifications as hints wherever measured. Use startup/settings-change reads and a periodic route check (propose 30 s) for route drift; read conntrack directly on policy changes and verify targeted invalidations. Keep closed traffic protected independently during the route polling interval and test deletion of an essential route with a WAN-side leak witness. Trade-off: some externally induced drift is detected on the next check and the router incurs the periodic reads. The experiments do not establish that RouterOS can never emit these events.
 
-No Task 1 or M3b implementation is authorized by these findings. Resume only after the owner decides on the proposed changes.
+Task 1 stayed stopped at `ffe363b` pending the owner's decision.
+
+### Owner decision — Task 1 authorized
+
+Ruling: Preserve the one-paste installer and create a self-signed API-SSL certificate when no suitable certificate exists, tracking only an installer-created certificate in a separate `tikray:`-tagged, non-executable receipt — RouterOS certificates cannot carry the ownership comment, and the owner rejected a manual certificate prerequisite — cost if wrong: a missing, corrupt or mismatched receipt requires owner intervention before teardown.
+
+The certificate receipt records the created certificate's name and exact SHA-256 fingerprint and the original API-SSL enabled state, certificate setting and address list. A second import preserves the receipt. A suitable pre-existing certificate is reused and pinned, never listed as owned in the certificate receipt, and never deleted. Uninstall preflights the receipt and reference safety before dismantling anything, restores the original API-SSL settings, verifies the service no longer uses the certificate, rechecks its fingerprint, and only then deletes the certificate. Any mismatch or unsafe reference follows `shared_reference_refuses`. Required tests cover preserved receipt on reimport, a same-name replacement with another fingerprint, and exact restoration of the original API-SSL settings.
+
+Ruling: The local owner-run `uninstall.rsc` removes the tagged user and group by verified ID while the control account retains exactly `read,write,api` — the owner approved this privilege boundary after both CHRs denied those removals to the restricted account — cost if wrong: full uninstall needs an owner session.
+
+Ruling: Reconcile routes every 30 s and on changes using router-side filters, and query conntrack only for affected client addresses — route and conntrack notifications remain unproven, and the owner forbids full-table reads for every periodic or on-change pass — cost if wrong: external drift can wait up to one polling interval and each filtered read consumes router work.
+
+Only tikray's own routing tables and `tikray:`-tagged routes may be read in those passes. Connection invalidation reads select the affected client addresses on the router before results are returned. Filtering a downloaded full table in Go does not satisfy this rule. Closed traffic keeps an independent protection while routes are stale. The CHR WAN-side leak witness must demonstrate this throughout the polling window.
+
+These decisions open Task 1. M3b still waits for the owner-approved M3a merge.
