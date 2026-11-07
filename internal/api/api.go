@@ -46,6 +46,7 @@ import (
 
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/auth"
+	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -58,6 +59,7 @@ const maxBody = 1 << 20
 type Backend interface {
 	State() (store.State, uint64)
 	Status(ctx context.Context) service.Status
+	Leases(ctx context.Context) ([]routeros.LeaseInfo, error)
 	Events(after uint64) []service.Event
 	Core(ctx context.Context) (service.CoreInfo, error)
 	ApplyNow(ctx context.Context) (artifacts.Result, error)
@@ -120,6 +122,7 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter) http.H
 	mux.HandleFunc("GET /v1/status", h.status)
 	mux.HandleFunc("GET /v1/state", h.state)
 	mux.HandleFunc("GET /v1/events", h.events)
+	mux.HandleFunc("GET /v1/routeros/leases", h.leases)
 
 	mux.HandleFunc("GET /v1/servers", h.listServers)
 	mux.HandleFunc("POST /v1/servers", h.addServer)

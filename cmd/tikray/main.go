@@ -512,6 +512,13 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, configFile 
 		return c.refused(cfg, base, err)
 	}
 	defer unlock()
+	// Only the running service can guard clients across the runner trial
+	// and router update. A dangling or unreadable install is still managed.
+	for _, name := range []string{"routeros.json", "router-policy.json"} {
+		if _, err := os.Lstat(filepath.Join(stateDir(cfg.Data), name)); !errors.Is(err, os.ErrNotExist) {
+			return c.refused(cfg, base, errors.New("RouterOS steering requires tikray serve to apply changes"))
+		}
+	}
 	var st store.State
 	var rev uint64
 	if fromState {

@@ -73,7 +73,7 @@ func (s *Service) AddSubscription(ctx context.Context, rev uint64, n NewSubscrip
 	if sub.Interval == 0 {
 		sub.Interval = store.Duration(defaultInterval)
 	}
-	st, next, err := s.change(rev, func(st *store.State) ([]note, error) {
+	st, next, err := s.change(ctx, rev, func(st *store.State) ([]note, error) {
 		for sub.ID == "" || subscriptionIndex(st.Subscriptions, sub.ID) >= 0 {
 			sub.ID = store.NewID()
 		}
@@ -101,7 +101,7 @@ type SubscriptionPatch struct {
 // new revision; ErrNotFound if there is no such subscription.
 func (s *Service) UpdateSubscription(ctx context.Context, rev uint64, id string, p SubscriptionPatch) (store.Subscription, uint64, error) {
 	moved := false
-	st, next, err := s.change(rev, func(st *store.State) ([]note, error) {
+	st, next, err := s.change(ctx, rev, func(st *store.State) ([]note, error) {
 		i := subscriptionIndex(st.Subscriptions, id)
 		if i < 0 {
 			return nil, notFound(*st, "subscription", id)
@@ -139,7 +139,7 @@ func (s *Service) UpdateSubscription(ctx context.Context, rev uint64, id string,
 // and the custom rules that send traffic through one are dropped, each with a
 // cleanup event.
 func (s *Service) RemoveSubscription(ctx context.Context, rev uint64, id string) (uint64, error) {
-	_, next, err := s.change(rev, func(st *store.State) ([]note, error) {
+	_, next, err := s.change(ctx, rev, func(st *store.State) ([]note, error) {
 		i := subscriptionIndex(st.Subscriptions, id)
 		if i < 0 {
 			return nil, notFound(*st, "subscription", id)
@@ -244,7 +244,7 @@ func (s *Service) RefreshSubscription(ctx context.Context, id string) (RefreshRe
 			return RefreshResult{}, s.redactError(err)
 		}
 		reason := s.redact(err.Error())
-		s.refreshFailed(sub, reason)
+		s.refreshFailed(ctx, sub, reason)
 		return RefreshResult{}, fmt.Errorf("%w: %s", ErrFetchFailed, reason)
 	}
 
@@ -255,16 +255,16 @@ func (s *Service) RefreshSubscription(ctx context.Context, id string) (RefreshRe
 	if len(got.entries) == 0 {
 		// Nothing is left to merge, and merging nothing removes every server.
 		reason := "xray rejected every server the subscription lists"
-		s.refreshFailed(sub, reason)
+		s.refreshFailed(ctx, sub, reason)
 		return RefreshResult{}, &Refused{Reason: reason}
 	}
 	got.url, got.via = sub.URL, via
 
 	var res RefreshResult
 	merge := s.mergeFetched(id, got, &res)
-	if _, _, err = s.change(rev, merge); errors.Is(err, store.ErrConflict) {
+	if _, _, err = s.change(ctx, rev, merge); errors.Is(err, store.ErrConflict) {
 		_, rev = s.store.State()
-		_, _, err = s.change(rev, merge)
+		_, _, err = s.change(ctx, rev, merge)
 	}
 	switch {
 	case err == nil:
@@ -280,7 +280,7 @@ func (s *Service) RefreshSubscription(ctx context.Context, id string) (RefreshRe
 		// A merge that the checks refuse, or a write that fails, as on a full
 		// disk, would fail again at the next look, after another fetch and
 		// another test of each new server: it waits as a failed fetch does.
-		s.refreshFailed(sub, "the refresh was not stored: "+s.redact(err.Error()))
+		s.refreshFailed(ctx, sub, "the refresh was not stored: "+s.redact(err.Error()))
 		return RefreshResult{}, err
 	}
 	s.lift(id)
@@ -471,7 +471,15 @@ var errMoved = errors.New("service: the subscription is gone or points elsewhere
 // It is the failure of the refresh of sub's URL. A subscription that was
 // removed, or pointed at another URL, while that was fetched has nothing to
 // answer for it: nothing is written, held or recorded.
-func (s *Service) refreshFailed(sub store.Subscription, reason string) {
+func (s *Service) refreshFailed(ctx context.Context, sub store.Subscription, reason string) {
+	if s.router != nil && !s.repairBridge {
+		ctx, cancel := context.WithTimeout(ctx, routerWriterWait)
+		defer cancel()
+		if s.acquire(ctx) != nil {
+			return
+		}
+		defer s.release()
+	}
 	label := sub.ID
 	var wait time.Duration
 	_, _, err := s.store.Update(store.AnyRevision, func(st *store.State) error {
@@ -486,6 +494,9 @@ func (s *Service) refreshFailed(sub store.Subscription, reason string) {
 	})
 	if errors.Is(err, errMoved) {
 		return
+	}
+	if s.router != nil && err == nil {
+		s.Kick()
 	}
 	s.mu.Lock()
 	s.holds[sub.ID] = s.now().Add(wait)

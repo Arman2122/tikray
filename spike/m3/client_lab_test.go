@@ -15,10 +15,8 @@ import (
 	native "github.com/Arman2122/tikray/internal/routeros"
 )
 
-// Use the production transport against the same two pinned CHRs as Task 0.
-// Each read selects the exact disposable row on the router.
-func TestM3NativeClient(t *testing.T) {
-	r := newRig(t)
+func newNativeClient(t *testing.T, r *rig) *native.Client {
+	t.Helper()
 	pemText, e := r.chr.RunPrivate(r.ctx, ":put [/file/get m3-cap-public.crt contents]")
 	block, _ := pem.Decode([]byte(pemText))
 	if e != nil || block == nil {
@@ -37,10 +35,21 @@ func TestM3NativeClient(t *testing.T) {
 	if e != nil {
 		t.Fatalf("native client: pin=%t profile=%t protocol=%t limit=%t deadline=%t auth=%t", errors.Is(e, native.ErrPin), errors.Is(e, native.ErrUnsupported), errors.Is(e, native.ErrProtocol), errors.Is(e, native.ErrLimit), errors.Is(e, context.DeadlineExceeded), errors.Is(e, native.ErrAuth))
 	}
-	defer client.Close()
+	t.Cleanup(func() { client.Close() })
 	if client.Profile().Version() != r.version || client.Generation() == 0 {
 		t.Fatal("native client: profile mismatch")
 	}
+	return client
+}
+
+// Use the production transport against the same two pinned CHRs as Task 0.
+// Each read selects the exact disposable row on the router.
+func TestM3NativeClient(t *testing.T) {
+	r := newRig(t)
+	client := newNativeClient(t, r)
+	ctx, cancel := context.WithTimeout(r.ctx, 25*time.Second)
+	defer cancel()
+
 	tag := "tikray:native-client-fixture"
 	add, e := client.Command(ctx, []string{"/ip/firewall/address-list/add", "=list=tikray-native-test", "=address=192.0.2.18", "=comment=" + tag})
 	if e != nil || len(add) != 1 || add[0]["ret"] == "" {

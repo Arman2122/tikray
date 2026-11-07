@@ -67,6 +67,9 @@ type Store struct {
 	mu    sync.Mutex // held across the write in Update
 	state State
 	rev   uint64
+	// A failed replacement can have renamed its file before directory sync
+	// failed. The memory revision is still the last acknowledged one.
+	writeUncertain bool
 
 	degraded []string // what Open disabled; never changed after it
 }
@@ -256,6 +259,22 @@ func (s *Store) State() (State, uint64) {
 	return s.state.Clone(), s.rev
 }
 
+// EnsureDurable restores the acknowledged snapshot after a failed write.
+// Router steering must keep its transition guard until a restart would
+// load the same revision the live service is about to apply.
+func (s *Store) EnsureDurable() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.writeUncertain {
+		return nil
+	}
+	if err := s.write(s.state, s.rev); err != nil {
+		return fmt.Errorf("store: confirming the acknowledged revision: %w", err)
+	}
+	s.writeUncertain = false
+	return nil
+}
+
 // Degraded returns the IDs of the servers that Open disabled because they fail
 // this tikray's checks, in state order, or an empty list if there are none. It
 // is what Open found and does not change: a server that the file already held
@@ -301,8 +320,10 @@ func (s *Store) Update(rev uint64, fn func(*State) error) (State, uint64, error)
 		return State{}, 0, err
 	}
 	if err := s.write(next, s.rev+1); err != nil {
+		s.writeUncertain = true
 		return State{}, 0, fmt.Errorf("store: %s: %w", stateName(s.current), err)
 	}
+	s.writeUncertain = false
 	s.rev++
 	// The store keeps a copy of its own, out of reach of whatever fn kept a
 	// hold of and of whatever the caller does with the result.

@@ -481,10 +481,11 @@ func TestStatusShowsWhatIsNotWell(t *testing.T) {
 	fake.status.Degraded = []string{"6bc4d5e6"}
 	fake.status.Health.Level = "down"
 	fake.status.Health.Runner = health.RunnerHealth{Err: "the runner can't be reached\nsecond line"}
+	fake.status.Router = &service.RouterStatus{Revision: 6, Pending: true, Degraded: "unavailable", LastVerified: time.Unix(100, 0).UTC()}
 	vars := startDaemon(t, fake).env(t)
 
 	out := ok(t, vars, "status")
-	for _, want := range []string{"no", "pending", "down", "the runner can't be reached second line", "6bc4d5e6"} {
+	for _, want := range []string{"no", "pending", "down", "the runner can't be reached second line", "6bc4d5e6", "routeros", "revision 6", "unavailable", atTime(fake.status.Router.LastVerified)} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status lacks %q:\n%s", want, out)
 		}

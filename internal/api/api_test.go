@@ -19,6 +19,7 @@ import (
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/health"
+	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
@@ -85,6 +86,8 @@ type fakeBackend struct {
 	// RefreshSubscription and SetDefaultPolicy, with the context they got.
 	gate func(method string, ctx context.Context)
 }
+
+func (f *fakeBackend) Leases(context.Context) ([]routeros.LeaseInfo, error) { return nil, f.err }
 
 func newFake() *fakeBackend {
 	return &fakeBackend{

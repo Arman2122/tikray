@@ -31,9 +31,9 @@ type PolicyDevice struct {
 // LAN associates a managed IPv4 network with its observed ingress. Dedicated
 // means that the interface's entire client population is in the listed LANs.
 type LAN struct {
-	Interface string
-	Prefix    netip.Prefix
-	Dedicated bool
+	Interface string       `json:"interface"`
+	Prefix    netip.Prefix `json:"prefix"`
+	Dedicated bool         `json:"dedicated,omitempty"`
 }
 
 // Lease identifies a currently bound LAN address and the L2 source visible
@@ -43,17 +43,23 @@ type Lease struct {
 	MAC, Interface string
 }
 type WANPath struct {
-	Interface string
-	Gateway   netip.Addr
-	Network   netip.Prefix
+	Interface string       `json:"interface"`
+	Gateway   netip.Addr   `json:"gateway,omitzero"`
+	Network   netip.Prefix `json:"network,omitzero"`
 	// True when the observed main default uses this point-to-point link
 	// itself as the gateway (for example PPPoE). Gateway is then empty.
-	PointToPoint bool
+	PointToPoint bool `json:"point_to_point,omitempty"`
+	// A live resolved route proves the egress as well as the IP. Keep that
+	// interface binding when another connected link can reach the same gateway.
+	bindInterface bool
 }
 
 func (w WANPath) nextHop() string {
 	if w.PointToPoint {
 		return w.Interface
+	}
+	if w.bindInterface {
+		return w.Gateway.String() + "%" + w.Interface
 	}
 	return w.Gateway.String()
 }
@@ -80,6 +86,14 @@ type ForwardRule struct {
 // includes inbound port forwards whose replies a closed egress guard would
 // intercept. The observer must refuse unverified intersections.
 type ForeignRef struct{ Menu, Property, Value string }
+
+// Opaque means a further configured matcher has no verified flow-table
+// equivalent; the visible predicates can exclude a flow but cannot prove a hit.
+type RoutingMarkWriter struct {
+	Mark   string
+	Match  map[string]string
+	Opaque bool
+}
 type Topology struct {
 	Subnet  netip.Prefix
 	LANList string
@@ -90,6 +104,7 @@ type Topology struct {
 	// Marks set by overlapping, nonterminal owner routing-mark rules. Any
 	// overlapping mark writer that cannot be described must be a ForeignRef.
 	ForeignRoutingMarks []string
+	RoutingMarkWriters  []RoutingMarkWriter
 	// LocalLANs are additional local LAN destinations outside the managed list.
 	LocalLANs []netip.Prefix
 	// Connected lists occupied non-tikray networks used for collision checks.

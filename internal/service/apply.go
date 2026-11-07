@@ -36,6 +36,12 @@ func (s *Service) Kick() {
 // a pass waits in kicks, and leads to another pass after it.
 func (s *Service) loop(ctx context.Context) {
 	s.catchUp(ctx)
+	sweep := s.routerSweep
+	if s.router != nil && sweep == nil {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		sweep = ticker.C
+	}
 	var (
 		fire <-chan time.Time
 		stop = func() bool { return false }
@@ -55,19 +61,29 @@ func (s *Service) loop(ctx context.Context) {
 			return
 		case <-s.kicks:
 			arm(s.debounce)
+			continue
+		case <-s.routerHints:
+			// Repeated notices, including those emitted by our own writes,
+			// share one pass and cannot postpone a sweep.
+			if fire == nil {
+				arm(s.debounce)
+			}
+			continue
+		case <-sweep:
+			stop()
 		case <-fire:
-			fire, stop = nil, func() bool { return false }
-			again := s.pass(ctx, wait)
-			if ctx.Err() != nil {
-				return
-			}
-			if !again {
-				wait = s.retry
-				continue
-			}
-			arm(wait)
-			wait = min(2*wait, max(maxRetry, s.retry))
 		}
+		fire, stop = nil, func() bool { return false }
+		again := s.pass(ctx, wait)
+		if ctx.Err() != nil {
+			return
+		}
+		if !again {
+			wait = s.retry
+			continue
+		}
+		arm(wait)
+		wait = min(2*wait, max(maxRetry, s.retry))
 	}
 }
 
@@ -76,6 +92,10 @@ func (s *Service) loop(ctx context.Context) {
 // change did not finish (artifacts.HotPending). A matching config can also
 // have untested servers: the pass must check them before going idle.
 func (s *Service) catchUp(ctx context.Context) {
+	if s.router != nil {
+		s.Kick()
+		return
+	}
 	st, rev := s.store.State()
 	pending := artifacts.HotPending(s.data)
 	if rev == 0 && !pending {
@@ -117,8 +137,14 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 	}()
 
 	st, rev := s.store.State()
+	if err := s.prepareRouter(ctx, st, rev); err != nil {
+		return ctx.Err() == nil
+	}
 	rs, err := s.runner.Status(ctx)
 	if err != nil {
+		if s.router != nil {
+			s.routerPending("runner")
+		}
 		if ctx.Err() != nil {
 			return false
 		}
@@ -138,17 +164,24 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 		switch {
 		case err != nil:
 			// Apply would refuse with the same error.
+			if s.router != nil {
+				s.routerPending("runner")
+			}
 			s.noteRender(rev, err, true)
-			return false
+			return s.router != nil
 		case name == rs.Active.Config && !artifacts.HotPending(s.data):
+			if s.router != nil {
+				return s.finishRouter(ctx, st, rev) != nil && ctx.Err() == nil
+			}
 			s.record(KindApply, fmt.Sprintf("revision %d is applied already", rev))
 			return false
 		}
 	}
 	res, err := u.Apply(ctx)
+	err = s.afterRunner(ctx, st, rev, err)
 	// A failed recovery can leave xray partially changed, even if the
 	// fallback reports a normally terminal config rejection.
-	again = ctx.Err() == nil && (artifacts.HotPending(s.data) || s.retryable(ctx, res, err))
+	again = ctx.Err() == nil && (s.router != nil && err != nil || artifacts.HotPending(s.data) || s.retryable(ctx, res, err))
 	if !again {
 		retry = 0
 	}
@@ -199,12 +232,24 @@ func (s *Service) ApplyNow(ctx context.Context) (artifacts.Result, error) {
 		}
 	}()
 	st, rev := s.store.State()
+	if err := s.prepareRouter(ctx, st, rev); err != nil {
+		s.Kick()
+		return artifacts.Result{}, err
+	}
 	if _, err := s.runner.Status(ctx); err != nil {
+		if s.router != nil && !s.repairBridge {
+			s.routerPending("runner")
+			s.Kick()
+		}
 		err = s.runnerError(ctx, err)
 		s.record(KindApply, fmt.Sprintf("revision %d not applied: %v", rev, err))
 		return artifacts.Result{}, err
 	}
 	res, err := s.updater(st, rev).Apply(ctx)
+	err = s.afterRunner(ctx, st, rev, err)
+	if s.router != nil && err != nil {
+		s.Kick()
+	}
 	s.noteApply(rev, res, err, 0)
 	return res, s.redactError(err)
 }
@@ -240,7 +285,15 @@ func (s *Service) coreOp(ctx context.Context, what string, op func(*artifacts.Co
 	defer s.pokeMonitor()
 	defer s.release()
 	st, rev := s.store.State()
+	if err := s.prepareRouter(ctx, st, rev); err != nil {
+		s.Kick()
+		return artifacts.Result{}, err
+	}
 	if _, err := s.runner.Status(ctx); err != nil {
+		if s.router != nil && !s.repairBridge {
+			s.routerPending("runner")
+			s.Kick()
+		}
 		err = s.runnerError(ctx, err)
 		s.record(KindCore, fmt.Sprintf("%s failed: %v", what, err))
 		return artifacts.Result{}, err
@@ -251,6 +304,10 @@ func (s *Service) coreOp(ctx context.Context, what string, op func(*artifacts.Co
 		}
 	}()
 	res, err := op(s.updater(st, rev))
+	err = s.afterRunner(ctx, st, rev, err)
+	if s.router != nil && err != nil {
+		s.Kick()
+	}
 	switch {
 	case err != nil:
 		s.record(KindCore, fmt.Sprintf("%s failed: %v", what, err))

@@ -359,6 +359,19 @@ func (c *cli) printStatus(st service.Status, servers []store.Server) int {
 	fmt.Fprintf(tw, "revision\t%d\n", st.Revision)
 	fmt.Fprintf(tw, "applied\t%s\n", yes(st.Applied))
 	fmt.Fprintf(tw, "pending\t%s\n", yes(st.Pending))
+	if router := st.Router; router != nil {
+		verified := "awaiting first verification"
+		if !router.LastVerified.IsZero() {
+			verified = fmt.Sprintf("verified revision %d at %s", router.Revision, atTime(router.LastVerified))
+		}
+		if router.Pending {
+			verified += ", pending"
+		}
+		if router.Degraded != "" {
+			verified += " (" + oneWord(router.Degraded) + ")"
+		}
+		fmt.Fprintf(tw, "routeros\t%s\n", verified)
+	}
 	switch {
 	case st.Core == "":
 		fmt.Fprintf(tw, "core\tnone\n")

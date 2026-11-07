@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,6 +19,40 @@ import (
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 )
+
+// A lease hostname is controlled by the LAN client. Limit display to short,
+// ordinary host labels, then check the same private values as other views.
+// Longer identifiers, URLs, dotted paths and arbitrary DHCP data stay local.
+var leaseLabel = regexp.MustCompile(`^[A-Za-z](?:[A-Za-z0-9-]{0,22}[A-Za-z0-9])?$`)
+
+func (h *handler) leases(w http.ResponseWriter, r *http.Request) {
+	leases, err := h.b.Leases(r.Context())
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	type view struct {
+		Address netip.Addr `json:"address"`
+		MAC     string     `json:"mac"`
+		Name    string     `json:"name,omitempty"`
+	}
+	st, rev := h.b.State()
+	redact := service.RedactorFor(st)
+	session := callerOf(r).session
+	out := make([]view, 0, len(leases))
+	for _, l := range leases {
+		mac, err := net.ParseMAC(l.MAC)
+		if !l.Address.Is4() || err != nil || len(mac) != 6 {
+			continue
+		}
+		v := view{Address: l.Address, MAC: mac.String()}
+		if leaseLabel.MatchString(l.Name) && redact(l.Name) == l.Name && h.publicName(l.Name, session) == l.Name {
+			v.Name = l.Name
+		}
+		out = append(out, v)
+	}
+	h.reply(w, http.StatusOK, rev, out)
+}
 
 // publicName is the auth store's PublicName, for the admin's username and a
 // token's name, with the root bearer checked too: the auth store does not own

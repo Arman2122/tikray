@@ -50,7 +50,7 @@ func (s *Service) retest(ctx context.Context) (retry bool) {
 	// The runner tested this revision. If an edit landed while it worked,
 	// leave every verdict for the next pass rather than disabling a replacement.
 	redact := RedactorFor(st)
-	_, _, err = s.change(rev, func(next *store.State) ([]note, error) {
+	_, _, err = s.save(rev, func(next *store.State) ([]note, error) {
 		var notes []note
 		for i := range next.Servers {
 			srv := &next.Servers[i]

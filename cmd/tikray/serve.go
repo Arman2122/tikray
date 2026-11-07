@@ -14,6 +14,7 @@ import (
 	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/health"
 	"github.com/Arman2122/tikray/internal/render"
+	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
@@ -86,10 +87,19 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 		return c.fail(err)
 	}
 	w := wireService(env, st, pub, c.stderr)
+	managed, err := routeros.OpenManaged(env.Data)
+	if err != nil {
+		return c.fail(err)
+	}
+	var router service.RouterController
+	if managed != nil {
+		router = managed
+	}
 	svc, err := service.New(service.Config{
 		Store:       s,
 		Updaters:    w.updaters,
 		Runner:      w.runner,
+		Router:      router,
 		Monitor:     w.monitor,
 		Data:        env.Data,
 		Socks:       w.cfg.Socks,
@@ -124,7 +134,7 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 		go func() {
 			defer watcher.Done()
 			w.token.watch(ctx, func() {
-				if _, rev := svc.State(); rev > 0 {
+				if _, rev := svc.State(); rev > 0 || router != nil {
 					svc.Kick()
 				}
 			})

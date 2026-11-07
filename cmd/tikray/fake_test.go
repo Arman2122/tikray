@@ -19,6 +19,7 @@ import (
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/health"
+	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -87,6 +88,8 @@ type fakeBackend struct {
 	// gate, if set, runs in ApplyNow, CoreUpdate and CoreRollback.
 	gate func(ctx context.Context)
 }
+
+func (f *fakeBackend) Leases(context.Context) ([]routeros.LeaseInfo, error) { return nil, nil }
 
 var _ api.Backend = (*fakeBackend)(nil)
 

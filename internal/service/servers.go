@@ -176,7 +176,7 @@ func (s *Service) AddServer(ctx context.Context, rev uint64, n NewServer) (store
 	if err != nil {
 		return store.Server{}, 0, err
 	}
-	st, next, err := s.change(rev, tested)
+	st, next, err := s.change(ctx, rev, tested)
 	if err != nil {
 		return store.Server{}, 0, err
 	}
@@ -239,7 +239,7 @@ func (s *Service) UpdateServer(ctx context.Context, rev uint64, id string, p Ser
 			return store.Server{}, 0, err
 		}
 	}
-	st, next, err := s.change(rev, patch)
+	st, next, err := s.change(ctx, rev, patch)
 	if err != nil {
 		return store.Server{}, 0, err
 	}
@@ -251,7 +251,7 @@ func (s *Service) UpdateServer(ctx context.Context, rev uint64, id string, p Ser
 // send traffic through it are dropped, each with a cleanup event: the state
 // would be invalid otherwise.
 func (s *Service) RemoveServer(ctx context.Context, rev uint64, id string) (uint64, error) {
-	_, next, err := s.change(rev, func(st *store.State) ([]note, error) {
+	_, next, err := s.change(ctx, rev, func(st *store.State) ([]note, error) {
 		i := serverIndex(st.Servers, id)
 		if i < 0 {
 			return nil, notFound(*st, "server", id)

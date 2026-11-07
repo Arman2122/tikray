@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"reflect"
 	"slices"
 	"strings"
 
+	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/store"
 )
 
@@ -70,9 +72,60 @@ type edit func(st *store.State) ([]note, error)
 // change makes the edit at revision rev (store.AnyRevision skips the check)
 // and returns the new state and revision. What it leaves the state as must
 // pass Validate, or the change is refused (see Refused). After the write it
-// records the edit's events and kicks the
-// apply loop. On an error nothing is written, recorded or kicked.
-func (s *Service) change(rev uint64, fn edit) (store.State, uint64, error) {
+// records the edit's events and kicks the apply loop. If protection was
+// staged before a failure, the loop resumes against the saved state.
+func (s *Service) change(ctx context.Context, rev uint64, fn edit) (store.State, uint64, error) {
+	if s.router == nil {
+		return s.save(rev, fn)
+	}
+	if s.repairBridge {
+		return store.State{}, 0, ErrRouterUnavailable
+	}
+	wait, cancel := context.WithTimeout(ctx, routerWriterWait)
+	err := s.acquire(wait)
+	cancel()
+	if err != nil {
+		return store.State{}, 0, err
+	}
+	defer s.release()
+	old, current := s.store.State()
+	if rev != store.AnyRevision && rev != current {
+		return store.State{}, 0, store.ErrConflict
+	}
+	next := old.Clone()
+	notes, err := fn(&next)
+	if err != nil {
+		return store.State{}, 0, err
+	}
+	if err := validated(next); err != nil {
+		return store.State{}, 0, err
+	}
+	before, _ := routeros.Project(old)
+	after, err := routeros.Project(next)
+	if err != nil {
+		return store.State{}, 0, ErrRouterConflict
+	}
+	if !reflect.DeepEqual(before, after) {
+		if err := s.prepareRouter(ctx, next, current+1); err != nil {
+			// A lost acknowledgement may already have installed the guard.
+			s.Kick()
+			return store.State{}, 0, err
+		}
+	}
+	st, rev, err := s.save(current, func(st *store.State) ([]note, error) {
+		*st = next
+		return notes, nil
+	})
+	if err != nil {
+		// Resolve staged protection against the state that survived.
+		s.Kick()
+	}
+	return st, rev, err
+}
+
+// save also serves the retry of previously untested servers. That operation
+// already holds the apply lock and only changes server test metadata.
+func (s *Service) save(rev uint64, fn edit) (store.State, uint64, error) {
 	var notes []note
 	st, next, err := s.store.Update(rev, func(st *store.State) (err error) {
 		if notes, err = fn(st); err != nil {
@@ -93,8 +146,8 @@ func (s *Service) change(rev uint64, fn edit) (store.State, uint64, error) {
 }
 
 // set is change for an edit that can't fail and has nothing to record.
-func (s *Service) set(rev uint64, fn func(st *store.State)) (uint64, error) {
-	_, next, err := s.change(rev, func(st *store.State) ([]note, error) {
+func (s *Service) set(ctx context.Context, rev uint64, fn func(st *store.State)) (uint64, error) {
+	_, next, err := s.change(ctx, rev, func(st *store.State) ([]note, error) {
 		fn(st)
 		return nil, nil
 	})
@@ -121,7 +174,7 @@ func (s *Service) preview(rev uint64, fn edit) (store.State, error) {
 // SetDevice adds a device, or replaces the one with the same address (in
 // place), and returns the new revision.
 func (s *Service) SetDevice(ctx context.Context, rev uint64, d store.Device) (uint64, error) {
-	return s.set(rev, func(st *store.State) {
+	return s.set(ctx, rev, func(st *store.State) {
 		if i := slices.IndexFunc(st.Devices, func(o store.Device) bool { return o.Address == d.Address }); i >= 0 {
 			st.Devices[i] = d
 		} else {
@@ -133,7 +186,7 @@ func (s *Service) SetDevice(ctx context.Context, rev uint64, d store.Device) (ui
 // RemoveDevice removes the device with address addr and returns the new
 // revision; ErrNotFound if there is none.
 func (s *Service) RemoveDevice(ctx context.Context, rev uint64, addr netip.Prefix) (uint64, error) {
-	_, next, err := s.change(rev, func(st *store.State) ([]note, error) {
+	_, next, err := s.change(ctx, rev, func(st *store.State) ([]note, error) {
 		i := slices.IndexFunc(st.Devices, func(d store.Device) bool { return d.Address == addr })
 		if i < 0 {
 			return nil, notFound(*st, "device", addr.String())
@@ -155,7 +208,11 @@ type NetworkRepair struct {
 // RepairNetwork saves all corrections at once. The caller restarts serve
 // after changing the bridge because its runner endpoints are fixed at startup.
 func (s *Service) RepairNetwork(ctx context.Context, rev uint64, fix NetworkRepair) (bool, uint64, error) {
-	_, next, err := s.change(rev, func(st *store.State) ([]note, error) {
+	change := s.change
+	if s.repairBridge {
+		change = func(_ context.Context, rev uint64, fn edit) (store.State, uint64, error) { return s.save(rev, fn) }
+	}
+	_, next, err := change(ctx, rev, func(st *store.State) ([]note, error) {
 		bridgeNeedsRepair := store.ValidateRouterNetwork(st.Network, nil) != nil ||
 			s.repairBridge && st.Network.RequireLocalBridge && !s.localBridge(st.Network)
 		if !bridgeNeedsRepair && store.ValidateRouterNetwork(st.Network, st.Devices) == nil {
@@ -202,22 +259,22 @@ func (s *Service) RepairNetwork(ctx context.Context, rev uint64, fix NetworkRepa
 // SetDefaultPolicy sets the policy of the devices that are not listed and
 // returns the new revision.
 func (s *Service) SetDefaultPolicy(ctx context.Context, rev uint64, p store.Policy) (uint64, error) {
-	return s.set(rev, func(st *store.State) { st.DefaultPolicy = p })
+	return s.set(ctx, rev, func(st *store.State) { st.DefaultPolicy = p })
 }
 
 // SetRouting replaces the routing, the pin and the custom rules included, and
 // returns the new revision.
 func (s *Service) SetRouting(ctx context.Context, rev uint64, r store.Routing) (uint64, error) {
-	return s.set(rev, func(st *store.State) { st.Routing = r })
+	return s.set(ctx, rev, func(st *store.State) { st.Routing = r })
 }
 
 // SetDNS replaces the resolvers and returns the new revision.
 func (s *Service) SetDNS(ctx context.Context, rev uint64, d store.DNS) (uint64, error) {
-	return s.set(rev, func(st *store.State) { st.DNS = d })
+	return s.set(ctx, rev, func(st *store.State) { st.DNS = d })
 }
 
 // SetHealth replaces the connectivity probe's settings and returns the new
 // revision.
 func (s *Service) SetHealth(ctx context.Context, rev uint64, h store.Health) (uint64, error) {
-	return s.set(rev, func(st *store.State) { st.Health = h })
+	return s.set(ctx, rev, func(st *store.State) { st.Health = h })
 }
