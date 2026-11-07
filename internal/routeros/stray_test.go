@@ -2,13 +2,15 @@ package routeros
 
 import (
 	"context"
-	"github.com/Arman2122/tikray/internal/runnerapi"
-	"github.com/Arman2122/tikray/internal/store"
+	"encoding/json"
 	"net/netip"
 	"os"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/Arman2122/tikray/internal/runnerapi"
+	"github.com/Arman2122/tikray/internal/store"
 )
 
 func TestStraySourceRepairPreservesDirectAndOwnerBindings(t *testing.T) {
@@ -49,8 +51,9 @@ func TestStraySourceRepairPreservesDirectAndOwnerBindings(t *testing.T) {
 		return id
 	}
 	f.insert(firewallNAT, "owner", map[string]string{"chain": "dstnat", "action": "dst-nat", "dst-address": "203.0.113.44", "protocol": "tcp", "dst-port": "53", "to-addresses": runner, "to-ports": "53"})
-	stale := []string{mark(client, "8.8.8.8", "tikray-open"), dns(client, "8.8.4.4", runner)}
-	keep := []string{mark(client, "1.1.1.1", "no-mark"), mark(client, "1.1.1.2", "owner"), dns(client, "8.8.8.8", "8.8.8.8"), dns(client, "8.8.8.8", "10.20.0.1"), dns(client, "203.0.113.44", runner), mark(client, "10.20.0.1", "tikray-open"), mark("10.20.0.6", "8.8.8.8", "tikray-open"), mark("10.20.0.19", "8.8.8.8", "tikray-open")}
+	f.insert(firewallNAT, "owner-redirect", map[string]string{"chain": "dstnat", "action": "redirect", "dst-address": "203.0.113.45", "protocol": "tcp", "dst-port": "53", "to-ports": "53"})
+	stale := []string{mark(client, "8.8.8.8", "tikray-open"), dns(client, "8.8.4.4", runner), dns(client, "9.9.9.9", "10.20.0.1")}
+	keep := []string{mark(client, "1.1.1.1", "no-mark"), mark(client, "1.1.1.2", "owner"), dns(client, "8.8.8.8", "8.8.8.8"), dns(client, "203.0.113.45", "10.20.0.1"), dns(client, "203.0.113.44", runner), mark(client, "10.20.0.1", "tikray-open"), mark("10.20.0.6", "8.8.8.8", "tikray-open"), mark("10.20.0.19", "8.8.8.8", "tikray-open"), dns(client, "10.20.0.1", "10.20.0.1")}
 	f.reads = nil
 	report, e := session().Reconcile(t.Context(), target)
 	if e != nil {
@@ -115,6 +118,51 @@ func TestStrayMemberCannotAuthorizeOffLANReads(t *testing.T) {
 	for _, q := range f.reads {
 		if q[0] == ct4+"/print" {
 			t.Fatal("untrusted connection scope reached transport")
+		}
+	}
+}
+
+func TestStrayRouterDNSProofSurvivesDetachment(t *testing.T) {
+	for _, effective := range []bool{true, false} {
+		f := &connectionRouter{diffRouter: newDiffRouter()}
+		a := f.actual()
+		src := netip.MustParsePrefix("10.20.0.7/32")
+		policy := store.Policy{Mode: store.ModeFull}
+		member := appendMembers(nil, srcList(policy), []netip.Prefix{src})[0]
+		id := f.insert(member.Menu, member.Comment, member.Props)
+		if !effective {
+			f.insert(firewallNAT, "tikray:dns-full-open-tcp", map[string]string{"chain": "dstnat", "action": "dst-nat"})
+		}
+		f.insert(firewallNAT, "tikray:dns-router-full-open-tcp", map[string]string{"chain": "dstnat", "action": "redirect", "protocol": "tcp", "dst-port": "53", "src-address-list": srcList(policy), "in-interface-list": a.Topology.LANList, "to-ports": "53"})
+		direct := policyView{}
+		before, ok := repairWindow(direct, direct, []Op{{Menu: member.Menu, Comment: member.Comment, id: id, Kind: "remove", target: member}}, f.actual(), nil)
+		if !ok || !validView(before) {
+			t.Fatal("missing stray-source repair receipt")
+		}
+		receipt, err := json.Marshal(before)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var recovered policyView
+		if err = json.Unmarshal(receipt, &recovered); err != nil || !validView(recovered) {
+			t.Fatal("receipt failed recovery")
+		}
+		f.rows = nil // the old classifier and redirect disappeared before restart
+		f.insert(firewallNAT, "owner", map[string]string{"chain": "dstnat", "action": "redirect", "dst-address": "1.1.1.1", "protocol": "tcp"})
+		var ids []string
+		for _, client := range []struct{ dst, proto string }{{"9.9.9.9", "tcp"}, {"9.9.9.9", "udp"}, {"1.1.1.1", "tcp"}, {"10.20.0.1", "tcp"}} {
+			id := f.flow(ct4, src.Addr().String(), client.dst, "53")
+			r := f.row(id).Props
+			r["protocol"], r["dstnat"], r["reply-src-address"], r["reply-src-port"] = client.proto, "true", "10.20.0.1", "53"
+			ids = append(ids, id)
+		}
+		if _, err = purgeAfterSwitch(t.Context(), f, f.actual(), []policyView{direct, recovered, direct}); err != nil {
+			t.Fatal(err)
+		}
+		for i, id := range ids {
+			if (f.row(id) == nil) != (effective && i == 0) {
+				t.Fatalf("incorrect recovered DNS verdict for witness %d", i)
+			}
 		}
 	}
 }

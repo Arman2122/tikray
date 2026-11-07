@@ -46,29 +46,57 @@ func rangeCovers(rs []addrRange, p netip.Prefix) bool {
 // A reserved member under an otherwise unchanged direct policy can leave
 // marks or a runner translation. It cannot prove ownership of unmarked
 // connections and must not create a temporary kill switch on this client.
-func straySourceRepairs(old, next policyView, t Topology, observed map[string][]netip.Prefix, lists map[string]bool, pending []policyView) []flowChange {
-	var members, excluded []netip.Prefix
-	for list, ps := range observed {
-		if lists[list] && strings.HasPrefix(list, "tikray-src-") {
-			members = append(members, ps...)
+func straySourceRepairs(old, next policyView, a Actual, observed map[string][]netip.Prefix, lists map[string]bool, pending []policyView) []flowChange {
+	members := map[string][]netip.Prefix{}
+	for _, mode := range []store.Mode{store.ModeFull, store.ModeSmart} {
+		for _, closed := range []bool{false, true} {
+			p := store.Policy{Mode: mode, KillSwitch: closed}
+			list := srcList(p)
+			if !lists[list] || len(observed[list]) == 0 {
+				continue
+			}
+			members[""] = append(members[""], observed[list]...)
+			if !closed {
+				for _, proto := range []string{"tcp", "udp"} {
+					if activeRouterFallback(a, p, proto) {
+						members[proto] = append(members[proto], observed[list]...)
+					}
+				}
+			}
 		}
 	}
 	if len(members) == 0 {
 		return nil
 	}
+	var excluded []netip.Prefix
 	for _, v := range []policyView{old, next} {
 		for _, s := range v.Sources {
 			excluded = append(excluded, s.Prefix)
 		}
 	}
+	prior := map[string][]netip.Prefix{}
 	for _, v := range pending {
 		for _, ch := range v.Repairs {
 			if ch.StraySource {
-				excluded = append(excluded, ch.Source)
+				prior[ch.DNSProtocol] = append(prior[ch.DNSProtocol], ch.Source)
 			}
 		}
 	}
-	stray, blocked, clients := prefixRanges(members), prefixRanges(excluded), clientRanges(t)
+	clients := clientRanges(a.Topology)
+	var changes []flowChange
+	for _, proto := range []string{"", "tcp", "udp"} {
+		if len(members[proto]) == 0 {
+			continue
+		}
+		stray, blocked := prefixRanges(members[proto]), prefixRanges(slices.Concat(excluded, prior[proto]))
+		for _, p := range directStrays(clients, stray, blocked) {
+			changes = append(changes, flowChange{StraySource: true, Source: p, From: directPolicy, To: directPolicy, DNSProtocol: proto})
+		}
+	}
+	return changes
+}
+
+func directStrays(clients, stray, blocked []addrRange) []netip.Prefix {
 	var cuts []uint64
 	for _, rs := range [][]addrRange{stray, blocked, clients} {
 		for _, r := range rs {
@@ -77,17 +105,38 @@ func straySourceRepairs(old, next policyView, t Topology, observed map[string][]
 	}
 	slices.Sort(cuts)
 	cuts = slices.Compact(cuts)
-	var changes []flowChange
+	var prefixes []netip.Prefix
 	for i := 1; i < len(cuts); i++ {
 		lo := cuts[i-1]
 		if !rangeContains(clients, lo) || !rangeContains(stray, lo) || rangeContains(blocked, lo) {
 			continue
 		}
-		for _, p := range appendCIDRs(nil, addrRange{lo, cuts[i]}) {
-			changes = append(changes, flowChange{StraySource: true, Source: p, From: directPolicy, To: directPolicy})
+		prefixes = appendCIDRs(prefixes, addrRange{lo, cuts[i]})
+	}
+	return prefixes
+}
+
+func exactRouterFallback(r Observed, lan string, p store.Policy, proto string) bool {
+	want := object(firewallNAT, "dns-router-"+string(p.Mode)+"-open-"+proto, map[string]string{"chain": "dstnat", "action": "redirect", "src-address-list": srcList(p), "in-interface-list": lan, "protocol": proto, "dst-port": "53", "to-ports": "53"})
+	return r.Menu == want.Menu && r.Comment == want.Comment && !r.Dynamic && !unavailableRow(Row(r.Props)) && len(changes(r, want)) == 0
+}
+
+// Prove the redirect could actually select this source before the member is
+// detached. A stale comment or a running primary cannot supply this proof.
+func activeRouterFallback(a Actual, p store.Policy, proto string) bool {
+	primary := "tikray:dns-" + string(p.Mode) + "-open-" + proto
+	for _, r := range a.Rows {
+		if r.Menu != firewallNAT {
+			continue
+		}
+		if r.Comment == primary && !onBit(r.Props["disabled"]) {
+			return false
+		}
+		if exactRouterFallback(r, a.Topology.LANList, p, proto) {
+			return true
 		}
 	}
-	return changes
+	return false
 }
 
 type repairBindings struct {
@@ -111,7 +160,7 @@ func readRepairBindings(o observation, a Actual, views []policyView) (repairBind
 		}
 	}
 	if needOwners {
-		q := append([]string{"?chain=dstnat"}, valuesQuery("action", "dst-nat", "netmap", "jump", "endpoint-independent-nat", "dst-nat-to-hotspot")...)
+		q := append([]string{"?chain=dstnat"}, valuesQuery("action", "redirect", "dst-nat", "netmap", "jump", "endpoint-independent-nat", "dst-nat-to-hotspot")...)
 		rows, err := o.read(firewallNAT, "comment,action,protocol,src-address,dst-address,src-port,dst-port,in-interface,in-interface-list,to-addresses,to-ports", q...)
 		if err != nil {
 			return proof, err
@@ -140,18 +189,33 @@ func readRepairBindings(o observation, a Actual, views []policyView) (repairBind
 	return proof, nil
 }
 
-func (b repairBindings) strayBinding(r Row, src, dst netip.Addr) bool {
+func (b repairBindings) lanRouter(src, reply netip.Addr) bool {
+	return slices.Contains(b.topology.RouterIPs, reply) && slices.ContainsFunc(b.topology.LANs, func(l LAN) bool { return l.Prefix.Contains(src) && l.Prefix.Contains(reply) })
+}
+
+func (b repairBindings) strayBinding(ch flowChange, r Row, src, dst netip.Addr) bool {
 	if slices.Contains(b.topology.RouterIPs, src) {
+		return false
+	}
+	if ch.DNSProtocol != "" && (!isDNS(r) || r["protocol"] != ch.DNSProtocol) {
 		return false
 	}
 	if !isDNS(r) {
 		return !slices.Contains(b.topology.RouterIPs, dst) && (r["connection-mark"] == "tikray-open" || r["connection-mark"] == "tikray-closed")
 	}
-	if !b.runner.IsValid() || dst == b.runner || !onBit(r["dstnat"]) || r["reply-src-port"] != "53" || r["reply-src-address"] != b.runner.String() {
+	reply, err := netip.ParseAddr(r["reply-src-address"])
+	router := ch.DNSProtocol != ""
+	if err != nil || !reply.Is4() || dst == reply || !onBit(r["dstnat"]) || r["reply-src-port"] != "53" {
+		return false
+	}
+	if router && !b.lanRouter(src, reply) || !router && reply != b.runner {
 		return false
 	}
 	for _, owner := range b.owners {
-		if owner["action"] != "jump" && !addressHitsLAN(owner["to-addresses"], []LAN{{Prefix: netip.PrefixFrom(b.runner, 32)}}) {
+		if owner["action"] == "redirect" && !router {
+			continue
+		}
+		if owner["action"] != "jump" && !addressHitsLAN(owner["to-addresses"], []LAN{{Prefix: netip.PrefixFrom(reply, 32)}}) {
 			continue
 		}
 		possible := true
@@ -180,10 +244,9 @@ func (b repairBindings) healthyDNS(d affectedClass, r Row, src netip.Addr) bool 
 	}
 	proto := r["protocol"]
 	p := d.change.To
-	fallback := b.fallback["tikray:dns-router-"+string(p.Mode)+"-open-"+proto].Props
-	if fallback["chain"] != "dstnat" || fallback["action"] != "redirect" || fallback["protocol"] != proto || fallback["dst-port"] != "53" || fallback["to-ports"] != "53" || fallback["src-address-list"] != srcList(p) || fallback["in-interface-list"] != b.topology.LANList {
+	if !exactRouterFallback(b.fallback["tikray:dns-router-"+string(p.Mode)+"-open-"+proto], b.topology.LANList, p, proto) {
 		return false
 	}
 	reply, err := netip.ParseAddr(r["reply-src-address"])
-	return err == nil && slices.Contains(b.topology.RouterIPs, reply) && slices.ContainsFunc(b.topology.LANs, func(l LAN) bool { return l.Prefix.Contains(src) && l.Prefix.Contains(reply) })
+	return err == nil && b.lanRouter(src, reply)
 }

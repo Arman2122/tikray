@@ -94,7 +94,7 @@ func validView(v policyView) bool {
 			return false
 		}
 		if r.StraySource {
-			if r.From != directPolicy || r.To != directPolicy || r.DataOnly || r.DNSProtocol != "" {
+			if r.From != directPolicy || r.To != directPolicy || r.DataOnly {
 				return false
 			}
 			i, _ := slices.BinarySearchFunc(v.Sources, r.Source.Addr(), func(s sourceClass, a netip.Addr) int { return s.Prefix.Addr().Compare(a) })

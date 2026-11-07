@@ -157,7 +157,7 @@ func ipv4Candidates(o observation, a Actual, views []policyView, closedOnly, aft
 				class := netip.PrefixFrom(src, bits).Masked()
 				for _, d := range scopes[class] {
 					if d.change.StraySource {
-						affected = affected || proof.strayBinding(r, src, dst)
+						affected = affected || proof.strayBinding(d.change, r, src, dst)
 						continue
 					}
 					if !proof.healthyDNS(d, r, src) && d.includes(src, dst, r) {

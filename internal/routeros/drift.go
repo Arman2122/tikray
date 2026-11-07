@@ -154,7 +154,7 @@ func repairWindow(verified, target policyView, ops []Op, a Actual, pending []pol
 			}
 		}
 	}
-	before.Repairs = append(before.Repairs, straySourceRepairs(verified, target, a.Topology, observed, lists, pending)...)
+	before.Repairs = append(before.Repairs, straySourceRepairs(verified, target, a, observed, lists, pending)...)
 	var v6Drift bool
 	before.V6, v6Drift = repairIPv6(verified, target, ops, a, pending)
 	return before, len(before.Repairs) > 0 || v6Drift
