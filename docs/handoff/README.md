@@ -24,8 +24,8 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M1: runner and artifacts | Done, merged (PR #3) | |
 | M2a: state model and render | Done, merged (PR #4) | |
 | M2b: the service (`tikray serve`, HTTPS API, health, subscriptions) | Done, merged (PR #5) | |
-| **M2c: human sign-in and hot server changes** | **Implemented, reviewed and validated; awaiting owner review of PR #6** | this branch |
-| M3: RouterOS (installer, reconciler, version adapters, watchdog, uninstall, CHR e2e) | Not started | |
+| M2c: human sign-in and hot server changes | Done, merged (PR #6) | |
+| M3: RouterOS (installer, reconciler, version adapters, watchdog, uninstall, CHR e2e) | M3a in progress on `m3-routeros` | [Plan](../superpowers/plans/2026-11-06-m3-routeros.md), [task results and rulings](m3/ledger.md) |
 | M4: web UI | Not started | |
 | M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
 
@@ -72,8 +72,8 @@ minor. With those fixes, `TestAuth` (6/6), `TestHot` (4/4) and `TestService`
 7.23.8 x86_64 and 7.25 arm64 results are still from `bf6b119`.
 
 M2c is complete with [PR #6](https://github.com/Arman2122/tikray/pull/6).
-M3 (RouterOS: installer, reconciler, version adapters, watchdog, uninstall)
-is the next milestone: write its plan from spec §10 and the carries below.
+The approved [M3 plan](../superpowers/plans/2026-11-06-m3-routeros.md) splits delivery into
+M3a and M3b. The [M3 ledger](m3/ledger.md) records branch progress and CHR evidence.
 
 ### Key M2c facts
 
