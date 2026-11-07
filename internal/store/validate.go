@@ -107,10 +107,21 @@ func (p problems) err() error {
 // problem starts with the path of the field at fault, such as
 // "devices[1].address: ".
 func (s State) Validate() error {
+	p := s.storedProblems()
+	p.routerOverlaps(s.Network, s.Devices)
+	return p.err()
+}
+
+// storedProblems keeps the checks an M2 file already had to pass. Open admits
+// a legacy router overlap for repair, while writes and renders use Validate.
+func (s State) storedProblems() problems {
 	var p problems
 	subscriptions := p.subscriptions(s.Subscriptions)
 	servers := p.servers(s.Servers, subscriptions)
-	p.devices(s.Devices)
+	p.deviceAddresses(s.Devices)
+	for i, d := range s.Devices {
+		p.policy(fmt.Sprintf("devices[%d].policy", i), d.Policy)
+	}
 	p.policy("default_policy", s.DefaultPolicy)
 	p.routing(s.Routing, servers)
 	p.dns(s.DNS, s.DomesticResolver())
@@ -118,7 +129,7 @@ func (s State) Validate() error {
 	if !httpURL(s.Health.ProbeURL) {
 		p.add("health.probe_url", "must be an absolute http or https URL")
 	}
-	return p.err()
+	return p
 }
 
 // checkMasked returns what is wrong with next as a write over prev: a value a
@@ -323,7 +334,7 @@ func (p *problems) outbound(path string, raw json.RawMessage) {
 	}
 }
 
-func (p *problems) devices(devices []Device) {
+func (p *problems) deviceAddresses(devices []Device) {
 	ok := make([]bool, len(devices))
 	for i, d := range devices {
 		path := fmt.Sprintf("devices[%d]", i)
@@ -331,17 +342,16 @@ func (p *problems) devices(devices []Device) {
 		case !a.IsValid() || !a.Addr().Is4():
 			p.add(path+".address", "must be an IPv4 address with a prefix length, such as 192.168.1.5/32")
 		case a != a.Masked():
-			p.add(path+".address", "has host bits set: want %s", a.Masked())
+			p.add(path+".address", "has host bits set")
 		default:
 			ok[i] = true
 			for j := range i {
 				if ok[j] && a.Overlaps(devices[j].Address) {
-					p.add(path+".address", "overlaps devices[%d] (%s)", j, devices[j].Address)
+					p.add(path+".address", "overlaps devices[%d]", j)
 					break
 				}
 			}
 		}
-		p.policy(path+".policy", d.Policy)
 	}
 }
 
@@ -410,18 +420,25 @@ func (p *problems) dns(d DNS, domestic netip.Addr) {
 	if d.Domestic.IsValid() && !d.Domestic.Is4() {
 		p.add("dns.domestic", "must be an IPv4 address")
 	}
-	switch a, err := netip.ParseAddr(d.Remote); {
+	switch {
 	case !dnsRemote(d.Remote):
 		p.add("dns.remote", "must be an https:// URL or an IPv4 address")
-	case err == nil && a == domestic:
-		// The plain queries to the domestic resolver go out direct, so the
-		// remote resolver's would too, every name with them.
-		p.add("dns.remote", "is %s, the domestic resolver: the remote resolver must be another one, or every lookup goes out without the proxy", a)
-	case err != nil && dohOnPort53(d.Remote, domestic):
-		// Render sends whatever goes to port 53 of the domestic resolver out
-		// direct, DoH as well as plain DNS.
-		p.add("dns.remote", "is DoH on port 53 of %s, the domestic resolver, which goes out direct: every lookup would go out without the proxy (use another port, such as 443)", domestic)
+	case d.RemoteUsesDomestic(domestic):
+		if _, err := netip.ParseAddr(d.Remote); err == nil {
+			p.add("dns.remote", "is %s, the domestic resolver: the remote resolver must be another one, or every lookup goes out without the proxy", domestic)
+		} else {
+			p.add("dns.remote", "is DoH on port 53 of %s, the domestic resolver, which goes out direct: every lookup would go out without the proxy (use another port, such as 443)", domestic)
+		}
 	}
+}
+
+// RemoteUsesDomestic reports whether the remote resolver would use the
+// domestic resolver's direct DNS exemption, including HTTPS on port 53.
+func (d DNS) RemoteUsesDomestic(domestic netip.Addr) bool {
+	if a, err := netip.ParseAddr(d.Remote); err == nil {
+		return a == domestic
+	}
+	return dohOnPort53(d.Remote, domestic)
 }
 
 // dohOnPort53 reports whether the DoH URL s is for port 53 of addr: its host
@@ -450,8 +467,63 @@ func (p *problems) network(n Network) {
 	case sn.Bits() > maxSubnetBits:
 		p.add("network.subnet", "is too small: the router, tikray and the runner need .1 to .3 (use /%d or larger)", maxSubnetBits)
 	case sn != sn.Masked():
-		p.add("network.subnet", "has host bits set: want %s", sn.Masked())
+		p.add("network.subnet", "has host bits set")
 	}
+}
+
+// ValidateRouterNetwork checks the IPv4 prefixes used by router steering.
+// It reads no device names, MACs, policies or server data.
+func ValidateRouterNetwork(n Network, devices []Device) error {
+	var p problems
+	p.network(n)
+	p.deviceAddresses(devices)
+	p.routerOverlaps(n, devices)
+	return p.err()
+}
+
+var (
+	loopback  = netip.MustParsePrefix("127.0.0.0/8")
+	multicast = netip.MustParsePrefix("224.0.0.0/4")
+)
+
+// ReservedRouterPrefixes are IPv4 ranges with a special network use that
+// the bridge cannot claim. RFC 1918 subnets are valid installation choices.
+func ReservedRouterPrefixes() []netip.Prefix {
+	return slices.Clone(reservedRouterPrefixes)
+}
+
+var reservedRouterPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),     // this network
+	netip.MustParsePrefix("100.64.0.0/10"), // shared address space
+	loopback,
+	netip.MustParsePrefix("169.254.0.0/16"),  // link-local
+	netip.MustParsePrefix("192.0.0.0/24"),    // protocol assignments
+	netip.MustParsePrefix("192.0.2.0/24"),    // documentation
+	netip.MustParsePrefix("192.88.99.0/24"),  // 6to4 relay
+	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking
+	netip.MustParsePrefix("198.51.100.0/24"), // documentation
+	netip.MustParsePrefix("203.0.113.0/24"),  // documentation
+	multicast,
+	netip.MustParsePrefix("240.0.0.0/4"), // reserved and limited broadcast
+}
+
+func (p *problems) routerOverlaps(n Network, devices []Device) {
+	for _, reserved := range reservedRouterPrefixes {
+		if n.Subnet.Overlaps(reserved) {
+			p.add("network.subnet", "overlaps a reserved IPv4 range")
+			break
+		}
+	}
+	for i, d := range devices {
+		if DeviceRouterOverlap(n, d.Address) {
+			p.add(fmt.Sprintf("devices[%d].address", i), "overlaps the container bridge, loopback or multicast")
+		}
+	}
+}
+
+// DeviceRouterOverlap also identifies the device rows a legacy repair can remove.
+func DeviceRouterOverlap(n Network, a netip.Prefix) bool {
+	return a.Overlaps(n.Subnet) || a.Overlaps(loopback) || a.Overlaps(multicast)
 }
 
 // checkDomain returns what is wrong with a domain matcher, or "" if it is

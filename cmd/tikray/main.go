@@ -788,6 +788,9 @@ func prepareDirs(data string) error {
 // newRunner is the client of the runner at cfg.RunnerURL, with the token from
 // <data>/run/runner.token.
 func newRunner(cfg Config) (*runnerapi.Client, error) {
+	if store.ValidateRouterNetwork(cfg.network, nil) != nil || cfg.network.RequireLocalBridge && !assignedBridge(cfg.network) {
+		return nil, errors.New("tikray: repair the container bridge over HTTPS and restart tikray serve")
+	}
 	tok, err := os.ReadFile(filepath.Join(cfg.Data, "run", "runner.token"))
 	if err != nil {
 		return nil, fmt.Errorf("reading the runner token: %w", err)

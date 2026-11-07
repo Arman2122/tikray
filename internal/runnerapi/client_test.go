@@ -5,13 +5,102 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func callRunnerControls(c *Client, t *testing.T) (error, error) {
+	t.Helper()
+	_, statusErr := c.Status(t.Context())
+	_, testErr := c.Test(t.Context(), []byte(`{"outbounds":[{"test_value":"fixture-body"}]}`))
+	return statusErr, testErr
+}
+
+// ProxyFromEnvironment reads its settings only once in a process. Use a
+// fresh test process so this also tests the behavior of a newly started serve.
+func TestRunnerControlIgnoresEnvironmentProxy(t *testing.T) {
+	const key = "TIKRAY_TEST_PRIVATE_RUNNER_URL"
+	if address := os.Getenv(key); address != "" {
+		for _, hc := range []*http.Client{nil, {Timeout: 5 * time.Second}, {Transport: http.DefaultTransport.(*http.Transport).Clone()}} {
+			control := &Client{BaseURL: address, Token: "fixture-bearer", HTTP: hc}
+			statusErr, testErr := callRunnerControls(control, t)
+			if statusErr != nil || testErr != nil {
+				t.Fatal("direct runner requests failed")
+			}
+		}
+		return
+	}
+	var proxyCalls, runnerCalls atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyCalls.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer proxy.Close()
+	runner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		runnerCalls.Add(1)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer runner.Close()
+	// Linux resolves 0.0.0.0 locally. Go's automatic loopback exception to
+	// HTTP_PROXY would make a 127.0.0.1 fixture pass even on the old client.
+	_, port, err := net.SplitHostPort(runner.Listener.Addr().String())
+	if err != nil {
+		t.Fatal("invalid fixture listener")
+	}
+	t.Setenv(key, "http://0.0.0.0:"+port)
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("http_proxy", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestRunnerControlIgnoresEnvironmentProxy$")
+	err = cmd.Run()
+	if got := proxyCalls.Load(); got != 0 {
+		t.Errorf("the proxy received %d private requests", got)
+	}
+	if got := runnerCalls.Load(); got != 6 || err != nil {
+		t.Errorf("the intended runner received %d of 6 requests", got)
+	}
+}
+
+func TestRunnerControlRefusesRedirects(t *testing.T) {
+	var redirected atomic.Int32
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected.Add(1)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer receiver.Close()
+	var location atomic.Value
+	location.Store(receiver.URL + "/fixture-location")
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", location.Load().(string))
+		w.WriteHeader(http.StatusTemporaryRedirect)
+		_, _ = io.WriteString(w, "fixture-response")
+	}))
+	defer source.Close()
+	for _, target := range []string{receiver.URL + "/fixture-location", "/%zz/fixture-location"} {
+		location.Store(target)
+		for _, hc := range []*http.Client{nil, {Timeout: time.Second}, source.Client()} {
+			c := &Client{BaseURL: source.URL, Token: "fixture-bearer", HTTP: hc}
+			statusErr, testErr := callRunnerControls(c, t)
+			for _, err := range []error{statusErr, testErr} {
+				if err == nil || strings.Contains(err.Error(), "fixture-") {
+					t.Error("redirect was followed or disclosed private data")
+				}
+			}
+		}
+	}
+	if n := redirected.Load(); n != 0 {
+		t.Errorf("another port received %d private requests", n)
+	}
+}
 
 func TestClientMapsErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

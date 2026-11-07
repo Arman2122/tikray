@@ -144,6 +144,61 @@ func (s *Service) RemoveDevice(ctx context.Context, rev uint64, addr netip.Prefi
 	return next, err
 }
 
+// NetworkRepair lists the operator's corrections for an M2 router overlap.
+// An omitted subnet preserves the bridge. Only named offending devices may go.
+type NetworkRepair struct {
+	Subnet        netip.Prefix   `json:"subnet,omitzero"`
+	RemoveDevices []netip.Prefix `json:"remove_devices,omitempty"`
+	RemoteDNS     *string        `json:"remote_dns,omitempty"`
+}
+
+// RepairNetwork saves all corrections at once. The caller restarts serve
+// after changing the bridge because its runner endpoints are fixed at startup.
+func (s *Service) RepairNetwork(ctx context.Context, rev uint64, fix NetworkRepair) (bool, uint64, error) {
+	_, next, err := s.change(rev, func(st *store.State) ([]note, error) {
+		bridgeNeedsRepair := store.ValidateRouterNetwork(st.Network, nil) != nil ||
+			s.repairBridge && st.Network.RequireLocalBridge && !s.localBridge(st.Network)
+		if !bridgeNeedsRepair && store.ValidateRouterNetwork(st.Network, st.Devices) == nil {
+			return nil, &Refused{Reason: "the network needs no repair"}
+		}
+		proposed := st.Network
+		if fix.Subnet.IsValid() {
+			proposed.Subnet = fix.Subnet
+		}
+		if bridgeNeedsRepair {
+			proposed.RequireLocalBridge = true
+			if store.ValidateRouterNetwork(proposed, nil) != nil || !s.localBridge(proposed) {
+				return nil, &Refused{Reason: "repair requires the bridge's exact control IPv4 address and prefix and an unambiguous on-link route to the runner"}
+			}
+		} else if proposed.Subnet != st.Network.Subnet {
+			return nil, &Refused{Reason: "a repair must keep a usable bridge subnet"}
+		}
+		remove := make(map[netip.Prefix]bool, len(fix.RemoveDevices))
+		for _, addr := range fix.RemoveDevices {
+			remove[addr] = true
+		}
+		st.Devices = slices.DeleteFunc(st.Devices, func(d store.Device) bool {
+			if !remove[d.Address] || !store.DeviceRouterOverlap(st.Network, d.Address) && !d.Address.Overlaps(proposed.Subnet) {
+				return false
+			}
+			delete(remove, d.Address)
+			return true
+		})
+		if len(remove) != 0 {
+			return nil, &Refused{Reason: "only an existing device with a router overlap can be removed by a repair"}
+		}
+		if fix.RemoteDNS != nil {
+			if proposed.Subnet == st.Network.Subnet || st.DNS.Domestic.IsValid() || !st.DNS.RemoteUsesDomestic(proposed.Router()) {
+				return nil, &Refused{Reason: "repair may change remote DNS only when the new bridge would send that resolver's queries direct"}
+			}
+			st.DNS.Remote = *fix.RemoteDNS
+		}
+		st.Network = proposed
+		return nil, nil
+	})
+	return s.repairBridge, next, err
+}
+
 // SetDefaultPolicy sets the policy of the devices that are not listed and
 // returns the new revision.
 func (s *Service) SetDefaultPolicy(ctx context.Context, rev uint64, p store.Policy) (uint64, error) {

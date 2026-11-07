@@ -309,6 +309,37 @@ func TestValidBaseIsValid(t *testing.T) {
 	}
 }
 
+func TestValidateRouterNetworkOverlap(t *testing.T) {
+	for _, tc := range []struct{ subnet, device, wantPath string }{
+		{"172.31.255.0/29", "172.31.255.3/32", "devices[0].address"},
+		{"172.31.255.0/29", "172.31.0.0/16", "devices[0].address"},
+		{"172.31.255.0/29", "126.0.0.0/7", "devices[0].address"},
+		{"172.31.255.0/29", "239.255.255.250/32", "devices[0].address"},
+		{"127.1.2.0/29", "192.168.88.0/24", "network.subnet"},
+		{"224.0.0.0/3", "192.168.88.0/24", "network.subnet"},
+		{"0.0.0.0/8", "192.168.88.0/24", "network.subnet"},
+		{"169.254.8.0/24", "192.168.88.0/24", "network.subnet"},
+		{"192.0.2.0/24", "192.168.88.0/24", "network.subnet"},
+		{"240.0.0.0/4", "192.168.88.0/24", "network.subnet"},
+		{"10.30.0.0/24", "10.30.1.0/24", ""},
+		{"192.168.15.0/29", "192.168.15.8/29", ""},
+	} {
+		t.Run(tc.subnet+"_"+tc.device, func(t *testing.T) {
+			st := Default()
+			st.Network.Subnet = netip.MustParsePrefix(tc.subnet)
+			st.Devices = []Device{{Address: netip.MustParsePrefix(tc.device), Policy: Policy{Mode: ModeDirect}}}
+			err := st.Validate()
+			if tc.wantPath == "" {
+				if err != nil {
+					t.Fatal("refused a disjoint LAN and bridge")
+				}
+			} else if err == nil || !strings.HasPrefix(err.Error(), tc.wantPath+": ") {
+				t.Fatalf("expected refusal at %s", tc.wantPath)
+			}
+		})
+	}
+}
+
 // joined splits a Validate error into its joined parts.
 func joined(err error) []error {
 	if err == nil {

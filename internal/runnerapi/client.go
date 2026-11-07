@@ -25,7 +25,26 @@ var (
 	defaultHTTP = &http.Client{Timeout: 10 * time.Second}
 	// testHTTP is Test's default: the runner gives xray run -test 20 s.
 	testHTTP = &http.Client{Timeout: 30 * time.Second}
+	// Keep the standard dial/TLS/pooling behavior without ever looking up
+	// an environment proxy for a private runner request.
+	directTransport = func() *http.Transport {
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.Proxy = nil
+		return t
+	}()
 )
+
+// Removing Location at the transport boundary also prevents net/http from
+// parsing a malformed secret-bearing Location before it calls CheckRedirect.
+type runnerTransport struct{ http.RoundTripper }
+
+func (t runnerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.RoundTripper.RoundTrip(req)
+	if err == nil && resp.StatusCode/100 == 3 {
+		resp.Header.Del("Location")
+	}
+	return resp, err
+}
 
 // Client calls the runner's control API.
 type Client struct {
@@ -258,15 +277,27 @@ func (c *Client) send(ctx context.Context, def *http.Client, method, path string
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	hc := c.HTTP
-	if hc == nil {
-		hc = def
+	hc := *cmp.Or(c.HTTP, def)
+	transport := hc.Transport
+	if transport == nil {
+		transport = directTransport
+	} else if tr, ok := transport.(*http.Transport); ok && tr.Proxy != nil {
+		// An injected transport can carry TLS settings or a custom dialer.
+		// Give the private request its own direct copy; leave the caller's alone.
+		direct := tr.Clone()
+		direct.Proxy = nil
+		defer direct.CloseIdleConnections()
+		transport = direct
 	}
+	hc.Transport = runnerTransport{transport}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("runnerapi: %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode/100 == 3 {
+		return fmt.Errorf("runnerapi: %s %s: HTTP %d redirect refused", method, path, resp.StatusCode)
+	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return fmt.Errorf("runnerapi: %s %s: reading response: %w", method, path, err)

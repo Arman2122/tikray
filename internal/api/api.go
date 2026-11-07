@@ -80,6 +80,7 @@ type Backend interface {
 
 	SetDevice(ctx context.Context, rev uint64, d store.Device) (uint64, error)
 	RemoveDevice(ctx context.Context, rev uint64, addr netip.Prefix) (uint64, error)
+	RepairNetwork(ctx context.Context, rev uint64, fix service.NetworkRepair) (bool, uint64, error)
 	SetDefaultPolicy(ctx context.Context, rev uint64, p store.Policy) (uint64, error)
 	SetRouting(ctx context.Context, rev uint64, r store.Routing) (uint64, error)
 	SetDNS(ctx context.Context, rev uint64, d store.DNS) (uint64, error)
@@ -134,6 +135,7 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter) http.H
 	mux.HandleFunc("GET /v1/devices", h.listDevices)
 	mux.HandleFunc("PUT /v1/devices/{address}", h.setDevice)
 	mux.HandleFunc("DELETE /v1/devices/{address}", h.removeDevice)
+	mux.HandleFunc("PUT /v1/network", h.repairNetwork)
 
 	mux.HandleFunc("PUT /v1/policy", set(h, b.SetDefaultPolicy))
 	mux.HandleFunc("PUT /v1/routing", set(h, b.SetRouting))
@@ -397,6 +399,26 @@ func (h *handler) removeDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.noContent(w, newRev)
+}
+
+// repairNetwork accepts only a complete fix of a previously permitted overlap.
+func (h *handler) repairNetwork(w http.ResponseWriter, r *http.Request) {
+	rev, ok := h.revision(w, r)
+	if !ok {
+		return
+	}
+	var fix service.NetworkRepair
+	if !h.decode(w, r, &fix) || h.maskedRequest(w, fix) {
+		return
+	}
+	restart, next, err := h.b.RepairNetwork(r.Context(), rev, fix)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.reply(w, http.StatusOK, next, struct {
+		RestartRequired bool `json:"restart_required"`
+	}{restart})
 }
 
 // address reads the device address of the path: a CIDR prefix (its slash

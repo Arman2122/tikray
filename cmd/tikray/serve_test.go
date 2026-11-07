@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,6 +26,8 @@ import (
 	"github.com/Arman2122/tikray/internal/store"
 	"github.com/Arman2122/tikray/internal/xray"
 	"github.com/Arman2122/tikray/internal/xrayver"
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // lockedBuffer is a buffer that the serving goroutine writes while the test
@@ -1032,5 +1035,60 @@ func TestCertIPs(t *testing.T) {
 				t.Errorf("certIPs(%q) = %v, want %v", tc.listen, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRepairRequiresAssignedControlAddress(t *testing.T) {
+	n := store.Network{Subnet: netip.MustParsePrefix("10.81.0.0/29")}
+	_, dst, _ := net.ParseCIDR(n.Subnet.String())
+	direct := netlink.Route{LinkIndex: 1, Scope: netlink.SCOPE_LINK, Type: unix.RTN_UNICAST, Dst: dst, Src: net.IP(n.Tikray().AsSlice())}
+	for _, tc := range []struct {
+		name      string
+		addresses []string
+		want      bool
+	}{
+		{"exact control host and prefix", []string{"127.0.0.1/8", "fe80::a/64", "10.81.0.2/29"}, true},
+		{"missing", nil, false},
+		{"wrong control host", []string{"10.81.0.3/29"}, false},
+		{"wrong network", []string{"10.82.0.2/29"}, false},
+		{"wrong mask", []string{"10.81.0.2/24"}, false},
+		{"duplicate", []string{"10.81.0.2/29", "10.81.0.2/29"}, false},
+		{"unrelated interface", []string{"10.81.0.2/29", "10.82.0.2/29"}, true},
+		{"overlapping interface", []string{"10.81.0.2/29", "10.81.0.12/24"}, false},
+		{"mismatched duplicate", []string{"10.81.0.2/29", "10.81.0.2/32"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var addrs []netlink.Addr
+			for _, text := range tc.addresses {
+				a, err := netlink.ParseAddr(text)
+				if err != nil {
+					t.Fatal("invalid fixture")
+				}
+				a.LinkIndex = 1
+				addrs = append(addrs, *a)
+			}
+			if localBridge(n, addrs, []netlink.Route{direct}) != tc.want {
+				t.Fatal("incorrect bridge verification")
+			}
+		})
+	}
+	addr, _ := netlink.ParseAddr("10.81.0.2/29")
+	addr.LinkIndex = 1
+	for _, change := range []func(*netlink.Route){
+		func(r *netlink.Route) { r.Gw = net.ParseIP("10.81.0.1") },
+		func(r *netlink.Route) { r.LinkIndex = 2 },
+		func(r *netlink.Route) { r.Scope = netlink.SCOPE_UNIVERSE },
+		func(r *netlink.Route) { r.Type = unix.RTN_LOCAL },
+		func(r *netlink.Route) { r.Src = net.ParseIP("10.81.0.4") },
+		func(r *netlink.Route) { r.MultiPath = []*netlink.NexthopInfo{{LinkIndex: 1}, {LinkIndex: 2}} },
+	} {
+		route := direct
+		change(&route)
+		if localBridge(n, []netlink.Addr{*addr}, []netlink.Route{route}) {
+			t.Fatal("accepted an unsafe route to the runner")
+		}
+	}
+	if localBridge(n, []netlink.Addr{*addr}, nil) || localBridge(n, []netlink.Addr{*addr}, []netlink.Route{direct, direct}) {
+		t.Fatal("accepted a missing or ambiguous route")
 	}
 }

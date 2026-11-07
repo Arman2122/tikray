@@ -276,6 +276,11 @@ func (f *fakeBackend) RemoveDevice(_ context.Context, rev uint64, addr netip.Pre
 	return f.rev + 1, f.err
 }
 
+func (f *fakeBackend) RepairNetwork(_ context.Context, rev uint64, fix service.NetworkRepair) (bool, uint64, error) {
+	f.rec("RepairNetwork", rev, fix)
+	return false, f.rev + 1, f.err
+}
+
 func (f *fakeBackend) SetDefaultPolicy(_ context.Context, rev uint64, p store.Policy) (uint64, error) {
 	f.rec("SetDefaultPolicy", rev, p)
 	return f.rev + 1, f.err

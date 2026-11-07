@@ -64,6 +64,9 @@ type Config struct {
 	// restarting xray (artifacts.CoreUpdater.Hot). It is on unless TIKRAY_HOT
 	// is off, which makes every apply a trial.
 	Hot bool
+	// network is what an offline command must verify before it constructs
+	// the credential-bearing runner client.
+	network store.Network
 }
 
 const (
@@ -111,6 +114,7 @@ func readState(data string, warn io.Writer) (store.State, uint64, error) {
 // with ProbeURL taken from st's Health.ProbeURL likewise: tikray's SOCKS probe
 // and xray's observatory then fetch the same URL.
 func (c Config) withState(st store.State) Config {
+	c.network = st.Network
 	runner := st.Network.Runner().String()
 	if c.RunnerURL == "" {
 		c.RunnerURL = "http://" + net.JoinHostPort(runner, strconv.Itoa(runnerPort))

@@ -57,6 +57,20 @@ type Runner interface {
 	Test(ctx context.Context, config []byte) (runnerapi.TestResult, error)
 }
 
+// A reserved legacy bridge cannot identify a trusted runner. Until serve is
+// restarted after repair, even a status request would send its token there.
+type unavailableBridge struct{}
+
+func (unavailableBridge) Status(context.Context) (runnerapi.Status, error) {
+	return runnerapi.Status{}, errBridgeRepair
+}
+
+func (unavailableBridge) Test(context.Context, []byte) (runnerapi.TestResult, error) {
+	return runnerapi.TestResult{}, errBridgeRepair
+}
+
+var errBridgeRepair = fmt.Errorf("%w: repair the container bridge over HTTPS and restart tikray serve", ErrRunnerUnavailable)
+
 // Updaters builds the CoreUpdater for a state and its revision: Render renders
 // st, NoState is rev == 0 (a state never saved), and Health and ProxyHealth
 // check the trial. The service sets Redact on what it returns, so the factory
@@ -97,10 +111,18 @@ type Config struct {
 	// the default Fetcher takes its second attempt through. Empty means the
 	// default Fetcher goes direct only.
 	Socks string
+	// LocalBridge verifies that the control container has the proposed .2
+	// address and exact prefix. Without it a bridge repair cannot be trusted.
+	LocalBridge func(store.Network) bool
 }
 
 // Service owns the desired state and keeps xray applied to it.
 type Service struct {
+	// The runner endpoints cannot be used during this process's lifetime
+	// if they were derived from an unsafe legacy bridge at startup.
+	repairBridge bool
+	localBridge  func(store.Network) bool
+
 	store    *store.Store
 	updaters Updaters
 	runner   Runner
@@ -171,7 +193,19 @@ func New(c Config) (*Service, error) {
 	case c.Data == "":
 		return nil, errors.New("service: Config.Data is not set")
 	}
+	st, _ := c.Store.State()
+	if c.LocalBridge == nil {
+		c.LocalBridge = func(store.Network) bool { return false }
+	}
+	repairBridge := store.ValidateRouterNetwork(st.Network, nil) != nil ||
+		st.Network.RequireLocalBridge && !c.LocalBridge(st.Network)
+	if repairBridge {
+		c.Runner, c.Monitor, c.Socks = unavailableBridge{}, nil, ""
+	}
 	s := &Service{
+		repairBridge: repairBridge,
+		localBridge:  c.LocalBridge,
+
 		store:    c.Store,
 		updaters: c.Updaters,
 		runner:   c.Runner,
@@ -205,7 +239,9 @@ func New(c Config) (*Service, error) {
 			}
 		}
 	}
-	st, _ := c.Store.State()
+	if repairBridge {
+		s.record(KindDegraded, errBridgeRepair.Error())
+	}
 	for _, id := range c.Store.Degraded() {
 		i := slices.IndexFunc(st.Servers, func(srv store.Server) bool { return srv.ID == id })
 		if i < 0 {
@@ -227,6 +263,10 @@ func (s *Service) Run(ctx context.Context) error {
 		return errors.New("service: Run is already running")
 	}
 	defer s.running.Store(false)
+	if s.repairBridge {
+		<-ctx.Done()
+		return nil
+	}
 	var wg sync.WaitGroup
 	if s.monitor != nil {
 		wg.Add(1)

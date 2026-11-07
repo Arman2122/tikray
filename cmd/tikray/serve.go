@@ -18,6 +18,8 @@ import (
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 	"github.com/Arman2122/tikray/internal/xray"
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // serve runs the service until ctx ends, which main ties to SIGINT and
@@ -85,13 +87,14 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 	}
 	w := wireService(env, st, pub, c.stderr)
 	svc, err := service.New(service.Config{
-		Store:    s,
-		Updaters: w.updaters,
-		Runner:   w.runner,
-		Monitor:  w.monitor,
-		Data:     env.Data,
-		Socks:    w.cfg.Socks,
-		Log:      c.stderr,
+		Store:       s,
+		Updaters:    w.updaters,
+		Runner:      w.runner,
+		Monitor:     w.monitor,
+		Data:        env.Data,
+		Socks:       w.cfg.Socks,
+		Log:         c.stderr,
+		LocalBridge: assignedBridge,
 	})
 	if err != nil {
 		return c.fail(err)
@@ -144,6 +147,45 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 		return c.fail(first)
 	}
 	return 0
+}
+
+func assignedBridge(n store.Network) bool {
+	addrs, err := netlink.AddrList(nil, netlink.FAMILY_V4)
+	if err != nil {
+		return false
+	}
+	// FIBMatch reports the selected route itself including ECMP, rather than
+	// one resolved next hop which could change between TCP connections.
+	routes, err := netlink.RouteGetWithOptions(net.IP(n.Runner().AsSlice()), &netlink.RouteGetOptions{FIBMatch: true})
+	return err == nil && localBridge(n, addrs, routes)
+}
+
+// The control .2 and prefix must designate one interface. Other interfaces
+// can coexist if neither their addresses nor a route through them claims .3.
+func localBridge(n store.Network, addrs []netlink.Addr, routes []netlink.Route) bool {
+	if len(routes) != 1 {
+		return false
+	}
+	control, runner := net.IP(n.Tikray().AsSlice()), net.IP(n.Runner().AsSlice())
+	link := 0
+	for _, a := range addrs {
+		if a.IPNet == nil || a.Peer != nil && a.Peer.Contains(runner) {
+			return false
+		}
+		if !a.IP.Equal(control) && !a.Contains(runner) {
+			continue
+		}
+		ones, bits := a.Mask.Size()
+		if link != 0 || a.LinkIndex <= 0 || !a.IP.Equal(control) || bits != 32 || ones != n.Subnet.Bits() ||
+			a.Peer != nil || a.Flags&(unix.IFA_F_TENTATIVE|unix.IFA_F_DADFAILED) != 0 {
+			return false
+		}
+		link = a.LinkIndex
+	}
+	r := routes[0]
+	return link != 0 && r.LinkIndex == link && r.Type == unix.RTN_UNICAST && r.Scope == netlink.SCOPE_LINK &&
+		r.Dst != nil && r.Dst.Contains(runner) && r.Src.Equal(control) && len(r.Gw) == 0 &&
+		len(r.MultiPath) == 0 && r.Via == nil && r.Encap == nil && r.NewDst == nil
 }
 
 // serveWiring is what the service is made of, for a configuration and the state
