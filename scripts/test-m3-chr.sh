@@ -61,6 +61,9 @@ export TIKRAY_LAB_XRAY=${TIKRAY_LAB_XRAY:-v26.10.31}
 TIKRAY_LAB_CACHE=$(realpath "${TIKRAY_LAB_CACHE:-$HOME/.cache/tikray-lab}")
 export TIKRAY_LAB_CACHE
 export PATH="$TIKRAY_LAB_CACHE/tools:$PATH"
+# The privileged lab compiles test helpers from the owner's checkout. Image
+# revision stamps come from the separately built, verified release archives.
+export GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false"
 bundle=${TIKRAY_LAB_IMAGES:-$project/out/m3-install/$1-$2}
 export TIKRAY_LAB_IMAGES
 TIKRAY_LAB_IMAGES=$(realpath "$bundle")

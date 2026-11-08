@@ -37,20 +37,19 @@ func loginPrompts(password string) []prompt {
 
 var shellPrompt = regexp.MustCompile(`\] > $`)
 
-// console owns the single connection QEMU allows to the serial socket. It
-// copies everything to a log file and keeps the output since the last reset
-// for expect.
+// The serial peer can echo a login reply, including across separate reads.
+// Keep its bytes in memory for prompt matching. Only local lifecycle events
+// belong in the diagnostic file.
 type console struct {
 	conn net.Conn
 	log  *os.File
-	tl   *os.File // console lines with timestamps
-	line []byte
 
-	mu      sync.Mutex
-	pending bytes.Buffer
-	last    time.Time
-	changed chan struct{}
-	closed  chan struct{}
+	mu        sync.Mutex
+	pending   bytes.Buffer
+	truncated bool
+	last      time.Time
+	changed   chan struct{}
+	closed    chan struct{}
 }
 
 func openConsole(ctx context.Context, sock, logPath string) (*console, error) {
@@ -67,18 +66,13 @@ func openConsole(ctx context.Context, sock, logPath string) (*console, error) {
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		conn.Close()
 		return nil, err
 	}
-	tl, err := os.OpenFile(logPath+".timeline", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		conn.Close()
-		f.Close()
-		return nil, err
-	}
-	c := &console{conn: conn, log: f, tl: tl, last: time.Now(), changed: make(chan struct{}, 1), closed: make(chan struct{})}
+	c := &console{conn: conn, log: f, last: time.Now(), changed: make(chan struct{}, 1), closed: make(chan struct{})}
+	fmt.Fprintln(c.log, "serial connection opened")
 	go c.read()
 	return c, nil
 }
@@ -89,9 +83,11 @@ func (c *console) read() {
 	for {
 		n, err := c.conn.Read(b)
 		if n > 0 {
-			c.log.Write(b[:n])
-			c.timeline(b[:n])
 			c.mu.Lock()
+			if excess := c.pending.Len() + n - (64 << 10); excess > 0 {
+				c.pending.Next(excess)
+				c.truncated = true
+			}
 			c.pending.Write(b[:n])
 			c.last = time.Now()
 			c.mu.Unlock()
@@ -106,22 +102,10 @@ func (c *console) read() {
 	}
 }
 
-func (c *console) timeline(b []byte) {
-	for _, ch := range b {
-		if ch != '\n' && ch != '\r' {
-			c.line = append(c.line, ch)
-			continue
-		}
-		if len(bytes.TrimSpace(c.line)) > 0 {
-			fmt.Fprintf(c.tl, "%s %q\n", time.Now().Format("15:04:05.000"), c.line)
-		}
-		c.line = c.line[:0]
-	}
-}
-
 func (c *console) send(s string) error {
 	c.mu.Lock()
 	c.pending.Reset()
+	c.truncated = false
 	c.mu.Unlock()
 	_, err := c.conn.Write([]byte(s))
 	return err
@@ -152,13 +136,7 @@ func (c *console) expect(ctx context.Context, kick time.Duration, res ...*regexp
 		}
 		select {
 		case <-ctx.Done():
-			c.mu.Lock()
-			tail := c.pending.String()
-			c.mu.Unlock()
-			if len(tail) > 300 {
-				tail = tail[len(tail)-300:]
-			}
-			return -1, fmt.Errorf("console: %w; last output %q", ctx.Err(), tail)
+			return -1, fmt.Errorf("console: waiting for a prompt: %w", ctx.Err())
 		case <-c.closed:
 			return -1, fmt.Errorf("console closed")
 		case <-c.changed:
@@ -180,6 +158,7 @@ func (c *console) login(ctx context.Context, password string) error {
 			return err
 		}
 		if ps[i].done {
+			fmt.Fprintln(c.log, "login completed")
 			return nil
 		}
 		if err := c.send(ps[i].reply); err != nil {
@@ -199,12 +178,21 @@ func (c *console) command(ctx context.Context, line string) error {
 	}
 	c.mu.Lock()
 	out := c.pending.String()
+	truncated := c.truncated
 	c.mu.Unlock()
+	if truncated {
+		return fmt.Errorf("console: command response exceeded limit")
+	}
 	for _, l := range strings.Split(out, "\n") {
-		if rosError.MatchString(l) {
-			return fmt.Errorf("RouterOS: %s", strings.TrimSpace(l))
+		if class := rosError.FindString(l); class != "" {
+			if strings.Contains(l, "input does not match any value of interface") {
+				class = "input does not match any value of interface"
+			}
+			fmt.Fprintln(c.log, "command rejected")
+			return fmt.Errorf("RouterOS: %s", class)
 		}
 	}
+	fmt.Fprintln(c.log, "command completed")
 	return nil
 }
 
@@ -212,5 +200,4 @@ func (c *console) close() {
 	c.conn.Close()
 	<-c.closed
 	c.log.Close()
-	c.tl.Close()
 }

@@ -300,3 +300,9 @@ Each `out/m3-install/<version>-<arch>/` bundle contains `install.rsc`, `uninstal
 Reproduction uses the matching bundle and source revision in Ubuntu. Set `TIKRAY_LAB_IMAGES` to the bundle's absolute directory, `TIKRAY_LAB_INSTALLER` and `TIKRAY_LAB_UNINSTALLER` to its two scripts, `TIKRAY_LAB_CHANNEL` and `TIKRAY_LAB_ARCH` to the table row, and `TIKRAY_LAB_XRAY=v26.10.31`. With the verified cosign binary on PATH, run `go test -tags lab -p 1 -count=1 -v -timeout 150m -run '^(TestM3Install|TestM3Uninstall)$' ./test/e2e/` as the lab owner. The final wrappers used private logs, bounded waits and PID-scoped cleanup. No task-owned QEMU process, lab interface or namespace remained.
 
 The unit, vet, race and arm64 build checks passed. Independent review approved the production network binding, health check, private data boundaries and teardown. M3a still has its dedicated routing acceptance suite and final branch review ahead of its draft PR. Image replacement and rollback remain M3b.
+
+## Task 8 — M3a routing acceptance
+
+Ruling: Store M3 outcomes as an allowlisted case ID, fixed public description, verdict and elapsed time — raw router replies, server settings and client-supplied labels can contain private values — cost if wrong: the report contains less diagnostic detail, which remains in the assertions and the private lab run. An invalid, incomplete or filtered run cannot overwrite the full report. The negative evidence test first failed on the missing writer and passed after implementation.
+
+Ruling: Retain serial prompt bytes only in bounded memory and record fixed console lifecycle events — a simulated serial peer echoed a private login witness into both old log files, the rejection and the timeout error — cost if wrong: diagnosing boot requires reproducing the failure rather than inspecting a raw transcript. The original fixed interface error remains distinguishable. The disclosure regression and lab race tests passed.
