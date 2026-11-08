@@ -514,10 +514,25 @@ func (f *installLab) probe(ctx context.Context, t *testing.T, arg string) string
 			t.Fatal("could not stage control-side witness")
 		}
 	}
-	out := f.mustRun(ctx, t, fmt.Sprintf(`/container/shell [find where name=tikray] cmd="chmod 700 %s && %s %s"`, remote, remote, arg))
-	v, ok := installProbeValue(out, arg)
+	command := fmt.Sprintf(`/container/shell [find where name=tikray] cmd="chmod 700 %s && %s %s"`, remote, remote, arg)
+	var v string
+	var seen int
+	observe := func() bool {
+		out, err := f.CHR.RunPrivate(ctx, command)
+		seen = len(out)
+		var ok bool
+		v, ok = installProbeValue(out, arg)
+		return err == nil && ok
+	}
+	ok := false
+	switch arg {
+	case "runner", "control-start", "ports":
+		_, ok = poll(ctx, 12*time.Second, 500*time.Millisecond, observe)
+	default:
+		ok = observe()
+	}
 	if !ok {
-		t.Fatalf("missing or ambiguous %s control-side witness", arg)
+		t.Fatalf("missing or ambiguous %s control-side witness (%d received bytes)", arg, seen)
 	}
 	return v
 }
@@ -526,7 +541,7 @@ func installProbeValue(out, arg string) (string, bool) {
 	var shape string
 	switch arg {
 	case "control-start":
-		shape = `[0-9]{1,20}`
+		shape = `[0-9]{1,20}-[0-9]{1,20}`
 	case "runner":
 		shape = `[0-9]+\.[0-9]+\.[0-9]+\|[A-Za-z2-7]{20,64}`
 	case "account", "ports", "uninstall-links", "uninstall-unlink":
@@ -551,7 +566,7 @@ func (f *installLab) stability(ctx context.Context, t *testing.T) [5]string {
 		t.Fatal("runner instance witness failed")
 	}
 	proc := f.probe(ctx, t, "control-start")
-	if _, err := strconv.ParseUint(proc, 10, 64); err != nil {
+	if !regexp.MustCompile(`^[0-9]{1,20}-[0-9]{1,20}$`).MatchString(proc) {
 		t.Fatal("control PID start time unavailable")
 	}
 	handoff := f.exactFile(ctx, t, dataRoot+"/state/routeros.json")

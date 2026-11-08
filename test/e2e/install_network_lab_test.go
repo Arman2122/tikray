@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net/netip"
 	"os/exec"
@@ -212,15 +213,45 @@ func hasIPv4Answer(b []byte) bool {
 	return false
 }
 
-func (f *installLab) checkWatchdog(ctx context.Context, t *testing.T) {
+func (f *installLab) watchdogTicker(ctx context.Context, t *testing.T) func() {
 	t.Helper()
-	tick := func() {
+	owner := f.ownerSession(ctx, t)
+	t.Cleanup(func() { owner.Close() })
+	receiptName := fmt.Sprintf("m3-lab-tick-%d", time.Now().UnixNano())
+	if _, err := owner.CommandAt(ctx, owner.Generation(), []string{"/system/script/add", "=name=" + receiptName, "=comment=lab:tick/0", "=policy=read", "=source="}); err != nil {
+		t.Fatal("could not create fixture tick receipt")
+	}
+	rec, err := owner.CommandAt(ctx, owner.Generation(), []string{"/system/script/print", "?name=" + receiptName, "?comment=lab:tick/0", "=.proplist=.id"})
+	if err != nil || len(rec) != 1 || !regexp.MustCompile(`^\*[0-9a-fA-F]+$`).MatchString(rec[0][".id"]) {
+		t.Fatal("fixture tick receipt unavailable")
+	}
+	rid := rec[0][".id"]
+	t.Cleanup(func() {
+		clean, cancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
+		defer cancel()
+		if _, err := owner.CommandAt(clean, owner.Generation(), []string{"/system/script/remove", "=.id=" + rid}); err != nil {
+			t.Error("could not retire fixture tick receipt")
+		}
+	})
+	sequence := 0
+	return func() {
 		t.Helper()
-		wire := f.mustRun(ctx, t, `:onerror why in={ /system/script/run tikray-watchdog; :put "m3-import-ok" } do={ :put ("m3-import-error=" . [:convert [:tostr $why] to=base64]) }`)
-		if _, err := installOutput(wire); err != nil {
-			t.Fatalf("native watchdog tick failed: %v", err)
+		// Running this via a native API call can suppress fetch's as-value
+		// results. Use the owner terminal for the run, then read the distinct
+		// acknowledgement via the independent pinned API session.
+		sequence++
+		tag := fmt.Sprintf("lab:tick/%d/", sequence)
+		_, _ = f.CHR.RunPrivate(ctx, `:onerror why in={ /system/script/run tikray-watchdog; /system/script/set `+rid+` comment="`+tag+`done" } do={ /system/script/set `+rid+` comment="`+tag+`failed" }`)
+		rows, e := owner.CommandAt(ctx, owner.Generation(), []string{"/system/script/print", "?.id=" + rid, "?name=" + receiptName, "=.proplist=comment"})
+		if e != nil || len(rows) != 1 || rows[0]["comment"] != tag+"done" {
+			t.Fatal("no verified completion for this explicit owner watchdog tick")
 		}
 	}
+}
+
+func (f *installLab) checkWatchdog(ctx context.Context, t *testing.T) {
+	t.Helper()
+	tick := f.watchdogTicker(ctx, t)
 	f.mustRun(ctx, t, `/system/scheduler/disable [find name=tikray-watchdog]`)
 	defer func() { f.mustRun(ctx, t, `/system/scheduler/enable [find name=tikray-watchdog]`) }()
 	stop := func(name string) {
@@ -245,7 +276,7 @@ func (f *installLab) checkWatchdog(ctx context.Context, t *testing.T) {
 	ctlStart := func() string {
 		t.Helper()
 		s := f.probe(ctx, t, "control-start")
-		if _, e := strconv.ParseUint(s, 10, 64); e != nil {
+		if !regexp.MustCompile(`^[0-9]{1,20}-[0-9]{1,20}$`).MatchString(s) {
 			t.Fatal("control process start unavailable")
 		}
 		return s

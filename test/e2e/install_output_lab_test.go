@@ -47,8 +47,8 @@ func TestPrivateImportFailureHidesOutput(t *testing.T) {
 }
 
 func TestInstallProbeEvidenceIsFramed(t *testing.T) {
-	const marker = "m3-witness-control-start=35471|end"
-	if v, ok := installProbeValue("terminal notice\r\n"+marker+"\r\nconsole closed", "control-start"); !ok || v != "35471" {
+	const marker = "m3-witness-control-start=35471-0|end"
+	if v, ok := installProbeValue("terminal notice\r\n"+marker+"\r\nconsole closed", "control-start"); !ok || v != "35471-0" {
 		t.Fatal("a framed PID-start sample was lost")
 	}
 	for _, raw := range []string{"35471", marker + marker, "m3-witness-runner=35471|end", "m3-witness-control-start=35471|partial"} {

@@ -4,18 +4,18 @@ package e2e
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Arman2122/tikray/internal/routeros"
 )
 
 const attackRun = dataRoot + "/run/m3-spoof"
@@ -86,15 +86,33 @@ func (f *installLab) launchSpoof(ctx context.Context, t *testing.T, id, controlM
 	f.checkReady(ctx, t)
 }
 
-func (f *installLab) routerHealth(ctx context.Context, scheme, addr, id string) bool {
+func (f *installLab) routerHealth(ctx context.Context, t *testing.T, scheme, addr, id string) bool {
+	t.Helper()
 	// Like the production probe this request contains only public data.
 	options := ""
 	if scheme == "https" {
 		options = "check-certificate=no"
 	}
-	s := fmt.Sprintf(`{ :local matches false; :do { :local r [/tool/fetch url="%s://%s/healthz" src-address=172.30.252.1 %s http-max-redirect-count=0 duration=3s idle-timeout=2s output=user as-value]; :local b [:deserialize from=json options=json.no-string-conversion value=($r->"data")]; :set matches ((($b->"ok")=true) and (($b->"installation_id")="%s")) } on-error={}; :put $matches }`, scheme, addr, options, id)
-	out, e := f.CHR.RunPrivate(ctx, s)
-	return e == nil && strings.TrimSpace(out) == "true"
+	s := fmt.Sprintf(`{ :local matches false; :do { :local r [/tool/fetch url="%s://%s/healthz" src-address=172.30.252.1 %s http-max-redirect-count=0 idle-timeout=2s output=user as-value]; :local b [:deserialize from=json options=json.no-string-conversion value=($r->"data")]; :set matches ((($b->"ok")=true) and (($b->"installation_id")="%s")) } on-error={}; :put ("m3-health:" . $matches . ":end") }`, scheme, addr, options, id)
+	// Both outcomes require a real, completed native request. Repeat only an
+	// unacknowledged observation; the attack observer counts every request.
+	for range 3 {
+		out, e := f.CHR.RunPrivate(ctx, s)
+		if e != nil {
+			continue
+		}
+		if strings.Count(out, "m3-health:") != 1 {
+			continue
+		}
+		if strings.Contains(out, "m3-health:true:end") {
+			return true
+		}
+		if strings.Contains(out, "m3-health:false:end") {
+			return false
+		}
+	}
+	t.Fatal("no complete private transport witness")
+	return false
 }
 
 func (f *installLab) witnessPackets(ctx context.Context, t *testing.T) int {
@@ -112,6 +130,63 @@ func (f *installLab) spoofDirectFlow(ctx context.Context, t *testing.T) {
 	out, e := f.Net.Client(ctx, "curl", "--noproxy", "*", "-fsS", "--max-time", "4", "http://203.0.113.30/whoami").Output()
 	if e != nil || strings.TrimSpace(string(out)) != egressDirect {
 		t.Fatal("unmanaged LAN traffic lost its direct WAN path")
+	}
+}
+
+// Dispatch the installed scheduler itself. A lost SSH acknowledgement must
+// neither hide a missing observation nor cause a second failure sample.
+func (f *installLab) scheduledSpoofTick(ctx context.Context, t *testing.T) func() {
+	t.Helper()
+	owner := f.ownerSession(ctx, t)
+	t.Cleanup(func() { owner.Close() })
+	read := func(path string, query ...string) []routeros.Row {
+		t.Helper()
+		rows, e := owner.CommandAt(ctx, owner.Generation(), append([]string{path + "/print"}, query...))
+		if e != nil {
+			t.Fatal("native scheduled observation unavailable")
+		}
+		return rows
+	}
+	timer := read("/system/scheduler", "?name=tikray-watchdog", "?comment=tikray:watchdog-scheduler", "=.proplist=.id")
+	if len(timer) != 1 {
+		t.Fatal("missing owned scheduler")
+	}
+	timerID := timer[0][".id"]
+	set := func(args ...string) {
+		t.Helper()
+		_, e := owner.CommandAt(ctx, owner.Generation(), append([]string{"/system/scheduler/set", "=.id=" + timerID}, args...))
+		if e != nil {
+			t.Fatal("schedule update rejected")
+		}
+	}
+	set("=disabled=yes", "=interval=10s")
+	count := func() int {
+		t.Helper()
+		rows := read("/system/script", "?name=tikray-watchdog", "?comment=tikray:watchdog-script", "=.proplist=run-count")
+		if len(rows) != 1 {
+			t.Fatal("missing owned watchdog")
+		}
+		n, e := strconv.Atoi(rows[0]["run-count"])
+		if e != nil {
+			t.Fatal("native watchdog count unavailable")
+		}
+		return n
+	}
+	// This fixture ends by removing protection on a disposable VM. Leave the
+	// timer disabled so no later automated repair undoes the positive control.
+	return func() {
+		t.Helper()
+		before := count()
+		set("=disabled=no")
+		_, ran := poll(ctx, 18*time.Second, 150*time.Millisecond, func() bool { return count() > before })
+		set("=disabled=yes")
+		if !ran {
+			t.Fatal("no real scheduled health probe")
+		}
+		_, finished := poll(ctx, 12*time.Second, 150*time.Millisecond, func() bool { return len(read("/system/script/job", "?script=tikray-watchdog", "=.proplist=.id")) == 0 })
+		if !finished || count() != before+1 {
+			t.Fatal("could not isolate one completed scheduled probe")
+		}
 	}
 }
 
@@ -135,31 +210,15 @@ func TestM3WatchdogImpersonation(t *testing.T) {
 		t.Fatal("missing control peer MAC")
 	}
 	f.launchSpoof(ctx, t, id, mac)
-	if !f.routerHealth(ctx, "http", installRunner, id) || !f.routerHealth(ctx, "https", installRunner, id) {
+	if !f.routerHealth(ctx, t, "http", installRunner, id) || !f.routerHealth(ctx, t, "https", installRunner, id) {
 		t.Fatal("attacker failed independent HTTP and HTTPS positive controls")
 	}
-	before, _ := f.spoofObservation(ctx)
-	if before.Witness < 2 {
+	before, present := f.spoofObservation(ctx)
+	if !present || before.Witness < 2 {
 		t.Fatal("attacker did not record the independent router requests")
 	}
 	f.mustRun(ctx, t, `/interface/bridge/filter/add chain=input in-interface=tikray-ctl mac-protocol=ip ip-protocol=tcp src-address=172.30.252.2/32 dst-address=172.30.252.1/32 src-port=443 action=passthrough comment="lab:genuine-health-response"`)
-	tick := func() {
-		t.Helper()
-		out, e := f.CHR.RunPrivate(ctx, `:onerror why in={ /system/script/run tikray-watchdog; :put "tick-ok" } do={ :put ("m3-refused=" . [:convert [:tostr $why] to=base64]) }`)
-		if e == nil && strings.Contains(out, "tick-ok") {
-			return
-		}
-		_, encoded, _ := strings.Cut(out, "m3-refused=")
-		msg, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
-		category := "native refusal"
-		for _, word := range []string{"syntax error", "expected end", "not enough permissions", "invalid internal item", "invalid value", "no such item", "argument", "watchdog state", "ownership", "return", "certificate"} {
-			if strings.Contains(strings.ToLower(string(msg)), word) {
-				category = word
-				break
-			}
-		}
-		t.Fatal("watchdog tick", category, regexp.MustCompile(`line [0-9]+ column [0-9]+`).FindString(string(msg)))
-	}
+	tick := f.scheduledSpoofTick(ctx, t)
 	// With an original installer the working attacker must win, rather than
 	// interpreting an unavailable probe as successful network protection.
 	if f.mustRun(ctx, t, `:put [/interface/bridge/get [find name="tikray"] arp]`) != "reply-only" {
@@ -169,7 +228,7 @@ func TestM3WatchdogImpersonation(t *testing.T) {
 		}
 		f.spoofMode(ctx, t, "clone")
 		_, exposed := poll(ctx, 22*time.Second, 250*time.Millisecond, func() bool {
-			return f.routerHealth(ctx, "https", installControl, id) && f.routerHealth(ctx, "http", installControl, id)
+			return f.routerHealth(ctx, t, "https", installControl, id) && f.routerHealth(ctx, t, "http", installControl, id)
 		})
 		s, _ := f.spoofObservation(ctx)
 		if exposed && s.TLS > 0 && s.HTTP > 0 {
@@ -190,11 +249,11 @@ func TestM3WatchdogImpersonation(t *testing.T) {
 		if f.watchdogRecord(ctx, t).Control.Misses != 0 {
 			t.Fatalf("genuine service failed during %s attack", phase)
 		}
-		if !f.routerHealth(ctx, "https", installControl, id) {
+		if !f.routerHealth(ctx, t, "https", installControl, id) {
 			t.Fatal("router could not reach genuine control")
 		}
-		s, _ = f.spoofObservation(ctx)
-		if s.TLS != 0 || s.HTTP != 0 {
+		s, present = f.spoofObservation(ctx)
+		if !present || s.Phase != phase || s.TLS != 0 || s.HTTP != 0 {
 			t.Fatal("runner received a control-address request while genuine control was up")
 		}
 		f.spoofDirectFlow(ctx, t)
@@ -217,7 +276,7 @@ func TestM3WatchdogImpersonation(t *testing.T) {
 		t.Fatal("could not stop genuine control")
 	}
 	tick()
-	if f.routerHealth(ctx, "https", installControl, id) || f.routerHealth(ctx, "http", installControl, id) || f.watchdogRecord(ctx, t).Control.Misses != 1 {
+	if f.routerHealth(ctx, t, "https", installControl, id) || f.routerHealth(ctx, t, "http", installControl, id) || f.watchdogRecord(ctx, t).Control.Misses != 1 {
 		t.Fatal("a stopped control still had a healthy transport or watchdog state")
 	}
 	after, _ := f.spoofObservation(ctx)
@@ -232,7 +291,7 @@ func TestM3WatchdogImpersonation(t *testing.T) {
 	f.mustRun(ctx, t, `/ip/arp/remove [find interface=tikray and address=172.30.252.2 and !dynamic and comment="tikray:arp-ctl"]`)
 	f.mustRun(ctx, t, `/interface/bridge/host/remove [find bridge=tikray and comment="tikray:fdb-ctl"]`)
 	_, ok := poll(ctx, 20*time.Second, 300*time.Millisecond, func() bool {
-		return f.routerHealth(ctx, "https", installControl, id) && f.routerHealth(ctx, "http", installControl, id)
+		return f.routerHealth(ctx, t, "https", installControl, id) && f.routerHealth(ctx, t, "http", installControl, id)
 	})
 	if !ok {
 		t.Fatal("removing the protections did not expose the attacker; negative proof is inconclusive")

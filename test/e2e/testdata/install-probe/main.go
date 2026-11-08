@@ -69,10 +69,21 @@ func main() {
 			os.Exit(1)
 		}
 		start, err := strconv.ParseUint(fields[19], 10, 64)
-		if err != nil || start == 0 {
+		if err != nil {
 			os.Exit(1)
 		}
-		emit(strconv.FormatUint(start, 10))
+		// A new PID namespace can report its init process at tick zero. Pair
+		// start ticks with the kernel's namespace identity to distinguish
+		// incarnations without assuming a positive namespace-relative time.
+		ns, err := os.Readlink("/proc/1/ns/pid")
+		if err != nil || !strings.HasPrefix(ns, "pid:[") || !strings.HasSuffix(ns, "]") {
+			os.Exit(1)
+		}
+		inode, err := strconv.ParseUint(strings.TrimSuffix(strings.TrimPrefix(ns, "pid:["), "]"), 10, 64)
+		if err != nil || inode == 0 {
+			os.Exit(1)
+		}
+		emit(fmt.Sprintf("%d-%d", inode, start))
 	case "account":
 		c, err := routeros.Dial(ctx, routeros.ConnConfig{Address: in.Address, Username: in.Username, Password: in.Password, Fingerprint: in.Fingerprint})
 		if err != nil {
