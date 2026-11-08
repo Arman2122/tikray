@@ -55,6 +55,11 @@ func t4CertTest(t *testing.T, reuse bool) {
 	if !reuse {
 		cmd("/ip/service/set api-ssl disabled=yes certificate=none address=192.168.88.0/24")
 		cmd("/certificate/remove [find where name=m3-cap-api]")
+		cmd("/certificate/add name=owner-nonserver common-name=owner-nonserver key-size=prime256v1 key-usage=key-cert-sign,digital-signature")
+		cmd("/certificate/sign owner-nonserver")
+		if cmd(`:local c [/certificate/get [find name=owner-nonserver]]; :put ((($c->"private-key") = true) and ([:typeof [:find [:tostr ($c->"key-usage")] "tls-server"]] != "num"))`) != "true" {
+			t.Fatal("negative key-usage witness was not established")
+		}
 	} else {
 		cmd(`/ip/service/set api-ssl disabled=no address=""`)
 		run()

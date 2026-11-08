@@ -14,8 +14,8 @@
         :local canonical [:toarray ""]
         :foreach item in=$1 do={
             :local entry [:tostr $item]
-            :if (([:len $entry] != 0) and ([:find $entry "/"] = nil)) do={
-                :if ([:find $entry ":"] = nil) do={ :set entry ($entry . "/32") } else={ :set entry ($entry . "/128") }
+            :if (([:len $entry] != 0) and ([:typeof [:find $entry "/"]] != "num")) do={
+                :if ([:typeof [:find $entry ":"]] != "num") do={ :set entry ($entry . "/32") } else={ :set entry ($entry . "/128") }
             }
             :if ([:len $entry] != 0) do={ :set ($canonical->$entry) true }
         }
@@ -33,7 +33,7 @@
         :if ([:len $projected] != 1) do={ :error "tikray: cannot verify original api-ssl settings" }
         :local view [:pick $projected 0]
         :local grants ($view->"available-from"); :local usingAlias true
-        :if ([:typeof $grants] = "nothing") do={ :set usingAlias false; :set grants ($view->"address") }
+        :if (([:typeof $grants] = "nothing") or ([:typeof $grants] = "nil")) do={ :set usingAlias false; :set grants ($view->"address") }
         :if (([:typeof ($entire->"address")] != "array") or ([:typeof $grants] != "array")) do={ :error "tikray: cannot verify original api-ssl grant fields" }
         :if (([:tostr ($view->".id")] != [:tostr $serviceId]) or (($entire->"name") != "api-ssl") or ([:tostr ($entire->"port")] != [:tostr ($view->"port")]) or ([:tostr ($entire->"certificate")] != [:tostr ($view->"certificate")]) or ([:tostr ($entire->"disabled")] != [:tostr ($view->"disabled")]) or ([$canonicalize ($entire->"address")] != [$canonicalize $grants])) do={ :error "tikray: cannot verify original api-ssl settings" }
         :if ([:len ($entire->"address")] = 0) do={
@@ -59,7 +59,7 @@
     :local allowed ([:len $oldAddresses] = 0 and !$oldDisabled)
     :foreach prefix in=$oldAddresses do={
         :local s [:tostr $prefix]
-        :if ([:find $s ":"] = nil) do={
+        :if ([:typeof [:find $s ":"]] != "num") do={
             :local n 32; :local pos [:find $s "/"]
             :if ([:typeof $pos] = "num") do={ :set n [:tonum [:pick $s ($pos+1) [:len $s]]]; :set s [:pick $s 0 $pos] }
             :local m (255.255.255.255 << (32-$n))
@@ -78,7 +78,7 @@
         :local id $1
         :if (([:typeof $id] != "id") and ([:len $id] != 1)) do={ :return false }
         :local c [/certificate/get $id]
-        :return ((($c->"private-key") = true) and (($c->"expired") != true) and (($c->"revoked") != true) and ([:find [:tostr ($c->"key-usage")] "tls-server"] != nil) and ([:len ($c->"fingerprint")] = 64))
+        :return ((($c->"private-key") = true) and (($c->"expired") != true) and (($c->"revoked") != true) and ([:typeof [:find [:tostr ($c->"key-usage")] "tls-server"]] = "num") and ([:len ($c->"fingerprint")] = 64))
     }
     :if ([:len $receipts] > 1) do={ :error "tikray: inspect conflicting api-ssl receipts" }
     :if ([:len $receipts] = 1) do={
@@ -90,7 +90,7 @@
         :set baseline [:deserialize from=json value=[:pick $text [:len $token] [:len $text]] options=json.no-string-conversion]
         :if ((($baseline->"version") != 1) or (($baseline->"port") != $port)) do={ :error "tikray: api-ssl receipt no longer matches service" }
         :if ($created) do={ :set cert ($baseline->"name") } else={
-            :if (([:typeof ($baseline->"name")] != "nothing") or ([:typeof ($baseline->"fingerprint")] != "nothing")) do={ :error "tikray: invalid service access grant" }
+            :if ((([:typeof ($baseline->"name")] != "nothing") and ([:typeof ($baseline->"name")] != "nil")) or (([:typeof ($baseline->"fingerprint")] != "nothing") and ([:typeof ($baseline->"fingerprint")] != "nil"))) do={ :error "tikray: invalid service access grant" }
             :set cert $oldCert
             :if (![$suitable [/certificate/find where name=$cert]]) do={
                 :set cert ""
@@ -141,7 +141,10 @@
             :set receipts [/system/script/find where name=$receiptName]
         }
     }
-    :if (!$apply) do={ :return "" }
+    :if (!$apply) do={
+        :if ($incomplete) do={ :return "" }
+        :return [/certificate/get [:pick [/certificate/find where name=$cert] 0] fingerprint]
+    }
     :if ($incomplete) do={
         /certificate/add name=$cert common-name=$cert subject-alt-name=("IP:" . $router) key-size=prime256v1 days-valid=3650 key-usage=key-cert-sign,digital-signature,tls-server
         /certificate/sign $cert
@@ -150,6 +153,11 @@
         :set ($baseline->"fingerprint") [/certificate/get $id fingerprint]
         /system/script/set $receipts comment=($token . [:serialize to=json options=json.no-string-conversion value=$baseline])
     }
+    :local selected [/certificate/find where name=$cert]
+    :if (![$suitable $selected]) do={ :error "tikray: shared_reference_refuses; certificate identity changed" }
+    :local selectedId [:pick $selected 0]
+    :local pin [/certificate/get $selectedId fingerprint]
+    :if (($created and ($pin != ($baseline->"fingerprint"))) or (([:len $4] > 0) and ($pin != $4))) do={ :error "tikray: shared_reference_refuses; certificate identity changed" }
     :if (($oldCert != $cert) or $oldDisabled or ([$allowedList $oldAddresses] != [$allowedList $desired])) do={
         :local fresh [$readService $svc $allowedList]
         :if ((($fresh->"port") != $port) or ([:tostr ($fresh->"certificate")] != $oldCert) or (($fresh->"disabled") != $oldDisabled) or ([$allowedList ($fresh->"address")] != [$allowedList $oldAddresses])) do={ :error "tikray: shared_reference_refuses; api-ssl changed during installation" }
@@ -157,5 +165,7 @@
         :local checked [$readService $svc $allowedList]
         :if (([:tostr ($checked->"certificate")] != $cert) or (($checked->"disabled") = true) or ([$allowedList ($checked->"address")] != [$allowedList $desired])) do={ :error "tikray: shared_reference_refuses; verify api-ssl service grants" }
     }
-    :return [/certificate/get [/certificate/find where name=$cert] fingerprint]
+    :local after [/certificate/find where name=$cert]
+    :if (([:len $after] != 1) or ([:pick $after 0] != $selectedId) or ([/certificate/get $selectedId fingerprint] != $pin)) do={ :error "tikray: shared_reference_refuses; certificate identity changed" }
+    :return $pin
 }

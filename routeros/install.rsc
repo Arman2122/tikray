@@ -128,7 +128,7 @@
     :local logical [:tostr ($actual->"gateway")]
     :if ([:len $ifaceId] != 1) do={ :error "tikray: verify the resolved WAN interface" }
     :if ($logical = $wanIf) do={
-        :if ([:find {"pppoe-out";"pptp-out";"sstp-out";"l2tp-out";"ovpn-out";"gre-tunnel";"ipip-tunnel"} [:tostr [/interface/get $ifaceId type]]] = nil) do={ :error "tikray: ambiguous WAN interface gateway" }
+        :if ([:typeof [:find {"pppoe-out";"pptp-out";"sstp-out";"l2tp-out";"ovpn-out";"gre-tunnel";"ipip-tunnel"} [:tostr [/interface/get $ifaceId type]]]] != "num") do={ :error "tikray: ambiguous WAN interface gateway" }
     } else={
         :if ([:typeof $pct] != "num") do={ :error "tikray: verify the active WAN gateway" }
         :local ip [:toip [:pick $hop 0 $pct]]
@@ -155,7 +155,7 @@
         :local count 0
         :foreach right in=[/system/script/get $emergency policy] do={
             :if ([:pick $right 0 1] != "!") do={
-                :if ([:find {"read";"write";"test"} $right] = nil) do={ :error "tikray: object conflict in emergency script permissions" }
+                :if ([:typeof [:find {"read";"write";"test"} $right]] != "num") do={ :error "tikray: object conflict in emergency script permissions" }
                 :set count ($count+1)
             }
         }
@@ -192,7 +192,7 @@
             :if (($menu = "/ip/firewall/filter") or ($menu = "/ip/firewall/raw") or ($menu = "/ip/firewall/nat") or ($menu = "/ipv6/firewall/filter")) do={
                 # A hidden selector could turn a bridge drop into a false assurance.
                 :foreach k,v in=$got do={
-                    :if (([:typeof ($props->$k)] = "nothing") and ([:find {"comment";".id";"dynamic";"disabled";"invalid";"log";"log-prefix";"bytes";"packets"} $k] = nil) and ([:len [:tostr $v]] > 0)) do={ :error ("tikray: object conflict in firewall selectors at " . $role) }
+                    :if ((([:typeof ($props->$k)] = "nothing") or ([:typeof ($props->$k)] = "nil")) and ([:typeof [:find {"comment";".id";"dynamic";"disabled";"invalid";"log";"log-prefix";"bytes";"packets"} $k]] != "num") and ([:len [:tostr $v]] > 0)) do={ :error ("tikray: object conflict in firewall selectors at " . $role) }
                 }
             }
             :local id [:pick $found 0]
@@ -247,13 +247,13 @@
             :local rel [:pick [/file/get $f name] ([:len $base]+1) [:len [/file/get $f name]]]
             :local ok false
             :if ([/file/get $f type] = "directory") do={
-                :set ok ([:find {"tmp";"images";"containers";"data";"data/state";"data/cores";"data/run";"data/geo";"data/inbox"} $rel] != nil)
+                :set ok ([:typeof [:find {"tmp";"images";"containers";"data";"data/state";"data/cores";"data/run";"data/geo";"data/inbox"} $rel]] = "num")
             } else={
                 :set ok (($rel = ("images/tikray-" . $arch . ".tar")) or ($rel = ("images/tikray-runner-" . $arch . ".tar")) or ($rel = "data/state/index.pub") or ($rel = "data/inbox/index.json") or ($rel = "data/inbox/index.json.sig") or ($rel ~ "^data/inbox/Xray-linux-[A-Za-z0-9_-]+\\.zip(\\.dgst)?\$"))
                 # Unknown incomplete uploads are never imported or removed.
-                :if (([:pick $rel 0 17] = "images/.incoming-") and ([:len $rel] >= 49)) do={
-                    :local tail [:pick $rel 49 [:len $rel]]
-                    :if (([:pick $rel 17 49] ~ "^[a-f0-9]+\$") and ([:find {"-tikray-amd64.tar";"-tikray-arm64.tar";"-tikray-runner-amd64.tar";"-tikray-runner-arm64.tar"} $tail] != nil)) do={ :set ok true }
+                :if (([:pick $rel 0 16] = "images/incoming-") and ([:len $rel] >= 48)) do={
+                    :local tail [:pick $rel 48 [:len $rel]]
+                    :if (([:pick $rel 16 48] ~ "^[a-f0-9]+\$") and ([:typeof [:find {"-tikray-amd64.tar";"-tikray-arm64.tar";"-tikray-runner-amd64.tar";"-tikray-runner-arm64.tar"} $tail]] = "num")) do={ :set ok true }
                 }
             }
             :if (!$ok) do={ :error "tikray: object conflict in data folder; select a new dedicated tikray directory" }
@@ -283,11 +283,11 @@
     }
     :foreach id in=[/container/mounts/find where list="tikray" or list="tikray-runner" or comment~"^tikray:mount-"] do={
         :local c [/container/mounts/get $id comment]
-        :if ([:find {"tikray:mount-tikray-data";"tikray:mount-runner-run";"tikray:mount-runner-cores";"tikray:mount-runner-geo"} $c] = nil) do={ :error "tikray: object conflict in mount list" }
+        :if ([:typeof [:find {"tikray:mount-tikray-data";"tikray:mount-runner-run";"tikray:mount-runner-cores";"tikray:mount-runner-geo"} $c]] != "num") do={ :error "tikray: object conflict in mount list" }
     }
     :foreach id in=[/container/envs/find where list="tikray" or list="tikray-runner" or comment~"^tikray:env-"] do={
         :local tagSeen [/container/envs/get $id comment]
-        :if ([:find {"tikray:env-ctl-data";"tikray:env-runner-data"} $tagSeen] = nil) do={ :error "tikray: object conflict; unexpected container environment" }
+        :if ([:typeof [:find {"tikray:env-ctl-data";"tikray:env-runner-data"} $tagSeen]] != "num") do={ :error "tikray: object conflict; unexpected container environment" }
     }
     # Paths returned by v7 container menus have a leading slash. Match a full
     # path component so an owner's neighbouring folder is never taken as ours.
@@ -314,16 +314,16 @@
         :local p ([:tostr $1] . "/"); :local q ([:tostr $2] . "/")
         :local alias ($3 . "/")
         :if ([:pick $p 0 [:len $alias]] = $alias) do={ :set p ($4 . "/" . [:pick $p [:len $alias] [:len $p]]) }
-        :return (([:pick $p 0 [:len $q]] = $q) or ([:pick $q 0 [:len $p]] = $p) or ([:find $p "//"] != nil) or ([:find ("/" . $p) "/../"] != nil) or ([:find ("/" . $p) "/./"] != nil))
+        :return (([:pick $p 0 [:len $q]] = $q) or ([:pick $q 0 [:len $p]] = $p) or ([:typeof [:find $p "//"]] = "num") or ([:typeof [:find ("/" . $p) "/../"]] = "num") or ([:typeof [:find ("/" . $p) "/./"]] = "num"))
     }
     :local restrictions {"tikray";"tikray-runner"}
     :foreach c in=[/container/find] do={
         :local mounts [/container/get $c mountlists]
-        :local own ([:find {"tikray:tikray";"tikray:runner"} [/container/get $c comment]] != nil)
+        :local own ([:typeof [:find {"tikray:tikray";"tikray:runner"} [/container/get $c comment]]] = "num")
         :if (!$own and [$overlapsPath [$normalized [/container/get $c root-dir]] $base $diskSlot $disk]) do={ :error "tikray: shared_reference_refuses; overlapping container root" }
         :if (!$own) do={
             :foreach envList in=[/container/get $c envlists] do={
-                :if ([:find $restrictions $envList] != nil) do={ :error "tikray: shared_reference_refuses; private environment list is in use" }
+                :if ([:typeof [:find $restrictions $envList]] = "num") do={ :error "tikray: shared_reference_refuses; private environment list is in use" }
             }
         }
         :foreach list in=$mounts do={
@@ -333,13 +333,13 @@
                     :if (([:len $origin] = 0) or [$overlapsPath $origin $base $diskSlot $disk]) do={ :error "tikray: shared_reference_refuses; another container can access private installation files" }
                 }
             }
-            :if (([:find $restrictions $list] != nil) and ([:find {"tikray:tikray";"tikray:runner"} [/container/get $c comment]] = nil)) do={ :error "tikray: shared_reference_refuses; private mount list is in use" }
+            :if (([:typeof [:find $restrictions $list]] = "num") and ([:typeof [:find {"tikray:tikray";"tikray:runner"} [/container/get $c comment]]] != "num")) do={ :error "tikray: shared_reference_refuses; private mount list is in use" }
         }
     }
     :local tags {"tikray:acl-control-runner";"tikray:acl-runner-reply";"tikray:acl-established";"tikray:acl-lan-https";"tikray:acl-dns-udp";"tikray:acl-dns-tcp";"tikray:acl-deny";"tikray:acl-input-dns-udp";"tikray:acl-input-dns-tcp";"tikray:acl-input-reply";"tikray:acl-input-api";"tikray:acl-input-deny"}
     :foreach f in=[/ip/firewall/filter/find where chain="tikray-bridge-fw" or chain="tikray-bridge-in" or jump-target="tikray-bridge-fw" or jump-target="tikray-bridge-in"] do={
         :local ownedTag [/ip/firewall/filter/get $f comment]
-        :if (([:find $tags $ownedTag] = nil) and ($ownedTag != "tikray:acl-hook") and ($ownedTag != "tikray:acl-input-hook")) do={ :error "tikray: shared_reference_refuses; firewall chain is already used" }
+        :if (([:typeof [:find $tags $ownedTag]] != "num") and ($ownedTag != "tikray:acl-hook") and ($ownedTag != "tikray:acl-input-hook")) do={ :error "tikray: shared_reference_refuses; firewall chain is already used" }
     }
     :local oldApiOff ($serviceRow->"disabled")
     :local receipt [/system/script/find where name="tikray-api-receipt" or name="tikray-api-access"]
@@ -397,9 +397,28 @@
         :foreach proto in={"udp";"tcp"} do={
             :set before [$ensure "/ip/firewall/filter" ("tikray:acl-input-dns-" . $proto) $noKeys ({"chain"=$inChain;"action"="accept";"src-address"=$subnet;"dst-address"=$routerIP;"protocol"=$proto;"dst-port"="53"}) $apply $before $requireInstall $lease]
         }
-        :local first [:pick [/ip/firewall/filter/find where chain="forward" and !dynamic] 0]
+        # Bridge admission can accept a translated DNS packet. Preserve
+        # a live transition's drops and the permanent closed egress check.
+        :local first ""
+        :local sawBridge false; :local moveBelowGuard false
+        :local onlyRestricts ([:len [/ip/firewall/filter/find where chain="tikray-egress" and !disabled and action!="drop" and action!="return" and action!="reject"]] = 0)
+        :foreach rowID in=[/ip/firewall/filter/find where chain="forward" and !dynamic] do={
+            :local row [/ip/firewall/filter/get $rowID]
+            :local label [:tostr ($row->"comment")]
+            :if ($label = "tikray:acl-hook") do={ :set sawBridge true } else={
+                :local guard (([:pick $label 0 12] = "tikray:hold:") and ((($row->"action") = "drop") or (($row->"action") = "reject")))
+                :if (($label = "tikray:egress-guard") and (($row->"action") = "jump") and (($row->"jump-target") = "tikray-egress") and $onlyRestricts) do={ :set guard true }
+                :if ($guard) do={
+                    :if ([:len [:tostr $first]] > 0) do={ :error "tikray: wait for closed policy guard order to be repaired" }
+                    :if ($sawBridge) do={ :set moveBelowGuard true }
+                } else={ :if ([:len [:tostr $first]] = 0) do={ :set first $rowID } }
+            }
+        }
+        # End guard order observation.
         :local hook [$ensure "/ip/firewall/filter" "tikray:acl-hook" $noKeys ({"chain"="forward";"action"="jump";"jump-target"=$fwd;"dst-address"=$subnet}) $apply $first $requireInstall $lease]
-        :if ($apply and ([:len [:tostr $first]] > 0) and ($first != $hook) and ([:pick [/ip/firewall/filter/find where chain="forward" and !dynamic] 0] != $hook)) do={ /ip/firewall/filter/move $hook destination=$first }
+        :if ($apply and $moveBelowGuard) do={
+            :if ([:len [:tostr $first]] > 0) do={ /ip/firewall/filter/move $hook destination=$first } else={ /ip/firewall/filter/move $hook }
+        }
         :set first [:pick [/ip/firewall/filter/find where chain="input" and !dynamic and comment!="tikray:acl-input-hook" and comment!="tikray:acl-wan-api"] 0]
         :set hook [$ensure "/ip/firewall/filter" "tikray:acl-input-hook" $noKeys ({"chain"="input";"action"="jump";"jump-target"=$inChain;"in-interface"="tikray"}) $apply $first $requireInstall $lease]
         :if ($oldApiOff) do={
@@ -425,7 +444,7 @@
         }
     }
     $requireInstall $lease
-    :local pin [$tls true $routerIP $ctlIP]
+    :local pin [$tls true $routerIP $ctlIP $checkPin]
     :local scope {"subnet"=$subnet;"lan_list"=$lanList;"lans"=$lans;"wan"={"interface"=$wanIf}}
     :local seed {"version"=1;"address"=($routerIP . ":" . $apiPort);"fingerprint"=$pin;"scope"=$scope;"core"=$core;"offline"=$offline}
     :if ([:len $seedFiles] = 0) do={
