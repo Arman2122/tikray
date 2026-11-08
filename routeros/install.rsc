@@ -140,7 +140,9 @@
         }
         :if ($onlink != 1) do={ :error "tikray: verify the on-link WAN gateway" }
     }
-    :local apiPort [/ip/service/get api-ssl port]
+    :local serviceRow [/ip/service/get [:pick [/ip/service/find where name="api-ssl" and !dynamic] 0]]
+    :local apiPort ($serviceRow->"port")
+    :if (([:typeof $apiPort] != "num") or ($apiPort < 1) or ($apiPort > 65535) or ([:typeof ($serviceRow->"disabled")] != "bool")) do={ :error "tikray: cannot verify api-ssl port or enabled state" }
     :local ctlID
     :local runnerID
     # @TIKRAY_CERTIFICATE@
@@ -148,7 +150,7 @@
     # @TIKRAY_WATCHDOG_PREFLIGHT@
     :local emergency [/system/script/find where name="tikray-emergency-off" or comment="tikray:emergency-off"]
     :if (([:len $emergency] > 1) or (([:len $emergency] = 1) and (([/system/script/get $emergency name] != "tikray-emergency-off") or ([/system/script/get $emergency comment] != "tikray:emergency-off")))) do={ :error "tikray: object conflict in emergency script" }
-    :if ([:len [/system/script/job/find where script="tikray-emergency-off" or script="tikray-watchdog"]] > 0) do={ :error "tikray: installer busy; retry after the local job completes" }
+    :if ([:len [/system/script/job/find where script="tikray-emergency-off"]] > 0) do={ :error "tikray: installer busy; retry after emergency off completes" }
     :if ([:len $emergency] = 1) do={
         :local count 0
         :foreach right in=[/system/script/get $emergency policy] do={
@@ -248,6 +250,11 @@
                 :set ok ([:find {"tmp";"images";"containers";"data";"data/state";"data/cores";"data/run";"data/geo";"data/inbox"} $rel] != nil)
             } else={
                 :set ok (($rel = ("images/tikray-" . $arch . ".tar")) or ($rel = ("images/tikray-runner-" . $arch . ".tar")) or ($rel = "data/state/index.pub") or ($rel = "data/inbox/index.json") or ($rel = "data/inbox/index.json.sig") or ($rel ~ "^data/inbox/Xray-linux-[A-Za-z0-9_-]+\\.zip(\\.dgst)?\$"))
+                # Unknown incomplete uploads are never imported or removed.
+                :if (([:pick $rel 0 17] = "images/.incoming-") and ([:len $rel] >= 49)) do={
+                    :local tail [:pick $rel 49 [:len $rel]]
+                    :if (([:pick $rel 17 49] ~ "^[a-f0-9]+\$") and ([:find {"-tikray-amd64.tar";"-tikray-arm64.tar";"-tikray-runner-amd64.tar";"-tikray-runner-arm64.tar"} $tail] != nil)) do={ :set ok true }
+                }
             }
             :if (!$ok) do={ :error "tikray: object conflict in data folder; select a new dedicated tikray directory" }
         }
@@ -278,7 +285,10 @@
         :local c [/container/mounts/get $id comment]
         :if ([:find {"tikray:mount-tikray-data";"tikray:mount-runner-run";"tikray:mount-runner-cores";"tikray:mount-runner-geo"} $c] = nil) do={ :error "tikray: object conflict in mount list" }
     }
-    :foreach id in=[/container/envs/find where list="tikray" or list="tikray-runner"] do={ :error "tikray: object conflict; unexpected container environment" }
+    :foreach id in=[/container/envs/find where list="tikray" or list="tikray-runner" or comment~"^tikray:env-"] do={
+        :local tagSeen [/container/envs/get $id comment]
+        :if ([:find {"tikray:env-ctl-data";"tikray:env-runner-data"} $tagSeen] = nil) do={ :error "tikray: object conflict; unexpected container environment" }
+    }
     # Paths returned by v7 container menus have a leading slash. Match a full
     # path component so an owner's neighbouring folder is never taken as ours.
     :local normalized do={
@@ -294,24 +304,33 @@
         :if ([:len $ids] > 0) do={
             :if (([:len $ids] != 1) or ([:len [/container/find where name=$componentName and comment=$ownedTag and interface=$iface]] != 1) or ([:len $seedFiles] = 0)) do={ :error "tikray: object conflict at container; inspect the existing installation" }
             :local item [/container/get $ids]
-            :if (([$normalized ($item->"root-dir")] != $root) or ([:tostr ($item->"mountlists")] != $componentName) or ([:len ($item->"envlists")] > 0) or ([:tostr ($item->"dns")] != [:tostr $routerIP]) or ([:len ($item->"entrypoint")] > 0)) do={ :error "tikray: object conflict in container executable, mounts or DNS" }
+            :if (([$normalized ($item->"root-dir")] != $root) or ([:tostr ($item->"mountlists")] != $componentName) or ([:tostr ($item->"envlists")] != $componentName) or ([:tostr ($item->"dns")] != [:tostr $routerIP]) or ([:len ($item->"entrypoint")] > 0)) do={ :error "tikray: object conflict in container executable, mounts or DNS" }
         } else={
             :if ([:len [/file/find where name=$root]] > 0) do={ :error "tikray: object conflict in container root directory" }
         }
     }
+    :local diskSlot [:tostr [/disk/get $volume slot]]
     :local overlapsPath do={
         :local p ([:tostr $1] . "/"); :local q ([:tostr $2] . "/")
-        :return (([:pick $p 0 [:len $q]] = $q) or ([:pick $q 0 [:len $p]] = $p) or ([:find ("/" . $p) "/../"] != nil) or ([:find ("/" . $p) "/./"] != nil))
+        :local alias ($3 . "/")
+        :if ([:pick $p 0 [:len $alias]] = $alias) do={ :set p ($4 . "/" . [:pick $p [:len $alias] [:len $p]]) }
+        :return (([:pick $p 0 [:len $q]] = $q) or ([:pick $q 0 [:len $p]] = $p) or ([:find $p "//"] != nil) or ([:find ("/" . $p) "/../"] != nil) or ([:find ("/" . $p) "/./"] != nil))
     }
     :local restrictions {"tikray";"tikray-runner"}
     :foreach c in=[/container/find] do={
         :local mounts [/container/get $c mountlists]
         :local own ([:find {"tikray:tikray";"tikray:runner"} [/container/get $c comment]] != nil)
-        :if (!$own and [$overlapsPath [$normalized [/container/get $c root-dir]] $base]) do={ :error "tikray: shared_reference_refuses; overlapping container root" }
+        :if (!$own and [$overlapsPath [$normalized [/container/get $c root-dir]] $base $diskSlot $disk]) do={ :error "tikray: shared_reference_refuses; overlapping container root" }
+        :if (!$own) do={
+            :foreach envList in=[/container/get $c envlists] do={
+                :if ([:find $restrictions $envList] != nil) do={ :error "tikray: shared_reference_refuses; private environment list is in use" }
+            }
+        }
         :foreach list in=$mounts do={
             :if (!$own) do={
                 :foreach m in=[/container/mounts/find where list=$list] do={
-                    :if ([$overlapsPath [$normalized [/container/mounts/get $m src]] $base]) do={ :error "tikray: shared_reference_refuses; another container can access private installation files" }
+                    :local origin [$normalized [/container/mounts/get $m src]]
+                    :if (([:len $origin] = 0) or [$overlapsPath $origin $base $diskSlot $disk]) do={ :error "tikray: shared_reference_refuses; another container can access private installation files" }
                 }
             }
             :if (([:find $restrictions $list] != nil) and ([:find {"tikray:tikray";"tikray:runner"} [/container/get $c comment]] = nil)) do={ :error "tikray: shared_reference_refuses; private mount list is in use" }
@@ -322,7 +341,7 @@
         :local ownedTag [/ip/firewall/filter/get $f comment]
         :if (([:find $tags $ownedTag] = nil) and ($ownedTag != "tikray:acl-hook") and ($ownedTag != "tikray:acl-input-hook")) do={ :error "tikray: shared_reference_refuses; firewall chain is already used" }
     }
-    :local oldApiOff [/ip/service/get api-ssl disabled]
+    :local oldApiOff ($serviceRow->"disabled")
     :local receipt [/system/script/find where name="tikray-api-receipt" or name="tikray-api-access"]
     :if ([:len $receipt] > 0) do={
         :local comment [/system/script/get $receipt comment]
@@ -333,13 +352,18 @@
     :onerror installError in={
     :foreach apply in={false;true} do={
         :if ($apply) do={
+            :set lease [$acquireInstall]
+            # The claim prevents a later tick from restarting a container
+            # under the installer. Give an already running tick time to end.
+            :local waitTick 0
+            :while (([:len [/system/script/job/find where script="tikray-watchdog"]] > 0) and ($waitTick < 20)) do={ :delay 1s; :set waitTick ($waitTick+1) }
+            :if (([:len [/system/script/job/find where script="tikray-watchdog" or script="tikray-emergency-off"]] > 0)) do={ :error "tikray: installer busy; retry after the local job completes" }
+            $requireInstall $lease
+            :if (([:tostr [/file/find where name=$seedPath]] != [:tostr $seedFiles]) or ([:tostr [/user/find where name="tikray" or comment="tikray:user"]] != [:tostr $originalUser]) or ([:tostr [/user/group/find where name="tikray" or comment="tikray:group"]] != [:tostr $groupId])) do={ :error "tikray: installation changed during preflight; retry import" }
             $dir $base; $dir ($base . "/images")
             :local archivesVerified false
             # @TIKRAY_ARCHIVES@
             :if (!$archivesVerified) do={ :error "tikray: archive verification required" }
-            :set lease [$acquireInstall]
-            $requireInstall $lease
-            :if (([:tostr [/file/find where name=$seedPath]] != [:tostr $seedFiles]) or ([:tostr [/user/find where name="tikray" or comment="tikray:user"]] != [:tostr $originalUser]) or ([:tostr [/user/group/find where name="tikray" or comment="tikray:group"]] != [:tostr $groupId])) do={ :error "tikray: installation changed during preflight; retry import" }
             $dir ($base . "/containers"); $dir $data
             :foreach part in={"run";"cores";"geo"} do={ $dir ($data . "/" . $part) }
         }
@@ -381,6 +405,10 @@
         :if ($oldApiOff) do={
             :set hook [$ensure "/ip/firewall/filter" "tikray:acl-wan-api" $noKeys ({"chain"="input";"action"="drop";"in-interface-list"=$wanList;"protocol"="tcp";"dst-port"=$apiPort}) $apply $hook $requireInstall $lease]
         }
+        :if ($oldApiOff) do={
+            :set first [:pick [/ipv6/firewall/filter/find where chain="input" and !dynamic and comment!="tikray:acl-wan-api6"] 0]
+            :set hook [$ensure "/ipv6/firewall/filter" "tikray:acl-wan-api6" $noKeys ({"chain"="input";"action"="drop";"in-interface-list"=$wanList;"protocol"="tcp";"dst-port"=$apiPort}) $apply $first $requireInstall $lease]
+        }
         # Inspect the original destination before DNS dstnat can replace it.
         # The routed TUN data path retains the original Internet destination.
         :set first [:pick [/ip/firewall/raw/find where chain="prerouting" and !dynamic] 0]
@@ -388,6 +416,8 @@
         :if ($apply and ([:len [:tostr $first]] > 0) and ($first != $hook) and ([:pick [/ip/firewall/raw/find where chain="prerouting" and !dynamic] 0] != $hook)) do={ /ip/firewall/raw/move $hook destination=$first }
         :set first [:pick [/ipv6/firewall/filter/find where chain="forward" and !dynamic] 0]
         :set hook [$ensure "/ipv6/firewall/filter" "tikray:acl-v6-bridge" $noKeys ({"chain"="forward";"action"="drop";"out-interface"="tikray"}) $apply $first $requireInstall $lease]
+        :set i [$ensure "/container/envs" "tikray:env-ctl-data" $noKeys ({"list"="tikray";"key"="TIKRAY_DATA";"value"="/data"}) $apply "" $requireInstall $lease]
+        :set i [$ensure "/container/envs" "tikray:env-runner-data" $noKeys ({"list"="tikray-runner";"key"="TIKRAY_DATA";"value"="/data"}) $apply "" $requireInstall $lease]
         :set i [$ensure "/container/mounts" "tikray:mount-tikray-data" ({"list"="tikray";"dst"="/data"}) ({"list"="tikray";"dst"="/data";"src"=$data;"mode"="rw"}) $apply "" $requireInstall $lease]
         :foreach part in={"run";"cores";"geo"} do={
             :local mode "ro"; :if ($part = "run") do={ :set mode "rw" }
@@ -410,7 +440,7 @@
             :local archivePath ($base . "/images/" . $componentName . "-" . $arch . ".tar")
             :if ([$verifyStaged $componentName $archivePath] != true) do={ :error "tikray: archive changed before container import" }
             $requireInstall $lease
-            /container/add name=$componentName comment=$ownedTag interface=$iface file=$archivePath root-dir=$root dns=$routerIP mountlists=$componentName start-on-boot=yes restart-policy=on-failure memory-high=$high memory-max=$maxMem logging=no
+            /container/add name=$componentName comment=$ownedTag interface=$iface file=$archivePath root-dir=$root dns=$routerIP mountlists=$componentName envlists=$componentName start-on-boot=yes restart-policy=on-failure memory-high=$high memory-max=$maxMem logging=no
             :local appeared 0
             :set ids [/container/find where name=$componentName and comment=$ownedTag]
             :while (([:len $ids] = 0) and ($appeared < 120)) do={

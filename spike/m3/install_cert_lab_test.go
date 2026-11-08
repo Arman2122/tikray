@@ -3,11 +3,17 @@
 package m3
 
 import (
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Arman2122/tikray/test/lab"
 )
 
 func t4CertTest(t *testing.T, reuse bool) {
@@ -29,16 +35,60 @@ func t4CertTest(t *testing.T, reuse bool) {
 		}
 		return strings.TrimSpace(o)
 	}
+	run := func() {
+		t.Helper()
+		out := cmd(`:onerror e in={ /import file-name=cert-spike.rsc } do={ :put ("diag=" . [:convert [:tostr $e] to=base64]) }`)
+		if i := strings.Index(out, "diag="); i >= 0 {
+			d, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(out[i+5:]))
+			for _, category := range []string{"cannot verify original api-ssl settings", "cannot prove unrestricted api-ssl baseline", "cannot verify api-ssl port or enabled state", "shared_reference_refuses", "inspect certificate signing", "syntax error"} {
+				if strings.Contains(string(d), category) {
+					t.Fatalf("certificate operation rejected (%s)", category)
+				}
+			}
+			t.Fatal("certificate operation rejected")
+		}
+		if !strings.Contains(out, "OK") {
+			t.Fatal("missing positive certificate verification")
+		}
+	}
+	var verifyOwner func()
 	if !reuse {
 		cmd("/ip/service/set api-ssl disabled=yes certificate=none address=192.168.88.0/24")
 		cmd("/certificate/remove [find where name=m3-cap-api]")
-	}
-	run := func() {
-		t.Helper()
-		if out := cmd("/import file-name=cert-spike.rsc"); !strings.Contains(out, "OK") {
-			t.Fatal("certificate setup or reimport failed")
+	} else {
+		cmd(`/ip/service/set api-ssl disabled=no address=""`)
+		run()
+		if cmd(`:local s [/ip/service/get [:pick [/ip/service/find where name="api-ssl" and !dynamic] 0]]; :put [:len ($s->"address")]`) != "0" || cmd(`:put [:len [/system/script/find where name="tikray-api-access" or name="tikray-api-receipt"]]`) != "0" {
+			t.Fatal("unrestricted owner service was narrowed or claimed")
 		}
+		// A fresh, pinned login from a different source proves the original
+		// management grant still works; a previously open socket cannot.
+		const ownerIP = "172.31.255.4"
+		if exec.CommandContext(r.ctx, "ip", "addr", "add", ownerIP+"/32", "dev", "tklab-lan").Run() != nil {
+			t.Fatal("could not attach independent owner endpoint")
+		}
+		cmd("/ip/service/set api-ssl address=172.31.255.4/32,2001:db8:11::/64")
+		block, _ := pem.Decode([]byte(cmd(":put [/file/get m3-cap-public.crt contents]")))
+		if block == nil {
+			t.Fatal("public certificate unavailable")
+		}
+		leaf, e := x509.ParseCertificate(block.Bytes)
+		pw, read := os.ReadFile(filepath.Join(lab.CacheDir(), "ready", r.version, "x86_64", "password"))
+		if e != nil || read != nil {
+			t.Fatal("owner endpoint credentials unavailable")
+		}
+		verifyOwner = func() {
+			t.Helper()
+			cl := dialPinnedFrom(t, r, "admin", string(pw), leaf, ownerIP)
+			rows, e := cl.RunContext(r.ctx, "/system/resource/print", "=.proplist=version")
+			if e != nil || len(rows.Re) != 1 {
+				t.Fatal("fresh permitted owner login failed")
+			}
+			_ = cl.Close()
+		}
+		verifyOwner()
 	}
+
 	run()
 	receipt := cmd(`:put [/system/script/find where name=tikray-api-receipt]`)
 	if (receipt != "") == reuse {
@@ -54,6 +104,19 @@ func t4CertTest(t *testing.T, reuse bool) {
 		t.Fatal("repeat import replaced certificate or receipt")
 	}
 	if reuse {
+		verifyOwner()
+		o := cmd(`:local r [/ip/service/get [:pick [/ip/service/find where name="api-ssl" and !dynamic] 0]]; :put [:tostr ($r->"address")]`)
+		set := strings.FieldsFunc(o, func(c rune) bool { return c == ',' || c == ';' })
+		got := map[string]bool{}
+		for _, s := range set {
+			got[strings.TrimSuffix(s, "/32")] = true
+		}
+		if len(got) != 3 || !got["172.31.255.4"] || !got["172.31.255.2"] || !got["2001:db8:11::/64"] {
+			t.Fatal("enabled owner's original grant set was changed")
+		}
+		if cmd(`:put [:len [/system/script/find where name="tikray-api-access" and source=""]]`) != "1" {
+			t.Fatal("missing isolated service access grant")
+		}
 		return
 	}
 	details := cmd(`:put [/system/script/get [find where name=tikray-api-receipt] comment]`)

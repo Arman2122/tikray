@@ -6,9 +6,7 @@
     :local control $3
     :local svc [/ip/service/find where name="api-ssl" and !dynamic]
     :if ([:len $svc] != 1) do={ :error "tikray: inspect api-ssl service before installation" }
-    :local oldCert [:tostr [/ip/service/get $svc certificate]]
-    :local oldDisabled [/ip/service/get $svc disabled]
-    :local oldAddresses [/ip/service/get $svc address]
+    :set svc [:pick $svc 0]
     # Service readback can spell a single-host prefix with or without its
     # suffix. RouterOS can reorder entries. Keep original spelling for teardown
     # and compare the full set of grants, including IPv6, on retries.
@@ -23,14 +21,40 @@
         }
         :return [:tostr $canonical]
     }
-    :local port [/ip/service/get $svc port]
+    # The field-level getter can give an empty address while the same native
+    # service row contains live grants. Demand agreement with an independent
+    # filtered print on the same static row before using any access setting.
+    :local readService do={
+        :local serviceId $1; :local canonicalize $2
+        :local entire [/ip/service/get $serviceId]
+        :if (([:typeof ($entire->"port")] != "num") or (($entire->"port") < 1) or (($entire->"port") > 65535) or ([:typeof ($entire->"disabled")] != "bool")) do={ :error "tikray: cannot verify api-ssl port or enabled state" }
+        # CLI print calls the same field available-from. get calls it address.
+        :local projected [/ip/service/print as-value where name="api-ssl" and !dynamic]
+        :if ([:len $projected] != 1) do={ :error "tikray: cannot verify original api-ssl settings" }
+        :local view [:pick $projected 0]
+        :local grants ($view->"available-from"); :local usingAlias true
+        :if ([:typeof $grants] = "nothing") do={ :set usingAlias false; :set grants ($view->"address") }
+        :if (([:typeof ($entire->"address")] != "array") or ([:typeof $grants] != "array")) do={ :error "tikray: cannot verify original api-ssl grant fields" }
+        :if (([:tostr ($view->".id")] != [:tostr $serviceId]) or (($entire->"name") != "api-ssl") or ([:tostr ($entire->"port")] != [:tostr ($view->"port")]) or ([:tostr ($entire->"certificate")] != [:tostr ($view->"certificate")]) or ([:tostr ($entire->"disabled")] != [:tostr ($view->"disabled")]) or ([$canonicalize ($entire->"address")] != [$canonicalize $grants])) do={ :error "tikray: cannot verify original api-ssl settings" }
+        :if ([:len ($entire->"address")] = 0) do={
+            :local empty
+            :if ($usingAlias) do={ :set empty [/ip/service/find where name="api-ssl" and !dynamic and available-from=""] } else={ :set empty [/ip/service/find where name="api-ssl" and !dynamic and address=""] }
+            :if (([:len $empty] != 1) or ([:tostr [:pick $empty 0]] != [:tostr $serviceId])) do={ :error "tikray: cannot prove unrestricted api-ssl baseline" }
+        }
+        :return $entire
+    }
+    :local original [$readService $svc $allowedList]
+    :local oldCert [:tostr ($original->"certificate")]
+    :local oldDisabled ($original->"disabled")
+    :local oldAddresses ($original->"address")
+    :local port ($original->"port")
     :local alias "tikray-api"
     :local proofName "tikray-api-receipt"
     :local accessName "tikray-api-access"
     :local proofTag "tikray:api-receipt "
     :local accessTag "tikray:api-access "
     :local receipts [/system/script/find where name=$proofName or name=$accessName or comment~"^tikray:api-(receipt|access) "]
-    :local baseline {"version"=1;"disabled"=$oldDisabled;"certificate"=$oldCert;"address"=[:tostr $oldAddresses];"port"=$port}
+    :local baseline {"version"=1;"disabled"=$oldDisabled;"certificate"=$oldCert;"address"=[:tostr $oldAddresses];"original-addresses"=$oldAddresses;"port"=$port}
     :local desired $oldAddresses
     :local allowed ([:len $oldAddresses] = 0 and !$oldDisabled)
     :foreach prefix in=$oldAddresses do={
@@ -81,7 +105,7 @@
         }
         :set desired ($baseline->"addresses")
         :local isOriginal (($oldCert = ($baseline->"certificate")) and ($oldDisabled = ($baseline->"disabled")) and ([:tostr $oldAddresses] = ($baseline->"address")))
-        :local isInstalled (($oldCert = $cert) and (!$oldDisabled) and ([$allowedList $oldAddresses] = [$allowedList $desired]))
+        :local isInstalled (($oldCert = $cert) and (!$oldDisabled) and (([:tostr $oldAddresses] = ($baseline->"grant")) or ([$allowedList $oldAddresses] = [$allowedList $desired])))
         :if (!$isOriginal and !$isInstalled) do={ :error "tikray: shared_reference_refuses; api-ssl was changed by its owner" }
         :if ($created) do={
             :if ($cert != $alias) do={ :error "tikray: invalid certificate receipt" }
@@ -127,7 +151,11 @@
         /system/script/set $receipts comment=($token . [:serialize to=json options=json.no-string-conversion value=$baseline])
     }
     :if (($oldCert != $cert) or $oldDisabled or ([$allowedList $oldAddresses] != [$allowedList $desired])) do={
+        :local fresh [$readService $svc $allowedList]
+        :if ((($fresh->"port") != $port) or ([:tostr ($fresh->"certificate")] != $oldCert) or (($fresh->"disabled") != $oldDisabled) or ([$allowedList ($fresh->"address")] != [$allowedList $oldAddresses])) do={ :error "tikray: shared_reference_refuses; api-ssl changed during installation" }
         /ip/service/set $svc certificate=$cert address=$desired disabled=no
+        :local checked [$readService $svc $allowedList]
+        :if (([:tostr ($checked->"certificate")] != $cert) or (($checked->"disabled") = true) or ([$allowedList ($checked->"address")] != [$allowedList $desired])) do={ :error "tikray: shared_reference_refuses; verify api-ssl service grants" }
     }
     :return [/certificate/get [/certificate/find where name=$cert] fingerprint]
 }

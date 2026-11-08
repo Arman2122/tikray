@@ -1,5 +1,7 @@
 # Installing on RouterOS
 
+M3a is undergoing CHR acceptance testing. The packager currently refuses to produce a deployment artifact while the watchdog's HTTPS authentication decision is pending. The [M3 ledger](../docs/handoff/m3/ledger.md) records the measured results.
+
 Build an installer for the router's installed version and CPU from an authenticated image pair. The packager uses `cosign verify-blob` with an independently obtained publisher public key. Supply the Docker-save images and detached signatures in one directory, for example `tikray-arm64.tar`, `tikray-arm64.tar.sig`, `tikray-runner-arm64.tar` and `tikray-runner-arm64.tar.sig`.
 
 ```sh
@@ -15,7 +17,7 @@ For a one-paste deployment, package with `-release-base https://<your-release-ho
 { :local download [/tool/fetch url="https://<your-release-host>/<release-directory>/install.rsc" check-certificate=yes http-max-redirect-count=0 dst-path=tikray-install.rsc as-value]; :if (($download->"status") != "finished") do={ :error "Installer download failed" }; /import file-name=tikray-install.rsc }
 ```
 
-For an offline install, upload the generated installer and the two matching archives with Winbox or WebFig. The default archive location is `disk1/tikray/images/`. For the xray core, choose an exact version, stage its architecture-specific upstream zip with the signed `index.json` and `index.json.sig` in `disk1/tikray/data/inbox/`, and put its independently trusted Ed25519 index public key at `disk1/tikray/data/state/index.pub`. Use the index public key format required by `tikray core update`. The xray index key and the image publisher key serve separate purposes.
+For an offline install, upload the generated installer and the two matching archives with Winbox or WebFig. The default archive location is `disk1/tikray/images/`. For the xray core, choose an exact version, stage its architecture-specific upstream zip with the signed `index.json` and `index.json.sig` in `disk1/tikray/data/inbox/`, and put its independently trusted ECDSA P-256 (PKIX PEM) index public key at `disk1/tikray/data/state/index.pub`. Use the index public key format required by `tikray core update`. The xray index key and the image publisher key serve separate purposes.
 
 ```routeros
 :global tikrayCore "26.10.31"; :global tikrayOffline true; /import file-name=tikray-install.rsc

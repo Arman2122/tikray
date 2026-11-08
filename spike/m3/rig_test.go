@@ -180,6 +180,11 @@ func (r *rig) audit(t *testing.T, password, dir string) {
 
 func dialPinned(t *testing.T, r *rig, user, pw string, cert *x509.Certificate) *ros.Client {
 	t.Helper()
+	return dialPinnedFrom(t, r, user, pw, cert, "172.31.255.2")
+}
+
+func dialPinnedFrom(t *testing.T, r *rig, user, pw string, cert *x509.Certificate, source string) *ros.Client {
+	t.Helper()
 	root := x509.NewCertPool()
 	root.AddCert(cert)
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: root, ServerName: "172.31.255.1", VerifyConnection: func(s tls.ConnectionState) error {
@@ -188,7 +193,7 @@ func dialPinned(t *testing.T, r *rig, user, pw string, cert *x509.Certificate) *
 		}
 		return nil
 	}}
-	d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: 12 * time.Second, LocalAddr: &net.TCPAddr{IP: net.ParseIP("172.31.255.2")}}, Config: tlsCfg}
+	d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: 12 * time.Second, LocalAddr: &net.TCPAddr{IP: net.ParseIP(source)}}, Config: tlsCfg}
 	ctx, cancel := context.WithTimeout(r.ctx, 20*time.Second)
 	defer cancel()
 	conn, err := d.DialContext(ctx, "tcp", "172.31.255.1:8729")

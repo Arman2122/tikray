@@ -31,7 +31,7 @@
     }
     :local own [/system/script/find where name=$lockName and comment=$claimText and source=""]
     :if ([:len $own] != 1) do={ /system/script/job/remove $keeper; :error "tikray: install lock changed" }
-    :return {"id"=[:pick $own 0];"comment"=$claimText;"job"=$keeper;"started"=$started}
+    :return {"id"=[:pick $own 0];"comment"=$claimText;"job"=$keeper;"started"=$started;"nonce"=($meta->"nonce")}
 }
 :local requireInstall do={
     :local lease $1
