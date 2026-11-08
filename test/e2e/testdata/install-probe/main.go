@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Arman2122/tikray/internal/routeros"
@@ -27,7 +28,33 @@ func main() {
 		os.Exit(1)
 	}
 	n := store.Network{Subnet: in.Scope.Subnet}
+	// RouterOS can deliver asynchronous console text on the same SSH
+	// response. Only a full receipt from this process is our observation.
+	emit := func(v string) { fmt.Printf("m3-witness-%s=%s|end\n", os.Args[1], v) }
 	switch os.Args[1] {
+	case "uninstall-links", "uninstall-unlink":
+		// Only these two fixture-owned links can be created or removed.
+		// The host verifies the destination's inode from a separate mount.
+		for name, target := range map[string]string{"/data/uninstall-link": "../../tikray-owner-sibling", "/data/uninstall-dir-link": "../../tikray-external-probe"} {
+			if os.Args[1] == "uninstall-links" {
+				if err := os.Symlink(target, name); err != nil && !errors.Is(err, os.ErrExist) {
+					os.Exit(1)
+				}
+			}
+			st, err := os.Lstat(name)
+			if errors.Is(err, os.ErrNotExist) && os.Args[1] == "uninstall-unlink" {
+				continue
+			}
+			actual, e := os.Readlink(name)
+			if err != nil || st.Mode()&os.ModeSymlink == 0 || e != nil || actual != target {
+				os.Exit(1)
+			}
+			if os.Args[1] == "uninstall-unlink" && os.Remove(name) != nil {
+				os.Exit(1)
+			}
+		}
+		syscall.Sync()
+		emit("verified")
 	case "control-start":
 		proc, err := os.ReadFile("/proc/1/stat")
 		if err != nil {
@@ -45,7 +72,7 @@ func main() {
 		if err != nil || start == 0 {
 			os.Exit(1)
 		}
-		fmt.Println(start)
+		emit(strconv.FormatUint(start, 10))
 	case "account":
 		c, err := routeros.Dial(ctx, routeros.ConnConfig{Address: in.Address, Username: in.Username, Password: in.Password, Fingerprint: in.Fingerprint})
 		if err != nil {
@@ -62,7 +89,7 @@ func main() {
 		if _, err := c.CommandAt(ctx, g, []string{"/user/group/add", "=name=m3-privilege-witness", "=policy=read", "=comment=lab:forbidden"}); !errors.Is(err, routeros.ErrRejected) {
 			os.Exit(1)
 		}
-		fmt.Println("verified")
+		emit("verified")
 	case "runner":
 		token, err := os.ReadFile("/data/run/runner.token")
 		if err != nil {
@@ -73,7 +100,7 @@ func main() {
 		if err != nil || s.Active == nil || s.Candidate != nil || !s.GatewayUp || s.XrayInstance == "" || strings.ContainsAny(s.XrayInstance, "|\n\r ") {
 			os.Exit(1)
 		}
-		fmt.Printf("%s|%s\n", s.Active.Core, s.XrayInstance)
+		emit(s.Active.Core + "|" + s.XrayInstance)
 	case "ports":
 		for _, port := range []string{"53", "1080", "8080", "10085"} {
 			c, err := net.DialTimeout("tcp", net.JoinHostPort(n.Runner().String(), port), 2*time.Second)
@@ -82,7 +109,7 @@ func main() {
 			}
 			c.Close()
 		}
-		fmt.Println("verified")
+		emit("verified")
 	default:
 		os.Exit(1)
 	}

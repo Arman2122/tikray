@@ -56,6 +56,21 @@
     :local proofTag "tikray:api-receipt "
     :local accessTag "tikray:api-access "
     :local receipts [/system/script/find where name=$proofName or name=$accessName or comment~"^tikray:api-(receipt|access) "]
+    # An absent certificate receipt is meaningful only when a separate,
+    # inert mode record positively identifies a no-change installation.
+    :local modeName "tikray-api-mode"
+    :local modeTag "tikray:api-mode "
+    :local modes [/system/script/find where name=$modeName or comment~"^tikray:api-mode "]
+    :local expected ""
+    :if ([:len $modes] > 0) do={
+        :if (([:len $modes] != 1) or ([/system/script/get $modes name] != $modeName) or ([:len [/system/script/get $modes source]] != 0) or [/system/script/get $modes dont-require-permissions]) do={ :error "tikray: shared_reference_refuses; invalid API service mode proof" }
+        :local rights 0
+        :foreach r in=[/system/script/get $modes policy] do={ :if ([:pick $r 0 1]!="!") do={ :if ($r!="read") do={ :error "tikray: shared_reference_refuses; API service mode permissions" }; :set rights ($rights+1) } }
+        :local m [/system/script/get $modes comment]
+        :set expected [:pick $m [:len $modeTag] [:len $m]]
+        :if (($rights!=1) or ($m!=($modeTag . $expected)) or ([:typeof [:find {"created";"access";"unchanged"} $expected]] != "num")) do={ :error "tikray: shared_reference_refuses; invalid API service mode" }
+        :if ((($expected="unchanged") and ([:len $receipts]!=0)) or (($expected!="unchanged") and ([:len $receipts]!=1))) do={ :error "tikray: shared_reference_refuses; required certificate receipt missing or unexpected" }
+    } else={ :if ($5 = true) do={ :error "tikray: shared_reference_refuses; API service mode proof missing" } }
     :local baseline {"version"=1;"disabled"=$oldDisabled;"certificate"=$oldCert;"address"=[:tostr $oldAddresses];"original-addresses"=$oldAddresses;"port"=$port}
     :local desired $oldAddresses
     :local allowed ([:len $oldAddresses] = 0 and !$oldDisabled)
@@ -73,6 +88,7 @@
     :set ($baseline->"addresses") $desired
     :local cert $oldCert
     :local created false
+    :local mode "unchanged"
     :local incomplete false
     :local token $proofTag
     :local receiptName $proofName
@@ -86,6 +102,8 @@
     :if ([:len $receipts] = 1) do={
         :local id [:pick $receipts 0]
         :set created ([/system/script/get $id name] = $proofName)
+        :set mode "access"; :if ($created) do={ :set mode "created" }
+        :if (($expected!="") and ($expected!=$mode)) do={ :error "tikray: shared_reference_refuses; wrong service receipt class" }
         :if (!$created) do={ :set token $accessTag; :set receiptName $accessName }
         :local text [/system/script/get $id comment]
         :if (([/system/script/get $id name] != $receiptName) or ([:pick $text 0 [:len $token]] != $token) or ([:len [/system/script/get $id source]] > 0)) do={ :error "tikray: conflicting api-ssl receipt; inspect ownership" }
@@ -138,7 +156,9 @@
         :if ($created) do={ :set ($baseline->"name") $cert; :set ($baseline->"fingerprint") "" } else={
             :set receiptName $accessName; :set token $accessTag
         }
-        :if ($apply and ($created or $oldDisabled or ($cert != $oldCert) or ([:tostr $oldAddresses] != [:tostr $desired]))) do={
+        :if ($created) do={ :set mode "created" } else={ :if ($oldDisabled or ($cert != $oldCert) or ([:tostr $oldAddresses] != [:tostr $desired])) do={ :set mode "access" } }
+        :if (($expected!="") and ($expected!=$mode)) do={ :error "tikray: shared_reference_refuses; service changed from its recorded mode" }
+        :if ($apply and ($mode!="unchanged")) do={
             /system/script/add name=$receiptName source="" policy=read comment=($token . [:serialize to=json options=json.no-string-conversion value=$baseline])
             :set receipts [/system/script/find where name=$receiptName]
         }
@@ -146,6 +166,10 @@
     :if (!$apply) do={
         :if ($incomplete) do={ :return "" }
         :return [/certificate/get [:pick [/certificate/find where name=$cert] 0] fingerprint]
+    }
+    :if ([:len $modes]=0) do={
+        /system/script/add name=$modeName source="" policy=read dont-require-permissions=no comment=($modeTag . $mode)
+        :if ([:len [/system/script/find where name=$modeName and comment=($modeTag . $mode) and source=""]] != 1) do={ :error "tikray: cannot confirm API service mode" }
     }
     :if ($incomplete) do={
         /certificate/add name=$cert common-name=$cert subject-alt-name=("IP:" . $router) key-size=prime256v1 days-valid=3650 key-usage=key-cert-sign,digital-signature,tls-server

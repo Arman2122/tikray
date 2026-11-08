@@ -67,6 +67,53 @@ The `tikray-watchdog` scheduler runs every minute. It fetches `/healthz` over tr
 
 The tagged, non-executable `tikray-watchdog-state` script holds the public installation ID, failure counts and restart times. Healthy steady checks cause no state writes. Restart decisions require an exact container name, interface and ownership tag. The watchdog waits for the first committed core and yields during an active installer, emergency shutdown or uninstall.
 
+## Removing an installation
+
+Generate the self-contained uninstaller from the reviewed sources. It can be
+generated separately from the signed image pair.
+
+```sh
+go run ./cmd/tikray-installer -uninstall-out uninstall.rsc
+```
+
+Upload the generated file and import it from the owner's RouterOS terminal.
+Choose **keep** to retain the configured servers, local admin, TLS identity
+and installed core slots.
+
+```routeros
+:global tikrayUninstallData "keep"; /import file-name=uninstall.rsc
+```
+
+To delete the validated installation's `/data` instead, explicitly select
+`purge` before import. An empty or unattended choice defaults to **keep**.
+Both choices remove the owned containers, account, routes, firewall rules,
+ARP/FDB bindings and private bridge. Restoring API-SSL uses the installer
+receipt and verifies the original grants. A replacement certificate, owner
+dependency or mismatched data identity stops teardown for inspection.
+
+The inert `tikray-api-mode` record identifies whether the installer created
+a certificate, added a service grant, or left API-SSL unchanged. The
+uninstaller checks this independently of the receipt. If a changed service
+has lost its receipt, restore the original proof before retrying. Neither
+installation nor removal infers an unchanged service from a missing record.
+
+A repeated import resumes the data choice in the pending uninstall marker.
+A clean second import reports that the installation has already been
+removed. Image archives outside `/data` remain available for reuse.
+If the original data identity has already gone during an interrupted purge,
+the uninstaller preserves unverified empty directories at that path.
+
+A successful keep prints the previous **public installation ID**. To
+reinstall on that retained volume, select the same disk, directory and
+subnet and set the printed ID before importing the packaged installer.
+
+```routeros
+:global tikrayReuseID "<previous-public-installation-id>"; /import file-name=install.rsc
+```
+
+The new installation receives fresh RouterOS credentials and an installation
+ID. The kept user state and control-plane TLS identity remain on the volume.
+
 ## Control container handoff
 
 On a managed installation the daemon generates a public installation ID once under its service lock. The private intent in `state/install.request` retains it and `state/install.id` exposes the same value to the owner installer. Reimport checks it against the ID in the watchdog receipt. Keep the original control volume together when restoring a backup.

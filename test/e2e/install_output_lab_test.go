@@ -45,3 +45,27 @@ func TestPrivateImportFailureHidesOutput(t *testing.T) {
 		t.Fatal("success acknowledgement lost terminal output")
 	}
 }
+
+func TestInstallProbeEvidenceIsFramed(t *testing.T) {
+	const marker = "m3-witness-control-start=35471|end"
+	if v, ok := installProbeValue("terminal notice\r\n"+marker+"\r\nconsole closed", "control-start"); !ok || v != "35471" {
+		t.Fatal("a framed PID-start sample was lost")
+	}
+	for _, raw := range []string{"35471", marker + marker, "m3-witness-runner=35471|end", "m3-witness-control-start=35471|partial"} {
+		if _, ok := installProbeValue(raw, "control-start"); ok {
+			t.Fatal("incomplete or ambiguous control-start sample accepted")
+		}
+	}
+}
+
+func TestPrivateInstallerFileRequiresWholeFrame(t *testing.T) {
+	const good = "m3-file|4|YQ0KYg==|end-file"
+	if v, ok := installFileValue("console notice\n" + good + "\nup"); !ok || string(v) != "a\r\nb" {
+		t.Fatal("exact private bytes lost")
+	}
+	for _, s := range []string{good + good, "m3-file|3|YQ0KYg==|end-file", "m3-file|4|YQ0K|end-file", "YQ0KYg=="} {
+		if _, ok := installFileValue(s); ok {
+			t.Fatal("ambiguous, truncated or unframed file accepted")
+		}
+	}
+}

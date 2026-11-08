@@ -213,12 +213,6 @@ func TestM3Install(t *testing.T) {
 		if f.probe(ctx, st, "account") != "verified" {
 			st.Fatal("restricted API permission witness failed")
 		}
-		if f.containerTmpDir(ctx, st) != f.ownerTmpDir {
-			st.Fatal("installer changed the owner's temporary directory")
-		}
-		if f.mustRun(ctx, st, `:put [:len [/system/scheduler/find where name=tikray-watchdog and interval=1m and disabled=no]]`) != "1" {
-			st.Fatal("missing minute watchdog")
-		}
 		note("Private API-SSL login from the control container succeeded and a privileged write failed in that session. The initial signed core runs with direct policy.")
 	})
 	check("bridge_acl", func(st *testing.T, note func(string, ...any)) {
@@ -244,9 +238,10 @@ func TestM3Install(t *testing.T) {
 		if f.checkHealthIdentity(ctx, st) != identity {
 			st.Fatal("repeat import changed the installation ID")
 		}
-		if strings.Contains(out, code) || f.stability(ctx, st) != prev {
-			st.Fatal("repeat import exposed setup material or changed healthy state, object IDs or running processes")
+		if strings.Contains(out, code) {
+			st.Fatal("repeat import exposed setup material")
 		}
+		f.requireStable(ctx, st, prev, "healthy reimport")
 		session.wantState(st, ctx, false, true)
 		// The cardinality is unchanged and the control grant still exists.
 		// A name-and-count check would incorrectly accept the replacement.
@@ -257,9 +252,7 @@ func TestM3Install(t *testing.T) {
 			defer f.mustRun(ctx, st, svc+original)
 			want := "tikray: shared_reference_refuses; api-ssl was changed by its owner"
 			f.requireRefusal(ctx, st, want)
-			if f.stability(ctx, st) != prev {
-				st.Fatal("conflicting owner edit changed installation state")
-			}
+			f.requireStable(ctx, st, prev, "conflicting owner edit")
 			current := f.mustRun(ctx, st, `{:local s [/ip/service/get [find where name=api-ssl and !dynamic]]; :put [:tostr ($s->"address")]}`)
 			if !strings.Contains(current, "198.51.100.4") || strings.Contains(current, "198.51.100.3") {
 				st.Fatal("installer overwrote the owner's replacement grant")
@@ -294,7 +287,38 @@ func TestM3Install(t *testing.T) {
 
 func (f *installLab) file(ctx context.Context, t *testing.T, path string) string {
 	t.Helper()
-	return f.mustRun(ctx, t, ":put ["+fileContents(path)+"]")
+	return strings.TrimSpace(string(f.exactFile(ctx, t, path)))
+}
+
+var privateFileFrame = regexp.MustCompile(`m3-file\|([0-9]{1,8})\|([A-Za-z0-9+/=\r\n]*)\|end-file`)
+
+func installFileValue(wire string) ([]byte, bool) {
+	m := privateFileFrame.FindAllStringSubmatch(wire, 2)
+	if len(m) != 1 {
+		return nil, false
+	}
+	n, err := strconv.Atoi(m[0][1])
+	if err != nil || n > 1<<20 {
+		return nil, false
+	}
+	b, err := base64.StdEncoding.DecodeString(m[0][2])
+	return b, err == nil && len(b) == n
+}
+
+func (f *installLab) exactFile(ctx context.Context, t *testing.T, path string) []byte {
+	t.Helper()
+	var data []byte
+	read := fmt.Sprintf(`{:local rows [/file/find where name="%s"]; :if ([:len $rows] = 1) do={ :local slot [:pick $rows 0]; :local value [/file/get $slot contents]; :put ("m3-file|" . [/file/get $slot size] . "|" . [:convert $value from=raw to=base64] . "|end-file") } }`, rosEscape(path))
+	_, ok := poll(ctx, 8*time.Second, 200*time.Millisecond, func() bool {
+		raw, err := f.CHR.RunPrivate(ctx, read)
+		var framed bool
+		data, framed = installFileValue(raw)
+		return err == nil && framed
+	})
+	if !ok {
+		t.Fatal("private file returned no complete size-checked witness")
+	}
+	return data
 }
 func (f *installLab) requireRefusal(ctx context.Context, t *testing.T, category string) {
 	t.Helper()
@@ -490,7 +514,31 @@ func (f *installLab) probe(ctx context.Context, t *testing.T, arg string) string
 			t.Fatal("could not stage control-side witness")
 		}
 	}
-	return f.mustRun(ctx, t, fmt.Sprintf(`/container/shell [find where name=tikray] cmd="chmod 700 %s && %s %s"`, remote, remote, arg))
+	out := f.mustRun(ctx, t, fmt.Sprintf(`/container/shell [find where name=tikray] cmd="chmod 700 %s && %s %s"`, remote, remote, arg))
+	v, ok := installProbeValue(out, arg)
+	if !ok {
+		t.Fatalf("missing or ambiguous %s control-side witness", arg)
+	}
+	return v
+}
+
+func installProbeValue(out, arg string) (string, bool) {
+	var shape string
+	switch arg {
+	case "control-start":
+		shape = `[0-9]{1,20}`
+	case "runner":
+		shape = `[0-9]+\.[0-9]+\.[0-9]+\|[A-Za-z2-7]{20,64}`
+	case "account", "ports", "uninstall-links", "uninstall-unlink":
+		shape = "verified"
+	default:
+		return "", false
+	}
+	matches := regexp.MustCompile("m3-witness-"+arg+"=("+shape+")"+`\|end`).FindAllStringSubmatch(out, 2)
+	if len(matches) != 1 {
+		return "", false
+	}
+	return matches[0][1], true
 }
 func (f *installLab) stability(ctx context.Context, t *testing.T) [5]string {
 	t.Helper()
@@ -506,7 +554,43 @@ func (f *installLab) stability(ctx context.Context, t *testing.T) [5]string {
 	if _, err := strconv.ParseUint(proc, 10, 64); err != nil {
 		t.Fatal("control PID start time unavailable")
 	}
-	return [5]string{ids, instance, proc, f.file(ctx, t, dataRoot+"/state/routeros.json"), f.file(ctx, t, dataRoot+"/run/active.json")}
+	handoff := f.exactFile(ctx, t, dataRoot+"/state/routeros.json")
+	active := f.exactFile(ctx, t, dataRoot+"/run/active.json")
+	if !json.Valid(handoff) || !json.Valid(active) {
+		t.Fatal("stability witness is not a complete JSON file")
+	}
+	return [5]string{ids, instance, proc, string(handoff), string(active)}
+}
+
+func (f *installLab) requireStable(ctx context.Context, t *testing.T, before [5]string, phase string) {
+	t.Helper()
+	after := f.stability(ctx, t)
+	if before == after {
+		return
+	}
+	for i, name := range []string{"owned rows", "xray instance", "control start", "private RouterOS handoff", "active runner selection"} {
+		if before[i] != after[i] {
+			t.Errorf("%s changed %s", phase, name)
+			if i == 0 {
+				for _, menu := range installMenus {
+					rows := func(s string) []string {
+						var found []string
+						for _, line := range strings.Split(s, "\n") {
+							if strings.HasPrefix(line, menu+"|") {
+								found = append(found, line)
+							}
+						}
+						return found
+					}
+					a, b := rows(before[0]), rows(after[0])
+					if !slices.Equal(a, b) {
+						t.Logf("%s row values differ (%d before, %d after)", menu, len(a), len(b))
+					}
+				}
+			}
+		}
+	}
+	t.FailNow()
 }
 func (f *installLab) audit(ctx context.Context, t *testing.T, extra ...string) {
 	t.Helper()
@@ -514,7 +598,17 @@ func (f *installLab) audit(ctx context.Context, t *testing.T, extra ...string) {
 	if json.Unmarshal([]byte(f.file(ctx, t, dataRoot+"/state/routeros.json")), &cfg) != nil {
 		t.Fatal("could not identify privacy witnesses")
 	}
-	secrets := append(extra, cfg.Password, f.file(ctx, t, runnerToken))
+	events, err := f.pinned(ctx, t).Events(ctx, 0)
+	if err != nil {
+		t.Fatal("private event audit unavailable")
+	}
+	f.auditKnown(ctx, t, events.Body, append(extra, cfg.Password, f.file(ctx, t, runnerToken))...)
+}
+
+// An uninstaller can still audit its diagnostics after the credentials on
+// disk have been retired: it captures each witness privately before teardown.
+func (f *installLab) auditKnown(ctx context.Context, t *testing.T, events []byte, secrets ...string) {
+	t.Helper()
 	scan := func(data []byte) {
 		t.Helper()
 		for _, secret := range secrets {
@@ -528,11 +622,7 @@ func (f *installLab) audit(ctx context.Context, t *testing.T, extra ...string) {
 			}
 		}
 	}
-	events, err := f.pinned(ctx, t).Events(ctx, 0)
-	if err != nil {
-		t.Fatal("private event audit unavailable")
-	}
-	scan(events.Body)
+	scan(events)
 	for _, menu := range []string{"/log", "/system/history", "/container/envs"} {
 		wire := f.mustRun(ctx, t, fmt.Sprintf(`:foreach id in=[%s/find] do={ :put [:convert [:serialize to=json options=json.no-string-conversion value=[%s/get $id]] to=base64] }`, menu, menu))
 		for _, line := range strings.Fields(wire) {
@@ -554,7 +644,7 @@ func (f *installLab) audit(ctx context.Context, t *testing.T, extra ...string) {
 
 // Login as the original owner from the retained LAN grant. A success from
 // the control account alone cannot establish that earlier grants survived.
-func (f *installLab) ownerLogin(ctx context.Context, t *testing.T) {
+func (f *installLab) ownerSession(ctx context.Context, t *testing.T) *routeros.Client {
 	t.Helper()
 	pw, err := os.ReadFile(filepath.Join(lab.CacheDir(), "ready", f.Version, string(f.Arch), "password"))
 	if err != nil {
@@ -566,10 +656,28 @@ func (f *installLab) ownerLogin(ctx context.Context, t *testing.T) {
 	if err != nil {
 		t.Fatal("retained LAN owner grant did not allow a pinned API-SSL login")
 	}
+	return c
+}
+
+func (f *installLab) ownerLogin(ctx context.Context, t *testing.T) {
+	t.Helper()
+	sub, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	c := f.ownerSession(sub, t)
 	defer c.Close()
 	rows, err := c.CommandAt(sub, c.Generation(), []string{"/interface/bridge/print", "?name=tikray", "=.proplist=name,comment"})
 	if err != nil || len(rows) != 1 || rows[0]["comment"] != "tikray:bridge" {
 		t.Fatal("retained owner API session could not read its router")
+	}
+	// Use the protected native session, independent of the owner's pre-install
+	// whole-row observation. Compare actual paths, never a console-rendered bool.
+	rows, err = c.CommandAt(sub, c.Generation(), []string{"/container/config/print", "?tmpdir", "=.proplist=tmpdir"})
+	if err != nil || len(rows) != 1 || strings.Trim(rows[0]["tmpdir"], "/") != strings.Trim(f.ownerTmpDir, "/") {
+		t.Fatal("native container temporary directory differs from the owner's baseline")
+	}
+	rows, err = c.CommandAt(sub, c.Generation(), []string{"/system/scheduler/print", "?name=tikray-watchdog", "=.proplist=name,comment,on-event,interval,disabled"})
+	if err != nil || len(rows) != 1 || rows[0]["comment"] != "tikray:watchdog-scheduler" || rows[0]["on-event"] != "tikray-watchdog" || !slices.Contains([]string{"1m", "00:01:00", "1m0s"}, rows[0]["interval"]) || !slices.Contains([]string{"false", "no"}, rows[0]["disabled"]) {
+		t.Fatal("missing enabled one-minute owner watchdog")
 	}
 }
 func (f *installLab) routerPin(ctx context.Context, t *testing.T) string {

@@ -13,12 +13,13 @@ import (
 	"strings"
 	"testing"
 
+	routerosfiles "github.com/Arman2122/tikray/routeros"
 	"github.com/Arman2122/tikray/test/lab"
 )
 
 func t4CertTest(t *testing.T, reuse bool) {
 	r := newRig(t)
-	content, e := os.ReadFile(filepath.Join("..", "..", "routeros", "certificate.rsc"))
+	content, e := routerosfiles.Sources.ReadFile("certificate.rsc")
 	if e != nil {
 		t.Fatal("certificate installer is missing")
 	}
@@ -92,6 +93,9 @@ func t4CertTest(t *testing.T, reuse bool) {
 			_ = cl.Close()
 		}
 		verifyOwner()
+		// The next fixture starts from a different owner service baseline.
+		// A completed no-change install cannot adopt subsequent owner edits.
+		cmd(`/system/script/remove [find where name="tikray-api-mode" and comment="tikray:api-mode unchanged" and source=""]`)
 	}
 
 	run()

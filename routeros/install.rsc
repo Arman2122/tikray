@@ -152,7 +152,8 @@
     # @TIKRAY_CERTIFICATE@
     # @TIKRAY_BINDINGS@
     :local bindingPreflight [$bindPeers "preflight" $subnet]
-    :local checkPin [$tls false $routerIP $ctlIP]
+    :local hadServiceProof ([:len [/file/find where name=($data . "/install.json")]] > 0)
+    :local checkPin [$tls false $routerIP $ctlIP "" $hadServiceProof]
     # @TIKRAY_WATCHDOG_PREFLIGHT@
     :local emergency [/system/script/find where name="tikray-emergency-off" or comment="tikray:emergency-off"]
     :if (([:len $emergency] > 1) or (([:len $emergency] = 1) and (([/system/script/get $emergency name] != "tikray-emergency-off") or ([/system/script/get $emergency comment] != "tikray:emergency-off")))) do={ :error "tikray: object conflict in emergency script" }
@@ -473,7 +474,7 @@
         }
     }
     $requireInstall $lease
-    :local pin [$tls true $routerIP $ctlIP $checkPin]
+    :local pin [$tls true $routerIP $ctlIP $checkPin $hadServiceProof]
     :local scope {"subnet"=$subnet;"lan_list"=$lanList;"lans"=$lans;"wan"={"interface"=$wanIf}}
     :local seed {"version"=1;"address"=($routerIP . ":" . $apiPort);"fingerprint"=$pin;"scope"=$scope;"core"=$core;"offline"=$offline}
     :if ([:len $seedFiles] = 0) do={

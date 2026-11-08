@@ -16,7 +16,7 @@ import (
 // formatting variant can be reported.
 func checkEmergencySource(ctx context.Context, t *testing.T, f *installLab) {
 	t.Helper()
-	source, err := os.ReadFile(filepath.Join("..", "..", "routeros", "emergency-off.rsc"))
+	source, err := os.ReadFile(filepath.Join(repoRoot(), "routeros", "emergency-off.rsc"))
 	if err != nil {
 		t.Fatal("missing reviewed emergency source")
 	}
