@@ -1,5 +1,7 @@
 # M3 execution ledger
 
+**M3a scope confirmed.** Task 7 (owner uninstall) is complete. Task 4 delivered the basic RouterOS watchdog in M3a, including repeated-failure detection, per-container restart and backoff. Image replacement and rollback are M3b. The M3a routing gate has nine cases, including emergency off; `geo_diff_and_rollback` belongs to M3b.
+
 The [amended M3 plan](../../superpowers/plans/2026-11-06-m3-routeros.md) starts from main at `d9050d7`. The original review draft is `4744887`. M3a is on `m3-routeros`. M3b starts only after the owner approves merging M3a and its merge is on main.
 
 ## Owner amendments
