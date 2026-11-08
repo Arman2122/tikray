@@ -81,6 +81,33 @@
             :local findRef [:parse (":return [/" . $menu . "/find where " . $attr . "=\$1]")]
             :if ([:len [$findRef $c]] != 0) do={ :error "tikray: shared_reference_refuses; owner TLS dependency" }
         }
+        # The current Wi-Fi manager is in the base package. The legacy
+        # manager exists only with wireless installed. Discover it from the
+        # live command tree and require a positive control on that read.
+        :local singleRefs {"/interface/wifi/capsman:certificate";"/interface/wifi/capsman:ca-certificate";"/interface/wifi/cap:certificate"}
+        :local profiles {"/interface/wifi/security:eap-tls-certificate";"/interface/wifi/configuration:security.eap-tls-certificate";"/interface/wifi:security.eap-tls-certificate"}
+        :local tree [/console/inspect request=child path="" as-value]
+        :local rootOK false
+        :foreach row in=$tree do={
+            :local name ($row->"name")
+            :if ($name="interface") do={ :set rootOK true }
+            :if ($name="caps-man") do={
+                :set singleRefs ($singleRefs,"/caps-man/manager:certificate","/caps-man/manager:ca-certificate","/interface/wireless/cap:certificate")
+                :set profiles ($profiles,"/interface/wireless/security-profiles:tls-certificate")
+            }
+            :if ($name="user-manager") do={ :set singleRefs ($singleRefs,"/user-manager:certificate") }
+        }
+        :if (!$rootOK) do={ :error "tikray: shared_reference_refuses; cannot verify wifi certificate consumers" }
+        :foreach pair in=$singleRefs do={
+            :local sep [:find $pair ":"]; :local menu [:pick $pair 0 $sep]; :local field [:pick $pair ($sep+1) [:len $pair]]
+            :local getCert [:parse (":return [" . $menu . "/get " . $field . "]")]
+            :if ([:tostr [$getCert]]=$c) do={ :error "tikray: shared_reference_refuses; wifi certificate dependency" }
+        }
+        :foreach pair in=$profiles do={
+            :local sep [:find $pair ":"]; :local menu [:pick $pair 0 $sep]; :local field [:pick $pair ($sep+1) [:len $pair]]
+            :local findCert [:parse (":return [" . $menu . "/find where " . $field . "=\$1]")]
+            :if ([:len [$findCert $c]]>0) do={ :error "tikray: shared_reference_refuses; wifi certificate dependency" }
+        }
         # A self-signed API certificate can also be used as a signing CA.
         :local parent [/certificate/find where name=$c]
         :if ([:len $parent] = 1) do={

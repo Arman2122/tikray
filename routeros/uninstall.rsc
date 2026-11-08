@@ -171,7 +171,7 @@
     # @TIKRAY_RESTORE_SERVICE@
     # @TIKRAY_REFERENCES@
     # @TIKRAY_CLEANUP_DATA@
-    :local checked [$references $inventory $role $data $diskMount $diskSlot $normalize $subnet]
+    :local checked [$references $inventory $checkTable $data $diskMount $diskSlot $normalize $subnet]
     :local peerCheck [$removeBindings "inspect"]
     :local serviceCheck [$restoreService "inspect" $phase $oldPin "" "" ($meta->"service")]
     :local fileCheck [$cleanData "inspect" $choice $data $identity $phase $subnet]
@@ -193,7 +193,7 @@
         :set phase "detach"
     }
     :set marker [:pick $marker 0]
-        :local again [$references $inventory $role $data $diskMount $diskSlot $normalize $subnet]
+        :local again [$references $inventory $checkTable $data $diskMount $diskSlot $normalize $subnet]
         :local restored [$restoreService "restore" $phase $oldPin $requireInstall $lease ($meta->"service")]
         :local sched [/system/scheduler/find where name="tikray-watchdog" and comment="tikray:watchdog-scheduler"]
         :if ([:len $sched] = 1) do={ /system/scheduler/disable $sched }
@@ -232,8 +232,9 @@
                     # Tables and groups can acquire dependencies between
                     # preflight and the last operation. Both are empty now.
                     :if ($menu="/routing/table") do={
-                        :local tab [/routing/table/get $id name]
-                        :if (([:len [/ip/route/find where routing-table=$tab]] != 0) or ([:len [/routing/rule/find where table=$tab or routing-mark=$tab]] != 0)) do={ :error "tikray: shared_reference_refuses; table acquired another dependency" }
+                        :local tableRefs $6; :local tab [/routing/table/get $id name]
+                        :if ($tab != ("tikray-" . [:pick $c [:len "tikray:table-"] [:len $c]])) do={ :error "tikray: uninstall identity changed; retry" }
+                        :local verified [$tableRefs $tab [:toarray ""]]
                     }
                     :if (($menu="/user/group") and ([:len [/user/find where group="tikray"]] != 0)) do={ :error "tikray: shared_reference_refuses; group acquired another user" }
                     :if (($menu="/interface/bridge") and ([:len [/interface/bridge/port/find where bridge="tikray"]] != 0)) do={ :error "tikray: shared_reference_refuses; bridge acquired another port" }
@@ -244,7 +245,7 @@
         }
         :if ($phase = "remove") do={
             :set inventory [$scan $menus $role]
-            :local rechecked [$references $inventory $role $data $diskMount $diskSlot $normalize $subnet]
+            :local rechecked [$references $inventory $checkTable $data $diskMount $diskSlot $normalize $subnet]
             # Remove the control and runner before exposing any bridge port.
             $drop "/container" $inventory "all" $requireInstall $lease
             $drop "/system/scheduler" $inventory "all" $requireInstall $lease
@@ -256,7 +257,7 @@
             $drop "/ip/firewall/raw" $inventory "all" $requireInstall $lease
             $drop "/ip/firewall/address-list" $inventory "all" $requireInstall $lease
             $drop "/ip/route" $inventory "all" $requireInstall $lease
-            $drop "/routing/table" $inventory "all" $requireInstall $lease
+            $drop "/routing/table" $inventory "all" $requireInstall $lease $checkTable
             $drop "/container/mounts" $inventory "all" $requireInstall $lease
             $drop "/container/envs" $inventory "all" $requireInstall $lease
             :local removed [$removeBindings "remove" $lease]

@@ -227,3 +227,29 @@ func TestUninstallReusedServiceModes(t *testing.T) {
 		t.Fatal("missing access-only receipt changed installation")
 	}
 }
+
+func TestUninstallProtectsSharedLookupTables(t *testing.T) {
+	_, cmd, uninstall := uninstallFixture(t)
+	cmd(`/interface/bridge/add name=tikray protocol-mode=none arp=reply-only comment="tikray:bridge"; /ip/address/add address=172.30.252.1/29 interface=tikray comment="tikray:addr"; /routing/table/add name=tikray-open fib comment="tikray:table-open"`)
+	cmd(`/ipv6/route/add dst-address=2001:db8:8::1/128 gateway=ether2 routing-table=tikray-open disabled=yes comment=owner-dependent`)
+	if got := uninstall(); !strings.Contains(got, "shared_reference_refuses; foreign route in an owned table") {
+		t.Fatal("uninstall did not identify the owner's IPv6 route", got)
+	}
+	if cmd(`:put [:len [/system/script/find where name=tikray-uninstall-state]]`) != "0" || cmd(`:put [/ip/service/get api-ssl certificate]`) != "tikray-api" || cmd(`:put [:len [/ipv6/route/find where comment=owner-dependent]]`) != "1" {
+		t.Fatal("shared-table refusal changed the router")
+	}
+	cmd(`/ipv6/route/remove [find comment=owner-dependent]`)
+	// A custom lookup in a gateway names a VRF. The gateway parser on
+	// both pinned versions rejects a standalone FIB table in this slot.
+	cmd(`/interface/bridge/add name=owner-vrf; /ip/vrf/add name=tikray-open-owner interfaces=owner-vrf`)
+	cmd(`/ip/route/add dst-address=198.18.8.2/32 gateway=198.51.100.254@tikray-open-owner disabled=yes comment=owner-similar`)
+	if cmd(`:put [:len [/ip/route/find where comment=owner-similar]]`) != "1" {
+		t.Fatal("owner lookup witness missing before removal")
+	}
+	if got := uninstall(); got != "" {
+		t.Fatal("nearby owner lookup name prevented removal", got)
+	}
+	if cmd(`:put [:len [/ip/route/find where comment=owner-similar]]`) != "1" || cmd(`:put [:len [/routing/table/find where name=tikray-open-owner]]`) != "1" {
+		t.Fatal("uninstall changed the owner's route or lookup table")
+	}
+}

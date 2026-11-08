@@ -1,5 +1,27 @@
+# A gateway in another table can still resolve its next hop in our table.
+# Run this again with an empty owned-route set just before removing the table.
+:local checkTable do={
+    :local tab $1; :local owned $2
+    :foreach j in=[/ip/route/find where routing-table=$tab] do={
+        :local ours false; :foreach key,id in=$owned do={ :if ($id=$j) do={ :set ours true } }
+        :if (!$ours) do={ :error "tikray: shared_reference_refuses; foreign route in an owned table" }
+    }
+    :if ([:len [/ipv6/route/find where routing-table=$tab]] != 0) do={ :error "tikray: shared_reference_refuses; foreign route in an owned table" }
+    :if ([:len [/routing/rule/find where table=$tab or routing-mark=$tab]] != 0) do={ :error "tikray: shared_reference_refuses; foreign firewall, routing or queue consumer" }
+    :foreach menu in={"/ip/route";"/ipv6/route"} do={
+        :local candidates [:parse (":return [" . $menu . "/find where !dynamic and gateway~\"@tikray-\"]")]
+        :local hops [:parse (":return [" . $menu . "/get \$1 gateway]")]
+        :foreach j in=[$candidates] do={
+            :foreach hop in=[:toarray [$hops $j]] do={
+                :local gw [:tostr $hop]; :local at [:find $gw "@"]
+                :if (([:typeof $at]="num") and ([:pick $gw ($at+1) [:len $gw]]=$tab)) do={ :error "tikray: shared_reference_refuses; owner next hop uses private lookup table" }
+            }
+        }
+    }
+    :return true
+}
 :local references do={
-    :local objects $1; :local roleOf $2; :local dataPath $3; :local volume $4; :local slot $5; :local normalize $6; :local scope $7
+    :local objects $1; :local tableRefs $2; :local dataPath $3; :local volume $4; :local slot $5; :local normalize $6; :local scope $7
     :local known do={
         :local menu $1; :local id $2; :local roles ($3->$menu)
         :foreach key,ownerID in=$roles do={ :if ($id = $ownerID) do={ :return true } }
@@ -55,7 +77,7 @@
         :local tab ("tikray-" . $cls)
         :local v [$unique "/routing/table" "name" $tab ("tikray:table-" . $cls) $objects]
         :if ([:len [/routing/table/find where name=$tab]] = 1) do={
-            :foreach j in=[/ip/route/find where routing-table=$tab] do={ :if (![$known "/ip/route" $j $objects]) do={ :error "tikray: shared_reference_refuses; foreign route in an owned table" } }
+            :local verified [$tableRefs $tab ($objects->"/ip/route")]
         }
     }
     :foreach j in=[/user/find where group="tikray"] do={ :if (![$known "/user" $j $objects]) do={ :error "tikray: shared_reference_refuses; foreign user in the owned group" } }

@@ -170,6 +170,10 @@ func (r *rig) audit(t *testing.T, password, dir string) {
 	}
 	for _, file := range []string{"harness.log", "console.log", "console.log.timeline", "qemu.log"} {
 		data, err := os.ReadFile(filepath.Join(dir, file))
+		// Older consoles also wrote a serial timeline. Audit it when present.
+		if file == "console.log.timeline" && os.IsNotExist(err) {
+			continue
+		}
 		if err != nil || bytes.Contains(data, []byte(password)) {
 			t.Error("privacy: host diagnostic audit failed")
 			return

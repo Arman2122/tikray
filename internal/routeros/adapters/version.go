@@ -175,6 +175,7 @@ func (p Profile) AcceptsComment(menu string) bool {
 	}
 	switch menu {
 	case "/interface/bridge", "/interface/veth", "/interface/bridge/port", "/ip/address",
+		"/ip/arp", "/interface/bridge/host", "/ip/firewall/raw",
 		"/routing/table", "/ip/route", "/ip/firewall/address-list", "/ipv6/firewall/address-list",
 		"/ip/firewall/filter", "/ipv6/firewall/filter", "/ip/firewall/mangle", "/ip/firewall/nat",
 		"/user/group", "/user", "/container/envs", "/container/mounts", "/container",
@@ -193,7 +194,13 @@ func (p Profile) UsesCertificateReceipt() bool { return p.version != "" }
 // certificates. Connection IDs are ephemeral, require affected-client filters,
 // and confer no ownership over other rows in the connection table.
 func (p Profile) CanRemoveRestricted(menu string) bool {
-	if p.version == "" || menu == "/user" || menu == "/user/group" {
+	if p.version == "" {
+		return false
+	}
+	// These comments were proven during owner-run installation and teardown.
+	// Comment support alone does not establish restricted deletion rights.
+	switch menu {
+	case "/user", "/user/group", "/ip/arp", "/interface/bridge/host", "/ip/firewall/raw":
 		return false
 	}
 	return p.AcceptsComment(menu) || menu == "/ip/firewall/connection"

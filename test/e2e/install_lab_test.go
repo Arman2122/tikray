@@ -644,6 +644,10 @@ func (f *installLab) auditKnown(ctx context.Context, t *testing.T, events []byte
 	}
 	for _, name := range []string{"harness.log", "console.log", "console.log.timeline", "qemu.log"} {
 		data, err := os.ReadFile(filepath.Join(f.workDir, "vm", name))
+		// Older consoles also wrote a serial timeline. Audit it when present.
+		if name == "console.log.timeline" && os.IsNotExist(err) {
+			continue
+		}
 		if err != nil {
 			t.Fatal("lab log audit unavailable")
 		}

@@ -425,6 +425,15 @@ func TestM3Uninstall(t *testing.T) {
 	})
 	check("shared_reference_refuses", func(st *testing.T) {
 		f := setupRemoval(ctx, st, false)
+		// The owner's IPv6 dependency must refer to a real policy table.
+		device := store.Device{Address: netip.MustParsePrefix("192.168.88.22/32"), MAC: "02:00:00:00:00:22", Policy: store.Policy{Mode: store.ModeFull, KillSwitch: true}}
+		if _, e := f.pinned(ctx, st).SetDevice(ctx, device); e != nil {
+			st.Fatal("could not seed the shared routing table")
+		}
+		f.checkReady(ctx, st)
+		if f.mustRun(ctx, st, `:put [:len [/routing/table/find where name="tikray-open" and comment="tikray:table-open"]]`) != "1" {
+			st.Fatal("shared reference fixture lacks the owned table")
+		}
 		// A marker at a syntactically valid root is insufficient if the
 		// installation ID is not the one independently anchored in RouterOS.
 		previous, err := f.refusalState(ctx, st)
@@ -470,6 +479,12 @@ func TestM3Uninstall(t *testing.T) {
 				st.Fatal("owner dependency refused after mutation", reason)
 			}
 		}
+		f.mustRun(ctx, st, `/interface/wifi/capsman/set ca-certificate=tikray-api`)
+		unchangedRefusal("wifi certificate dependency")
+		if f.mustRun(ctx, st, `:put [/interface/wifi/capsman/get ca-certificate]`) != "tikray-api" {
+			st.Fatal("Wi-Fi manager lost its certificate on refusal")
+		}
+		f.mustRun(ctx, st, `/interface/wifi/capsman/set ca-certificate=auto`)
 		receipt := f.mustRun(ctx, st, `:put [/system/script/get [find where name=tikray-api-receipt] comment]`)
 		if !strings.HasPrefix(receipt, "tikray:api-receipt ") {
 			st.Fatal("created-certificate ownership receipt unavailable")
@@ -478,6 +493,7 @@ func TestM3Uninstall(t *testing.T) {
 		unchangedRefusal("required API-SSL receipt missing")
 		f.mustRun(ctx, st, `{:local c [:convert "`+base64.StdEncoding.EncodeToString([]byte(receipt))+`" from=base64 to=raw]; /system/script/add name=tikray-api-receipt source="" policy=read comment=$c}`)
 		for _, dep := range []struct{ menu, props, reason string }{
+			{"/ipv6/route", "dst-address=2001:db8:ffff::2/128 gateway=ether1 routing-table=tikray-open disabled=yes", "foreign route in an owned table"},
 			{"/interface/bridge/filter", "chain=forward in-interface=tikray-ctl action=accept disabled=yes", "foreign firewall, routing or queue consumer"},
 			{"/interface/bridge/nat", "chain=srcnat out-interface=tikray-runner action=accept disabled=yes", "foreign firewall, routing or queue consumer"},
 			{"/ip/route", "dst-address=192.0.2.55/32 gateway=tikray disabled=yes", "static owner route uses private interface"},
