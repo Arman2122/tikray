@@ -1,4 +1,4 @@
-# Keep counters in RAM. Reboot starts a fresh three-probe grace period.
+# Compute a component's next state. The caller records changes before restart.
 :local wdStep do={
     :local state $1
     :local healthy $2

@@ -13,6 +13,10 @@ Use `-arch amd64` for x86_64 CHR. Supported releases are 7.25 and 7.23.8. The ge
 
 For a one-paste deployment, package with `-release-base https://<your-release-host>/<release-directory>`, publish that installer and both archives, substitute the real installer URL below, and paste into the owner's router terminal. Configure RouterOS HTTPS trust for that host first. Use a new local download filename on the first import.
 
+Choose a public HTTPS origin that serves each file in its first response, such as a static release directory on GitHub Pages. GitHub's `/releases/download` and `/releases/latest/download` endpoints redirect to signed URLs. The packager rejects those bases. RouterOS can record a server's `Location` header even when the client refuses to follow it, so keep credentials out of both the original URLs and the server's responses.
+
+The router downloads to a name unique to the current installer lease. It verifies the staged bytes and publishes the archive by ID before container import. A killed import can leave an `images/incoming-<nonce>-…tar` fragment. A later import uses a fresh name and preserves the old fragment for owner inspection. RouterOS streams the response to disk before its final length can be checked. Use an origin you trust to serve the expected archive size, or stage the already verified images offline when the data volume is tight.
+
 ```routeros
 { :local download [/tool/fetch url="https://<your-release-host>/<release-directory>/install.rsc" check-certificate=yes http-max-redirect-count=0 dst-path=tikray-install.rsc as-value]; :if (($download->"status") != "finished") do={ :error "Installer download failed" }; /import file-name=tikray-install.rsc }
 ```

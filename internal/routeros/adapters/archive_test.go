@@ -110,4 +110,12 @@ func TestReleaseImageIdentityAndChunkOrder(t *testing.T) {
 			t.Fatal("invalid release origin accepted")
 		}
 	}
+	for _, u := range []string{"https://github.com/owner/project/releases/download/v1", "https://www.GITHUB.com:443/owner/project/releases/latest/download", "https://github.com/owner/project/tmp/../releases/latest/download/"} {
+		if _, err := describeArchive(p, "tikray", b, u); err == nil {
+			t.Fatal("accepted a release endpoint known to return a signed redirect")
+		}
+	}
+	if _, err := describeArchive(p, "tikray", b, "https://owner.github.io/project/releases/download/v1"); err != nil {
+		t.Fatal("refused a static release path")
+	}
 }

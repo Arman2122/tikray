@@ -25,8 +25,8 @@ func archiveVerifier(images []VerifiedArchive) string {
 `)
 	for _, a := range images {
 		fmt.Fprintf(&b, "    :if ($component = \"%s\") do={\n", a.component)
-		fmt.Fprintf(&b, "        :if ([:len [/file/find where name=$path]] != 1) do={ :error \"tikray: upload the signed %s archive\" }\n", a.component)
-		fmt.Fprintf(&b, "        :if ([/file/get [/file/find where name=$path] size] != %d) do={ :error \"tikray: image length mismatch; replace archive\" }\n        :local offset 0\n", a.size)
+		fmt.Fprintf(&b, "        :local fileIDs [/file/find where name=$path]\n        :if ([:len $fileIDs] != 1) do={ :error \"tikray: upload the signed %s archive\" }\n", a.component)
+		fmt.Fprintf(&b, "        :local fileID [:pick $fileIDs 0]\n        :if ([/file/get $fileID size] != %d) do={ :error \"tikray: image length mismatch; replace archive\" }\n        :local offset 0\n", a.size)
 		for i := 0; i < len(a.digests); i += 16 {
 			b.WriteString("        :foreach expected in={")
 			for j, d := range a.digests[i:min(i+16, len(a.digests))] {
@@ -43,7 +43,12 @@ func archiveVerifier(images []VerifiedArchive) string {
         }
 `, installerChunkSize, a.size, a.size)
 		}
-		b.WriteString("        :return true\n    }\n")
+		fmt.Fprintf(&b, `        :local endIDs [/file/find where name=$path]
+        :if (([:len $endIDs] != 1) or ([:pick $endIDs 0] != $fileID) or ($offset != %d)) do={ :error "tikray: staged archive changed during verification" }
+        :if ([/file/get $fileID size] != $offset) do={ :error "tikray: staged archive length changed" }
+        :return true
+    }
+`, a.size)
 	}
 	b.WriteString(`    :error "tikray: unknown image component"
     }`)
@@ -56,7 +61,29 @@ func archiveChecks(images []VerifiedArchive) string {
 		file := a.component + "-" + a.arch + ".tar"
 		fmt.Fprintf(&b, "    { :local path ($base . \"/images/%s\")\n", file)
 		if a.releaseBase != "" {
-			fmt.Fprintf(&b, "        :if ((!$offline) and ([:len [/file/find where name=$path]] = 0)) do={ /tool/fetch url=\"%s/%s\" check-certificate=yes dst-path=$path }\n", a.releaseBase, file)
+			fmt.Fprintf(&b, `        :if ((!$offline) and ([:len [/file/find where name=$path]] = 0)) do={
+            $requireInstall $lease
+            :local nonce ($lease->"nonce")
+            :if (([:len $nonce] != 32) or (!($nonce ~ "^[0-9a-f]+\$"))) do={ :error "tikray: missing download lease" }
+            :local incoming ($base . "/images/incoming-" . $nonce . "-%s")
+            :if ([:len [/file/find where name=$incoming]] != 0) do={ :error "tikray: download staging conflict" }
+            /file/add name=$incoming type=file
+            :local transferID [:pick [/file/find where name=$incoming] 0]
+            :do {
+                # The public release origin must return the archive directly. A
+                # redirect can carry a signed URL in its response headers.
+                :local result [/tool/fetch url="%s/%s" check-certificate=yes http-max-redirect-count=0 dst-path=$incoming as-value]
+                :if (($result->"status") != "finished") do={ :error "tikray: incomplete HTTPS download" }
+                :if ([$verifyStaged "%s" $incoming] != true) do={ :error "tikray: download digest differs" }
+                $requireInstall $lease
+                :if (([:len [/file/find where .id=$transferID and name=$incoming]] != 1) or ([:len [/file/find where name=$path]] != 0)) do={ :error "tikray: download staging changed" }
+                /file/set $transferID name=$path
+            } on-error={
+                :if ([:len [/file/find where .id=$transferID and name=$incoming]] = 1) do={ /file/remove $transferID }
+                :error "tikray: image download failed; verify the HTTPS source or upload the signed archive"
+            }
+        }
+`, file, a.releaseBase, file, a.component)
 		}
 		fmt.Fprintf(&b, "        :if ([$verifyStaged \"%s\" $path] != true) do={ :error \"tikray: verify both image archives\" }\n    }\n", a.component)
 	}
@@ -153,7 +180,8 @@ func buildInstaller(p Profile, images []VerifiedArchive, dst io.Writer, readSour
 		return errors.New("installer: missing watchdog")
 	}
 	watchBody := string(watch)
-	for _, part := range []struct{ slot, file string }{{"STEP", "watchdog-step.rsc"}, {"HEALTH", "watchdog-health.rsc"}} {
+	var stateSource string
+	for _, part := range []struct{ slot, file string }{{"STEP", "watchdog-step.rsc"}, {"STATE", "watchdog-state.rsc"}, {"HEALTH", "watchdog-health.rsc"}} {
 		b, err := readSource(part.file)
 		if err != nil {
 			return errors.New("installer: missing watchdog logic")
@@ -163,15 +191,19 @@ func buildInstaller(p Profile, images []VerifiedArchive, dst io.Writer, readSour
 			return errors.New("installer: invalid watchdog template")
 		}
 		watchBody = strings.Replace(watchBody, key, string(b), 1)
+		if part.slot == "STATE" {
+			stateSource = string(b)
+		}
 	}
 	pre, e := readSource("watchdog-preflight.rsc")
 	if e != nil {
 		return errors.New("installer: missing watchdog preflight")
 	}
-	if e = replace("# @TIKRAY_WATCHDOG_PREFLIGHT@", ":local watchBody "+scriptLiteral(watchBody)+"\n"+string(pre)); e != nil {
+	if e = replace("# @TIKRAY_WATCHDOG_PREFLIGHT@", ":local watchBody "+scriptLiteral(watchBody)+"\n"+stateSource+"\n    :local watchStateCheck [$wdState \"inspect\"]\n"+string(pre)); e != nil {
 		return e
 	}
-	if e = replace("# @TIKRAY_WATCHDOG@", `:if ([$provisionWatch true $watchBody] != true) do={ :error "tikray: watchdog provisioning failed" }`); e != nil {
+	if e = replace("# @TIKRAY_WATCHDOG@", `:local watchStateInit [$wdState "init"]
+    :if ([$provisionWatch true $watchBody] != true) do={ :error "tikray: watchdog provisioning failed" }`); e != nil {
 		return e
 	}
 	platform := fmt.Sprintf(`:if (($arch != "%s") or ([:pick [/system/resource/get version] 0 [:find ([/system/resource/get version] . " ") " "]] != "%s")) do={ :error "tikray: obtain installer matching installed architecture and version" }; :set imageBytes %d`, p.GOARCH(), p.Version(), total)

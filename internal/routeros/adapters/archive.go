@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -87,6 +88,15 @@ func describeArchive(p Profile, component string, b []byte, releaseBase string) 
 		u, e := url.Parse(releaseBase)
 		if e != nil || !safeReleaseURL.MatchString(releaseBase) || u.Hostname() == "" || u.User != nil {
 			return VerifiedArchive{}, errors.New("installer: release base must be a public HTTPS path")
+		}
+		host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+		if host == "github.com" || host == "www.github.com" {
+			// These routes deliberately redirect to signed query URLs. Native
+			// fetch diagnostics can retain Location even when redirecting is off.
+			route := path.Clean(strings.ToLower(u.Path)) + "/"
+			if strings.Contains(route, "/releases/download/") || strings.Contains(route, "/releases/latest/download/") {
+				return VerifiedArchive{}, errors.New("installer: use a direct public HTTPS release endpoint or upload the archives")
+			}
 		}
 	}
 	var manifest []struct {

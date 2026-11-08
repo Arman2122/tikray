@@ -73,3 +73,19 @@ func TestInstallerBindsComponentArchitectureAndChunks(t *testing.T) {
 		t.Fatal("installer was not self-contained")
 	}
 }
+
+func TestOnlineArchivesAuthenticateBeforePublication(t *testing.T) {
+	a := VerifiedArchive{component: "tikray", arch: "amd64", releaseBase: "https://downloads.example/release"}
+	src := archiveChecks([]VerifiedArchive{a})
+	steps := []string{"$lease", "dst-path=$incoming", `[$verifyStaged "tikray" $incoming]`, "/file/set $transferID name=$path", `[$verifyStaged "tikray" $path]`}
+	for _, step := range steps {
+		start := strings.Index(src, step)
+		if start < 0 {
+			t.Fatalf("missing ordered online installation step %q", step)
+		}
+		src = src[start+len(step):]
+	}
+	if strings.Contains(archiveChecks([]VerifiedArchive{{component: "tikray", arch: "amd64"}}), "/tool/fetch") {
+		t.Fatal("offline installer issued an outbound request")
+	}
+}
