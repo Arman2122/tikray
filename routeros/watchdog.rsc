@@ -1,6 +1,6 @@
 # RouterOS runs this independently once a minute.
 {
-    :if ([:len [/system/script/job/find where script="tikray-watchdog"]] != 1) do={ :return }
+    :if ([:len [/system/script/job/find where script="tikray-watchdog"]] != 1) do={ :return true }
     :local suspended do={
         :if (([:len [/system/script/find where name="tikray-emergency-state" or comment="tikray:emergency-state" or comment="tikray:uninstall-state"]] > 0) or ([:len [/system/script/job/find where script="tikray-emergency-off" or script="tikray-uninstall"]] > 0)) do={ :return true }
         :local lock [/system/script/find where name="tikray-install-lock" or comment~"^tikray:install-lock "]
@@ -21,17 +21,17 @@
         } on-error={ :set active true }
         :return $active
     }
-    :if ([$suspended]) do={ :return }
+    :if ([$suspended]) do={ :return true }
     :local mounts [/container/mounts/find where comment="tikray:mount-tikray-data" and list="tikray" and dst="/data"]
-    :if ([:len $mounts] != 1) do={ :return }
+    :if ([:len $mounts] != 1) do={ :return true }
     :local data [/container/mounts/get $mounts src]
     :if ([:pick $data 0 1] = "/") do={ :set data [:pick $data 1 [:len $data]] }
     :local ready [/file/find where name=($data . "/state/install.ready")]
-    :if ([:len $ready] != 1) do={ :return }
+    :if ([:len $ready] != 1) do={ :return true }
     :local pin [/file/get $ready contents]
-    :if (([:len $pin] != 64) or (!($pin ~ "^[0-9a-f]+\$"))) do={ :return }
+    :if (([:len $pin] != 64) or (!($pin ~ "^[0-9a-f]+\$"))) do={ :return true }
     :local bridgeAddr [/ip/address/find where interface="tikray" and comment="tikray:addr" and !disabled]
-    :if ([:len $bridgeAddr] != 1) do={ :return }
+    :if ([:len $bridgeAddr] != 1) do={ :return true }
     :local cidr [:tostr [/ip/address/get $bridgeAddr address]]
     :local gateway [:toip [:pick $cidr 0 [:find $cidr "/"]]]
     :local ctlIP ($gateway + 1)

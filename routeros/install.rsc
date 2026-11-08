@@ -192,7 +192,7 @@
             :if (($menu = "/ip/firewall/filter") or ($menu = "/ip/firewall/raw") or ($menu = "/ip/firewall/nat") or ($menu = "/ipv6/firewall/filter")) do={
                 # A hidden selector could turn a bridge drop into a false assurance.
                 :foreach k,v in=$got do={
-                    :if ((([:typeof ($props->$k)] = "nothing") or ([:typeof ($props->$k)] = "nil")) and ([:typeof [:find {"comment";".id";"dynamic";"disabled";"invalid";"log";"log-prefix";"bytes";"packets"} $k]] != "num") and ([:len [:tostr $v]] > 0)) do={ :error ("tikray: object conflict in firewall selectors at " . $role) }
+                    :if ((([:typeof ($props->$k)] = "nothing") or ([:typeof ($props->$k)] = "nil")) and ([:typeof [:find {"comment";".id";".nextid";"dynamic";"disabled";"invalid";"log";"log-prefix";"bytes";"packets"} $k]] != "num") and ([:len [:tostr $v]] > 0)) do={ :error ("tikray: object conflict in firewall selectors at " . $role) }
                 }
             }
             :local id [:pick $found 0]

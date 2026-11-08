@@ -57,7 +57,13 @@ For a development installation, upload the repository's `emergency-off.rsc` file
 /import file-name=emergency-off.rsc
 ```
 
-The production installer must include this script block. Its watchdog must check for `tikray-emergency-state` and an active `tikray-emergency-off` job at entry and immediately before any container restart.
+The release template includes this script. The watchdog checks for the emergency marker and job before acting on a container.
+
+## Basic watchdog
+
+The `tikray-watchdog` scheduler runs every minute. It tracks control HTTPS health and the runner gateway separately. Three consecutive misses allow a restart of that component. Further attempts are spaced 1, 2, 4, 8 and then 15 minutes apart. A successful probe clears that component's failure state.
+
+The tagged, non-executable `tikray-watchdog-state` script holds only public failure counts and restart times. Healthy steady checks cause no state writes. Restart decisions require an exact container name, interface and ownership tag. The watchdog waits for the first committed core and yields during an active installer, emergency shutdown or uninstall.
 
 ## Control container handoff
 
