@@ -126,7 +126,7 @@ func (p Profile) MountSyntax() (list, containerLists, mode string) {
 // MemoryFields returns the measured container memory fields. Empty values mean
 // unproven, not absent; installation must preflight any required unknown field.
 func (p Profile) MemoryFields() (high, max string) {
-	if p.version == "7.25" {
+	if p.version == "7.25" || p.version == "7.23.8" {
 		return "memory-high", "memory-max"
 	}
 	return "", ""
@@ -134,7 +134,7 @@ func (p Profile) MemoryFields() (high, max string) {
 
 // RestartPolicyField follows the same evidence boundary as MemoryFields.
 func (p Profile) RestartPolicyField() string {
-	if p.version == "7.25" {
+	if p.version == "7.25" || p.version == "7.23.8" {
 		return "restart-policy"
 	}
 	return ""

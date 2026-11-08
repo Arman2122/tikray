@@ -47,12 +47,8 @@ func TestSelectRouterOSProfile(t *testing.T) {
 				t.Error("profile has incorrect mount syntax")
 			}
 			high, max := p.MemoryFields()
-			if tt.WantVersion == "7.25" {
-				if high != "memory-high" || max != "memory-max" || p.RestartPolicyField() != "restart-policy" {
-					t.Error("7.25 container field vocabulary is incomplete")
-				}
-			} else if high != "" || max != "" || p.RestartPolicyField() != "" {
-				t.Error("profile claims unproven container fields")
+			if high != "memory-high" || max != "memory-max" || p.RestartPolicyField() != "restart-policy" {
+				t.Error("installed-release container field vocabulary is incomplete")
 			}
 			if p.DiskFormatCommand() != "/disk/format" {
 				t.Error("profile has incorrect disk command vocabulary")
