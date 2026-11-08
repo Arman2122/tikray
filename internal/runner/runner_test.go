@@ -588,7 +588,16 @@ func TestCrashRestartsWithBackoff(t *testing.T) {
 	sawRestarting := false
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		st := g.r.Status()
+		// Status deliberately combines a published lifecycle view with the
+		// live process. Sample between runner operations so this assertion
+		// measures the backoff itself, outside the launch/publication window.
+		var st runnerapi.Status
+		if err := g.r.do(t.Context(), func() error {
+			st = g.r.Status()
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 		if st.State == runnerapi.StateRestarting {
 			sawRestarting = true
 			if st.XrayPID != 0 {
