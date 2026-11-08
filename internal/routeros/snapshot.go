@@ -514,6 +514,15 @@ func EmergencyState(ctx context.Context, c Native, g uint64) (string, bool, erro
 		return "", false, e
 	}
 	busy := len(jobs) > 0
+	// A durable owner teardown fences a previously planned write even after
+	// the import job exits or the router reboots. Never read its journal here.
+	teardown, e := o.read("/system/script", ".id", "?name=tikray-uninstall-state")
+	if e != nil {
+		return "", false, e
+	}
+	if len(teardown) != 0 {
+		return "", true, nil
+	}
 	rows, e := o.read("/system/script", ".id,name,comment,policy,dont-require-permissions", "?name=tikray-emergency-state", "?comment=tikray:emergency-state", "?#|")
 	if e != nil {
 		return "", busy, e

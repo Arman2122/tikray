@@ -1,6 +1,6 @@
 # Installing on RouterOS
 
-M3a is undergoing CHR acceptance testing. The packager currently refuses to produce a deployment artifact while the watchdog's HTTPS authentication decision is pending. The [M3 ledger](../docs/handoff/m3/ledger.md) records the measured results.
+The [M3 ledger](../docs/handoff/m3/ledger.md) records installer validation against the pinned RouterOS releases and the signing identity used for the lab artifacts.
 
 Build an installer for the router's installed version and CPU from an authenticated image pair. The packager uses `cosign verify-blob` with an independently obtained publisher public key. Supply the Docker-save images and detached signatures in one directory, for example `tikray-arm64.tar`, `tikray-arm64.tar.sig`, `tikray-runner-arm64.tar` and `tikray-runner-arm64.tar.sig`.
 
@@ -61,11 +61,15 @@ The release template includes this script. The watchdog checks for the emergency
 
 ## Basic watchdog
 
-The `tikray-watchdog` scheduler runs every minute. It tracks control HTTPS health and the runner gateway separately. Three consecutive misses allow a restart of that component. Further attempts are spaced 1, 2, 4, 8 and then 15 minutes apart. A successful probe clears that component's failure state.
+On the private bridge, static ARP entries map control and runner addresses to their container-side MACs. Static bridge host entries map those MACs to the two owned veth ports. The bridge uses reply-only ARP. Both ports have MAC learning and unknown-unicast flooding disabled so a stopped or recreated control port cannot send health traffic to the runner. These settings apply only to the tagged tikray bridge and ports.
 
-The tagged, non-executable `tikray-watchdog-state` script holds only public failure counts and restart times. Healthy steady checks cause no state writes. Restart decisions require an exact container name, interface and ownership tag. The watchdog waits for the first committed core and yields during an active installer, emergency shutdown or uninstall.
+The `tikray-watchdog` scheduler runs every minute. It fetches `/healthz` over transport-only HTTPS at the bound control address and checks both `ok: true` and the public installation ID from its receipt. The runner gateway has a separate ping check. Management clients continue to verify the UI certificate. Three consecutive misses allow a restart of that component. Further attempts are spaced 1, 2, 4, 8 and then 15 minutes apart. A successful probe clears that component's failure state.
+
+The tagged, non-executable `tikray-watchdog-state` script holds the public installation ID, failure counts and restart times. Healthy steady checks cause no state writes. Restart decisions require an exact container name, interface and ownership tag. The watchdog waits for the first committed core and yields during an active installer, emergency shutdown or uninstall.
 
 ## Control container handoff
+
+On a managed installation the daemon generates a public installation ID once under its service lock. The private intent in `state/install.request` retains it and `state/install.id` exposes the same value to the owner installer. Reimport checks it against the ID in the watchdog receipt. Keep the original control volume together when restoring a backup.
 
 The installer writes `/data/state/routeros.json` atomically with mode `0600` under the control container's private `0700` state directory. Version 1 requires `version`, `address` (router bridge IP and API-SSL port), `username` (`tikray`), `password`, the pinned SHA-256 certificate `fingerprint`, and `scope`. The scope contains `subnet`, `lan_list`, `lans` (interface, IPv4 prefix and optional dedicated flag), the install-time `wan` interface and optional `local_lans`. Keep this file on the control volume.
 

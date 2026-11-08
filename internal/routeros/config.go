@@ -303,6 +303,7 @@ func (m *Managed) Watch(ctx context.Context, notify func()) error {
 		client, err := Dial(ctx, m.cfg)
 		if err == nil {
 			e := NewEngine(client, m.scope, m.dir)
+			e.managedBindings = true
 			m.mu.Lock()
 			m.engine = e
 			m.client = client

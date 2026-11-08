@@ -3,7 +3,7 @@
     :local runTick do={
         :if ([:len [/system/script/job/find where script="tikray-watchdog"]] != 1) do={ :return true }
         :local suspended do={
-            :if (([:len [/system/script/find where name="tikray-emergency-state" or comment="tikray:emergency-state" or comment="tikray:uninstall-state"]] > 0) or ([:len [/system/script/job/find where script="tikray-emergency-off" or script="tikray-uninstall"]] > 0)) do={ :return true }
+            :if (([:len [/system/script/find where name="tikray-emergency-state" or comment="tikray:emergency-state" or name="tikray-uninstall-state" or comment="tikray:uninstall-state"]] > 0) or ([:len [/system/script/job/find where script="tikray-emergency-off" or script="tikray-uninstall"]] > 0)) do={ :return true }
             :local lock [/system/script/find where name="tikray-install-lock" or comment~"^tikray:install-lock "]
             :if ([:len $lock] = 0) do={ :return false }
             :if ([:len $lock] != 1) do={ :return true }
@@ -27,6 +27,18 @@
         :if ([:len $mounts] != 1) do={ :return true }
         :local data [/container/mounts/get $mounts src]
         :if ([:pick $data 0 1] = "/") do={ :set data [:pick $data 1 [:len $data]] }
+        # A recreated control veth can strand the very API session that
+        # normally repairs these rows. Restore the verified path locally.
+        :local intent [/file/find where name=($data . "/state/install.request")]
+        :if (([:len $intent] != 1) or ([/file/get $intent size] > 60000)) do={ :return true }
+        # @TIKRAY_WATCHDOG_BINDINGS@
+        :local bindingsOK false
+        :local mayBind do={ :local stopCheck $1; :if ([$stopCheck]) do={ :error "tikray: binding repair suspended" }; :return true }
+        :do {
+            :local request [:deserialize from=json options=json.no-string-conversion value=[/file/get $intent contents]]
+            :set bindingsOK [$bindPeers "repair" ($request->"scope"->"subnet") $mayBind $suspended]
+        } on-error={ :set bindingsOK false }
+        :if ($bindingsOK != true) do={ :return true }
         :local ready [/file/find where name=($data . "/state/install.ready")]
         :if ([:len $ready] != 1) do={ :return true }
         :local pin [/file/get $ready contents]

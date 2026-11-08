@@ -148,7 +148,7 @@ func buildInstaller(p Profile, images []VerifiedArchive, dst io.Writer, readSour
 		source = strings.Replace(source, key, value, 1)
 		return nil
 	}
-	for _, f := range []struct{ slot, file string }{{"CERTIFICATE", "certificate.rsc"}, {"LOCK", "install-lock.rsc"}, {"EMERGENCY", "emergency-off.rsc"}} {
+	for _, f := range []struct{ slot, file string }{{"CERTIFICATE", "certificate.rsc"}, {"LOCK", "install-lock.rsc"}, {"EMERGENCY", "emergency-off.rsc"}, {"BINDINGS", "bindings.rsc"}} {
 		data, err := readSource(f.file)
 		if err != nil {
 			return errors.New("installer: missing script fragment")
@@ -181,7 +181,7 @@ func buildInstaller(p Profile, images []VerifiedArchive, dst io.Writer, readSour
 	}
 	watchBody := string(watch)
 	var stateSource string
-	for _, part := range []struct{ slot, file string }{{"STEP", "watchdog-step.rsc"}, {"STATE", "watchdog-state.rsc"}, {"HEALTH", "watchdog-health.rsc"}} {
+	for _, part := range []struct{ slot, file string }{{"STEP", "watchdog-step.rsc"}, {"STATE", "watchdog-state.rsc"}, {"BINDINGS", "bindings.rsc"}, {"HEALTH", "watchdog-health.rsc"}} {
 		b, err := readSource(part.file)
 		if err != nil {
 			return errors.New("installer: missing watchdog logic")
@@ -202,7 +202,7 @@ func buildInstaller(p Profile, images []VerifiedArchive, dst io.Writer, readSour
 	if e = replace("# @TIKRAY_WATCHDOG_PREFLIGHT@", ":local watchBody "+scriptLiteral(watchBody)+"\n"+stateSource+"\n    :local watchStateCheck [$wdState \"inspect\"]\n"+string(pre)); e != nil {
 		return e
 	}
-	if e = replace("# @TIKRAY_WATCHDOG@", `:local watchStateInit [$wdState "init"]
+	if e = replace("# @TIKRAY_WATCHDOG@", `:local watchStateInit [$wdState "init" [$readWatchID $data]]
     :if ([$provisionWatch true $watchBody] != true) do={ :error "tikray: watchdog provisioning failed" }`); e != nil {
 		return e
 	}

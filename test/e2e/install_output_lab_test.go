@@ -28,6 +28,7 @@ func TestPrivateImportFailureHidesOutput(t *testing.T) {
 	const hidden = "private-witness"
 	for _, tc := range []struct{ diagnostic, want string }{
 		{"tikray: object conflict at " + hidden, "tikray: object conflict"},
+		{"tikray: peer MAC collides with veth " + hidden, "tikray: peer MAC collides with veth"},
 		{"syntax error (line 51 column 7) " + hidden, "installer syntax at line 51 column 7"},
 		{"unexpected " + hidden, "installer refused"},
 	} {

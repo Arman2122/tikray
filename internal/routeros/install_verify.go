@@ -63,6 +63,9 @@ func (e *Engine) verifyInstallation(ctx context.Context, t Target, reauthenticat
 	if err := reauthenticate(ctx); err != nil {
 		return ErrUnavailable
 	}
+	if e.managedBindings && ReconcileBindings(ctx, e.c, e.scope.Subnet, false) != nil {
+		return ErrUnavailable
+	}
 	a, err := e.Snapshot(ctx)
 	if err != nil {
 		return ErrUnavailable

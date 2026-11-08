@@ -1,5 +1,6 @@
 # Source template. Package with tikray-installer and the two authenticated image archives.
 {
+    :if ([:len [/system/script/find where name="tikray-uninstall-state"]] > 0) do={ :error "tikray: finish the pending uninstall before importing" }
     :global tikrayDisk
     :global tikrayDir
     :global tikraySubnet
@@ -146,6 +147,8 @@
     :local ctlID
     :local runnerID
     # @TIKRAY_CERTIFICATE@
+    # @TIKRAY_BINDINGS@
+    :local bindingPreflight [$bindPeers "preflight" $subnet]
     :local checkPin [$tls false $routerIP $ctlIP]
     # @TIKRAY_WATCHDOG_PREFLIGHT@
     :local emergency [/system/script/find where name="tikray-emergency-off" or comment="tikray:emergency-off"]
@@ -231,7 +234,7 @@
     }
     :foreach port in=[/interface/bridge/port/find where bridge="tikray"] do={
         :local iface [/interface/bridge/port/get $port interface]; :local ownedTag [/interface/bridge/port/get $port comment]
-        :if (!(($iface = "tikray-ctl" and $ownedTag = "tikray:port-ctl") or ($iface = "tikray-runner" and $ownedTag = "tikray:port-runner"))) do={ :error "tikray: shared_reference_refuses; unexpected bridge port" }
+        :if (!( (($iface = "tikray-ctl" or [:pick [:tostr $iface] 0 1] = "*") and $ownedTag = "tikray:port-ctl") or (($iface = "tikray-runner" or [:pick [:tostr $iface] 0 1] = "*") and $ownedTag = "tikray:port-runner") )) do={ :error "tikray: shared_reference_refuses; unexpected bridge port" }
     }
     :local seedPath ($data . "/install.json")
     :local statePath ($data . "/state/routeros.json")
@@ -373,9 +376,9 @@
             :if ($side = "runner") do={ :set ip $runnerIP }
             :local p {"name"=$componentName;"address"=($ip . "/" . $bits);"gateway"=$routerIP}
             :set i [$ensure "/interface/veth" ("tikray:veth-" . $side) ({"name"=$componentName}) $p $apply "" $requireInstall $lease]
-            :set i [$ensure "/interface/bridge/port" ("tikray:port-" . $side) ({"interface"=$componentName}) ({"bridge"="tikray";"interface"=$componentName}) $apply "" $requireInstall $lease]
         }
         :set i [$ensure "/ip/address" "tikray:addr" ({"address"=($routerIP . "/" . $bits)}) ({"address"=($routerIP . "/" . $bits);"interface"="tikray"}) $apply "" $requireInstall $lease]
+        :if ($apply) do={ $requireInstall $lease; :local bound [$bindPeers "repair" $subnet $requireInstall $lease] }
         :set i [$ensure "/ip/firewall/nat" "tikray:nat-containers" $noKeys ({"chain"="srcnat";"src-address"=$subnet;"out-interface-list"=$wanList;"action"="masquerade"}) $apply "" $requireInstall $lease]
         :local fwd "tikray-bridge-fw"; :local inChain "tikray-bridge-in"
         :local before [$ensure "/ip/firewall/filter" "tikray:acl-deny" $noKeys ({"chain"=$fwd;"action"="drop"}) $apply "" $requireInstall $lease]

@@ -35,7 +35,7 @@ func TestWatchdogSchedulerIdentity(t *testing.T) {
 		t.Fatal(e)
 	}
 	source := "{\n" + string(stateSource) + "\n" + string(step) + `
-        :local receipt [$wdState "init"]
+        :local receipt [$wdState "init" "bba00707962545289269840109d349f3"]
         :local prior ($receipt->"tikray")
         :if ([:typeof $prior] != "array") do={ :set prior [:toarray ""] }
         :local now ([:tonsec [/system/resource/get uptime]]/1000000000)
@@ -92,7 +92,7 @@ func TestWatchdogInactiveExitsCleanly(t *testing.T) {
 		t.Fatal(e)
 	}
 	source := string(body)
-	for _, part := range []struct{ key, file string }{{"STEP", "watchdog-step.rsc"}, {"STATE", "watchdog-state.rsc"}} {
+	for _, part := range []struct{ key, file string }{{"STEP", "watchdog-step.rsc"}, {"STATE", "watchdog-state.rsc"}, {"BINDINGS", "bindings.rsc"}} {
 		b, e := routerosfiles.Sources.ReadFile(part.file)
 		if e != nil {
 			t.Fatal(e)

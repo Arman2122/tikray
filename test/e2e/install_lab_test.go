@@ -36,6 +36,7 @@ func TestM3Install(t *testing.T) {
 		t.Fatal("could not resolve installer target")
 	}
 	check := (&Lab{Version: target, Arch: labArch()}).recordChecks(t, "m3-install")
+	var interruptedID string
 	// An interrupted install on a separate ready overlay also proves the
 	// owner's pre-existing certificate is never claimed. Teardown completes
 	// before the first truly clean import starts.
@@ -96,6 +97,7 @@ func TestM3Install(t *testing.T) {
 			st.Fatal("retry replaced reused certificate or credentials")
 		}
 		f.checkReady(ctx, st)
+		interruptedID = f.checkHealthIdentity(ctx, st)
 		acl := f.mustRun(ctx, st, `{:local r [/ip/service/get [find where name=api-ssl and !dynamic]]; :put [:len ($r->"address")]}`)
 		if acl != "0" || !f.v6TLS(ctx, st) {
 			st.Fatal("installer restricted the previously enabled unrestricted owner API")
@@ -172,6 +174,9 @@ func TestM3Install(t *testing.T) {
 	})
 	check("clean_install", func(st *testing.T, note func(string, ...any)) {
 		f := ensure(st)
+		if f.checkHealthIdentity(ctx, st) == interruptedID {
+			st.Fatal("separate fresh installations reused an identity")
+		}
 		state, err := f.pinned(ctx, st).State(ctx)
 		var initial struct {
 			Servers, Subscriptions []json.RawMessage
@@ -204,8 +209,7 @@ func TestM3Install(t *testing.T) {
 		if f.probe(ctx, st, "account") != "verified" {
 			st.Fatal("restricted API permission witness failed")
 		}
-		keptTmp := f.mustRun(ctx, st, `{:local p [:tostr [/container/config/get tmpdir]]; :put (($p = "/disk1/lab-container-tmp") or ($p = "disk1/lab-container-tmp"))}`)
-		if keptTmp != "true" {
+		if f.containerTmpDir(ctx, st) != f.ownerTmpDir {
 			st.Fatal("installer changed the owner's temporary directory")
 		}
 		if f.mustRun(ctx, st, `:put [:len [/system/scheduler/find where name=tikray-watchdog and interval=1m and disabled=no]]`) != "1" {
@@ -221,6 +225,7 @@ func TestM3Install(t *testing.T) {
 	})
 	check("second_import", func(st *testing.T, note func(string, ...any)) {
 		f := ensure(st)
+		identity := f.checkHealthIdentity(ctx, st)
 		code := f.file(ctx, st, dataRoot+"/state/setup.code")
 		if !setupPattern.MatchString(code) {
 			st.Fatal("missing first-claim code")
@@ -232,6 +237,9 @@ func TestM3Install(t *testing.T) {
 		session := anon.withSession(st, login)
 		prev := f.stability(ctx, st)
 		out := f.requireSuccess(ctx, st)
+		if f.checkHealthIdentity(ctx, st) != identity {
+			st.Fatal("repeat import changed the installation ID")
+		}
 		if strings.Contains(out, code) || f.stability(ctx, st) != prev {
 			st.Fatal("repeat import exposed setup material or changed healthy state, object IDs or running processes")
 		}
@@ -276,7 +284,7 @@ func TestM3Install(t *testing.T) {
 	check("basic_watchdog", func(st *testing.T, note func(string, ...any)) {
 		f := ensure(st)
 		f.checkWatchdog(ctx, st)
-		note("Tick-level evidence distinguished control and runner failures, restart threshold, backoff, recovery and emergency suppression.")
+		note("Healthy HTTPS with another installation ID counted as a miss. The genuine response cleared it. The third real minute tick restarted only the stopped control. Runner-only failure, sustained control backoff and emergency suppression also passed.")
 	})
 }
 

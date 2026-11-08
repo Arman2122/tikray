@@ -14,17 +14,20 @@ import (
 )
 
 type Engine struct {
-	finalPurge     func(context.Context, Native, Actual, []policyView) (int, error)
-	check          func(context.Context, Native, Actual, []policyView) error
-	c              Native
-	scope          InstallScope
-	file           string
-	gate           chan struct{}
-	observe        func(context.Context, Native, InstallScope) (Actual, error)
-	purge          func(context.Context, Native, Actual, []policyView) (int, error)
-	mu             sync.RWMutex
-	seen           map[string]bool
-	seenGeneration uint64
+	// Pure policy-engine callers can supply a topology without an installed
+	// container bridge. The production Managed session must prove that bridge.
+	managedBindings bool
+	finalPurge      func(context.Context, Native, Actual, []policyView) (int, error)
+	check           func(context.Context, Native, Actual, []policyView) error
+	c               Native
+	scope           InstallScope
+	file            string
+	gate            chan struct{}
+	observe         func(context.Context, Native, InstallScope) (Actual, error)
+	purge           func(context.Context, Native, Actual, []policyView) (int, error)
+	mu              sync.RWMutex
+	seen            map[string]bool
+	seenGeneration  uint64
 }
 
 func NewEngine(c Native, scope InstallScope, stateDir string) *Engine {
@@ -264,6 +267,11 @@ func (e *Engine) prepare(ctx context.Context, t Target) (*pass, error) {
 	p.j, err = e.readJournal()
 	if err != nil {
 		return nil, err
+	}
+	if e.managedBindings {
+		if err = ReconcileBindings(ctx, e.c, e.scope.Subnet, true); err != nil {
+			return nil, err
+		}
 	}
 	p.a, err = e.Snapshot(ctx)
 	if err != nil {

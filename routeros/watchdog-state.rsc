@@ -9,8 +9,10 @@
     :local prefix "tikray:watchdog-state "
     :local rows [/system/script/find where name=$label or comment~"^tikray:watchdog-state "]
     :if (([:len $rows] = 0) and ($op = "inspect")) do={ :return {"version"=1} }
+    :if (($op = "init") and (([:typeof $key] != "str") or ([:len $key] != 32) or (!($key ~ "^[0-9a-f]+\$")))) do={ :error "tikray: invalid installation ID" }
     :if (([:len $rows] = 0) and ($op = "init")) do={
-        /system/script/add name=$label comment=($prefix . "{\"version\":1}") policy=read dont-require-permissions=no source=""
+        :local initial {"version"=1;"installation_id"=$key}
+        /system/script/add name=$label comment=($prefix . [:serialize to=json options=json.no-string-conversion value=$initial]) policy=read dont-require-permissions=no source=""
         :set rows [/system/script/find where name=$label or comment~"^tikray:watchdog-state "]
     }
     :if ([:len $rows] != 1) do={ :error "tikray: watchdog state ownership conflict" }
@@ -27,8 +29,11 @@
     :if (!$readable) do={ :error "tikray: watchdog state permissions conflict" }
     :local values [:deserialize from=json options=json.no-string-conversion value=[:pick $tag [:len $prefix] [:len $tag]]]
     :if (($values->"version") != 1) do={ :error "tikray: unknown watchdog state" }
+    :local identity ($values->"installation_id")
+    :if (([:typeof $identity] != "str") or ([:len $identity] != 32) or (!($identity ~ "^[0-9a-f]+\$"))) do={ :error "tikray: unreadable watchdog installation ID" }
+    :if (($op = "init") and ($identity != $key)) do={ :error "tikray: watchdog installation ID conflict" }
     :foreach field,record in=$values do={
-        :if ($field != "version") do={
+        :if (($field != "version") and ($field != "installation_id")) do={
             :if (($field != "tikray") and ($field != "tikray-runner")) do={ :error "tikray: unexpected watchdog state" }
             :foreach prop in={"miss";"delay";"due";"at"} do={
                 :if ([:typeof ($record->$prop)] != "num") do={ :error "tikray: unreadable watchdog state" }

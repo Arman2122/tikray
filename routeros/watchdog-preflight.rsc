@@ -1,3 +1,13 @@
+    :local readWatchID do={
+        :local rows [/file/find where name=($1 . "/state/install.id")]
+        :if ([:len $rows] != 1) do={ :error "tikray: check the control volume installation ID" }
+        :local value [/file/get [:pick $rows 0] contents]
+        :if (([:len $value] != 32) or (!($value ~ "^[0-9a-f]+\$"))) do={ :error "tikray: invalid control volume installation ID" }
+        :return $value
+    }
+    :if ([:typeof ($watchStateCheck->"installation_id")] = "str") do={
+        :if ([$readWatchID $data] != ($watchStateCheck->"installation_id")) do={ :error "tikray: watchdog installation ID conflict" }
+    }
     :local provisionWatch do={
         :local apply [:tobool $1]
         :local body $2

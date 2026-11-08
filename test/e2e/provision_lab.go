@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -43,6 +44,7 @@ type installLab struct {
 	publicKey             string
 	ownerRules            []string
 	originalAPI           string
+	ownerTmpDir           string
 }
 
 func DeployM3(ctx context.Context, t *testing.T) *installLab { t.Helper(); return deployM3(ctx, t, t) }
@@ -162,6 +164,10 @@ func (f *installLab) cleanOverlay(ctx context.Context, t *testing.T) {
 	}
 	f.mustRun(ctx, t, "/file/add type=directory name=disk1/lab-container-tmp")
 	f.mustRun(ctx, t, "/container/config/set tmpdir=disk1/lab-container-tmp")
+	f.ownerTmpDir = f.containerTmpDir(ctx, t)
+	if strings.TrimPrefix(f.ownerTmpDir, "/") != "disk1/lab-container-tmp" {
+		t.Fatal("owner container temporary directory fixture did not take effect")
+	}
 	sort.Slice(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
 	for _, path := range paths {
 		f.mustRun(ctx, t, "/file/remove [find name="+path+"]")
@@ -171,7 +177,20 @@ func (f *installLab) cleanOverlay(ctx context.Context, t *testing.T) {
 	}
 }
 
-var installMenus = []string{"/interface/bridge", "/interface/bridge/port", "/interface/veth", "/ip/address", "/ip/firewall/filter", "/ip/firewall/mangle", "/ip/firewall/raw", "/ip/firewall/nat", "/ipv6/firewall/filter", "/ip/firewall/address-list", "/routing/table", "/ip/route", "/tool/netwatch", "/system/script", "/system/scheduler", "/user", "/user/group", "/container", "/container/mounts", "/container/envs"}
+func (f *installLab) containerTmpDir(ctx context.Context, t *testing.T) string {
+	t.Helper()
+	// The native row preserves the canonical mounted path, including the
+	// leading slash on releases that return one. Compare the same property
+	// on both sides of the import without relying on CLI boolean rendering.
+	out := f.mustRun(ctx, t, `{:local row [/container/config/get]; :put ("m3-tmpdir=" . [:tostr ($row->"tmpdir")] . "|end")}`)
+	m := regexp.MustCompile(`(?m)^m3-tmpdir=([^|\r\n]+)\|end[[:space:]]*$`).FindStringSubmatch(out)
+	if len(m) != 2 {
+		t.Fatal("owner temporary directory readback unavailable")
+	}
+	return m[1]
+}
+
+var installMenus = []string{"/interface/bridge", "/interface/bridge/port", "/interface/bridge/host", "/interface/veth", "/ip/address", "/ip/arp", "/ip/firewall/filter", "/ip/firewall/mangle", "/ip/firewall/raw", "/ip/firewall/nat", "/ipv6/firewall/filter", "/ip/firewall/address-list", "/routing/table", "/ip/route", "/tool/netwatch", "/system/script", "/system/scheduler", "/user", "/user/group", "/container", "/container/mounts", "/container/envs"}
 
 func (f *installLab) owned(ctx context.Context) (string, error) {
 	var s strings.Builder
@@ -250,6 +269,16 @@ func (f *installLab) packInstaller(ctx context.Context, t *testing.T) string {
 	cmd.Dir = repoRoot()
 	if cmd.Run() != nil {
 		t.Fatal("real installer packager refused signed test inputs")
+	}
+	if delivered := os.Getenv("TIKRAY_LAB_INSTALLER"); delivered != "" {
+		// Test the exact artifact handed to the owner. A separately signed
+		// fixture with the same images must regenerate every byte.
+		want, err := os.ReadFile(target)
+		got, readErr := os.ReadFile(delivered)
+		if err != nil || readErr != nil || !bytes.Equal(want, got) {
+			t.Fatal("delivered installer differs from independently verified image pair")
+		}
+		return delivered
 	}
 	return target
 }
@@ -333,7 +362,7 @@ func installOutput(wire string) (string, error) {
 	}
 	// Error literals come only from the reviewed installer sources. Dynamic
 	// RouterOS diagnostics can contain router configuration or credentials.
-	for _, p := range []string{"install.rsc", "certificate.rsc", "watchdog-preflight.rsc", "watchdog-state.rsc", "watchdog.rsc"} {
+	for _, p := range []string{"install.rsc", "certificate.rsc", "bindings.rsc", "watchdog-preflight.rsc", "watchdog-state.rsc", "watchdog.rsc"} {
 		src, e := os.ReadFile(filepath.Join(repoRoot(), "routeros", p))
 		if e != nil {
 			continue

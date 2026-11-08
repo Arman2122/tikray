@@ -251,6 +251,7 @@ func (f *installLab) checkWatchdog(ctx context.Context, t *testing.T) {
 		return s
 	}
 	tick()
+	f.checkWrongHealthIdentity(ctx, t, tick)
 	trace := f.mustRun(ctx, t, `{:local rows [/container/find where name="tikray-runner" and comment="tikray:runner"]; :local rid [:pick $rows 0]; :put ("m3-peer=" . [:len $rows] . "|" . [:convert [:tostr $rid] to=hex] . "|end")}`)
 	match := regexp.MustCompile(`m3-peer=([0-9]+)\|([0-9a-fA-F]*)\|end`).FindStringSubmatch(trace)
 	if len(match) != 3 || match[1] != "1" {

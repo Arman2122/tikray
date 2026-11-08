@@ -10,6 +10,7 @@
     # Service readback can spell a single-host prefix with or without its
     # suffix. RouterOS can reorder entries. Keep original spelling for teardown
     # and compare the full set of grants, including IPv6, on retries.
+            # BEGIN API SERVICE READ
     :local allowedList do={
         :local canonical [:toarray ""]
         :foreach item in=$1 do={
@@ -43,6 +44,7 @@
         }
         :return $entire
     }
+            # END API SERVICE READ
     :local original [$readService $svc $allowedList]
     :local oldCert [:tostr ($original->"certificate")]
     :local oldDisabled ($original->"disabled")
