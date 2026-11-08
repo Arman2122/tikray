@@ -86,7 +86,9 @@ type Config struct {
 	Updaters Updaters
 	Runner   Runner
 	// Router manages steering when the installer configured a RouterOS peer.
-	Router RouterController
+	Router       RouterController
+	Bootstrap    *Bootstrap // pending installer handoff, nil for an established installation
+	VerifyBridge bool       // installer credentials must stay on the assigned local bridge
 	// Monitor, if set, runs with Run, and gives Status its health. When its
 	// State is nil, New sets it to read the service's state.
 	Monitor *health.Monitor
@@ -120,6 +122,8 @@ type Config struct {
 
 // Service owns the desired state and keeps xray applied to it.
 type Service struct {
+	bootstrap   *Bootstrap
+	bootPending atomic.Bool
 	// The runner endpoints cannot be used during this process's lifetime
 	// if they were derived from an unsafe legacy bridge at startup.
 	repairBridge bool
@@ -206,11 +210,12 @@ func New(c Config) (*Service, error) {
 		c.LocalBridge = func(store.Network) bool { return false }
 	}
 	repairBridge := store.ValidateRouterNetwork(st.Network, nil) != nil ||
-		st.Network.RequireLocalBridge && !c.LocalBridge(st.Network)
+		(st.Network.RequireLocalBridge || c.VerifyBridge) && !c.LocalBridge(st.Network)
 	if repairBridge {
 		c.Runner, c.Monitor, c.Socks = unavailableBridge{}, nil, ""
 	}
 	s := &Service{
+		bootstrap:    c.Bootstrap,
 		repairBridge: repairBridge,
 		localBridge:  c.LocalBridge,
 
@@ -234,6 +239,12 @@ func New(c Config) (*Service, error) {
 		holds:      map[string]time.Time{},
 		after:      realTimer,
 		schedAfter: realTimer,
+	}
+	if c.Bootstrap != nil {
+		if c.Bootstrap.Version == "" || c.Bootstrap.Ready == nil {
+			return nil, errors.New("service: incomplete bootstrap configuration")
+		}
+		s.bootPending.Store(true)
 	}
 	if s.now == nil {
 		s.now = time.Now
@@ -286,6 +297,21 @@ func (s *Service) Run(ctx context.Context) error {
 			defer wg.Done()
 			s.watchRouter(ctx)
 		}()
+	}
+	// Management is already listening. Ordinary applies and refreshes can
+	// start once the committed selection has survived the durable handshake.
+	for s.bootPending.Load() {
+		err := s.BootstrapCore(ctx, s.bootstrap.Version)
+		if err == nil {
+			break
+		}
+		s.routerPending("retry_bootstrap")
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return nil
+		case <-time.After(s.retry):
+		}
 	}
 	if s.monitor != nil {
 		wg.Add(1)
@@ -362,6 +388,16 @@ func (s *Service) Status(ctx context.Context) Status {
 	}
 	s.mu.Unlock()
 
+	if s.bootPending.Load() {
+		out.Pending = true
+		if out.Router != nil {
+			out.Router.Pending = true
+			if !s.repairBridge {
+				out.Router.Degraded = "retry_bootstrap"
+			}
+		}
+		return out
+	}
 	rctx, cancel := context.WithTimeout(ctx, statusTimeout)
 	rs, err := s.runner.Status(rctx)
 	cancel()

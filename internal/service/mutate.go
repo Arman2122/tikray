@@ -75,6 +75,9 @@ type edit func(st *store.State) ([]note, error)
 // records the edit's events and kicks the apply loop. If protection was
 // staged before a failure, the loop resumes against the saved state.
 func (s *Service) change(ctx context.Context, rev uint64, fn edit) (store.State, uint64, error) {
+	if s.bootPending.Load() {
+		return store.State{}, 0, ErrBootstrapPending
+	}
 	if s.router == nil {
 		return s.save(rev, fn)
 	}

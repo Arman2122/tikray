@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Arman2122/tikray/internal/atomicfile"
 	"github.com/Arman2122/tikray/internal/xrayver"
 )
 
@@ -140,10 +141,11 @@ func (x *Index) Lookup(v xrayver.Version, file string) (string, bool) {
 
 // Verifier finds the SHA-256 a release file must have.
 type Verifier struct {
-	Upstream  Chain        // direct and proxy only: where upstream's .dgst files come from
-	IndexURLs []string     // hash index locations, tried in order; each has a ".sig" beside it
-	IndexPub  []byte       // PKIX PEM ECDSA P-256 key the index is signed with
-	HTTP      *http.Client // for the index; nil means a client with a 30 s timeout
+	localIndex *Index
+	Upstream   Chain        // direct and proxy only: where upstream's .dgst files come from
+	IndexURLs  []string     // hash index locations, tried in order; each has a ".sig" beside it
+	IndexPub   []byte       // PKIX PEM ECDSA P-256 key the index is signed with
+	HTTP       *http.Client // for the index; nil means a client with a 30 s timeout
 }
 
 // Verified is a known hash and where it came from.
@@ -160,6 +162,16 @@ type Verified struct {
 // caller decides whether the file may be used unverified. A canceled ctx gives
 // ctx's error instead.
 func (v Verifier) Expected(ctx context.Context, r Request) (Verified, error) {
+	if v.localIndex != nil {
+		if err := ctx.Err(); err != nil {
+			return Verified{}, err
+		}
+		h, ok := v.localIndex.Lookup(r.Version, r.File)
+		if !ok {
+			return Verified{}, ErrNoHash
+		}
+		return Verified{SHA256: h, Method: "index"}, nil
+	}
 	var why []string
 	if len(v.Upstream.Sources) > 0 {
 		h, err := v.fromDgst(ctx, r)
@@ -185,6 +197,28 @@ func (v Verifier) Expected(ctx context.Context, r Request) (Verified, error) {
 		why = append(why, "no upstream source or hash index configured")
 	}
 	return Verified{Method: "unverified"}, fmt.Errorf("%w %s: %s", ErrNoHash, r.File, strings.Join(why, "; "))
+}
+
+// InboxVerifier authenticates the uploaded index with the independently
+// provisioned key. Its lookup never makes an HTTP request during bootstrap.
+func InboxVerifier(dir, keyFile string) (Verifier, error) {
+	key, e := atomicfile.ReadRegular(keyFile, 16<<10, 0)
+	if e != nil {
+		return Verifier{}, errors.New("artifacts: offline trust key unavailable")
+	}
+	data, e := atomicfile.ReadRegular(filepath.Join(dir, "index.json"), indexMaxBytes, 0)
+	if e != nil {
+		return Verifier{}, errors.New("artifacts: offline index unavailable")
+	}
+	sig, e := atomicfile.ReadRegular(filepath.Join(dir, "index.json.sig"), 16<<10, 0)
+	if e != nil {
+		return Verifier{}, errors.New("artifacts: offline signature unavailable")
+	}
+	idx, e := VerifyIndex(data, sig, key)
+	if e != nil {
+		return Verifier{}, errors.New("artifacts: offline index verification failed")
+	}
+	return Verifier{localIndex: idx}, nil
 }
 
 // dgstChain returns a copy of c fit for a .dgst, which is a few hundred bytes:

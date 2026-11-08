@@ -514,8 +514,8 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, configFile 
 	defer unlock()
 	// Only the running service can guard clients across the runner trial
 	// and router update. A dangling or unreadable install is still managed.
-	for _, name := range []string{"routeros.json", "router-policy.json"} {
-		if _, err := os.Lstat(filepath.Join(stateDir(cfg.Data), name)); !errors.Is(err, os.ErrNotExist) {
+	for _, name := range []string{"install.json", "state/install.request", "state/install.ready", "state/routeros.json", "state/router-policy.json"} {
+		if _, err := os.Lstat(filepath.Join(cfg.Data, name)); !errors.Is(err, os.ErrNotExist) {
 			return c.refused(cfg, base, errors.New("RouterOS steering requires tikray serve to apply changes"))
 		}
 	}

@@ -259,6 +259,30 @@ func TestVerifyIndex(t *testing.T) {
 	})
 }
 
+func TestOfflineInboxUsesIndependentSignedIndex(t *testing.T) {
+	inbox := t.TempDir()
+	keyFile := filepath.Join(t.TempDir(), "index.pub")
+	k := newKey(t, elliptic.P256())
+	data := testIndex(t, hashB)
+	if os.WriteFile(keyFile, pubPEM(t, k), 0600) != nil || os.WriteFile(filepath.Join(inbox, "index.json"), data, 0600) != nil || os.WriteFile(filepath.Join(inbox, "index.json.sig"), sign(t, k, data), 0600) != nil {
+		t.Fatal("fixture")
+	}
+	v, err := InboxVerifier(inbox, keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := v.Expected(context.Background(), testReq)
+	if err != nil || got.SHA256 != hashB || got.Method != "index" {
+		t.Fatal("verified offline hash missing")
+	}
+	if os.WriteFile(filepath.Join(inbox, "index.json"), testIndex(t, hashA), 0600) != nil {
+		t.Fatal("tamper")
+	}
+	if _, err := InboxVerifier(inbox, keyFile); err == nil {
+		t.Fatal("unsigned replacement index accepted")
+	}
+}
+
 func TestIndexLookup(t *testing.T) {
 	idx := &Index{Version: 1, Files: map[string]map[string]string{
 		"v26.10.21": {

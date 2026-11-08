@@ -221,6 +221,9 @@ func (s *Service) retryable(ctx context.Context, res artifacts.Result, err error
 // can't be reached is. artifacts.ErrLocked comes back as it is. A rejected or
 // unhealthy apply is not retried.
 func (s *Service) ApplyNow(ctx context.Context) (artifacts.Result, error) {
+	if s.bootPending.Load() {
+		return artifacts.Result{}, ErrBootstrapPending
+	}
 	if err := s.acquire(ctx); err != nil {
 		return artifacts.Result{}, err
 	}
@@ -260,6 +263,12 @@ func (s *Service) ApplyNow(ctx context.Context) (artifacts.Result, error) {
 // runner can't be reached before the update starts; the error of one that
 // ran is its own, as ApplyNow's.
 func (s *Service) CoreUpdate(ctx context.Context, version string, o artifacts.UpdateOptions) (artifacts.Result, error) {
+	if s.bootPending.Load() {
+		if version != s.bootstrap.Version || o.ConfigFile != "" || o.AllowUnverified {
+			return artifacts.Result{}, ErrBootstrapPending
+		}
+		return s.bootstrapCore(ctx, version)
+	}
 	return s.coreOp(ctx, "xray-core update to "+version, func(u *artifacts.CoreUpdater) (artifacts.Result, error) {
 		return u.Update(ctx, version, o)
 	})
@@ -271,6 +280,9 @@ func (s *Service) CoreUpdate(ctx context.Context, version string, o artifacts.Up
 // runner can't be reached before the rollback starts; the error of one that
 // ran is its own, as ApplyNow's.
 func (s *Service) CoreRollback(ctx context.Context) (artifacts.Result, error) {
+	if s.bootPending.Load() {
+		return artifacts.Result{}, ErrBootstrapPending
+	}
 	return s.coreOp(ctx, "rollback", func(u *artifacts.CoreUpdater) (artifacts.Result, error) {
 		return u.Rollback(ctx)
 	})

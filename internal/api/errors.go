@@ -61,6 +61,8 @@ type errorBody struct {
 func classify(err error) (status int, code, detail string) {
 	var refused *service.Refused
 	switch {
+	case errors.Is(err, service.ErrBootstrapPending):
+		return http.StatusServiceUnavailable, "bootstrap_pending", service.ErrBootstrapPending.Error()
 	case errors.As(err, &refused):
 		return http.StatusUnprocessableEntity, codeRefused, refused.Reason
 	case errors.Is(err, auth.ErrBadCredentials):

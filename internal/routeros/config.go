@@ -3,6 +3,7 @@ package routeros
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Arman2122/tikray/internal/atomicfile"
 	"github.com/Arman2122/tikray/internal/store"
 )
 
@@ -207,6 +210,10 @@ func OpenManaged(data string) (*Managed, error) {
 		}
 		return nil, nil
 	}
+	return managedInstallation(dir, in)
+}
+
+func managedInstallation(dir string, in Installation) (*Managed, error) {
 	h, port, e := net.SplitHostPort(in.Address)
 	a, e2 := netip.ParseAddr(h)
 	n, e3 := strconv.ParseUint(port, 10, 16)
@@ -239,6 +246,47 @@ func OpenManaged(data string) (*Managed, error) {
 	}
 	m := &Managed{cfg: ConnConfig{Address: in.Address, Username: in.Username, Password: in.Password, Fingerprint: in.Fingerprint}, scope: in.Scope, dir: dir}
 	return m, nil
+}
+
+// InitInstallation is called under serve.lock. A repeat preserves the
+// credential. A different router or topology must never inherit it.
+func InitInstallation(data string, proposed Installation, recordIntent func() error) error {
+	dir := filepath.Join(data, "state")
+	path := filepath.Join(dir, "routeros.json")
+	var previous Installation
+	found, err := readPrivate(path, &previous, 1<<20)
+	if err != nil {
+		return errPrivate
+	}
+	if found {
+		proposed.Password = previous.Password
+		if !reflect.DeepEqual(previous, proposed) {
+			return errPrivate
+		}
+		if _, err := managedInstallation(dir, previous); err != nil {
+			return err
+		}
+		return recordIntent()
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "router-policy.json")); !errors.Is(err, os.ErrNotExist) {
+		return errPrivate
+	}
+	var entropy [32]byte
+	rand.Read(entropy[:])
+	proposed.Password = hex.EncodeToString(entropy[:])
+	if _, err := managedInstallation(dir, proposed); err != nil {
+		return err
+	}
+	// A crash after credential publication must never start the ordinary
+	// managed service without its install gate.
+	if err := recordIntent(); err != nil {
+		return err
+	}
+	body, err := encodePrivate(proposed, 1<<20)
+	if err != nil || atomicfile.WriteFile(path, body, 0600) != nil {
+		return errPrivate
+	}
+	return nil
 }
 
 type Managed struct {

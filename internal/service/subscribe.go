@@ -212,6 +212,9 @@ type RefreshResult struct {
 //
 // A subscription that is disabled is not fetched: *Refused.
 func (s *Service) RefreshSubscription(ctx context.Context, id string) (RefreshResult, error) {
+	if s.bootPending.Load() {
+		return RefreshResult{}, ErrBootstrapPending
+	}
 	if err := s.acquireRefresh(ctx); err != nil {
 		return RefreshResult{}, err
 	}

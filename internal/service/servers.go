@@ -156,6 +156,9 @@ type NewServer struct {
 // ignored in a link (its warnings) is recorded as one warning event each,
 // once the server is saved.
 func (s *Service) AddServer(ctx context.Context, rev uint64, n NewServer) (store.Server, uint64, error) {
+	if s.bootPending.Load() {
+		return store.Server{}, 0, ErrBootstrapPending
+	}
 	var link *string
 	if strings.TrimSpace(n.Link) != "" {
 		link = &n.Link
@@ -201,6 +204,9 @@ type ServerPatch struct {
 // link or outbound as AddServer's does, and no other change; a new link's
 // warnings are recorded as AddServer's are.
 func (s *Service) UpdateServer(ctx context.Context, rev uint64, id string, p ServerPatch) (store.Server, uint64, error) {
+	if s.bootPending.Load() {
+		return store.Server{}, 0, ErrBootstrapPending
+	}
 	var src source
 	replace := p.Link != nil || len(p.Outbound) > 0
 	if replace {

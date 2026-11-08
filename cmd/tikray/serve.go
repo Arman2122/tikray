@@ -67,6 +67,13 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 	if err != nil {
 		return c.fail(err)
 	}
+	install, err := openInstallation(env.Data, s)
+	if err != nil {
+		return c.fail(err)
+	}
+	if install != nil && (env.RunnerURL != "" || env.Socks != "" || env.XrayAPI != "") {
+		return c.fail(errors.New("tikray: managed runner addresses must come from the private bridge"))
+	}
 	// The admin, the sessions and the API tokens: one Store, opened here under
 	// the lock like the state.
 	people, err := auth.OpenStore(stateDir(env.Data))
@@ -87,6 +94,10 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 		return c.fail(err)
 	}
 	w := wireService(env, st, pub, c.stderr)
+	bootstrap, err := install.bootstrapConfig(env, fingerprint)
+	if err != nil {
+		return c.fail(err)
+	}
 	managed, err := routeros.OpenManaged(env.Data)
 	if err != nil {
 		return c.fail(err)
@@ -96,15 +107,17 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 		router = managed
 	}
 	svc, err := service.New(service.Config{
-		Store:       s,
-		Updaters:    w.updaters,
-		Runner:      w.runner,
-		Router:      router,
-		Monitor:     w.monitor,
-		Data:        env.Data,
-		Socks:       w.cfg.Socks,
-		Log:         c.stderr,
-		LocalBridge: assignedBridge,
+		Store:        s,
+		Updaters:     w.updaters,
+		Runner:       w.runner,
+		Router:       router,
+		Bootstrap:    bootstrap,
+		VerifyBridge: install != nil,
+		Monitor:      w.monitor,
+		Data:         env.Data,
+		Socks:        w.cfg.Socks,
+		Log:          c.stderr,
+		LocalBridge:  assignedBridge,
 	})
 	if err != nil {
 		return c.fail(err)
