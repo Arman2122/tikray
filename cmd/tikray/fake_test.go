@@ -316,7 +316,7 @@ func apiHandler(t testing.TB, b api.Backend, token string) http.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return api.NewHandler(b, token, a, auth.NewLimiter(nil))
+	return api.NewHandler(b, token, a, auth.NewLimiter(nil), "")
 }
 
 // daemon is the fake backend behind the real API handler, on a TLS test

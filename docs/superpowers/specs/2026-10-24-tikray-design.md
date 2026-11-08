@@ -263,6 +263,10 @@ them with `mountlists=`; `mode=ro` is enforced (M0).
   a freshly started container's veth spends the forward delay blocked, so a
   just-started container couldn't reach the runner (M1 lab, 2/2 A/B each way).
 - NAT masquerade for the container subnet out to the WAN.
+- Bind the control and runner IPv4 addresses to their own veth MACs and bridge
+  ports. The binding must hold even when the runner uses the control address
+  and the control port is down. Reimport and reconciliation repair recreated
+  veths, and uninstall removes only verified, tagged binding objects.
 - Every container sets `dns=` explicitly (the router's bridge address): RouterOS
   refuses to start a container without DNS ("no default dns servers") even when
   `/ip/dns` has servers (M0).
@@ -634,7 +638,10 @@ reconciler. It is idempotent and safe to re-run.
 
 Runs every minute on RouterOS itself, independent of both containers:
 
-- Checks `tikray` `/healthz` with `/tool fetch`.
+- Fetches `/healthz` at the control address over HTTPS with redirects
+  disabled. The bridge binding protects the destination. The watchdog
+  requires a healthy response carrying the installation's public ID.
+  TLS supplies transport encryption for this probe.
 - If a `tikray` update marker is present and health has failed past the update
   window → restores the previous `tikray` image from `/data/images/` and removes
   the marker.

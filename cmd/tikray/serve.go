@@ -161,9 +161,13 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 		}()
 	}
 	ended := make(chan error, 2)
+	var installationID string
+	if install != nil {
+		installationID = install.ID
+	}
 	go func() { ended <- svc.Run(ctx) }()
 	go func() {
-		ended <- api.ServeListener(ctx, ln, api.NewHandler(svc, token, people, auth.NewLimiter(nil)), cert)
+		ended <- api.ServeListener(ctx, ln, api.NewHandler(svc, token, people, auth.NewLimiter(nil), installationID), cert)
 	}()
 	var first error
 	for range 2 {

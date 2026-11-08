@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 
 	"github.com/Arman2122/tikray/internal/apiclient"
 	"github.com/Arman2122/tikray/internal/atomicfile"
@@ -26,6 +29,7 @@ type installRequest struct {
 	Scope       routeros.InstallScope `json:"scope"`
 	Core        string                `json:"core"`
 	Offline     bool                  `json:"offline,omitempty"`
+	ID          string                `json:"installation_id,omitempty"` // set only by the control plane
 }
 
 var errInstall = errors.New("tikray: installer handoff is incomplete or conflicts with this installation")
@@ -81,11 +85,20 @@ func openInstallation(data string, db *store.Store) (*installRequest, error) {
 	if public == nil && private == nil {
 		return nil, nil
 	}
-	if public == nil {
-		public = private
-	}
-	if private != nil && !reflect.DeepEqual(private, public) {
+	if public != nil && public.ID != "" {
 		return nil, errInstall
+	}
+	if private != nil {
+		if private.ID != "" && (len(private.ID) != 32 || strings.Trim(private.ID, "0123456789abcdef") != "") {
+			return nil, errInstall
+		}
+		intent := *private
+		intent.ID = ""
+		if public != nil && !reflect.DeepEqual(public, &intent) {
+			return nil, errInstall
+		}
+		intent.ID = private.ID
+		public = &intent
 	}
 	info, err := os.Lstat(dir)
 	if err != nil || !info.IsDir() {
@@ -101,11 +114,26 @@ func openInstallation(data string, db *store.Store) (*installRequest, error) {
 	}
 	in := routeros.Installation{Version: 1, Address: public.Address, Username: "tikray", Fingerprint: public.Fingerprint, Scope: public.Scope}
 	recordIntent := func() error {
-		if private != nil {
-			return nil
+		// The daemon owns the identity under serve.lock. RouterOS reads a
+		// separate, public projection without opening the credential file.
+		idPath := filepath.Join(dir, "install.id")
+		published, err := atomicfile.ReadRegular(idPath, 32, 0600)
+		missing := errors.Is(err, os.ErrNotExist)
+		if !missing && (err != nil || public.ID == "" || string(published) != public.ID) {
+			return errInstall
 		}
-		b, err := json.Marshal(public)
-		if err != nil || atomicfile.WriteFile(path, b, 0600) != nil {
+		if public.ID == "" {
+			var identity [16]byte
+			rand.Read(identity[:])
+			public.ID = hex.EncodeToString(identity[:])
+		}
+		if private == nil || private.ID == "" {
+			b, err := json.Marshal(public)
+			if err != nil || atomicfile.WriteFile(path, b, 0600) != nil {
+				return errInstall
+			}
+		}
+		if missing && atomicfile.WriteFile(idPath, []byte(public.ID), 0600) != nil {
 			return errInstall
 		}
 		return nil

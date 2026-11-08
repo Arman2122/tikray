@@ -334,7 +334,7 @@ func newHandlerWithRoot(t testing.TB, b Backend, root string) http.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewHandler(b, root, a, auth.NewLimiter(nil))
+	return NewHandler(b, root, a, auth.NewLimiter(nil), "")
 }
 
 func mustJSON(t testing.TB, v any) string {
@@ -344,6 +344,20 @@ func mustJSON(t testing.TB, v any) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func TestManagedHealthReportsPublicInstallationID(t *testing.T) {
+	people, err := auth.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "bba00707962545289269840109d349f3"
+	srv := httptest.NewServer(NewHandler(newFake(), testToken, people, auth.NewLimiter(nil), id))
+	defer srv.Close()
+	r := request(t, srv, "GET", "/healthz", "", nil)
+	if r.status != http.StatusOK || strings.TrimSpace(string(r.body)) != `{"ok":true,"installation_id":"`+id+`"}` {
+		t.Fatal("managed health lacks the public identity or returned extra fields")
+	}
 }
 
 // sameJSON fails unless got and want are the same JSON value.

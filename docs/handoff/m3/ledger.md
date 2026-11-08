@@ -237,3 +237,9 @@ The receipt and bridge fixes, clean harness, online verification, and repeat-imp
 Native early-exit tests also passed on 7.25 (12.66 s) and 7.23.8 (12.75 s), covering both an absent readiness handoff and emergency suspension. The test first caught a dictionary argument that RouterOS required in parentheses and a top-level return that produced a native error. A local tick function now consumes explicit results.
 
 **Task 4 remains open.** The source and tests are reviewable on `m3-routeros`. Implement the owner-selected HTTPS health check, exercise genuine and substituted responders and a running-but-unhealthy control container, and run the complete stable `TestM3Install` suite against the resulting production installer. Image-update fallback and rollback remain in M3b.
+
+### Owner decision on the production health probe
+
+Ruling: Bind each container address to its own veth and use transport-only HTTPS plus the installation's public ID for the watchdog — a hijacked runner already controls all proxied traffic, and at worst a false healthy result delays a restart, so network binding is proportionate — cost if wrong: a forged response can delay recovery until the next genuine failure is detected. The owner requires a live impersonation witness on both CHR releases. The probe adds no key or cryptographic computation to the RouterOS script.
+
+The control plane generates the public ID once under its service lock and retains it in the private installation intent. A separate file exposes only the ID to the installer. The watchdog receipt retains the expected ID and refuses conflicting data on a repeat import. The anonymous health response includes it only on managed installations. Management HTTPS and API-SSL keep their original certificate checks.

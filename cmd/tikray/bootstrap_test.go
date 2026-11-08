@@ -42,6 +42,11 @@ func TestBootstrapHandoffSetsSubnetAndRetainsCredential(t *testing.T) {
 		}
 	}
 	open()
+	idPath := filepath.Join(stateDir(data), "install.id")
+	idBytes, err := os.ReadFile(idPath)
+	if err != nil || len(idBytes) != 32 || strings.Trim(string(idBytes), "0123456789abcdef") != "" {
+		t.Fatal("managed installation lacks public identifier")
+	}
 	st, rev := db.State()
 	if st.Network.Subnet != netip.MustParsePrefix("172.30.9.0/29") || !st.Network.RequireLocalBridge || st.DefaultPolicy.Mode != store.ModeDirect {
 		t.Fatal("network not initialized")
@@ -64,6 +69,24 @@ func TestBootstrapHandoffSetsSubnetAndRetainsCredential(t *testing.T) {
 		t.Fatal("fixture")
 	}
 	open()
+	again, err := os.ReadFile(idPath)
+	if err != nil || string(again) != string(idBytes) {
+		t.Fatal("startup replaced the public identity")
+	}
+	if err := os.WriteFile(idPath, []byte(strings.Repeat("0", 32)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openInstallation(data, db); err == nil {
+		t.Fatal("conflicting published identity accepted")
+	}
+	if err := os.Remove(idPath); err != nil {
+		t.Fatal(err)
+	}
+	open()
+	again, err = os.ReadFile(idPath)
+	if err != nil || string(again) != string(idBytes) {
+		t.Fatal("identity lost during repair of public handoff")
+	}
 	if _, r := db.State(); rev != r || read().Password != first.Password {
 		t.Fatal("retry replaced private state")
 	}

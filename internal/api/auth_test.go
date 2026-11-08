@@ -75,7 +75,7 @@ func newAuthEnv(t *testing.T, claimed bool) *authEnv {
 	}
 	clk := &testClock{now: t0}
 	f := newFake()
-	h := NewHandler(f, testToken, st, auth.NewLimiter(clk.Now))
+	h := NewHandler(f, testToken, st, auth.NewLimiter(clk.Now), "")
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	return &authEnv{f: f, store: st, dir: dir, clock: clk, h: h, srv: srv}
@@ -1976,7 +1976,7 @@ func TestLegacyCredentialLabelsStayPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal("could not reopen the previous auth file")
 	}
-	e.h = NewHandler(e.f, testToken, st, auth.NewLimiter(e.clock.Now))
+	e.h = NewHandler(e.f, testToken, st, auth.NewLimiter(e.clock.Now), "")
 	e.srv = httptest.NewServer(e.h)
 	t.Cleanup(e.srv.Close)
 	sess, err := st.SignIn(t.Context(), testToken, adminPass)

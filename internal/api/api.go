@@ -106,7 +106,7 @@ type handler struct {
 // session of a, and the sign-in routes held to lim (neither may be nil). The
 // check sits in front of the routes, so that a caller without a credential
 // learns nothing about them.
-func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter) http.Handler {
+func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter, installationID string) http.Handler {
 	h := &handler{b: b, a: a, lim: lim, root: sha256.Sum256([]byte(root)), rootLen: len(root), hasRoot: root != "", now: time.Now}
 	mux := http.NewServeMux()
 	// The routes that need no credential, by their pattern: the one list. A
@@ -117,7 +117,12 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter) http.H
 		public[pattern] = true
 		mux.HandleFunc(pattern, f)
 	}
-	handlePublic("GET /healthz", healthz)
+	handlePublic("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, struct {
+			OK             bool   `json:"ok"`
+			InstallationID string `json:"installation_id,omitempty"`
+		}{true, installationID})
+	})
 
 	mux.HandleFunc("GET /v1/status", h.status)
 	mux.HandleFunc("GET /v1/state", h.state)
@@ -170,11 +175,6 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter) http.H
 		h.writeError(w, http.StatusNotFound, codeNotFound, "no such route")
 	})
 	return h.guard(mux, public)
-}
-
-// healthz answers that the service runs: the handler exists only once it does.
-func healthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // --- reads
