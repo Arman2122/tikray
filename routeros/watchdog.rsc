@@ -3,7 +3,12 @@
     :local runTick do={
         :if ([:len [/system/script/job/find where script="tikray-watchdog"]] != 1) do={ :return true }
         :local suspended do={
-            :if (([:len [/system/script/find where name="tikray-emergency-state" or comment="tikray:emergency-state" or name="tikray-uninstall-state" or comment="tikray:uninstall-state"]] > 0) or ([:len [/system/script/job/find where script="tikray-emergency-off" or script="tikray-uninstall"]] > 0)) do={ :return true }
+            :if (([:len [/system/script/find where name="tikray-uninstall-state" or comment="tikray:uninstall-state"]] > 0) or ([:len [/system/script/job/find where script="tikray-emergency-off" or script="tikray-uninstall"]] > 0)) do={ :return true }
+            # Restore the private return path while traffic is suspended so
+            # the owner can start control and let it reconcile normally.
+            :if ($1 != "bindings") do={
+                :if ([:len [/system/script/find where name="tikray-emergency-state" or comment="tikray:emergency-state"]] > 0) do={ :return true }
+            }
             :local lock [/system/script/find where name="tikray-install-lock" or comment~"^tikray:install-lock "]
             :if ([:len $lock] = 0) do={ :return false }
             :if ([:len $lock] != 1) do={ :return true }
@@ -22,7 +27,7 @@
             } on-error={ :set active true }
             :return $active
         }
-        :if ([$suspended]) do={ :return true }
+        :if ([$suspended "bindings"]) do={ :return true }
         :local mounts [/container/mounts/find where comment="tikray:mount-tikray-data" and list="tikray" and dst="/data"]
         :if ([:len $mounts] != 1) do={ :return true }
         :local data [/container/mounts/get $mounts src]
@@ -33,16 +38,16 @@
         :if (([:len $intent] != 1) or ([/file/get $intent size] > 60000)) do={ :return true }
         # @TIKRAY_WATCHDOG_BINDINGS@
         :local bindingsOK false
-        :local mayBind do={ :local stopCheck $1; :if ([$stopCheck]) do={ :error "tikray: binding repair suspended" }; :return true }
+        :local mayBind do={ :local stopCheck $1; :if ([$stopCheck "bindings"]) do={ :error "tikray: binding repair suspended" }; :return true }
         :do {
             :local request [:deserialize from=json options=json.no-string-conversion value=[/file/get $intent contents]]
             :set bindingsOK [$bindPeers "repair" ($request->"scope"->"subnet") $mayBind $suspended]
         } on-error={ :set bindingsOK false }
-        :if ($bindingsOK != true) do={ :return true }
+        :if (($bindingsOK != true) or ([$suspended "restart"])) do={ :return true }
         :local ready [/file/find where name=($data . "/state/install.ready")]
         :if ([:len $ready] != 1) do={ :return true }
-        :local pin [/file/get $ready contents]
-        :if (([:len $pin] != 64) or (!($pin ~ "^[0-9a-f]+\$"))) do={ :return true }
+        :local readyStamp [/file/get $ready contents]
+        :if (([:len $readyStamp] != 64) or (!($readyStamp ~ "^[0-9a-f]+\$"))) do={ :return true }
         :local bridgeAddr [/ip/address/find where interface="tikray" and comment="tikray:addr" and !disabled]
         :if ([:len $bridgeAddr] != 1) do={ :return true }
         :local cidr [:tostr [/ip/address/get $bridgeAddr address]]
@@ -79,13 +84,13 @@
                     }
                     :local state [$wdStep $prior $healthy $uptime]
                     :if ([$wdState "save" $component $state $uptime] != true) do={ :error "tikray: watchdog state unverified" }
-                    :if (($state->"restart") and (![$suspended]) and ([$verified $component $ownedTag $vethName])) do={
+                    :if (($state->"restart") and (![$suspended "restart"]) and ([$verified $component $ownedTag $vethName])) do={
                         :if ([:len [/container/find where .id=$id and running]] = 1) do={
                             /container/stop $id
                             :local waits 0
                             :while (([:len [/container/find where .id=$id and stopped]] = 0) and ($waits < 40)) do={ :delay 250ms; :set waits ($waits+1) }
                         }
-                        :if ((![$suspended]) and ([$verified $component $ownedTag $vethName]) and ([:len [/container/find where .id=$id and name=$component and comment=$ownedTag and stopped]] = 1)) do={
+                        :if ((![$suspended "restart"]) and ([$verified $component $ownedTag $vethName]) and ([:len [/container/find where .id=$id and name=$component and comment=$ownedTag and stopped]] = 1)) do={
                             /container/start $id
                             :log warning ("tikray: watchdog restarted " . $component)
                         }

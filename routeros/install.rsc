@@ -3,6 +3,9 @@
     :if ([:len [/system/script/find where name="tikray-uninstall-state"]] > 0) do={ :error "tikray: finish the pending uninstall before importing" }
     :global tikrayDisk
     :global tikrayDir
+    :global tikrayReuseID
+    :local requestedReuse [:tostr $tikrayReuseID]
+    :set tikrayReuseID
     :global tikraySubnet
     :global tikrayLanList
     :global tikrayWanList
@@ -241,6 +244,27 @@
     :local readyPath ($data . "/state/install.ready")
     :local originalUser [/user/find where name="tikray" or comment="tikray:user"]
     :local seedFiles [/file/find where name=$seedPath]
+    :local retainedPath ($data . "/install.retained")
+    :local kept [/file/find where name=$retainedPath]
+    :local reuse false
+    :local keptText ""
+    :if ([:len $kept] > 0) do={
+        :if (([:len $kept] != 1) or ([/file/get $kept type]="directory")) do={ :error "tikray: invalid retained-data receipt" }
+        :set keptText [/file/get $kept contents]
+        :local rec [:deserialize from=json options=json.no-string-conversion value=$keptText]
+        :local publicID [:tostr ($rec->"installation_id")]
+        :if ((($rec->"version") != 1) or (($rec->"data") != $data) or (($rec->"subnet") != $subnet) or ([:len $publicID] != 32) or (!($publicID ~ "^[0-9a-f]+\$"))) do={ :error "tikray: invalid retained-data receipt" }
+        :if ([:len $seedFiles] = 0) do={
+            :if ($requestedReuse != $publicID) do={ :error "tikray: set tikrayReuseID to the public ID issued by uninstall to reuse this data" }
+            :foreach rel in={"state/install.request";"state/install.id";"state/install.ready";"state/routeros.json";"state/router-policy.json";"install.check"} do={
+                :if ([:len [/file/find where name=($data . "/" . $rel)]] != 0) do={ :error "tikray: finish incomplete retirement of the previous installation" }
+            }
+            :foreach rel in={"state/state.v1.json";"state/tls.crt";"state/tls.key"} do={
+                :if ([:len [/file/find where name=($data . "/" . $rel) and type!="directory"]] != 1) do={ :error "tikray: restore the kept control state and TLS identity before reuse" }
+            }
+        }
+        :set reuse true
+    } else={ :if ($requestedReuse != "") do={ :error "tikray: retained installation receipt unavailable" } }
     :if ([:len $seedFiles] = 0) do={
         # An upload directory does not grant ownership of unrelated content.
         # Only the documented public trust input, signed inbox and image pair
@@ -259,6 +283,7 @@
                     :if (([:pick $rel 16 48] ~ "^[a-f0-9]+\$") and ([:typeof [:find {"-tikray-amd64.tar";"-tikray-arm64.tar";"-tikray-runner-amd64.tar";"-tikray-runner-arm64.tar"} $tail]] = "num")) do={ :set ok true }
                 }
             }
+            :if ($reuse and ([:pick $rel 0 5] = "data/")) do={ :set ok true }
             :if (!$ok) do={ :error "tikray: object conflict in data folder; select a new dedicated tikray directory" }
         }
     }
@@ -356,6 +381,7 @@
     :foreach apply in={false;true} do={
         :if ($apply) do={
             :set lease [$acquireInstall]
+            :if ([:len [/system/script/find where name="tikray-uninstall-state"]] > 0) do={ :error "tikray: finish the pending uninstall before importing" }
             # The claim prevents a later tick from restarting a container
             # under the installer. Give an already running tick time to end.
             :local waitTick 0
@@ -525,6 +551,11 @@
         :if ($answer != ($nonce . " " . $httpsPin)) do={ :delay 1s; :set waited ($waited+1) }
     }
     :if ($answer != ($nonce . " " . $httpsPin)) do={ :error "tikray: retry bootstrap; live control, runner and router verification failed" }
+    :if ($reuse) do={
+        :local prior [/file/find where name=$retainedPath]
+        :if (([:len $prior] != 1) or ([:tostr $prior] != [:tostr $kept]) or ([/file/get $prior contents] != $keptText)) do={ :error "tikray: retained-data receipt changed; inspect before retry" }
+        /file/remove $prior
+    }
     :put ("tikray: https://" . $ctlIP . "/  SHA-256 " . $httpsPin)
     :if ([:len [/file/find where name=($data . "/state/setup.code")]] = 1) do={
         :local shown false

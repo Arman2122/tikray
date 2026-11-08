@@ -55,4 +55,21 @@ func TestM3ReimportWithReplacementVeth(t *testing.T) {
 	if peer != f.mustRun(ctx, t, `:put [:tostr [/ip/arp/find where comment="tikray:arp-runner"]]`) || publicID != f.file(ctx, t, dataRoot+"/state/install.id") {
 		t.Fatal("unaffected peer or installation ID replaced")
 	}
+	// The daemon also needs a return path when the owner restarts it after
+	// emergency off. Restore the private bindings without rearming steering
+	// or starting either container on behalf of the owner.
+	f.mustRun(ctx, t, `/system/scheduler/disable [find where comment="tikray:watchdog-scheduler"]`)
+	f.mustRun(ctx, t, `/container/stop [find where name="tikray" and comment="tikray:tikray"]`)
+	if e := f.waitForContainer(ctx, "tikray", "stopped"); e != nil {
+		t.Fatal("emergency fixture control did not stop")
+	}
+	f.mustRun(ctx, t, `/system/script/run tikray-emergency-off`)
+	f.mustRun(ctx, t, `/ip/arp/set [find where comment="tikray:arp-ctl"] mac-address=`+previous)
+	f.mustRun(ctx, t, `/system/script/run tikray-watchdog`)
+	if !strings.EqualFold(f.mustRun(ctx, t, `:put [/ip/arp/get [find where comment="tikray:arp-ctl"] mac-address]`), newMAC) {
+		t.Fatal("emergency left control without a return path to its native API")
+	}
+	if f.mustRun(ctx, t, `:put [:len [/container/find where name="tikray" and stopped]]`) != "1" || f.mustRun(ctx, t, `:put [:len [/system/script/find where comment="tikray:emergency-state"]]`) != "1" {
+		t.Fatal("binding repair broke emergency suspension")
+	}
 }
