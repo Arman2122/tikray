@@ -1,0 +1,26 @@
+[
+  {
+    "id": "keep_data",
+    "pass": true,
+    "detail": "Default keep restored owner service and WAN routing. Reinstall retained the claimed owner, desired policy, UI certificate and running signed core.",
+    "seconds": 208.8
+  },
+  {
+    "id": "purge_owned_data",
+    "pass": true,
+    "detail": "Purge removed the identified data tree and all owned bindings. The sibling file, original certificate, API grants and owner forwarding rules survived.",
+    "seconds": 88
+  },
+  {
+    "id": "shared_reference_refuses",
+    "pass": true,
+    "detail": "Foreign ARP and bridge-host natural keys and a substituted same-name certificate independently refused teardown before a change.",
+    "seconds": 94.6
+  },
+  {
+    "id": "interrupted_and_repeat",
+    "pass": true,
+    "detail": "An interruption after native container removal retained a durable marker. The original uninstaller finished cleanup, then repeated without changing owner state.",
+    "seconds": 138.8
+  }
+]

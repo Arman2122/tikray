@@ -146,11 +146,15 @@ func setupRemoval(ctx context.Context, t *testing.T, reuse bool) *removalLab {
 // The terminal can include expanded peer values. Return only a matching
 // constant from the packaged program, a syntax coordinate, or a fixed class.
 func (f *removalLab) remove(ctx context.Context, name, choice string) error {
+	return f.removeVia(ctx, name, choice, f.CHR.RunPrivate)
+}
+
+func (f *removalLab) removeVia(ctx context.Context, name, choice string, invoke func(context.Context, string) (string, error)) error {
 	f.serial++
-	cmd := fmt.Sprintf(`:global tikrayUninstallData; :set tikrayUninstallData "%s"; :local observer [/system/script/find where name=m3-removal-observer]; /system/script/set $observer comment="entered-%d"; :onerror reason in={ /import file-name="%s"; /system/script/set $observer comment="complete-%d"; :put "m3-remove-ok" } do={ /system/script/set $observer comment="refused-%d"; :put ("m3-remove-error=" . [:convert [:tostr $reason] to=base64]) }`, choice, f.serial, name, f.serial, f.serial)
+	cmd := fmt.Sprintf(`{ :global tikrayUninstallData; :set tikrayUninstallData "%s"; :local observer [/system/script/find where name=m3-removal-observer]; /system/script/set $observer comment="entered-%d"; :onerror reason in={ /import file-name="%s"; /system/script/set $observer comment="complete-%d"; :put "m3-remove-ok" } do={ /system/script/set $observer comment="refused-%d"; :put ("m3-remove-error=" . [:convert [:tostr $reason] to=base64]) } }`, choice, f.serial, name, f.serial, f.serial)
 	sub, stop := context.WithTimeout(ctx, 15*time.Minute)
 	defer stop()
-	out, e := f.CHR.RunPrivate(sub, cmd)
+	out, e := invoke(sub, cmd)
 	if e != nil {
 		return errors.New("private uninstall command failed")
 	}
@@ -163,8 +167,16 @@ func (f *removalLab) remove(ctx context.Context, name, choice string) error {
 	if !ok {
 		// The owner SSH exec occasionally omits terminal output. Only a separate
 		// read of this invocation's post-import receipt proves it returned.
-		seen, _ := f.CHR.RunPrivate(sub, `:put [/system/script/get [find where name=m3-removal-observer] comment]`)
-		if strings.TrimSpace(seen) == fmt.Sprintf("complete-%d", f.serial) {
+		completed := false
+		_, _ = poll(sub, 15*time.Second, 250*time.Millisecond, func() bool {
+			seen, err := f.CHR.RunPrivate(sub, `:put ("m3-outcome=" . [/system/script/get [find where name=m3-removal-observer] comment] . "|end")`)
+			if err != nil {
+				return false
+			}
+			completed = strings.Contains(seen, fmt.Sprintf("m3-outcome=complete-%d|end", f.serial))
+			return completed || strings.Contains(seen, fmt.Sprintf("m3-outcome=refused-%d|end", f.serial))
+		})
+		if completed {
 			return nil
 		}
 		for _, reason := range []string{"syntax error", "expected end of command", "expected command name", "input does not match any value", "failure:", "interrupted", "connection closed", "error occurred", "shared_reference_refuses", "tikray: uninstall complete", "tikray: owner data kept", "tikray: already uninstalled"} {
@@ -391,7 +403,7 @@ func TestM3Uninstall(t *testing.T) {
 		if f.probe(ctx, st, "uninstall-links") != "verified" {
 			st.Fatal("outside symlink witness absent")
 		}
-		err := f.remove(ctx, removalFile, "purge")
+		err := f.removeVia(ctx, removalFile, "purge", f.CHR.RunPrivateFresh)
 		if expectedRefusal(err, "tikray: shared_reference_refuses") {
 			if f.file(ctx, st, siblingFile) != "owner stays" || f.file(ctx, st, external+"/payload") != "outside directory survives" {
 				st.Fatal("purge followed a link to owner data")
@@ -399,7 +411,7 @@ func TestM3Uninstall(t *testing.T) {
 			if f.probe(ctx, st, "uninstall-unlink") != "verified" {
 				st.Fatal("could not retire scoped symlink witness")
 			}
-			err = f.remove(ctx, removalFile, "purge")
+			err = f.removeVia(ctx, removalFile, "purge", f.CHR.RunPrivateFresh)
 		}
 		if err != nil {
 			st.Fatal("explicit purge refused", err)
