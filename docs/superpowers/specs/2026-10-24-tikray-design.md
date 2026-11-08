@@ -662,6 +662,11 @@ Runs every minute on RouterOS itself, independent of both containers:
 
 Removes both containers and every RouterOS object tagged `tikray:` (rules, lists,
 tables, routes, user, group, scheduler). Asks whether to keep `/data`.
+This includes the static ARP and bridge forwarding entries. Preflight checks
+both peer bindings, owner references and the original API-SSL service proof
+before dismantling anything. The owner uninstaller restores the service
+settings, deletes an installer-created certificate only after verifying its
+fingerprint and release from use, and preserves reused certificates.
 
 ## 7. Security
 

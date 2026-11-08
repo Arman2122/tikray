@@ -282,3 +282,19 @@ The combined installer/uninstaller build is `83d849531d76cce71a8879b77ff966dd7e0
 The final runs used separate disposable overlays, QEMU TCG and private bounded logs and exited zero. The arm64 purge fixture used a dedicated SSH connection after an in-container shell operation returned interleaved terminal output. A nonce-specific acknowledgement and independent postconditions distinguish a completed removal from a lost reply. No destructive command is replayed on an unknown outcome. The focused race tests and lab vet passed. A fresh reviewer approved the corrected removal path.
 
 Ruling: Sample runner status between runner operations in the crash/backoff test — CI at `6314fb1` observed a replacement PID alongside the previous published lifecycle state, a pre-existing window in the intentionally nonblocking status API — cost if wrong: the test could mistake a transition for the backoff interval. It still requires a real restarting state with PID zero, followed by a running state with a different positive PID. Twelve repetitions under the race detector passed. Production runner behavior and the delivered images are unchanged.
+
+## Task 4 complete — production installer and basic watchdog
+
+The production source for the delivered scripts and images is [`83d8495`](https://github.com/Arman2122/tikray/commit/83d849531d76cce71a8879b77ff966dd7e035125). The definitive serial install runs used QEMU TCG, xray-core 26.10.31, the exact delivered `install.rsc` and its matching image pair. All six cases passed on each target, including the non-default subnet, preserved IPv4/IPv6 owner grants, signed core bootstrap, interrupted recovery, unchanged healthy containers on repeat, wrong-ID refusal and real restart backoff. The separate runner-impersonation and port-recreation controls above used both pinned x86_64 versions.
+
+| RouterOS | Full installer | Basic watchdog case | Results |
+|---|---|---|---|
+| 7.25 x86_64 | 6/6, 1104.57 s | 409.7 s | [Installer checks](../../../test/e2e/results/7.25-x86_64-m3-install.json) |
+| 7.23.8 x86_64 | 6/6, 1092.77 s | 399.1 s | [Installer checks](../../../test/e2e/results/7.23.8-x86_64-m3-install.json) |
+| 7.25 arm64 | 6/6, 1076.96 s | 389.5 s | [Installer checks](../../../test/e2e/results/7.25-arm64-m3-install.json) |
+
+Each `out/m3-install/<version>-<arch>/` bundle contains `install.rsc`, `uninstall.rsc`, both image archives and detached signatures, `cosign.pub`, `SOURCE_COMMIT` and `SHA256SUMS`. The final local QA publisher public key has DER SPKI SHA-256 `bb2bc419d606c802b50c24e0c97e613e9db3183860f73a369e48f7131780107e`. All manifests and signatures were independently checked. This key identifies the lab build. Public release signing remains M5.
+
+Reproduction uses the matching bundle and source revision in Ubuntu. Set `TIKRAY_LAB_IMAGES` to the bundle's absolute directory, `TIKRAY_LAB_INSTALLER` and `TIKRAY_LAB_UNINSTALLER` to its two scripts, `TIKRAY_LAB_CHANNEL` and `TIKRAY_LAB_ARCH` to the table row, and `TIKRAY_LAB_XRAY=v26.10.31`. With the verified cosign binary on PATH, run `go test -tags lab -p 1 -count=1 -v -timeout 150m -run '^(TestM3Install|TestM3Uninstall)$' ./test/e2e/` as the lab owner. The final wrappers used private logs, bounded waits and PID-scoped cleanup. No task-owned QEMU process, lab interface or namespace remained.
+
+The unit, vet, race and arm64 build checks passed. Independent review approved the production network binding, health check, private data boundaries and teardown. M3a still has its dedicated routing acceptance suite and final branch review ahead of its draft PR. Image replacement and rollback remain M3b.

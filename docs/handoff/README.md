@@ -25,7 +25,7 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M2a: state model and render | Done, merged (PR #4) | |
 | M2b: the service (`tikray serve`, HTTPS API, health, subscriptions) | Done, merged (PR #5) | |
 | M2c: human sign-in and hot server changes | Done, merged (PR #6) | |
-| M3: RouterOS (installer, reconciler, version adapters, watchdog, uninstall, CHR e2e) | M3a in progress on `m3-routeros` | [Plan](../superpowers/plans/2026-11-06-m3-routeros.md), [task results and rulings](m3/ledger.md) |
+| M3: RouterOS (installer, reconciler, version adapters, watchdog, uninstall, CHR e2e) | M3a installer, watchdog, reconciler and owner uninstall implemented. Install and uninstall passed on all three pinned targets. The routing suite and whole-branch review remain before the M3a PR. | [Plan](../superpowers/plans/2026-11-06-m3-routeros.md), [task results and rulings](m3/ledger.md) |
 | M4: web UI | Not started | |
 | M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
 

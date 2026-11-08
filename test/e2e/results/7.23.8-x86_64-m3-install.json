@@ -1,0 +1,38 @@
+[
+  {
+    "id": "interrupted_install",
+    "pass": true,
+    "detail": "Core absence kept HTTPS up and rejected admission. Retry committed the signed core and preserved the owner certificate.",
+    "seconds": 370.1
+  },
+  {
+    "id": "preflight",
+    "pass": true,
+    "detail": "DNS, overlapping LAN, owner name collision and altered archive failed before any owned network, account or container row.",
+    "seconds": 50
+  },
+  {
+    "id": "clean_install",
+    "pass": true,
+    "detail": "Private API-SSL login from the control container succeeded and a privileged write failed in that session. The initial signed core runs with direct policy.",
+    "seconds": 40.7
+  },
+  {
+    "id": "bridge_acl",
+    "pass": true,
+    "detail": "LAN used the pinned HTTPS service. Fresh WAN and direct LAN probes could not reach private runner services. The control and router probes succeeded.",
+    "seconds": 196.6
+  },
+  {
+    "id": "second_import",
+    "pass": true,
+    "detail": "Healthy reimport preserved object and process IDs. An owner grant edit refused safely. A stopped control with an empty command recovered serving the original session, with the same xray instance.",
+    "seconds": 35.6
+  },
+  {
+    "id": "basic_watchdog",
+    "pass": true,
+    "detail": "Healthy HTTPS with another installation ID counted as a miss. The genuine response cleared it. The third real minute tick restarted only the stopped control. Runner-only failure, sustained control backoff and emergency suppression also passed.",
+    "seconds": 399.1
+  }
+]
