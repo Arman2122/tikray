@@ -143,11 +143,15 @@ func TestM3Install(t *testing.T) {
 		}
 		f.mustRun(ctx, st, "/ip/dns/set allow-remote-requests=yes")
 		f.mustRun(ctx, st, "/interface/bridge/add name=tikray comment=owner:sentinel")
-		f.requireRefusal(ctx, st, "tikray: object conflict")
+		removeSentinel := func() {
+			f.mustRun(ctx, st, `{:local owner [/interface/bridge/find where name="tikray" and comment="owner:sentinel"]; :if ([:len $owner] = 1) do={ /interface/bridge/remove [:pick $owner 0] } }`)
+		}
+		defer removeSentinel()
+		f.requireRefusal(ctx, st, "tikray: private bridge identity conflict")
 		if (!f.installClean(ctx) || baseline() != owner) || f.mustRun(ctx, st, `:put [:len [/interface/bridge/find where name=tikray and comment="owner:sentinel"]]`) != "1" {
 			st.Fatal("preflight changed a foreign bridge")
 		}
-		f.mustRun(ctx, st, `/interface/bridge/remove [find where name=tikray and comment="owner:sentinel"]`)
+		removeSentinel()
 		f.mustRun(ctx, st, "/ip/address/add address=172.30.252.18/24 interface=ether2 comment=owner:overlap")
 		f.requireRefusal(ctx, st, "tikray: bridge overlaps")
 		if !f.installClean(ctx) || baseline() != owner {
