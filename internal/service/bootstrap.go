@@ -7,6 +7,7 @@ import (
 	"reflect"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -72,7 +73,7 @@ func (s *Service) bootstrapCore(ctx context.Context, version string) (artifacts.
 		}
 		// The updater can reuse an extracted slot without downloading its zip.
 		// Check those bytes before the runner is asked to execute them.
-		if _, err := inspectBootstrapSlot(s.data, version); err != nil {
+		if _, err := inspectBootstrapSlot(ctx, s.data, version); err != nil {
 			return artifacts.Result{}, ErrBootstrapPending
 		}
 		// Raw download and runner diagnostics are not installer output. The
@@ -83,13 +84,11 @@ func (s *Service) bootstrapCore(ctx context.Context, version string) (artifacts.
 		}
 		rs, err = s.runner.Status(ctx)
 	}
-	if err != nil || rs.State != runnerapi.StateRunning || rs.Candidate != nil || rs.Active == nil || rs.Active.Validate() != nil || !rs.RoutesOK || !rs.GatewayUp {
+	if err != nil || !s.verifiedInstallSelection(ctx, u, rs) {
 		return artifacts.Result{}, ErrBootstrapPending
 	}
 	active := *rs.Active
-	cfg, err := configName(u, &active)
-	installed, slotErr := inspectBootstrapSlot(s.data, active.Core)
-	if err != nil || cfg != active.Config || !installed || slotErr != nil || u.Health == nil || u.Health.Check(ctx) != nil {
+	if ok, err := inspectBootstrapSlot(ctx, s.data, active.Core); err != nil || !ok {
 		return artifacts.Result{}, ErrBootstrapPending
 	}
 	if err = s.prepareRouter(ctx, st, rev); err != nil {
@@ -98,8 +97,7 @@ func (s *Service) bootstrapCore(ctx context.Context, version string) (artifacts.
 	if err = s.finishRouter(ctx, st, rev); err != nil {
 		return artifacts.Result{}, ErrBootstrapPending
 	}
-	now, err := s.runner.Status(ctx)
-	if err != nil || now.State != runnerapi.StateRunning || now.Candidate != nil || now.Active == nil || *now.Active != active || !now.RoutesOK || !now.GatewayUp {
+	if !s.stillRunning(ctx, active) {
 		return artifacts.Result{}, ErrBootstrapPending
 	}
 	if err = s.bootstrap.Ready(); err != nil {
@@ -113,7 +111,54 @@ func (s *Service) bootstrapCore(ctx context.Context, version string) (artifacts.
 	return res, nil
 }
 
-func inspectBootstrapSlot(data, version string) (bool, error) {
+func (s *Service) verifiedInstallSelection(ctx context.Context, u *artifacts.CoreUpdater, rs runnerapi.Status) bool {
+	if rs.State != runnerapi.StateRunning || rs.Candidate != nil || rs.Active == nil || rs.Active.Validate() != nil || !rs.RoutesOK || !rs.GatewayUp || artifacts.HotPending(s.data) {
+		return false
+	}
+	cfg, err := configName(u, rs.Active)
+	return err == nil && cfg == rs.Active.Config && u.Health != nil && u.Health.Check(ctx) == nil
+}
+func (s *Service) stillRunning(ctx context.Context, active runnerapi.Selection) bool {
+	now, err := s.runner.Status(ctx)
+	return err == nil && now.State == runnerapi.StateRunning && now.Candidate == nil && now.Active != nil && *now.Active == active && now.RoutesOK && now.GatewayUp
+}
+
+// VerifyInstallation answers a fresh owner challenge. The regular status API
+// keeps serving its last verified revision during loss of either component.
+func (s *Service) VerifyInstallation(ctx context.Context) error {
+	if s.router == nil || s.bootPending.Load() || s.repairBridge {
+		return ErrBootstrapPending
+	}
+	// Installed slots are immutable. Hash before taking the policy writer
+	// and compare the committed selection again once we own the writer.
+	before, err := s.runner.Status(ctx)
+	if err != nil || before.State != runnerapi.StateRunning || before.Candidate != nil || before.Active == nil || before.Active.Validate() != nil {
+		return ErrBootstrapPending
+	}
+	active := *before.Active
+	if ok, err := inspectBootstrapSlot(ctx, s.data, active.Core); err != nil || !ok {
+		return ErrBootstrapPending
+	}
+	if err := s.acquire(ctx); err != nil {
+		return err
+	}
+	defer s.release()
+	st, rev := s.store.State()
+	rs, err := s.runner.Status(ctx)
+	if err != nil || rs.Active == nil || *rs.Active != active || !s.verifiedInstallSelection(ctx, s.updater(st, rev), rs) || rs.Active.Geo != "" {
+		return ErrBootstrapPending
+	}
+	p, err := routeros.Project(st)
+	if err != nil || s.router.VerifyInstallation(ctx, routeros.Target{Policy: p, Revision: rev, Selection: active}) != nil || !s.stillRunning(ctx, active) {
+		return ErrBootstrapPending
+	}
+	return nil
+}
+
+func inspectBootstrapSlot(ctx context.Context, data, version string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	slots, err := artifacts.ListCores(filepath.Join(data, "cores"))
 	if err != nil {
 		return false, err
@@ -125,11 +170,7 @@ func inspectBootstrapSlot(data, version string) (bool, error) {
 		if slot.Meta.Verified != "dgst" && slot.Meta.Verified != "index" {
 			return true, ErrBootstrapPending
 		}
-		sum, err := artifacts.FileSHA256(filepath.Join(slot.Dir, "xray"))
-		if err != nil || sum != slot.Meta.BinarySHA256 {
-			return true, ErrBootstrapPending
-		}
-		return true, nil
+		return true, slot.VerifyBinary(ctx)
 	}
 	return false, nil
 }

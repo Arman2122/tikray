@@ -14,6 +14,7 @@ import (
 // RouterController prepares scoped protection before either policy changes.
 // Reconcile releases it only after verifying the effective router policy.
 type RouterController interface {
+	VerifyInstallation(context.Context, routeros.Target) error
 	Prepare(context.Context, routeros.Target) error
 	Reconcile(context.Context, routeros.Target) (routeros.Report, error)
 	Watch(context.Context, func()) error

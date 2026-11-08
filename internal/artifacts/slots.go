@@ -2,6 +2,7 @@ package artifacts
 
 import (
 	"archive/zip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Arman2122/tikray/internal/xrayver"
@@ -49,6 +51,48 @@ type Slot struct {
 	Version xrayver.Version
 	Dir     string
 	Meta    Meta
+}
+
+// VerifyBinary checks the extracted file before bootstrap execution or an
+// owner attestation. Reuse the extraction size limit and cancel between
+// chunks on slow container storage.
+func (s Slot) VerifyBinary(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(s.Dir, coreFile), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return errors.New("artifacts: installed core unavailable")
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() || st.Size() <= 0 || st.Size() > maxCoreBytes {
+		return errors.New("artifacts: invalid installed core")
+	}
+	sum := sha256.New()
+	var buf [64 << 10]byte
+	var size int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, err := f.Read(buf[:])
+		size += int64(n)
+		if size > st.Size() {
+			return errors.New("artifacts: installed core changed")
+		}
+		sum.Write(buf[:n])
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return errors.New("artifacts: cannot read installed core")
+		}
+	}
+	if size != st.Size() || hex.EncodeToString(sum.Sum(nil)) != s.Meta.BinarySHA256 {
+		return errors.New("artifacts: installed core digest mismatch")
+	}
+	return nil
 }
 
 // InstallCore installs the xray binary from the release zip into a new slot

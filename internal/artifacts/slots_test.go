@@ -3,6 +3,7 @@ package artifacts
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -18,6 +19,37 @@ import (
 
 	"github.com/Arman2122/tikray/internal/xrayver"
 )
+
+type cancelHashRead struct {
+	context.Context
+	cancel context.CancelFunc
+	checks int
+}
+
+func (c *cancelHashRead) Err() error {
+	c.checks++
+	if c.checks == 4 {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+func TestSlotHashHonorsCancellationBetweenReads(t *testing.T) {
+	data := make([]byte, 2<<20)
+	sum := sha256.Sum256(data)
+	slot := Slot{Dir: t.TempDir(), Meta: Meta{BinarySHA256: hex.EncodeToString(sum[:])}}
+	if err := os.WriteFile(filepath.Join(slot.Dir, "xray"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := slot.VerifyBinary(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if err := slot.VerifyBinary(&cancelHashRead{Context: ctx, cancel: cancel}); !errors.Is(err, context.Canceled) {
+		t.Fatal("slot integrity check ignored cancellation")
+	}
+}
 
 // zentry is one entry of a zip built by zipOf.
 type zentry struct {

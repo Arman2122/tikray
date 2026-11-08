@@ -8,9 +8,40 @@ import (
 	"testing"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/store"
 )
+
+type attestationRouter struct {
+	testRouter
+	probe func(context.Context, routeros.Target) error
+}
+
+func (r *attestationRouter) VerifyInstallation(ctx context.Context, t routeros.Target) error {
+	return r.probe(ctx, t)
+}
+
+func TestLiveInstallCheckRefusesStaleRouterAndRunner(t *testing.T) {
+	e := newEnv(t)
+	e.inSync()
+	installCore(t, e.data, testCore)
+	r := &attestationRouter{}
+	e.s = e.newService(Config{Router: r})
+	probes := 0
+	r.probe = func(context.Context, routeros.Target) error { probes++; return nil }
+	if err := e.s.VerifyInstallation(t.Context()); err != nil || probes != 1 {
+		t.Fatal("verified live installation failed")
+	}
+	r.probe = func(context.Context, routeros.Target) error { return errors.New("removed router login") }
+	if err := e.s.VerifyInstallation(t.Context()); err == nil {
+		t.Fatal("accepted lost router authentication")
+	}
+	r.probe = func(context.Context, routeros.Target) error { e.runner.setDown(true); return nil }
+	if err := e.s.VerifyInstallation(t.Context()); err == nil {
+		t.Fatal("runner vanished during verification")
+	}
+}
 
 func TestBootstrapCoreRetryReportsTrial(t *testing.T) {
 	e := newEnv(t)

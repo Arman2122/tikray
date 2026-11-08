@@ -25,6 +25,7 @@ import (
 
 type peer struct {
 	logins atomic.Int32
+	reject atomic.Bool // the owner changed the password after a successful login
 	ln     net.Listener
 	mu     sync.Mutex
 	conns  []net.Conn
@@ -77,7 +78,7 @@ func testPeer(t *testing.T, authenticated bool, serve func(net.Conn, *bufio.Read
 					return
 				}
 				p.logins.Add(1)
-				if !authenticated {
+				if !authenticated || p.reject.Load() {
 					peerSend(conn, "!trap", "=message=private-fixture-value", tagWord(login))
 					peerSend(conn, "!done", tagWord(login))
 					return

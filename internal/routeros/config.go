@@ -295,6 +295,7 @@ type Managed struct {
 	dir    string
 	mu     sync.RWMutex
 	engine *Engine
+	client *Client
 }
 
 func (m *Managed) Watch(ctx context.Context, notify func()) error {
@@ -304,6 +305,7 @@ func (m *Managed) Watch(ctx context.Context, notify func()) error {
 			e := NewEngine(client, m.scope, m.dir)
 			m.mu.Lock()
 			m.engine = e
+			m.client = client
 			m.mu.Unlock()
 			notify()
 			// Individual streams are hints. The service sweep is independent.
@@ -318,6 +320,7 @@ func (m *Managed) Watch(ctx context.Context, notify func()) error {
 			}
 			m.mu.Lock()
 			m.engine = nil
+			m.client = nil
 			m.mu.Unlock()
 			client.Close()
 		}

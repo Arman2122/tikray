@@ -139,6 +139,13 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var watcher sync.WaitGroup
+	if install != nil {
+		watcher.Add(1)
+		go func() {
+			defer watcher.Done()
+			watchInstallChecks(ctx, env.Data, apiForListen(ln.Addr().String()), fingerprint, svc.VerifyInstallation)
+		}()
+	}
 	if !w.token.ready() {
 		// The runner has not made its token yet. The service is up all the same;
 		// when the token is there, a state that was saved is applied at once,

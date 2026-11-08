@@ -23,6 +23,8 @@ type testRouter struct {
 	fixes                   int
 }
 
+func (*testRouter) VerifyInstallation(context.Context, routeros.Target) error { return nil }
+
 func (r *testRouter) Prepare(ctx context.Context, target routeros.Target) error {
 	if r.beforePrepare != nil {
 		r.beforePrepare(ctx)
