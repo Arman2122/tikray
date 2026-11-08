@@ -4,9 +4,25 @@ package e2e
 
 import (
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 )
+
+func TestInstallerRetryCategoryRetainsNativeInstruction(t *testing.T) {
+	const category = "tikray: retry bootstrap"
+	const native = category + "; check the core source and rerun install"
+	wire := "m3-import-error=" + base64.StdEncoding.EncodeToString([]byte(native))
+	_, err := installOutput(wire)
+	if err == nil || err.Error() != native || !expectedRefusal(err, category) {
+		t.Fatal("native retry instruction did not match its refusal category")
+	}
+	for _, unrelated := range []error{nil, errors.New("tikray: retry bootstrapper"), errors.New("installer refused")} {
+		if expectedRefusal(unrelated, category) {
+			t.Fatal("unrelated refusal satisfied the retry witness")
+		}
+	}
+}
 
 func TestPrivateImportFailureHidesOutput(t *testing.T) {
 	const hidden = "private-witness"

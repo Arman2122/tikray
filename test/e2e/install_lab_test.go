@@ -61,6 +61,10 @@ func TestM3Install(t *testing.T) {
 		if api.Healthz(ctx) != nil {
 			st.Fatal("bootstrap failure took down management")
 		}
+		f.ownerPortForward(ctx, st)
+		if f.whoami(ctx) != egressDirect {
+			st.Fatal("missing core interrupted ordinary LAN egress")
+		}
 		before, err := api.State(ctx)
 		if err != nil {
 			st.Fatal("managed state unavailable during interruption")
@@ -163,10 +167,19 @@ func TestM3Install(t *testing.T) {
 		if f.CHR.Push(ctx, f.runnerTar, "disk1/tikray/images/"+filepath.Base(f.runnerTar)) != nil {
 			st.Fatal("could not restore signed archive")
 		}
+		checkInstallForeignResources(ctx, st, f)
 		note("DNS, overlapping LAN, owner name collision and altered archive failed before any owned network, account or container row.")
 	})
 	check("clean_install", func(st *testing.T, note func(string, ...any)) {
 		f := ensure(st)
+		state, err := f.pinned(ctx, st).State(ctx)
+		var initial struct {
+			Servers, Subscriptions []json.RawMessage
+			Policy                 struct{ Mode string } `json:"default_policy"`
+		}
+		if err != nil || json.Unmarshal(state.Body, &initial) != nil || len(initial.Servers) != 0 || len(initial.Subscriptions) != 0 || initial.Policy.Mode != "direct" {
+			st.Fatal("core bootstrap did not leave a fresh direct installation")
+		}
 		set := f.mustRun(ctx, st, `:put [/ip/service/get [find where name=api-ssl and !dynamic] certificate]`)
 		if set == "" || set == "none" {
 			st.Fatal("installer did not attach a certificate")
@@ -241,6 +254,7 @@ func TestM3Install(t *testing.T) {
 			}
 		}()
 		beforeRunner := f.probe(ctx, st, "runner")
+		beforeControl := f.probe(ctx, st, "control-start")
 		f.mustRun(ctx, st, `/container/stop [find where name="tikray" and comment="tikray:tikray"]`)
 		if f.waitForContainer(ctx, "tikray", "stopped") != nil {
 			st.Fatal("could not stage stopped control for command repair")
@@ -252,6 +266,9 @@ func TestM3Install(t *testing.T) {
 		session.wantState(st, ctx, false, true)
 		if f.probe(ctx, st, "runner") != beforeRunner {
 			st.Fatal("repairing the control command restarted xray")
+		}
+		if f.probe(ctx, st, "control-start") == beforeControl {
+			st.Fatal("control process witness did not change across the forced restart")
 		}
 		f.audit(ctx, st, code, password, api.Token, session.cookie.Value, session.csrf)
 		note("Healthy reimport preserved object and process IDs. An owner grant edit refused safely. A stopped control with an empty command recovered serving the original session, with the same xray instance.")
@@ -270,10 +287,18 @@ func (f *installLab) file(ctx context.Context, t *testing.T, path string) string
 func (f *installLab) requireRefusal(ctx context.Context, t *testing.T, category string) {
 	t.Helper()
 	_, err := f.runInstaller(ctx)
-	if err == nil || err.Error() != category {
+	if !expectedRefusal(err, category) {
 		t.Fatalf("missing installer refusal for %s (got %v)", category, err)
 	}
 
+}
+
+func expectedRefusal(err error, category string) bool {
+	if err == nil {
+		return false
+	}
+	suffix, ok := strings.CutPrefix(err.Error(), category)
+	return ok && (suffix == "" || strings.HasPrefix(suffix, " ") || strings.HasPrefix(suffix, ";"))
 }
 func (f *installLab) requireSuccess(ctx context.Context, t *testing.T) string {
 	t.Helper()
@@ -315,6 +340,10 @@ func (f *installLab) pinned(ctx context.Context, t *testing.T) *apiclient.Client
 func (f *installLab) checkReady(ctx context.Context, t *testing.T) {
 	t.Helper()
 	api := f.pinned(ctx, t)
+	var flags struct {
+		read, core, applied, managed, pending bool
+		reason                                string
+	}
 	_, ok := poll(ctx, 3*time.Minute, time.Second, func() bool {
 		resp, err := api.Status(ctx)
 		if err != nil {
@@ -328,10 +357,27 @@ func (f *installLab) checkReady(ctx context.Context, t *testing.T) {
 				Degraded string
 			} `json:"routeros"`
 		}
-		return json.Unmarshal(resp.Body, &s) == nil && s.Applied && s.Core == f.Newest && s.Router != nil && !s.Router.Pending && s.Router.Degraded == ""
+		if json.Unmarshal(resp.Body, &s) != nil {
+			return false
+		}
+		flags.read = true
+		flags.core = s.Core == f.Newest
+		flags.applied = s.Applied
+		flags.managed = s.Router != nil
+		if s.Router == nil {
+			return false
+		}
+		flags.pending = s.Router.Pending
+		switch s.Router.Degraded {
+		case "", "revision", "state", "policy", "runner", "geo", "unavailable", "conflict", "ipv6_fasttrack_scope", "bridge_repair", "retry_bootstrap":
+			flags.reason = s.Router.Degraded
+		default:
+			flags.reason = "unrecognized"
+		}
+		return flags.core && s.Applied && !s.Router.Pending && s.Router.Degraded == ""
 	})
 	if !ok {
-		t.Fatal("daemon could not verify the committed core and router state")
+		t.Fatalf("daemon verification timed out (read %t, core %t, applied %t, managed %t, pending %t, reason %q)", flags.read, flags.core, flags.applied, flags.managed, flags.pending, flags.reason)
 	}
 	for _, name := range []string{"tikray", "tikray-runner"} {
 		if want := f.mustRun(ctx, t, fmt.Sprintf(`:put [/container/get [find name="%s"] dns]`, name)); want != "172.30.252.1" {

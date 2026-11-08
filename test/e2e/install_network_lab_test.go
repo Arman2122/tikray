@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"maps"
 	"net/netip"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/Arman2122/tikray/internal/store"
 )
+
+var countLine = regexp.MustCompile(`(?m)^m3-count=([0-9]+)[[:space:]]*$`)
 
 func (f *installLab) checkBridge(ctx context.Context, t *testing.T) {
 	t.Helper()
@@ -47,12 +50,28 @@ s=socket.create_connection((sys.argv[1],int(sys.argv[2])),2);s.close()`, host, s
 		t.Fatal("control cannot reach a running private service")
 	}
 	f.mustRun(ctx, t, `:if ([/ping 172.30.252.3 count=3 interval=500ms] = 0) do={:error "router cannot reach runner"}`)
+	routerRunner := f.mustRun(ctx, t, `{:local b [/file/get [find name="disk1/tikray/data/run/runner.token"] contents]; :set b [:pick $b 0 [:find ($b . "\n") "\n"]]; :local r [/tool/fetch url="http://172.30.252.3:8080/v1/status" http-header-field=("Authorization: Bearer " . $b) output=user as-value]; :local s [:deserialize from=json value=($r->"data")]; :put ((($s->"state")="running") and (($s->"gateway_up")=true))}`)
+	if routerRunner != "true" {
+		t.Fatal("router could not authenticate to the running runner")
+	}
+
 	// UDP reachability needs a positive drop witness: a DNS timeout alone
 	// could also result from an unavailable upstream. Probe from both sides.
 	drops := func() int64 {
-		out := f.mustRun(ctx, t, `{:local n 0; :foreach i in=[/ip/firewall/filter/find where comment~"^tikray:" and action=drop] do={:set n ($n + [/ip/firewall/filter/get $i packets])}; :foreach i in=[/ip/firewall/raw/find where comment~"^tikray:" and action=drop] do={:set n ($n + [/ip/firewall/raw/get $i packets])}; :put $n}`)
-		n, e := strconv.ParseInt(out, 10, 64)
-		if e != nil {
+		var n int64
+		_, good := poll(ctx, 3*time.Second, 200*time.Millisecond, func() bool {
+			out, e := f.CHR.RunPrivate(ctx, `{:local n 0; :foreach i in=[/ip/firewall/filter/find where comment~"^tikray:" and action=drop] do={:set n ($n + [/ip/firewall/filter/get $i packets])}; :foreach i in=[/ip/firewall/raw/find where comment~"^tikray:" and action=drop] do={:set n ($n + [/ip/firewall/raw/get $i packets])}; :put ("m3-count=" . [:tostr $n])}`)
+			if e != nil {
+				return false
+			}
+			found := countLine.FindStringSubmatch(out)
+			if len(found) != 2 {
+				return false
+			}
+			n, e = strconv.ParseInt(found[1], 10, 64)
+			return e == nil
+		})
+		if !good {
 			t.Fatal("missing firewall counters")
 		}
 		return n
@@ -195,8 +214,13 @@ func hasIPv4Answer(b []byte) bool {
 
 func (f *installLab) checkWatchdog(ctx context.Context, t *testing.T) {
 	t.Helper()
-	const watch = `/system/script/run tikray-watchdog`
-	tick := func() { t.Helper(); f.mustRun(ctx, t, watch) }
+	tick := func() {
+		t.Helper()
+		wire := f.mustRun(ctx, t, `:onerror why in={ /system/script/run tikray-watchdog; :put "m3-import-ok" } do={ :put ("m3-import-error=" . [:convert [:tostr $why] to=base64]) }`)
+		if _, err := installOutput(wire); err != nil {
+			t.Fatalf("native watchdog tick failed: %v", err)
+		}
+	}
 	f.mustRun(ctx, t, `/system/scheduler/disable [find name=tikray-watchdog]`)
 	defer func() { f.mustRun(ctx, t, `/system/scheduler/enable [find name=tikray-watchdog]`) }()
 	stop := func(name string) {
@@ -227,29 +251,62 @@ func (f *installLab) checkWatchdog(ctx context.Context, t *testing.T) {
 		return s
 	}
 	tick()
-	oldRunner := f.probe(ctx, t, "runner")
-	id := f.mustRun(ctx, t, `:put [:pick [/container/find where name="tikray-runner" and comment="tikray:runner"] 0]`)
-	if !regexp.MustCompile(`^\*[A-Fa-f0-9]+$`).MatchString(id) {
-		t.Fatal("runner fixture native identity unavailable")
+	trace := f.mustRun(ctx, t, `{:local rows [/container/find where name="tikray-runner" and comment="tikray:runner"]; :local rid [:pick $rows 0]; :put ("m3-peer=" . [:len $rows] . "|" . [:convert [:tostr $rid] to=hex] . "|end")}`)
+	match := regexp.MustCompile(`m3-peer=([0-9]+)\|([0-9a-fA-F]*)\|end`).FindStringSubmatch(trace)
+	if len(match) != 3 || match[1] != "1" {
+		t.Fatalf("runner fixture lookup did not return exactly one tagged row (structured acknowledgement %t)", len(match) == 3)
 	}
+	raw, err := hex.DecodeString(match[2])
+	id := string(raw)
+	if err != nil || !regexp.MustCompile(`^\*[A-Fa-f0-9]+$`).MatchString(id) {
+		t.Fatalf("invalid native runner ID (encoded length %d)", len(match[2]))
+	}
+
 	// One malformed/unowned component cannot suppress a verified sibling.
 	// Preserve the exact runtime identity and restore only the row we tagged.
 	f.mustRun(ctx, t, `/container/set `+id+` comment=lab:watchdog-peer`)
 	restorePeer := func() {
 		t.Helper()
-		f.mustRun(ctx, t, `:if ([:len [/container/find where .id=`+id+` and name="tikray-runner" and comment="lab:watchdog-peer"]]=1) do={/container/set `+id+` comment="tikray:runner"}`)
+		f.mustRun(ctx, t, `{:local c [/container/get `+id+`]; :if ((($c->"name")="tikray-runner") and (($c->"comment")="lab:watchdog-peer")) do={ /container/set `+id+` comment="tikray:runner" }; :if ([/container/get `+id+` comment]!="tikray:runner") do={:error "fixture peer identity changed"} }`)
 	}
 	defer restorePeer()
+	// The verified interval starts after the owner-side fixture rename and
+	// finishes before restoring the tag. Metadata edits are outside it.
+	instance := func() string {
+		t.Helper()
+		v := f.probe(ctx, t, "runner")
+		m := regexp.MustCompile(`(?m)^([0-9]+\.[0-9]+\.[0-9]+)\|([A-Za-z2-7]{20,64})[[:space:]]*$`).FindStringSubmatch(v)
+		if len(m) != 3 || m[1] != f.Newest {
+			t.Fatal("runner instance witness unavailable inside the ownership window")
+		}
+		return m[2]
+	}
+	// RouterOS can recycle a running container as it applies a comment
+	// edit. Let that operation settle before attributing any later change
+	// to a watchdog invocation.
+	if sleep(ctx, 8*time.Second) != nil {
+		t.Fatal("fixture settling interrupted")
+	}
+	f.checkReady(ctx, t)
+	oldRunner := instance()
+	_, stable := poll(ctx, 25*time.Second, 2*time.Second, func() bool {
+		if sleep(ctx, 2*time.Second) != nil {
+			return false
+		}
+		next := instance()
+		unchanged := next == oldRunner
+		oldRunner = next
+		return unchanged
+	})
+	if !stable {
+		t.Fatal("retagged runner did not settle")
+	}
 	stop("tikray")
-	// Deliberate stop remains stopped with native on-failure configured.
-	// The first two explicit watchdog probes must also leave it stopped.
+	// An intentional stop must stay down without a scheduler. The three
+	// misses below must all be produced by actual native minute executions.
 	if sleep(ctx, 8*time.Second) != nil {
 		t.Fatal("native restart control interrupted")
 	}
-	stillStopped("tikray")
-	tick()
-	stillStopped("tikray")
-	tick()
 	stillStopped("tikray")
 	count := func() int64 {
 		raw := f.mustRun(ctx, t, `:put [/system/scheduler/get [find name=tikray-watchdog] run-count]`)
@@ -261,19 +318,59 @@ func (f *installLab) checkWatchdog(ctx context.Context, t *testing.T) {
 	}
 	before := count()
 	f.mustRun(ctx, t, `/system/scheduler/enable [find name=tikray-watchdog]`)
-	_, scheduled := poll(ctx, 100*time.Second, time.Second, func() bool {
-		state, err := containerStatus(ctx, f.CHR, "tikray")
-		return err == nil && state == "running" && count() > before
-	})
+	// Observe run-count for each execution. Re-enabling a scheduler can
+	// reset a native counter, which does not constitute a health check.
+	for minute := 1; minute <= 3; minute++ {
+		_, observed := poll(ctx, 85*time.Second, 300*time.Millisecond, func() bool {
+			n := count()
+			if n < before {
+				before = n
+				return false
+			}
+			if n == before {
+				return false
+			}
+			if n-before != 1 {
+				t.Fatal("could not distinguish consecutive scheduled ticks")
+			}
+			before = n
+			return true
+		})
+		if !observed {
+			t.Fatal("missing real minute scheduler tick")
+		}
+		if minute < 3 {
+			// run-count advances at dispatch. Give the native job time to
+			// run before asserting the failed component remains stopped.
+			if sleep(ctx, 2*time.Second) != nil {
+				t.Fatal("scheduled check interrupted")
+			}
+			_, idle := poll(ctx, 12*time.Second, 200*time.Millisecond, func() bool {
+				return f.mustRun(ctx, t, `:put [:len [/system/script/job/find where script="tikray-watchdog"]]`) == "0"
+			})
+			if !idle {
+				t.Fatal("scheduled probe did not finish")
+			}
+			stillStopped("tikray")
+		}
+	}
+	waitUp("tikray")
 	f.mustRun(ctx, t, `/system/scheduler/disable [find name=tikray-watchdog]`)
-	if !scheduled {
-		t.Fatal("an unowned runner suppressed the actual scheduled restart of verified control")
+	f.checkReady(ctx, t)
+	if instance() != oldRunner {
+		t.Fatal("a runner instance changed during the foreign-ownership observation window")
 	}
 	restorePeer()
-	f.checkReady(ctx, t)
-	if f.probe(ctx, t, "runner") != oldRunner {
-		t.Fatal("control failure restarted the healthy runner")
+	// Recovery after the physical owner turns steering off must stay under
+	// owner control even when the containers cannot communicate.
+	stop("tikray")
+	f.mustRun(ctx, t, "/system/script/run tikray-emergency-off")
+	for range 5 {
+		tick()
+		stillStopped("tikray")
 	}
+	f.mustRun(ctx, t, "/container/start [find name=tikray]")
+	f.checkReady(ctx, t)
 	// A successful health probe resets previous misses. Leave the control
 	// healthy throughout an independent runner failure/recovery.
 	tick()
@@ -319,14 +416,5 @@ func (f *installLab) checkWatchdog(ctx context.Context, t *testing.T) {
 	}
 	f.checkReady(ctx, t)
 	tick()
-	// Recovery after the physical owner turns steering off must stay under
-	// owner control even when the containers cannot communicate.
-	stop("tikray")
-	f.mustRun(ctx, t, "/system/script/run tikray-emergency-off")
-	for range 5 {
-		tick()
-		stillStopped("tikray")
-	}
-	f.mustRun(ctx, t, "/container/start [find name=tikray]")
-	f.checkReady(ctx, t)
+
 }

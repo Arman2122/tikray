@@ -296,6 +296,7 @@ func (f *installLab) runInstaller(ctx context.Context) (string, error) {
 	return installOutput(out)
 }
 
+var installRole = regexp.MustCompile(`tikray:[a-z0-9]+(?:-[a-z0-9]+)*`)
 var sourceError = regexp.MustCompile(`:error +"(tikray: [^"\\]+)"`)
 var importPosition = regexp.MustCompile(`line ([0-9]{1,7}) column ([0-9]{1,7})`)
 
@@ -314,21 +315,25 @@ func installOutput(wire string) (string, error) {
 		return "", errors.New("installer acknowledgement missing")
 	}
 	msg := string(raw)
+	// Only role/property strings present in the reviewed source are safe to
+	// render. An unrecognized peer string stays behind the fixed category.
+	if strings.Contains(msg, "tikray: object conflict") {
+		src, _ := os.ReadFile(filepath.Join(repoRoot(), "routeros", "install.rsc"))
+		for _, role := range installRole.FindAllString(string(src), -1) {
+			if strings.Contains(msg, " "+role) {
+				return "", fmt.Errorf("tikray: object conflict (%s)", role)
+			}
+		}
+	}
 	for _, suffix := range []string{"restore service certificate", "api-ssl was changed by its owner", "inspect certificate lacking completed fingerprint proof", "certificate identity changed"} {
 		known := "tikray: shared_reference_refuses; " + suffix
 		if strings.Contains(msg, known) {
 			return "", errors.New(known)
 		}
 	}
-	for _, category := range []string{"enable router DNS", "bridge overlaps", "object conflict", "retry bootstrap", "shared_reference_refuses", "inspect api-ssl", "inspect selected disk", "inspect disk", "select", "inspect", "enable", "choose", "archive", "image archive", "pending", "multiple active", "obtain installer", "unsupported", "unexpected", "invalid", "insufficient", "private handoff"} {
-		known := "tikray: " + category
-		if strings.Contains(msg, known) {
-			return "", errors.New(known)
-		}
-	}
 	// Error literals come only from the reviewed installer sources. Dynamic
 	// RouterOS diagnostics can contain router configuration or credentials.
-	for _, p := range []string{"install.rsc", "certificate.rsc", "watchdog-preflight.rsc", "watchdog.rsc"} {
+	for _, p := range []string{"install.rsc", "certificate.rsc", "watchdog-preflight.rsc", "watchdog-state.rsc", "watchdog.rsc"} {
 		src, e := os.ReadFile(filepath.Join(repoRoot(), "routeros", p))
 		if e != nil {
 			continue
@@ -337,6 +342,12 @@ func installOutput(wire string) (string, error) {
 			if strings.Contains(msg, match[1]) {
 				return "", errors.New(match[1])
 			}
+		}
+	}
+	for _, category := range []string{"enable router DNS", "bridge overlaps", "object conflict", "retry bootstrap", "shared_reference_refuses", "inspect api-ssl", "inspect selected disk", "inspect disk", "select", "inspect", "enable", "choose", "archive", "image archive", "pending", "multiple active", "obtain installer", "unsupported", "unexpected", "invalid", "insufficient", "private handoff"} {
+		known := "tikray: " + category
+		if strings.Contains(msg, known) {
+			return "", errors.New(known)
 		}
 	}
 	for _, category := range []string{"not enough permissions", "expected argument of type", "invalid internal item number", "no such item", "input does not match any value", "value of argument", "argument of", "not a valid", "cannot be used", "cannot add", "not enough", "cannot compare", "invalid value for", "expected end of command", "expected command name", "already have", "not a valid value", "not a number", "not allowed by device-mode", "script is too large"} {

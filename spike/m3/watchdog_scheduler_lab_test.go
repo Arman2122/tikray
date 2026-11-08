@@ -3,6 +3,8 @@
 package m3
 
 import (
+	"encoding/base64"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -81,4 +83,46 @@ func TestWatchdogSchedulerIdentity(t *testing.T) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	t.Fatal("native scheduled tick did not advance the protected receipt")
+}
+
+func TestWatchdogInactiveExitsCleanly(t *testing.T) {
+	r := newRig(t)
+	body, e := routerosfiles.Sources.ReadFile("watchdog.rsc")
+	if e != nil {
+		t.Fatal(e)
+	}
+	source := string(body)
+	for _, part := range []struct{ key, file string }{{"STEP", "watchdog-step.rsc"}, {"STATE", "watchdog-state.rsc"}} {
+		b, e := routerosfiles.Sources.ReadFile(part.file)
+		if e != nil {
+			t.Fatal(e)
+		}
+		source = strings.ReplaceAll(source, "# @TIKRAY_WATCHDOG_"+part.key+"@", string(b))
+	}
+	source = strings.ReplaceAll(source, "# @TIKRAY_WATCHDOG_HEALTH@", `:error "unexpected health probe"`)
+	add, e := r.admin.RunContext(r.ctx, "/system/script/add", "=name=tikray-watchdog", "=policy=read,write,test", "=source="+source)
+	if e != nil || add.Done == nil {
+		t.Fatal("fixture script add")
+	}
+	run := func() {
+		t.Helper()
+		if _, e := r.admin.RunContext(r.ctx, "/system/script/run", "=.id="+add.Done.Map["ret"]); e != nil {
+			out, _ := r.chr.RunPrivate(r.ctx, `:onerror reason in={ /system/script/run tikray-watchdog } do={ :put ("wd-reason=" . [:convert $reason to=base64]) }`)
+			_, raw, _ := strings.Cut(out, "wd-reason=")
+			msg, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(raw))
+			text := strings.ToLower(e.Error() + " " + string(msg))
+			pos := regexp.MustCompile(`line [0-9]+ column [0-9]+`).FindString(text)
+			for _, s := range []string{"expected end of command", "expected command name", "syntax error", "not enough permissions", "invalid internal item number", "no such item", "script is too large", "script error", "unable to", "invalid value", "no such command", "executing script", "not enough", "not found", "argument"} {
+				if strings.Contains(text, s) {
+					t.Fatal("inactive watchdog", s, pos)
+				}
+			}
+			t.Fatal("inactive watchdog rejected", pos)
+		}
+	}
+	run()
+	if _, e := r.admin.RunContext(r.ctx, "/system/script/add", "=name=tikray-emergency-state", "=source=", "=comment=tikray:emergency-state"); e != nil {
+		t.Fatal("fixture emergency marker")
+	}
+	run()
 }
