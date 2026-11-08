@@ -35,12 +35,12 @@ func TestM3Install(t *testing.T) {
 	if err != nil {
 		t.Fatal("could not resolve installer target")
 	}
-	check := (&Lab{Version: target, Arch: labArch()}).recordChecks(t, "m3-install")
+	check := (&Lab{Version: target, Arch: labArch()}).recordM3Checks(t, "m3-install")
 	var interruptedID string
 	// An interrupted install on a separate ready overlay also proves the
 	// owner's pre-existing certificate is never claimed. Teardown completes
 	// before the first truly clean import starts.
-	check("interrupted_install", func(st *testing.T, note func(string, ...any)) {
+	check("interrupted_install", func(st *testing.T) {
 		f := DeployM3(ctx, st)
 		f.stage(ctx, st, false)
 		f.mustRun(ctx, st, `/certificate/add name=owner-api common-name=owner-api subject-alt-name=IP:172.30.252.1 key-size=prime256v1 key-usage=key-cert-sign,digital-signature,tls-server; /certificate/sign owner-api`)
@@ -103,7 +103,6 @@ func TestM3Install(t *testing.T) {
 			st.Fatal("installer restricted the previously enabled unrestricted owner API")
 		}
 		f.audit(ctx, st, api.Token, f.file(ctx, st, dataRoot+"/state/setup.code"), linkA, "http://203.0.113.30/sub/fixture")
-		note("Core absence kept HTTPS up and rejected admission. Retry committed the signed core and preserved the owner certificate.")
 	})
 	var f *installLab
 	var installed bool
@@ -130,7 +129,7 @@ func TestM3Install(t *testing.T) {
 		}
 		return f
 	}
-	check("preflight", func(st *testing.T, note func(string, ...any)) {
+	check("preflight", func(st *testing.T) {
 		f := fixture(st)
 		baseline := func() string {
 			return f.mustRun(ctx, st, `:local s [/ip/service/get [find where name=api-ssl and !dynamic]]; :put ([:tostr ($s->"disabled")] . "|" . [:tostr ($s->"certificate")] . "|" . [:tostr ($s->"address")] . "|" . [:tostr ($s->"port")] . "|" . [:tostr [/certificate/find]] . "|" . [:tostr [/user/find]] . "|" . [:tostr [/user/group/find]] . "|" . [:tostr [/container/config/get tmpdir]] . "|" . [:tostr [/container/config/get registry-url]])`)
@@ -174,9 +173,8 @@ func TestM3Install(t *testing.T) {
 			st.Fatal("could not restore signed archive")
 		}
 		checkInstallForeignResources(ctx, st, f)
-		note("DNS, overlapping LAN, owner name collision and altered archive failed before any owned network, account or container row.")
 	})
-	check("clean_install", func(st *testing.T, note func(string, ...any)) {
+	check("clean_install", func(st *testing.T) {
 		f := ensure(st)
 		if f.checkHealthIdentity(ctx, st) == interruptedID {
 			st.Fatal("separate fresh installations reused an identity")
@@ -213,15 +211,13 @@ func TestM3Install(t *testing.T) {
 		if f.probe(ctx, st, "account") != "verified" {
 			st.Fatal("restricted API permission witness failed")
 		}
-		note("Private API-SSL login from the control container succeeded and a privileged write failed in that session. The initial signed core runs with direct policy.")
 	})
-	check("bridge_acl", func(st *testing.T, note func(string, ...any)) {
+	check("bridge_acl", func(st *testing.T) {
 		f := ensure(st)
 		f.checkBridge(ctx, st)
 		checkBridgeIPFirewall(ctx, st, f)
-		note("LAN used the pinned HTTPS service. Fresh WAN and direct LAN probes could not reach private runner services. The control and router probes succeeded.")
 	})
-	check("second_import", func(st *testing.T, note func(string, ...any)) {
+	check("second_import", func(st *testing.T) {
 		f := ensure(st)
 		identity := f.checkHealthIdentity(ctx, st)
 		code := f.file(ctx, st, dataRoot+"/state/setup.code")
@@ -276,12 +272,10 @@ func TestM3Install(t *testing.T) {
 			st.Fatal("control process witness did not change across the forced restart")
 		}
 		f.audit(ctx, st, code, password, api.Token, session.cookie.Value, session.csrf)
-		note("Healthy reimport preserved object and process IDs. An owner grant edit refused safely. A stopped control with an empty command recovered serving the original session, with the same xray instance.")
 	})
-	check("basic_watchdog", func(st *testing.T, note func(string, ...any)) {
+	check("basic_watchdog", func(st *testing.T) {
 		f := ensure(st)
 		f.checkWatchdog(ctx, st)
-		note("Healthy HTTPS with another installation ID counted as a miss. The genuine response cleared it. The third real minute tick restarted only the stopped control. Runner-only failure, sustained control backoff and emergency suppression also passed.")
 	})
 }
 

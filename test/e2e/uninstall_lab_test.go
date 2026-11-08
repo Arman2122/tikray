@@ -312,8 +312,8 @@ func TestM3Uninstall(t *testing.T) {
 	if e != nil {
 		t.Fatal("uninstall target unavailable")
 	}
-	check := (&Lab{Version: v, Arch: labArch()}).recordChecks(t, "m3-uninstall")
-	check("keep_data", func(st *testing.T, note func(string, ...any)) {
+	check := (&Lab{Version: v, Arch: labArch()}).recordM3Checks(t, "m3-uninstall")
+	check("keep_data", func(st *testing.T) {
 		f := setupRemoval(ctx, st, false)
 		api := f.pinned(ctx, st)
 		code := f.file(ctx, st, dataRoot+"/state/setup.code")
@@ -357,9 +357,8 @@ func TestM3Uninstall(t *testing.T) {
 			st.Fatal("reinstall failed to preserve desired state")
 		}
 		f.audit(ctx, st, password, code, api.Token)
-		note("Default keep restored owner service and WAN routing. Reinstall retained the claimed owner, desired policy, UI certificate and running signed core.")
 	})
-	check("purge_owned_data", func(st *testing.T, note func(string, ...any)) {
+	check("purge_owned_data", func(st *testing.T) {
 		f := setupRemoval(ctx, st, true)
 		const external = "disk1/tikray-external-probe"
 		f.mustRun(ctx, st, `/file/add name="`+external+`" type=directory`)
@@ -423,9 +422,8 @@ func TestM3Uninstall(t *testing.T) {
 		if f.mustRun(ctx, st, `:put [:len [/file/find where name="disk1/tikray/data" or name~"^disk1/tikray/data/"]]`) != "0" {
 			st.Fatal("owned data tree survived successful purge")
 		}
-		note("Purge removed the identified data tree and all owned bindings. The sibling file, original certificate, API grants and owner forwarding rules survived.")
 	})
-	check("shared_reference_refuses", func(st *testing.T, note func(string, ...any)) {
+	check("shared_reference_refuses", func(st *testing.T) {
 		f := setupRemoval(ctx, st, false)
 		// A marker at a syntactically valid root is insufficient if the
 		// installation ID is not the one independently anchored in RouterOS.
@@ -536,9 +534,8 @@ func TestM3Uninstall(t *testing.T) {
 		if err != nil || after != before || replacement != f.mustRun(ctx, st, `:put [/certificate/get [find name=tikray-api] fingerprint]`) {
 			st.Fatal("substitute identity or owned row changed during refusal")
 		}
-		note("Foreign ARP and bridge-host natural keys and a substituted same-name certificate independently refused teardown before a change.")
 	})
-	check("interrupted_and_repeat", func(st *testing.T, note func(string, ...any)) {
+	check("interrupted_and_repeat", func(st *testing.T) {
 		f := setupRemoval(ctx, st, false)
 		if _, err := f.pinned(ctx, st).SetDevice(ctx, store.Device{Address: netip.MustParsePrefix("192.168.88.22/32"), MAC: "02:00:00:00:00:22", Policy: store.Policy{Mode: store.ModeFull, KillSwitch: true}}); err != nil {
 			st.Fatal("could not seed interruption policy")
@@ -578,6 +575,5 @@ func TestM3Uninstall(t *testing.T) {
 			st.Fatal("repeat refused", err)
 		}
 		f.clean(ctx, st, false)
-		note("An interruption after native container removal retained a durable marker. The original uninstaller finished cleanup, then repeated without changing owner state.")
 	})
 }

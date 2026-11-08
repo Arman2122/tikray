@@ -129,6 +129,8 @@ func e2eDir() string {
 
 func repoRoot() string { return filepath.Join(e2eDir(), "..", "..") }
 
+func resultDirectory() string { return env("TIKRAY_LAB_RESULTS", filepath.Join(e2eDir(), "results")) }
+
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -334,7 +336,7 @@ func fakeXray(ctx context.Context, dir, mode, goarch string) (string, error) {
 // unverified core is only installed from the inbox. The signed hash index
 // lists only 26.3.27; buildReleases returns the PEM key it is signed with.
 func (l *Lab) buildReleases(ctx context.Context, wd, goarch string) ([]byte, error) {
-	newestTag, err := lab.ResolveXrayVersion(ctx, "latest")
+	newestTag, err := lab.ResolveXrayVersion(ctx, lab.LabXrayVersion())
 	if err != nil {
 		return nil, err
 	}
@@ -677,7 +679,7 @@ type result struct {
 func (l *Lab) recordChecks(t *testing.T, suite string) (check func(id string, f func(t *testing.T, note func(string, ...any)))) {
 	var results []result
 	t.Cleanup(func() {
-		dir := filepath.Join(e2eDir(), "results")
+		dir := resultDirectory()
 		os.MkdirAll(dir, 0o755)
 		b, _ := json.MarshalIndent(results, "", "  ")
 		name := fmt.Sprintf("%s-%s-%s", l.Version, l.Arch, suite)

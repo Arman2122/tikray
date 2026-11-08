@@ -164,6 +164,9 @@ func (c *CHR) start(ctx context.Context) error {
 		return err
 	}
 	c.logf("qemu started: pid %d", cmd.Process.Pid)
+	if c.opts.Notef != nil {
+		c.opts.Notef("lab: QEMU PID %d", cmd.Process.Pid)
+	}
 	exited := make(chan struct{})
 	go func() {
 		err := cmd.Wait()
