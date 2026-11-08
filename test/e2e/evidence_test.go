@@ -56,3 +56,33 @@ func TestEvidenceRejectsPrivateOrMissingResults(t *testing.T) {
 		t.Fatal("filtered failure was not safely recorded")
 	}
 }
+
+func TestSkippedRegressionIsUnsuccessfulEvidence(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TIKRAY_LAB_RESULTS", dir)
+	t.Run("suite", func(st *testing.T) {
+		rec := (&Lab{Version: "7.25", Arch: lab.ArchX86}).recordChecks(st, "m2b")
+		rec("fixture", func(c *testing.T, note func(string, ...any)) {
+			note("temporary-fixture-note")
+			c.SkipNow()
+		})
+	})
+	reports, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	if err != nil || len(reports) != 1 {
+		t.Fatal("missing lab report")
+	}
+	data, err := os.ReadFile(reports[0])
+	if err != nil || !bytes.Contains(data, []byte(`"pass": false`)) || bytes.Contains(data, []byte("temporary-fixture-note")) {
+		t.Fatal("skipped regression published successful or unfinished observations")
+	}
+}
+
+func TestMalformedCLIResultOmitsContents(t *testing.T) {
+	const private = "private-result-fixture"
+	if _, err := decodeCLIResult(private); err == nil || strings.Contains(err.Error(), private) {
+		t.Fatal("malformed CLI result exposed its contents or passed")
+	}
+	if r, err := decodeCLIResult(`{"outcome":"committed"}`); err != nil || r.Outcome != "committed" {
+		t.Fatal("lost valid CLI outcome")
+	}
+}

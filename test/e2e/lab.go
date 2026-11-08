@@ -508,23 +508,29 @@ func runTikray(ctx context.Context, c *lab.CHR, args string) (artifacts.Result, 
 		case st != "stopped":
 			ran = true
 		default:
-			body, err := c.Get(ctx, fileContents(lastResult))
-			if err == nil && body != "" {
-				if err := json.Unmarshal([]byte(body), &res); err != nil {
-					return res, fmt.Errorf("tikray %s: last-result.json: %v: %q", args, err, body)
-				}
-				return res, nil
+			body, err := c.RunPrivate(ctx, ":put ["+fileContents(lastResult)+"]")
+			if err == nil && strings.TrimSpace(body) != "" {
+				return decodeCLIResult(body)
 			}
 			// A container that stopped before this loop saw it run may
 			// not have been started at all.
 			if ran || time.Since(start) > time.Minute {
-				return res, fmt.Errorf("tikray %s stopped without a result (%v); container log:\n%s", args, err, containerLog(c, 30))
+				return res, errors.New("lab: tikray stopped without a CLI result")
 			}
 		}
 		if err := sleep(ctx, 2*time.Second); err != nil {
-			return res, fmt.Errorf("tikray %s: %w; container log:\n%s", args, err, containerLog(c, 30))
+			return res, fmt.Errorf("lab: waiting for CLI result: %w", err)
 		}
 	}
+}
+
+// A corrupt result or a container log can include private router input.
+func decodeCLIResult(body string) (artifacts.Result, error) {
+	var res artifacts.Result
+	if json.Unmarshal([]byte(body), &res) != nil {
+		return artifacts.Result{}, errors.New("lab: malformed CLI result")
+	}
+	return res, nil
 }
 
 // serveWithin is how long the tikray container may take to start or to stop:
@@ -698,7 +704,12 @@ func (l *Lab) recordChecks(t *testing.T, suite string) (check func(id string, f 
 			note := func(format string, args ...any) { notes = append(notes, fmt.Sprintf(format, args...)) }
 			start := time.Now()
 			defer func() {
-				results = append(results, result{ID: id, Pass: !t.Failed(), Detail: strings.Join(notes, "; "), Seconds: time.Since(start).Round(100 * time.Millisecond).Seconds()})
+				passed := !t.Failed() && !t.Skipped()
+				detail := "Check did not complete successfully."
+				if passed {
+					detail = strings.Join(notes, "; ")
+				}
+				results = append(results, result{ID: id, Pass: passed, Detail: detail, Seconds: time.Since(start).Round(100 * time.Millisecond).Seconds()})
 			}()
 			f(t, note)
 		})
@@ -733,19 +744,6 @@ func waitContainer(ctx context.Context, c *lab.CHR, name, want string) error {
 			return fmt.Errorf("container %s is %q (%v), want %s: %w", name, st, err, want, ctx.Err())
 		}
 	}
-}
-
-// containerLog is the last n lines RouterOS logged under the container topic,
-// where the containers' output goes (logging=yes).
-func containerLog(c *lab.CHR, n int) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	out, err := readContainerLog(ctx, c)
-	if err != nil {
-		return err.Error()
-	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	return strings.Join(lines[max(0, len(lines)-n):], "\n")
 }
 
 // Read each message value in RouterOS log order. /log/print formats a table
