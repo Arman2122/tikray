@@ -15,6 +15,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -95,7 +96,9 @@ var serverEgress = map[string]string{"a": "203.0.113.10", "b": "203.0.113.11"}
 // and a mirror with a signed hash index (203.0.113.41) serving Releases, and
 // subscriptions (http://203.0.113.30/sub/<name>) serving Subs.
 type Lab struct {
-	Net *lab.Network
+	workDir string
+	owner   *testing.T
+	Net     *lab.Network
 	// Inet is the fake internet, whose VLESS servers a test can stop and
 	// start.
 	Inet    *lab.Inet
@@ -144,31 +147,8 @@ func labArch() lab.Arch { return lab.Arch(env("TIKRAY_LAB_ARCH", string(lab.Arch
 func Deploy(ctx context.Context, t *testing.T) *Lab {
 	t.Helper()
 	runnerAPI = nil
-	l := &Lab{Arch: labArch(), Zips: map[string]string{}}
-	var err error
-	if l.Version, err = lab.ResolveChannel(ctx, "", env("TIKRAY_LAB_CHANNEL", "stable")); err != nil {
-		t.Fatal(err)
-	}
-	art, err := lab.FetchCHR(ctx, "", lab.CacheDir(), l.Version, l.Arch)
-	if err != nil {
-		t.Fatal(err)
-	}
-	goarch := l.Arch.GOARCH()
-	if l.Asset, err = xrayver.AssetName(goarch); err != nil {
-		t.Fatal(err)
-	}
-
-	wd, err := os.MkdirTemp("", "tikray-e2e-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if t.Failed() {
-			t.Logf("kept work dir %s", wd)
-			return
-		}
-		os.RemoveAll(wd)
-	})
+	l, art := newLab(ctx, t, t)
+	wd, goarch := l.workDir, l.Arch.GOARCH()
 	runnerImage, tikrayImage, err := buildImages(ctx, goarch)
 	if err != nil {
 		t.Fatal(err)
@@ -182,28 +162,7 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 		t.Fatal(err)
 	}
 
-	if l.Net, err = lab.SetupNetwork(ctx); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { l.Net.Teardown() })
-	l.Subs = filepath.Join(wd, "subs")
-	if err := os.MkdirAll(l.Subs, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if l.Inet, err = lab.StartInetLab(ctx, l.Net, lab.InetOptions{ReleasesDir: l.Releases, SubsDir: l.Subs}); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(l.Inet.Stop)
-
-	if l.CHR, err = lab.BootReadyCHR(ctx, l.Net, lab.BootOptions{
-		Version: l.Version, Arch: l.Arch, Artifacts: art, WorkDir: filepath.Join(wd, "vm"), Password: "tikray-lab",
-		// What the harness worked around, such as a push it had to retry,
-		// shows in a run that passes too.
-		Notef: t.Logf,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { l.CHR.Shutdown() })
+	bootLab(ctx, t, l, art)
 	c := l.CHR
 	if err := c.EnableContainers(ctx); err != nil {
 		t.Fatal(err)
@@ -244,6 +203,78 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 		t.Fatal(err)
 	}
 	return l
+}
+
+// newLab allocates the disposable target. No installer or M1 image is
+// imported here, so the M3 tests can exercise every bootstrap operation.
+func newLab(ctx context.Context, t, owner *testing.T) (*Lab, lab.Artifacts) {
+	t.Helper()
+	l := &Lab{owner: owner, Arch: labArch(), Zips: map[string]string{}}
+	var err error
+	if l.Version, err = lab.ResolveChannel(ctx, "", env("TIKRAY_LAB_CHANNEL", "stable")); err != nil {
+		t.Fatal(err)
+	}
+	art, err := lab.FetchCHR(ctx, "", lab.CacheDir(), l.Version, l.Arch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goarch := l.Arch.GOARCH()
+	if l.Asset, err = xrayver.AssetName(goarch); err != nil {
+		t.Fatal(err)
+	}
+
+	wd, err := os.MkdirTemp("", "tikray-e2e-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.owner.Cleanup(func() {
+		if l.owner.Failed() {
+			t.Logf("kept work dir %s", wd)
+			return
+		}
+		os.RemoveAll(wd)
+	})
+	l.workDir = wd
+	return l, art
+}
+
+func bootLab(ctx context.Context, t *testing.T, l *Lab, art lab.Artifacts) {
+	t.Helper()
+	wd := l.workDir
+	var err error
+	if _, err := net.InterfaceByName("tklab-wan"); err == nil {
+		t.Fatal("shared CHR lab is in use")
+	}
+	if l.Net, err = lab.SetupNetwork(ctx); err != nil {
+		t.Fatal(err)
+	}
+	l.owner.Cleanup(func() { l.Net.Teardown() })
+	l.Subs = filepath.Join(wd, "subs")
+	if err := os.MkdirAll(l.Subs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if l.Inet, err = lab.StartInetLab(ctx, l.Net, lab.InetOptions{ReleasesDir: l.Releases, SubsDir: l.Subs}); err != nil {
+		t.Fatal(err)
+	}
+	l.owner.Cleanup(l.Inet.Stop)
+
+	// The cache is shared with the scoped capability probes. Reusing its
+	// private credential avoids replacing a good ready image.
+	pass := "tikray-lab"
+	if b, e := os.ReadFile(filepath.Join(lab.CacheDir(), "ready", l.Version, string(l.Arch), "password")); e == nil && len(b) > 0 {
+		pass = string(b)
+	} else if e != nil && !errors.Is(e, os.ErrNotExist) {
+		t.Fatal("could not read ready-image credential")
+	}
+	if l.CHR, err = lab.BootReadyCHR(ctx, l.Net, lab.BootOptions{
+		Version: l.Version, Arch: l.Arch, Artifacts: art, WorkDir: filepath.Join(wd, "vm"), Password: pass,
+		// What the harness worked around, such as a push it had to retry,
+		// shows in a run that passes too.
+		Notef: t.Logf,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	l.owner.Cleanup(func() { l.CHR.Shutdown() })
 }
 
 // buildImages uses the archives from make images when TIKRAY_LAB_IMAGES
