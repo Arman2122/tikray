@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -210,7 +211,13 @@ func (f *routingLab) targets(ctx context.Context, t, owner *testing.T) {
 func (f *routingLab) setClientPolicy(ctx context.Context, t *testing.T, p store.Policy) {
 	t.Helper()
 	if _, err := f.api.SetDevice(ctx, store.Device{Address: lanClient, MAC: f.mac, Name: "routing-client", Policy: p}); err != nil {
-		t.Fatal("LAN policy mutation failed", p.Mode, p.KillSwitch)
+		var ae *apiclient.Error
+		routerUnavailable, routerConflict := false, false
+		if errors.As(err, &ae) {
+			routerUnavailable = ae.Detail == service.ErrRouterUnavailable.Error()
+			routerConflict = ae.Detail == service.ErrRouterConflict.Error()
+		}
+		t.Fatalf("LAN policy mutation failed (%s, unavailable=%t conflict=%t deadline=%t), mode=%s closed=%t", apiEvidence(err), routerUnavailable, routerConflict, errors.Is(err, context.DeadlineExceeded), p.Mode, p.KillSwitch)
 	}
 	f.checkReady(ctx, t)
 }

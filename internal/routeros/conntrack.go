@@ -361,11 +361,14 @@ func removeConnection(o observation, menu string, prior Row) (bool, error) {
 	if len(rows) != 1 || !maps.Equal(rows[0], prior) {
 		return false, errDrift
 	}
-	if _, err := o.c.CommandAt(o.ctx, o.gen, []string{menu + "/remove", "=.id=" + prior[".id"]}); err != nil {
-		return false, err
+	_, removeErr := o.c.CommandAt(o.ctx, o.gen, []string{menu + "/remove", "=.id=" + prior[".id"]})
+	if removeErr != nil && !errors.Is(removeErr, ErrRejected) {
+		return false, removeErr
 	}
-	// CHR can briefly report an acknowledged connection in its native
-	// snapshot. Poll the frozen identity only and never resend the remove.
+	// The row can expire after our identity check and before RouterOS
+	// receives remove. Its native print can also lag an expiry or an
+	// acknowledged deletion. Prove absence on this generation without
+	// replaying a mutation; only an acknowledgement counts as a removal.
 	deadline := time.Now().Add(4 * time.Second)
 	for {
 		rows, err = read()
@@ -373,9 +376,12 @@ func removeConnection(o observation, menu string, prior Row) (bool, error) {
 			return false, err
 		}
 		if len(rows) == 0 {
-			return true, nil
+			return removeErr == nil, nil
 		}
 		if len(rows) != 1 || !maps.Equal(rows[0], prior) || !time.Now().Before(deadline) {
+			if removeErr != nil {
+				return false, removeErr
+			}
 			return false, errDrift
 		}
 		select {

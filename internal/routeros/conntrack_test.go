@@ -425,3 +425,69 @@ func TestPurgeIPv6FastTrackScope(t *testing.T) {
 		})
 	}
 }
+
+type expiringConnection struct {
+	*connectionRouter
+	attempts  int
+	intercept func() error
+}
+
+func (f *expiringConnection) CommandAt(ctx context.Context, g uint64, words []string) ([]Row, error) {
+	if words[0] == ct4+"/remove" {
+		f.attempts++
+		return nil, f.intercept()
+	}
+	return f.connectionRouter.CommandAt(ctx, g, words)
+}
+
+func TestFrozenConntrackCanExpireAtNativeRemoval(t *testing.T) {
+	for _, scenario := range []string{"expired", "expired while cached", "recycled ID", "permission", "disconnected", "changed generation"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := &expiringConnection{connectionRouter: &connectionRouter{diffRouter: newDiffRouter()}}
+			ip, remote := "10.12.0.10", "1.1.1.1"
+			id := f.flow(ct4, ip, remote, "443")
+			peer := f.flow(ct4, "10.12.0.11", remote, "443")
+			ctx, cancel := context.WithTimeout(t.Context(), 350*time.Millisecond)
+			defer cancel()
+			o := observation{ctx: ctx, c: f, gen: f.gen}
+			rr, err := o.read(ct4, ipv4FlowFields, "?.id="+id, "?src-address="+ip)
+			if err != nil || len(rr) != 1 {
+				t.Fatal("could not freeze the original connection")
+			}
+			expire := func() { f.rows = slices.DeleteFunc(f.rows, func(r Observed) bool { return r.ID == id }) }
+			f.intercept = func() error {
+				switch scenario {
+				case "expired":
+					expire()
+				case "expired while cached":
+					samples := 0
+					f.beforeRead = func(words []string) {
+						if words[0] == ct4+"/print" {
+							samples++
+							if samples == 2 {
+								expire()
+							}
+						}
+					}
+				case "recycled ID":
+					f.row(id).Props["dst-address"] = "192.0.2.9"
+				case "disconnected":
+					expire()
+					return ErrDisconnected
+				case "changed generation":
+					expire()
+					f.gen++
+				}
+				return ErrRejected
+			}
+			removed, err := removeConnection(o, ct4, rr[0])
+			gone := scenario == "expired" || scenario == "expired while cached" || scenario == "recycled ID"
+			if removed || (err == nil) != gone || f.attempts != 1 || f.row(peer) == nil {
+				t.Fatal("expiry, rejection or identity reuse was misclassified")
+			}
+			if scenario == "recycled ID" && f.row(id) == nil {
+				t.Fatal("reused native ID was removed")
+			}
+		})
+	}
+}
