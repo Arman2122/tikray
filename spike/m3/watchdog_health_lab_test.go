@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,7 +36,7 @@ func TestWatchdogHealthResponse(t *testing.T) {
 		}
 	}
 	set(valid)
-	proc := r.net.Inet(r.ctx, "python3", "-c", `import http.server,ssl,sys,pathlib
+	proc := r.net.Inet(r.ctx, "python3", "-c", `import http.server,ssl,sys,pathlib,time
 d=pathlib.Path(sys.argv[2])
 class Health(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
@@ -44,6 +45,15 @@ class Health(http.server.BaseHTTPRequestHandler):
   if self.path=="/healthz" and p==b"redirect":
    self.send_response(302);self.send_header("Location","/other");self.send_header("Content-Length","0");self.end_headers();return
   if self.path=="/other":p=sys.argv[3].encode()
+  if p==b"trickle":
+   tail=sys.argv[3].encode()
+   self.send_response(200);self.send_header("Content-Length",str(16+len(tail)));self.end_headers()
+   try:
+    for i in range(16):
+     self.wfile.write(b" ");self.wfile.flush();(d/"trickle-count").write_text(str(i+1));time.sleep(1)
+    self.wfile.write(tail)
+   except OSError:pass
+   return
   self.send_response(200);self.send_header("Content-Length",str(len(p)));self.end_headers();self.wfile.write(p)
 s=http.server.HTTPServer((sys.argv[1],443),Health)
 c=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);c.load_cert_chain(str(d/"tls.crt"),str(d/"tls.key"))
@@ -115,6 +125,25 @@ s.socket=c.wrap_socket(s.socket,server_side=True);s.serve_forever()`, host, dir,
 			}
 		})
 	}
+	t.Run("trickle_response", func(st *testing.T) {
+		// One byte per second keeps the native idle timer from expiring.
+		// Even the eventual valid body is too late for this watchdog tick.
+		set("trickle")
+		start := time.Now()
+		got := observe()
+		elapsed := time.Since(start)
+		bytes, err := os.ReadFile(filepath.Join(dir, "trickle-count"))
+		count, parseErr := strconv.Atoi(string(bytes))
+		if err != nil || parseErr != nil || count < 2 {
+			st.Fatal("fixture did not sustain a slow HTTPS response")
+		}
+		if got != "miss" || elapsed > 12*time.Second {
+			st.Fatal("slow HTTPS service held the watchdog beyond its probe deadline")
+		}
+		if _, err := r.admin.RunContext(r.ctx, "/system/resource/print", "=.proplist=version"); err != nil {
+			st.Fatal("original owner API session failed after health probe timeout")
+		}
+	})
 	set(valid)
 	if observe() != "verified" {
 		t.Fatal("genuine service did not recover")

@@ -263,6 +263,11 @@ func (s *Service) ApplyNow(ctx context.Context) (artifacts.Result, error) {
 // runner can't be reached before the update starts; the error of one that
 // ran is its own, as ApplyNow's.
 func (s *Service) CoreUpdate(ctx context.Context, version string, o artifacts.UpdateOptions) (artifacts.Result, error) {
+	var err error
+	version, err = xrayver.UpdateTarget(version)
+	if err != nil {
+		return artifacts.Result{}, &Refused{Reason: err.Error()}
+	}
 	if s.bootPending.Load() {
 		if version != s.bootstrap.Version || o.ConfigFile != "" || o.AllowUnverified {
 			return artifacts.Result{}, ErrBootstrapPending

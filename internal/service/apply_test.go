@@ -968,3 +968,14 @@ func TestPassesAndOperationsPokeTheMonitor(t *testing.T) {
 	within(t, "a check after a rollback", checks)
 	e.shutdown()
 }
+
+func TestPrivateCoreTargetNeverReachesEvents(t *testing.T) {
+	e := newEnv(t)
+	raw := "provider-" + strings.Repeat("x", 31)
+	var log strings.Builder
+	e.s.log = &log
+	res, err := e.s.CoreUpdate(t.Context(), raw, artifacts.UpdateOptions{})
+	if err == nil || strings.Contains(fmt.Sprint(err, res, e.s.Events(0), log.String()), raw) {
+		t.Fatal("invalid core target was accepted or exposed by the service")
+	}
+}

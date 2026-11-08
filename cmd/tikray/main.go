@@ -494,8 +494,15 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, configFile 
 	if err := prepareDirs(cfg.Data); err != nil {
 		return c.fail(err)
 	}
+	var targetErr error
+	if base.To != "" {
+		base.To, targetErr = xrayver.UpdateTarget(base.To)
+	}
 	if err := removeFileDurably(filepath.Join(stateDir(cfg.Data), lastResultName)); err != nil {
 		return c.refused(cfg, base, fmt.Errorf("removing the previous result: %w", err))
+	}
+	if targetErr != nil {
+		return c.refused(cfg, base, targetErr)
 	}
 	cl, running, err := c.daemon(ctx, cfg)
 	if err != nil {

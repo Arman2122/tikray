@@ -223,6 +223,11 @@ func (s *Service) RepairNetwork(ctx context.Context, rev uint64, fix NetworkRepa
 		}
 		proposed := st.Network
 		if fix.Subnet.IsValid() {
+			// The installed native endpoint and pinned handoff share this
+			// subnet. Changing only state would prevent the next startup.
+			if s.router != nil && fix.Subnet != st.Network.Subnet {
+				return nil, &Refused{Reason: "restore the installed bridge's control address and prefix, then restart tikray serve"}
+			}
 			proposed.Subnet = fix.Subnet
 		}
 		if bridgeNeedsRepair {

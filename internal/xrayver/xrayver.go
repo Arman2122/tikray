@@ -2,6 +2,7 @@
 package xrayver
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -15,18 +16,38 @@ type Version struct{ Major, Minor, Patch int }
 // MinTUN is the first xray-core release with the TUN inbound.
 var MinTUN = Version{26, 1, 18}
 
+var errVersion = errors.New("xrayver: invalid release version")
+
+// UpdateTarget returns a public target suitable for update results and logs.
+func UpdateTarget(s string) (string, error) {
+	if s == "latest" {
+		return s, nil
+	}
+	v, err := Parse(s)
+	if err != nil {
+		return "", err
+	}
+	return v.String(), nil
+}
+
 // Parse accepts 26.10.21 and v26.10.21. It refuses anything else, including
 // "latest", which callers resolve first.
 func Parse(s string) (Version, error) {
+	// Three 64-bit signed integers, two dots and the optional leading v.
+	// A malformed target may be a credential pasted into the version field.
+	if len(s) > 3*19+3 {
+		return Version{}, errVersion
+	}
+
 	m := versionRE.FindStringSubmatch(s)
 	if m == nil {
-		return Version{}, fmt.Errorf("xrayver: invalid version %q", s)
+		return Version{}, errVersion
 	}
 	var n [3]int
 	for i := range n {
 		x, err := strconv.Atoi(m[i+1])
 		if err != nil {
-			return Version{}, fmt.Errorf("xrayver: invalid version %q: %w", s, err)
+			return Version{}, errVersion
 		}
 		n[i] = x
 	}
