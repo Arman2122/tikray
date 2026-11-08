@@ -1,4 +1,35 @@
-# RouterOS emergency off
+# Installing on RouterOS
+
+Build an installer for the router's installed version and CPU from an authenticated image pair. The packager uses `cosign verify-blob` with an independently obtained publisher public key. Supply the Docker-save images and detached signatures in one directory, for example `tikray-arm64.tar`, `tikray-arm64.tar.sig`, `tikray-runner-arm64.tar` and `tikray-runner-arm64.tar.sig`.
+
+```sh
+go run ./cmd/tikray-installer -version 7.25 -arch arm64 \
+  -images ./release-images -key ./publisher.pub -out ./install.rsc
+```
+
+Use `-arch amd64` for x86_64 CHR. Supported releases are 7.25 and 7.23.8. The generated script contains the expected archive lengths and the SHA-512 digest of each ordered 16 KiB chunk. Obtain the generated installer through a trusted channel. A party that can change the installer could also change its digests. The repository's `routeros/install.rsc` is the packaging source.
+
+For a one-paste deployment, package with `-release-base https://<your-release-host>/<release-directory>`, publish that installer and both archives, substitute the real installer URL below, and paste into the owner's router terminal. Configure RouterOS HTTPS trust for that host first. Use a new local download filename on the first import.
+
+```routeros
+{ :local download [/tool/fetch url="https://<your-release-host>/<release-directory>/install.rsc" check-certificate=yes http-max-redirect-count=0 dst-path=tikray-install.rsc as-value]; :if (($download->"status") != "finished") do={ :error "Installer download failed" }; /import file-name=tikray-install.rsc }
+```
+
+For an offline install, upload the generated installer and the two matching archives with Winbox or WebFig. The default archive location is `disk1/tikray/images/`. For the xray core, choose an exact version, stage its architecture-specific upstream zip with the signed `index.json` and `index.json.sig` in `disk1/tikray/data/inbox/`, and put its independently trusted Ed25519 index public key at `disk1/tikray/data/state/index.pub`. Use the index public key format required by `tikray core update`. The xray index key and the image publisher key serve separate purposes.
+
+```routeros
+:global tikrayCore "26.10.31"; :global tikrayOffline true; /import file-name=tikray-install.rsc
+```
+
+The installer defaults to the mounted ext4 volume `disk1`, directory `tikray`, bridge subnet `172.31.255.0/29`, existing interface lists `LAN` and `WAN`, and online core version `latest`. Override non-secret values in the same owner session before import using `tikrayDisk`, `tikrayDir` (the name `tikray` or a `tikray-…` directory), `tikraySubnet`, `tikrayLanList`, `tikrayWanList`, `tikrayCore` and `tikrayOffline`. The LAN list must describe the complete client population on each selected ingress. The chosen WAN list must include the active default's verified outgoing interface. A route or local address overlapping the bridge must be resolved before installation.
+
+Install the matching RouterOS container package, provide a compatible container temporary directory on the selected disk, and enable router DNS for the LAN. If device-mode requires physical confirmation, follow the terminal prompt and repeat the import after reboot. The installer preserves the disk layout, registry and existing firewall rules. It refuses a foreign mount or port that could expose the control volume or private bridge.
+
+At completion the installer prints the LAN-accessible HTTPS URL and control certificate SHA-256 fingerprint. The setup code is available through `tikray setup-code` in the control container's private terminal. For interactive first setup on RouterOS versions that support shell commands, the owner can explicitly set `tikrayShowSetup=true` before import. Leave it unset for unattended installation. After a core bootstrap failure, correct the missing signed input or connectivity problem and rerun the same installer. A mismatched ownership receipt or changed API-SSL certificate requires owner inspection before retry.
+
+During a verified import, an inert `tikray-install-lock` script identifies that import's temporary RouterOS job. A competing import refuses before changing the installation. Completion or a handled failure releases the claim immediately. If the owner session is killed, retry when the keeper has ended (at most 30 minutes), or after the router has rebooted. A missing or mismatched certificate proof requires inspection. The installer cannot adopt a certificate by name after an interruption between signing it and saving its fingerprint.
+
+## RouterOS emergency off
 
 Run this command in the router terminal as the owner. It works with both tikray containers stopped.
 
