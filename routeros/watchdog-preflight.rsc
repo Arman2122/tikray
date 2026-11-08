@@ -17,7 +17,8 @@
         :if ([:len $scripts] > 0) do={
             :if (([:len $scripts] != 1) or ([:len [/system/script/find where name="tikray-watchdog" and comment="tikray:watchdog-script" and !dont-require-permissions]] != 1)) do={ :error "tikray: watchdog script ownership conflict" }
             $checkPolicy [/system/script/get $scripts policy]
-            :if ([/system/script/get $scripts source] != $body) do={ :error "tikray: watchdog script has changed; inspect before proceeding" }
+            :local saved [/system/script/get $scripts source]
+            :if (($saved != $body) and ($saved != ($body . "\r\n")) and ($saved != ($body . "\n"))) do={ :error "tikray: watchdog script has changed; inspect before proceeding" }
         }
         :if ([:len $ticks] > 0) do={
             :if (([:len $ticks] != 1) or ([:len [/system/scheduler/find where name="tikray-watchdog" and comment="tikray:watchdog-scheduler" and on-event="tikray-watchdog" and interval=1m]] != 1)) do={ :error "tikray: watchdog scheduler ownership conflict" }
