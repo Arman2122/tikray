@@ -31,7 +31,7 @@ func Observe(ctx context.Context, c Native, scope InstallScope) (Actual, error) 
 		case firewallFilter, ipv6Filter:
 			chains = []string{"forward", "input"}
 		case firewallNAT:
-			chains = []string{"dstnat"}
+			chains = []string{"dstnat", "srcnat"}
 		case firewallMangle:
 			chains = []string{"prerouting", "forward"}
 		}
@@ -268,6 +268,14 @@ func checkReferences(ctx context.Context, c Native, gen uint64) error {
 		if n != 0 {
 			return errConflict
 		}
+		// The FIB is shared by both IP families. M3 owns no IPv6 routes.
+		n, e = o.count("/ipv6/route", "?routing-table="+table)
+		if e != nil {
+			return e
+		}
+		if n != 0 {
+			return errConflict
+		}
 		n, e = o.count(tableMenu, "?name="+table, "?comment=tikray:table-"+class, "?#!")
 		if e != nil {
 			return e
@@ -430,6 +438,9 @@ func (o observation) routingWriter(r Row) (RoutingMarkWriter, error) {
 	return writer, nil
 }
 func (o observation) ownerInteractions(t *Topology) error {
+	if err := o.sourceNAT(t); err != nil {
+		return err
+	}
 	conflict := func(menu string) {
 		t.ForeignRefs = append(t.ForeignRefs, ForeignRef{Menu: menu, Property: "overlapping owner policy"})
 	}

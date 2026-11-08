@@ -114,9 +114,15 @@ subnet and set the printed ID before importing the packaged installer.
 The new installation receives fresh RouterOS credentials and an installation
 ID. The kept user state and control-plane TLS identity remain on the volume.
 
+## Existing source NAT
+
+When a LAN device first enters a proxy policy, tikray checks whether an owner source-NAT rule could rewrite that device's address on the way to the runner. A broad LAN masquerade can do this. If admission is refused, inspect the rule's outgoing interface or interface list. An owner rule scoped to the actual WAN lets xray see the original LAN address.
+
+The active policy installs paired, tagged source-NAT exceptions for the steered data and DNS paths. Keep owner address-translation rules below these exceptions. If one exception disappears, its companion protects the flow during repair. An owner translation placed ahead of both exceptions can change the source xray sees on new connections, including for devices already assigned a closed policy. Existing connections retain their RouterOS NAT bindings. Reconciliation reports the conflict and requires the owner to restore the ordering.
+
 ## Control container handoff
 
-On a managed installation the daemon generates a public installation ID once under its service lock. The private intent in `state/install.request` retains it and `state/install.id` exposes the same value to the owner installer. Reimport checks it against the ID in the watchdog receipt. Keep the original control volume together when restoring a backup.
+On a managed installation the daemon generates a public installation ID once under its service lock. The private intent in `state/install.request` retains it and `state/install.id` exposes the same value to the owner installer. Reimport checks it against the ID in the watchdog receipt. Keep the original control volume together when restoring a backup. If the control veth address changes, restore its installed address and prefix before restarting the service. Moving a managed installation to a different subnet requires a new installation.
 
 The installer writes `/data/state/routeros.json` atomically with mode `0600` under the control container's private `0700` state directory. Version 1 requires `version`, `address` (router bridge IP and API-SSL port), `username` (`tikray`), `password`, the pinned SHA-256 certificate `fingerprint`, and `scope`. The scope contains `subnet`, `lan_list`, `lans` (interface, IPv4 prefix and optional dedicated flag), the install-time `wan` interface and optional `local_lans`. Keep this file on the control volume.
 

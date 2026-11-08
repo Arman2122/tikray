@@ -45,6 +45,7 @@ func ipv4Policy(in PolicyInput, obs Topology, active map[store.Policy]bool) ([]O
 	}
 	runner := in.Network.Runner().String()
 	out := policyRoutes(runner, obs.WAN[0].nextHop())
+	out = append(out, preserveSources(runner)...)
 	out = append(out, egressGuard(obs.LANList, policies)...)
 	out = append(out, policyDNS(runner, obs.LANList, policies)...)
 	for _, class := range []string{"open", "closed"} {

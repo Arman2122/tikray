@@ -4,10 +4,13 @@ package e2e
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/Arman2122/tikray/internal/apiclient"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -62,6 +65,24 @@ func (f *routingLab) packets(ctx context.Context, t *testing.T, menu, tag string
 
 func (f *routingLab) sourceAndFastTrack(ctx context.Context, t *testing.T) {
 	t.Helper()
+	// A previous owner masquerade could erase the policy client's source at
+	// the runner. Refuse activation, and allow exactly the WAN-scoped rule.
+	f.setClientPolicy(ctx, t, store.Policy{Mode: store.ModeDirect})
+	const owner = "witness:source-masquerade"
+	f.mustRun(ctx, t, `/ip/firewall/nat/add chain=srcnat src-address=192.168.88.10 action=masquerade comment="witness:source-masquerade"`)
+	t.Cleanup(func() {
+		f.mustRun(ctx, t, `/ip/firewall/nat/remove [find where chain=srcnat and action=masquerade and comment="witness:source-masquerade"]`)
+	})
+	identity := f.taggedID(ctx, t, "/ip/firewall/nat", owner)
+	_, err := f.api.SetDevice(ctx, store.Device{Address: lanClient, MAC: f.mac, Name: "routing-client", Policy: store.Policy{Mode: store.ModeFull, KillSwitch: true}})
+	var refusal *apiclient.Error
+	if identity == "" || !errors.As(err, &refusal) || refusal.Status != http.StatusConflict || f.egress(ctx, routingRemote) != egressDirect {
+		t.Fatal("unsafe source NAT was not refused with ordinary forwarding intact")
+	}
+	f.routingWrite(ctx, t, "/ip/firewall/nat/set", "=.id="+identity, "=out-interface=ether1")
+	f.setClientPolicy(ctx, t, fullOpen)
+	// A broad rule left below the verified exemptions must stay untouched.
+	f.mustRun(ctx, t, `/ip/firewall/nat/unset [find where chain=srcnat and action=masquerade and comment="witness:source-masquerade"] out-interface`)
 	const br = "/interface/bridge/filter"
 	const packet = "lab:private-runner-ingress"
 	// Observe the actual frame routed to the runner, after the srcnat hook.
@@ -112,6 +133,14 @@ func (f *routingLab) sourceAndFastTrack(ctx context.Context, t *testing.T) {
 	}
 	if f.packets(ctx, t, br, packet) <= brCount || f.packets(ctx, t, "/ip/firewall/mangle", "tikray:mss-open") <= mss || f.packets(ctx, t, "/ip/firewall/filter", "tikray:no-fasttrack") <= slow {
 		t.Fatal("live runner-ingress, MSS or FastTrack exception evidence did not advance")
+	}
+	if f.taggedID(ctx, t, "/ip/firewall/nat", owner) != identity || f.packets(ctx, t, "/ip/firewall/nat", "tikray:preserve-open") == 0 {
+		t.Fatal("source preservation or owner NAT identity was lost")
+	}
+	f.setClientPolicy(ctx, t, store.Policy{Mode: store.ModeFull, KillSwitch: true})
+	closed := f.tcpFlow(ctx, t, false, 31825)
+	if !isRoutingProxy(closed.echo(t)) || f.packets(ctx, t, "/ip/firewall/nat", "tikray:preserve-closed") == 0 {
+		t.Fatal("closed stream lost its original source to masquerade")
 	}
 	f.checkOwnerRules(ctx, t)
 }

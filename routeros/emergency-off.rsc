@@ -102,6 +102,38 @@
                     :if (([:len $safe] != 1) or ([:tostr $id] != [:tostr $safe])) do={ :error "tikray: emergency hold ownership conflict" }
                     :if ($apply) do={ /ipv6/firewall/filter/disable $safe }
                 }
+                # Remove the source-NAT bypass as well as the classifiers.
+                :foreach kind in={"preserve";"preserve-backup"} do={
+                    :foreach class in={"open";"closed"} do={
+                        :local tag ("tikray:" . $kind . "-" . $class)
+                        :local mark ("tikray-" . $class)
+                        :local claimed [/ip/firewall/nat/find where comment=$tag]
+                        :if ([:len $claimed] > 0) do={
+                            :local safe [/ip/firewall/nat/find where comment=$tag and chain=srcnat and action=accept and out-interface="tikray" and connection-mark=$mark and !dynamic]
+                            $selectOne $claimed $safe "source NAT"
+                            :if ($apply) do={ /ip/firewall/nat/disable $safe }
+                        }
+                        :foreach mode in={"smart";"full"} do={
+                            :local lst ("tikray-src-" . $mode . "-" . $class)
+                            :foreach proto in={"tcp";"udp"} do={
+                                :set tag ("tikray:" . $kind . "-dns-" . $mode . "-" . $class . "-" . $proto)
+                                :set claimed [/ip/firewall/nat/find where comment=$tag]
+                                :if ([:len $claimed] > 0) do={
+                                    :local safe [/ip/firewall/nat/find where comment=$tag and chain=srcnat and action=accept and out-interface="tikray" and src-address-list=$lst and !dynamic]
+                                    $selectOne $claimed $safe "source NAT"
+                                    # 7.23.8 prints 53 on this row but find dst-port=53 can miss it.
+                                    :local wireProto [:tostr [/ip/firewall/nat/get $safe protocol]]
+                                    :local port [:tostr [/ip/firewall/nat/get $safe dst-port]]
+                                    :local isProto (($wireProto = $proto) or (($proto = "udp") and ($wireProto = "17")) or (($proto = "tcp") and ($wireProto = "6")))
+                                    :if ((!$isProto) or (($port != "53") and ($port != "53-53"))) do={ :error "tikray: emergency source NAT DNS selector conflict" }
+                                    :local target [:tostr [/ip/firewall/nat/get $safe dst-address]]
+                                    :if (($target != [:tostr $runner]) and ($target != ([:tostr $runner] . "/32"))) do={ :error "tikray: emergency source NAT target conflict" }
+                                    :if ($apply) do={ /ip/firewall/nat/disable $safe }
+                                }
+                            }
+                        }
+                    }
+                }
                 :foreach mode in={"smart";"full"} do={
                     :foreach class in={"open";"closed"} do={
                         :local lst ("tikray-src-" . $mode . "-" . $class)

@@ -95,9 +95,10 @@ type RoutingMarkWriter struct {
 	Opaque bool
 }
 type Topology struct {
-	Subnet  netip.Prefix
-	LANList string
-	LANs    []LAN
+	sourceNATConflict bool
+	Subnet            netip.Prefix
+	LANList           string
+	LANs              []LAN
 	// Effective membership includes dynamic members and included/excluded
 	// lists. Missing or broader membership is insufficient for a LAN hook.
 	LANMembers []string

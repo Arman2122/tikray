@@ -149,7 +149,7 @@ func interfaceName(s string) bool {
 }
 
 func checkTopology(in PolicyInput, obs Topology) error {
-	if len(obs.ForeignRefs) > 0 {
+	if len(obs.ForeignRefs) > 0 || obs.sourceNATConflict {
 		return errConflict
 	}
 	if obs.Subnet != in.Network.Subnet || !interfaceName(obs.LANList) || len(obs.LANs) == 0 || len(obs.WAN) != 1 {

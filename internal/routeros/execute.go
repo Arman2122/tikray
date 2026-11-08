@@ -112,8 +112,12 @@ func (e *execution) verifyIdentity(op Op) error {
 	return equalObserved(prior, r)
 }
 
+func netwatchPrimary(r Observed) bool {
+	return r.Menu == firewallNAT && strings.HasPrefix(r.Comment, "tikray:dns-") && !strings.HasPrefix(r.Comment, "tikray:dns-router-") && strings.Contains(r.Comment, "-open-") && ownedRole(firewallNAT, r.Comment)
+}
+
 func equalObserved(prior, now Observed) error {
-	openPrimary := now.Menu == firewallNAT && strings.Contains(now.Comment, "-open-") && !strings.HasPrefix(now.Comment, "tikray:dns-router-")
+	openPrimary := netwatchPrimary(now)
 	for _, k := range managedFields(now.Menu) {
 		if k == "invalid" || k == "disabled" && openPrimary {
 			continue
@@ -181,7 +185,7 @@ func (e *execution) beforeWrite(op Op) error {
 		got, want := slices.Clone(t.ForeignRoutingMarks), slices.Clone(e.actual.Topology.ForeignRoutingMarks)
 		slices.Sort(got)
 		slices.Sort(want)
-		if len(t.ForeignRefs) != 0 || !slices.Equal(slices.Compact(got), slices.Compact(want)) {
+		if len(t.ForeignRefs) != 0 || t.sourceNATConflict || !slices.Equal(slices.Compact(got), slices.Compact(want)) {
 			return errConflict
 		}
 		ft, err := readForward(e.ctx, e.c, e.gen)
@@ -409,7 +413,7 @@ func (e *execution) verifyOrder(key [2]string) error {
 		if a.ID != b.ID || a.Comment != b.Comment || a.Dynamic != b.Dynamic || a.Props["action"] != b.Props["action"] {
 			return false
 		}
-		if a.Menu == firewallNAT && strings.Contains(a.Comment, "-open-") && !strings.HasPrefix(a.Comment, "tikray:dns-router-") && ownedRole(a.Menu, a.Comment) {
+		if netwatchPrimary(a) {
 			return true
 		}
 		return normalized(a.Menu, "disabled", a.Props["disabled"]) == normalized(b.Menu, "disabled", b.Props["disabled"])

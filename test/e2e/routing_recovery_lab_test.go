@@ -48,7 +48,7 @@ with open(sys.argv[2],"wb",buffering=0) as log:
   for s in ready:
    if s is udp:
     p,addr=udp.recvfrom(32)
-    if p==b"C" and addr[0] in sys.argv[4:6]:log.write(b"P")
+    if p in (b"C",b"F") and addr[0] in sys.argv[4:6]:log.write(b"P" if p==b"C" else b"Q")
     continue
    frame=wire.recv(65535)
    if len(frame)<43 or frame[12:14]!=b"\x08\x00" or frame[23]!=17 or frame[30:34]!=target:continue
@@ -56,7 +56,7 @@ with open(sys.argv[2],"wb",buffering=0) as log:
    if len(frame)<start+9:continue
    _,port,size,_=struct.unpack_from("!4H",frame,start)
    p=frame[start+8:start+size]
-   if port!=31947 or p not in (b"C",b"D"):continue
+   if port!=31947 or p not in (b"C",b"D",b"F"):continue
    if p==b"D" and frame[26:30]!=socket.inet_aton(sys.argv[3]):p=b"?"
    log.write(p)`, routingRemote, w.trace, egressDirect, serverEgress["a"], serverEgress["b"])
 	startRoutingProcess(t, serve)
@@ -85,6 +85,7 @@ func (w *routingWAN) sample(t *testing.T) wanSample {
 	}
 	return wanSample{
 		closedDirect: bytes.Count(b, []byte{'C'}), closedProxy: bytes.Count(b, []byte{'P'}),
+		freshDirect: bytes.Count(b, []byte{'F'}), freshProxy: bytes.Count(b, []byte{'Q'}),
 		peerDirect: bytes.Count(b, []byte{'D'}), unknown: bytes.Count(b, []byte{'?'}),
 	}
 }
@@ -161,6 +162,34 @@ func (f *routingLab) waitForDriftEvent(ctx context.Context, t *testing.T, after 
 	}
 }
 
+// Isolate only the service's API-SSL connection on its private bridge. Native
+// owner access, LAN forwarding and both containers remain live.
+func (f *routingLab) withholdRoutingObservation(ctx context.Context, t *testing.T) func() {
+	t.Helper()
+	const raw = "/ip/firewall/raw"
+	const gate = "lab:delay-routing-observation"
+	words := []string{raw + "/add", "=chain=prerouting", "=action=drop", "=in-interface=tikray", "=src-address=" + installControl, "=dst-address=172.30.252.1", "=protocol=tcp", "=dst-port=9879", "=comment=" + gate}
+	bounds := f.readROS(ctx, t, raw, ".id", "?chain=prerouting", "?dynamic=false")
+	if len(bounds) > 0 {
+		words = append(words, "=place-before="+bounds[0][".id"])
+	}
+	f.routingWrite(ctx, t, words...)
+	gateID := f.taggedID(ctx, t, raw, gate)
+	if gateID == "" {
+		t.Fatal("control-transport fixture missing")
+	}
+	return func() {
+		if gateID == "" {
+			return
+		}
+		if got := f.taggedID(ctx, t, raw, gate); got != gateID {
+			t.Fatal("control-transport fixture changed ownership")
+		}
+		f.routingWrite(ctx, t, raw+"/remove", "=.id="+gateID)
+		gateID = ""
+	}
+}
+
 func (f *routingLab) checkDriftRepair(ctx context.Context, t *testing.T) {
 	t.Helper()
 	f.setClientPolicy(ctx, t, store.Policy{Mode: store.ModeDirect})
@@ -221,32 +250,7 @@ func (f *routingLab) checkDriftRepair(ctx context.Context, t *testing.T) {
 		t.Fatal("recreating a single tagged rule changed unrelated row IDs")
 	}
 
-	// Hold only the control process's native API connection while withdrawing
-	// the routes. This puts a genuine sweep-sized interval between the loss
-	// and the service's next successful observation; xray, LAN and the owner
-	// all remain up. Dropping in raw precedes an established input accept.
-	const raw = "/ip/firewall/raw"
-	const gate = "lab:delay-routing-observation"
-	words := []string{raw + "/add", "=chain=prerouting", "=action=drop", "=in-interface=tikray", "=src-address=" + installControl, "=dst-address=172.30.252.1", "=protocol=tcp", "=dst-port=9879", "=comment=" + gate}
-	bounds := f.readROS(ctx, t, raw, ".id", "?chain=prerouting", "?dynamic=false")
-	if len(bounds) > 0 {
-		words = append(words, "=place-before="+bounds[0][".id"])
-	}
-	f.routingWrite(ctx, t, words...)
-	gateID := f.taggedID(ctx, t, raw, gate)
-	if gateID == "" {
-		t.Fatal("control-transport fixture missing")
-	}
-	release := func() {
-		if gateID == "" {
-			return
-		}
-		if got := f.taggedID(ctx, t, raw, gate); got != gateID {
-			t.Fatal("control-transport fixture changed ownership")
-		}
-		f.routingWrite(ctx, t, raw+"/remove", "=.id="+gateID)
-		gateID = ""
-	}
+	release := f.withholdRoutingObservation(ctx, t)
 	defer release()
 	const routes = "/ip/route"
 	tags := []string{"tikray:route-closed-runner", "tikray:route-closed-fallback"}
@@ -324,6 +328,7 @@ func (f *routingLab) checkDriftRepair(ctx context.Context, t *testing.T) {
 	if !ok || w.sample(t).closedDirect != leakBase || peer.echo(t) != egressDirect || peer.id(ctx, t) != id {
 		t.Fatal("closed route repair leaked or failed to restore the proxy without interrupting its peer")
 	}
+	f.checkSourcePreservationWindow(ctx, t, w, peer, id)
 	f.checkOwnerRules(ctx, t)
 	t.Logf("zero direct closed packets with both routes absent for 30 seconds; %d direct peer packets received by the same WAN service; closed filter counters increased; same peer connection survived", s.peerDirect-peerBase)
 }
@@ -368,6 +373,72 @@ func (f *routingLab) ownerLANSSH(ctx context.Context, t *testing.T) func() {
 		if err != nil || strings.TrimSpace(string(out)) != "owner-lan-ok" {
 			t.Fatal("owner LAN SSH command failed")
 		}
+	}
+}
+
+// Each fresh socket needs a new source-NAT decision. One established flow
+// could keep an old translation for the entire window and hide a real leak.
+func (f *routingLab) checkSourcePreservationWindow(ctx context.Context, t *testing.T, w *routingWAN, peer *routingFlow, peerID string) {
+	t.Helper()
+	const nat = "/ip/firewall/nat"
+	const tag = "tikray:preserve-closed"
+	const backup = "tikray:preserve-backup-closed"
+	const owner = "witness:closed-source-nat"
+	f.routingWrite(ctx, t, nat+"/add", "=chain=srcnat", "=action=src-nat", "=src-address=192.168.88.10", "=to-addresses=192.168.88.110", "=comment="+owner)
+	ownerID := f.taggedID(ctx, t, nat, owner)
+	if ownerID == "" {
+		t.Fatal("owner translation missing")
+	}
+	defer func() {
+		if f.taggedID(ctx, t, nat, owner) != ownerID {
+			t.Fatal("owner translation identity changed")
+		}
+		f.routingWrite(ctx, t, nat+"/remove", "=.id="+ownerID)
+	}()
+	base := f.policyInventory(ctx, t)
+	id, survivor := base[nat+"|"+tag], base[nat+"|"+backup]
+	if id == "" || survivor == "" {
+		t.Fatal("independent source guard missing")
+	}
+	seq := f.eventCursor(ctx, t)
+	release := f.withholdRoutingObservation(ctx, t)
+	defer release()
+	f.routingWrite(ctx, t, nat+"/remove", "=.id="+id)
+	count := f.packets(ctx, t, nat, backup)
+	s := w.sample(t)
+	startRoutingProcess(t, f.Net.Client(ctx, "python3", "-c", `import socket,time,sys
+while True:
+ with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as s:
+  s.bind(("192.168.88.10",0));s.sendto(b"F",(sys.argv[1],31947))
+ time.sleep(.2)`, routingRemote))
+	// Warm up a new real proxy path. The raw capture starts before removal.
+	_, up := poll(ctx, 15*time.Second, 100*time.Millisecond, func() bool { return w.sample(t).freshProxy > s.freshProxy })
+	if !up {
+		t.Fatal("no fresh closed-client transaction reached the proxy")
+	}
+	for range 10 {
+		if sleep(ctx, 3*time.Second) != nil {
+			t.Fatal("source guard window cancelled")
+		}
+		next := w.sample(t)
+		if !next.sourcesPreservedSince(s) {
+			t.Fatal("source guard lost a fresh proxied transaction, a peer witness, or leaked a closed packet")
+		}
+		s = next
+	}
+	if f.taggedID(ctx, t, nat, tag) != "" || f.taggedID(ctx, t, nat, backup) != survivor || f.packets(ctx, t, nat, backup) <= count || peer.echo(t) != egressDirect || peer.id(ctx, t) != peerID {
+		t.Fatal("source guard window lost its independent controls")
+	}
+	release()
+	f.waitForDriftEvent(ctx, t, seq)
+	now := f.policyInventory(ctx, t)
+	id = now[nat+"|"+tag]
+	if id == "" {
+		t.Fatal("missing source guard was not restored")
+	}
+	base[nat+"|"+tag] = id
+	if !maps.Equal(now, base) || w.sample(t).freshDirect != s.freshDirect {
+		t.Fatal("source guard repair leaked or rewrote a healthy row")
 	}
 }
 

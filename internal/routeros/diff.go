@@ -24,7 +24,7 @@ var managedMenus = []string{addressListMenu, tableMenu, routeMenu, ipv6Filter, f
 var rolePatterns = map[string]*regexp.Regexp{
 	firewallFilter: regexp.MustCompile(`^(egress-(guard|skip-local|drop-(marked|smart|full)|dns-(full|smart)-(open|closed)-(tcp|udp))|no-fasttrack)$`),
 	firewallMangle: regexp.MustCompile(`^(jump-pre|skip-(router|local|dns-(tcp|udp)|owner-route:[0-9a-f]{32})|(mss|packet|route)-(open|closed)|conn-(full|smart)-(open|closed))$`),
-	firewallNAT:    regexp.MustCompile(`^dns-((smart|full)-(closed|open)|router-(smart|full)-open)-(udp|tcp)$`),
+	firewallNAT:    regexp.MustCompile(`^(dns-((smart|full)-(closed|open)|router-(smart|full)-open)-(udp|tcp)|preserve-(backup-)?(open|closed|dns-(smart|full)-(open|closed)-(tcp|udp)))$`),
 	ipv6Filter:     regexp.MustCompile(`^ipv6:(jump|ingress:[a-f0-9]{32})$`),
 	watchMenu:      regexp.MustCompile(`^runner-watch$`),
 	routeMenu:      regexp.MustCompile(`^route-(open|closed)-(fallback|runner)$`),
@@ -231,6 +231,9 @@ func checkKind(r Observed) bool {
 			return props["chain"] == egressChain && props["action"] == "drop"
 		}
 	case firewallNAT:
+		if strings.HasPrefix(role, "preserve-") {
+			return props["chain"] == "srcnat" && props["action"] == "accept"
+		}
 		return props["chain"] == "dstnat" && ((strings.HasPrefix(role, "dns-router-") && props["action"] == "redirect") || (!strings.HasPrefix(role, "dns-router-") && props["action"] == "dst-nat"))
 	case firewallMangle:
 		switch {
@@ -292,6 +295,8 @@ func phase(o Object) int {
 	case o.Menu == routeMenu:
 		return 1
 	case o.Menu == ipv6Filter || o.Menu == firewallFilter && o.Comment != "tikray:no-fasttrack":
+		return 2
+	case o.Menu == firewallNAT && o.Props["chain"] == "srcnat":
 		return 2
 	case o.Menu == firewallNAT:
 		return 3

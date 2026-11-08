@@ -246,6 +246,9 @@ func TestTablesDNSAndFastTrack(t *testing.T) {
 				guards++
 			}
 		case "/ip/firewall/nat":
+			if v["chain"] == "srcnat" && v["action"] == "accept" && v["out-interface"] == "tikray" {
+				continue
+			}
 			if v["chain"] != "dstnat" || v["dst-port"] != "53" || v["to-ports"] != "53" || !slices.Contains([]string{"tcp", "udp"}, v["protocol"]) || v["in-interface-list"] != "inside" || !strings.HasPrefix(v["src-address-list"], "tikray-src-") {
 				t.Fatal("DNS scope or unexpected NAT")
 			}
@@ -415,7 +418,7 @@ func TestDNSFallbackForNewTransactions(t *testing.T) {
 	resolver := func(source, proto string, runnerUp bool) string {
 		for _, r := range rules {
 			v := r.Props
-			if r.Menu != "/ip/firewall/nat" || v["src-address-list"] != source || v["protocol"] != proto {
+			if r.Menu != "/ip/firewall/nat" || v["chain"] != "dstnat" || v["src-address-list"] != source || v["protocol"] != proto {
 				continue
 			}
 			if r.InitialDisabled && !runnerUp {
