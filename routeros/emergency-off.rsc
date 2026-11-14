@@ -190,20 +190,46 @@
             }
 
             $entries "inspect" $runnerIP
-            # A tuple can expire while another client is being processed. Keep
-            # the kernel ID and both original/reply directions, including the
-            # protocol-specific identity and NAT/mark bits.
-            :local signature do={
-                :local flow $1
-                :local original
-                :do { :set original [/ip/firewall/connection/get $flow src-address] } on-error={ :return "" }
-                :local value [:tostr $original]
-                :foreach field in={"protocol";"dst-address";"src-port";"dst-port";"reply-src-address";"reply-src-port";"reply-dst-address";"reply-dst-port";"icmp-type";"icmp-code";"icmp-id";"gre-protocol";"gre-version";"gre-key";"connection-mark";"dstnat"} do={
-                    :local part ""
-                    :do { :set part [:tostr [/ip/firewall/connection/get $flow $field]] } on-error={ :set part "" }
-                    :set value ($value . "|" . $part)
+            # This menu can trap when a selected tuple expires during print.
+            # Capture both directions together. The default projection omits
+            # the reply fields; filtering by a retired .id can itself trap.
+            :local readFlows do={
+                :local kind $1; :local scope $2; :local prior $3
+                :for attempt from=1 to=40 do={
+                    :local rows; :local ok false
+                    :onerror queryError in={
+                        :if ($kind="marked") do={
+                            :set rows [/ip/firewall/connection/print detail as-value where src-address in $scope and (connection-mark="tikray-open" or connection-mark="tikray-closed")]
+                        } else={
+                            :if ($kind="dns") do={
+                                :set rows [/ip/firewall/connection/print detail as-value where src-address in $scope and dstnat and dst-port=53 and reply-src-port=53 and (protocol=tcp or protocol=udp)]
+                            } else={
+                                :local dst ($prior->"dst"); :local proto ($prior->"protocol")
+                                :if (($proto="udp") or ($proto="tcp")) do={
+                                    :local sp ($prior->"sport"); :local dp ($prior->"port")
+                                    :set rows [/ip/firewall/connection/print detail as-value where src-address=$scope and dst-address=$dst and protocol=$proto and src-port=$sp and dst-port=$dp]
+                                } else={
+                                    :set rows [/ip/firewall/connection/print detail as-value where src-address=$scope and dst-address=$dst and protocol=$proto]
+                                }
+                            }
+                        }
+                        :set ok true
+                    } do={ :set ok false }
+                    :if ($ok) do={ :return $rows }
+                    :delay 100ms
                 }
-                :return $value
+                :error "tikray: affected flow read unverified"
+            }
+            :local capture do={
+                :local row $1
+                :local src ($row->"src-address"); :local dst ($row->"dst-address"); :local proto [:tostr ($row->"protocol")]
+                :if (([:typeof ($row->".id")]!="id") or ([:typeof $src]!="ip") or ([:typeof $dst]!="ip") or ($proto="") or ([:typeof ($row->"reply-src-address")]!="ip") or ([:typeof ($row->"reply-dst-address")]!="ip")) do={ :error "tikray: incomplete affected tuple" }
+                :if ((($proto="tcp") or ($proto="udp")) and (([:typeof ($row->"src-port")]!="num") or ([:typeof ($row->"dst-port")]!="num") or ([:typeof ($row->"reply-src-port")]!="num") or ([:typeof ($row->"reply-dst-port")]!="num"))) do={ :error "tikray: incomplete affected ports" }
+                :local origin [:tostr $src]
+                :foreach field in={"protocol";"dst-address";"src-port";"dst-port";"icmp-type";"icmp-code";"icmp-id";"gre-protocol";"gre-version";"gre-key"} do={ :set origin ($origin . "|" . [:tostr ($row->$field)]) }
+                :local tuple $origin
+                :foreach field in={"reply-src-address";"reply-src-port";"reply-dst-address";"reply-dst-port";"connection-mark";"dstnat"} do={ :set tuple ($tuple . "|" . [:tostr ($row->$field)]) }
+                :return {"flow"=[:tostr ($row->".id")];"tuple"=$tuple;"origin"=$origin;"src"=$src;"dst"=$dst;"protocol"=$proto;"sport"=($row->"src-port");"port"=($row->"dst-port")}
             }
             # If an enabled owner redirect can produce this same DNS binding,
             # detaching our rule need not terminate the owner's connection.
@@ -212,8 +238,8 @@
                 :local flow $1
                 :local peer $2
                 :local routerPeer $3
-                :local src [/ip/firewall/connection/get $flow src-address]
-                :local proto [:tostr [/ip/firewall/connection/get $flow protocol]]
+                :local src ($flow->"src")
+                :local proto ($flow->"protocol")
                 :foreach rule in=[/ip/firewall/nat/find where chain=dstnat and !disabled and (action=redirect or action=dst-nat or action=netmap or action=jump)] do={
                     :local tag [:tostr [/ip/firewall/nat/get $rule comment]]
                     :if (!($tag ~ "^tikray:dns-(router-)?(smart|full)-(open|closed)-(tcp|udp)\$")) do={
@@ -240,6 +266,30 @@
                     }
                 }
                 :return false
+            }
+            # RouterOS may assign a new menu ID while the connection stays
+            # alive. Only the original verified ID authorizes a removal. Any
+            # surviving owned path on the same original tuple prevents success.
+            :local checkFlow do={
+                :local purpose $1; :local record $2; :local read $3; :local captureRow $4; :local ownedDNS $5; :local runner $6
+                :local matches 0; :local removable false
+                :foreach row in=[$read "exact" ($record->"src") $record] do={
+                    :local live [$captureRow $row]
+                    :if (($live->"origin")=($record->"origin")) do={
+                        :set matches ($matches+1)
+                        :if ($purpose="remove") do={
+                            :if ((($live->"flow")=($record->"flow")) and (($live->"tuple")=($record->"tuple"))) do={ :set removable true }
+                        } else={
+                            :local mark [:tostr ($row->"connection-mark")]
+                            :if (($mark="tikray-open") or ($mark="tikray-closed")) do={ :return true }
+                            :local peer ($row->"reply-src-address")
+                            :if ((($live->"port")=53) and (($row->"reply-src-port")=53) and (($row->"dstnat")=true) and (($peer=$runner) or ($peer=($record->"dns-peer")))) do={
+                                :if (![$ownedDNS $live $peer ($peer!=$runner)]) do={ :return true }
+                            }
+                        }
+                    }
+                }
+                :return (($purpose="remove") and ($matches=1) and $removable)
             }
             :local frozen [:toarray ""]
             :local dnsRules [:toarray ""]
@@ -283,15 +333,14 @@
                             :if ((!($member ~ "^[0-9.]+/[0-9]+\$")) or ($member~"/0\$") or ([/ip/firewall/address-list/get $memberID comment] != $tag)) do={ :error "tikray: emergency source changed" }
                             :local literal [:parse (":return " . $member)]
                             :local prefix [$literal]
-                            :foreach flow in=[/ip/firewall/connection/find where src-address in $prefix and (connection-mark="tikray-open" or connection-mark="tikray-closed")] do={
-                                :local key [:tostr $flow]
-                                :local value [$signature $flow]
-                                :if ([:len $value] > 0) do={ :set ($frozen->$key) {"flow"=$flow;"tuple"=$value;"src"=[/ip/firewall/connection/get $flow src-address];"dst"=[/ip/firewall/connection/get $flow dst-address]} }
+                            :foreach row in=[$readFlows "marked" $prefix] do={
+                                :local record [$capture $row]; :local key [:tostr ($record->"flow")]
+                                :set ($frozen->$key) $record
                             }
-                            :foreach flow in=[/ip/firewall/connection/find where src-address in $prefix and dstnat and dst-port=53 and reply-src-port=53 and (protocol=tcp or protocol=udp)] do={
-                                :local peer
-                                :do { :set peer [:toip [:tostr [/ip/firewall/connection/get $flow reply-src-address]]] } on-error={ :set peer }
-                                :local owned ($peer = $runnerIP)
+                            :foreach row in=[$readFlows "dns" $prefix] do={
+                                :local record [$capture $row]
+                                :local peer ($row->"reply-src-address")
+                                :local owned ($peer=$runnerIP)
                                 # Open DNS fallback redirects to the router's own
                                 # interface; preserve translations to other peers.
                                 :if (($pass = 0) and (!$owned) and ([:typeof $peer] = "ip") and ($class = "open")) do={
@@ -302,15 +351,12 @@
                                     }
                                 }
                                 :if ($owned) do={
-                                    :local proto [:tostr [/ip/firewall/connection/get $flow protocol]]
+                                    :local proto ($record->"protocol")
                                     :local role ("tikray:dns-" . $mode . "-" . $class . "-" . $proto)
                                     :if ($peer != $runnerIP) do={ :set role ("tikray:dns-router-" . $mode . "-" . $class . "-" . $proto) }
                                     :if (($dnsRules->$role) = "yes") do={
-                                        :local key [:tostr $flow]
-                                        :if (![$ownerDNS $flow $peer ($peer != $runnerIP)]) do={
-                                            :local value [$signature $flow]
-                                            :if ([:len $value] > 0) do={ :set ($frozen->$key) {"flow"=$flow;"tuple"=$value;"src"=[/ip/firewall/connection/get $flow src-address];"dst"=[/ip/firewall/connection/get $flow dst-address]} }
-                                        }
+                                        :local key [:tostr ($record->"flow")]
+                                        :if (![$ownerDNS $record $peer ($peer != $runnerIP)]) do={ :set ($record->"dns-peer") $peer; :set ($frozen->$key) $record }
                                     }
                                 }
                             }
@@ -318,32 +364,30 @@
                     }
                 }
             }
+            :local uncertain false
             :foreach key,record in=$frozen do={
                 :local flow ($record->"flow")
-                :local saved ($record->"tuple")
-                :if ([$signature $flow] = $saved) do={
-                    :do { /ip/firewall/connection/remove $flow } on-error={
-                        :if ([$signature $flow] = $saved) do={ :error "tikray: affected flow still present" }
-                    }
+                :if ([$checkFlow "remove" $record $readFlows $capture $ownerDNS $runnerIP]) do={
+                    # The native row can expire while the mutation is in
+                    # flight. Never replay an unacknowledged removal.
+                    :onerror removalError in={ /ip/firewall/connection/remove [:toid $flow] } do={ :set uncertain true }
                 }
             }
-            # The dynamic connection list can briefly retain a removed
-            # binding. Verify its original-source query before reporting off.
-            :local pending true
+            :if ($uncertain) do={ :delay 100ms }
+            # A successful empty exact query or a different tuple proves the
+            # old binding gone. A trap or unreadable row cannot prove removal.
+            :local pending $frozen
             :local tries 0
-            :while ($pending and ($tries < 40)) do={
-                :set pending false
-                :foreach key,record in=$frozen do={
-                    :local src ($record->"src")
-                    :local dst ($record->"dst")
-                    :foreach live in=[/ip/firewall/connection/find where src-address=$src and dst-address=$dst] do={
-                        :if (([:tostr $live] = $key) and ([$signature $live] = ($record->"tuple"))) do={ :set pending true }
-                    }
-                }
-                :if ($pending) do={ :delay 100ms }
+            :while (([:len $pending]>0) and ($tries<40)) do={
                 :set tries ($tries+1)
+                :local outstanding [:toarray ""]
+                :foreach key,record in=$pending do={
+                    :if ([$checkFlow "verify" $record $readFlows $capture $ownerDNS $runnerIP]) do={ :set ($outstanding->$key) $record }
+                }
+                :set pending $outstanding
+                :if ([:len $pending]>0) do={ :delay 100ms }
             }
-            :if ($pending) do={ :error "tikray: affected flow removal unverified" }
+            :if ([:len $pending]>0) do={ :error "tikray: affected flow removal unverified" }
         }
     }
 }
