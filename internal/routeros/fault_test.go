@@ -391,3 +391,93 @@ func TestPartialMutationWriteIsUncertainAndNeverReplayed(t *testing.T) {
 		t.Fatal("partial mutation write was replayed or recovery did not replace its session")
 	}
 }
+
+// Hold a successful Write until cancellation has reached the socket. A peer
+// can receive the entire sentence before the local Write returns.
+type deliveredWriteConn struct {
+	net.Conn
+	cancelled chan struct{}
+	once      sync.Once
+}
+
+func (c *deliveredWriteConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if err == nil {
+		<-c.cancelled
+	}
+	return n, err
+}
+
+func (c *deliveredWriteConn) SetWriteDeadline(d time.Time) error {
+	err := c.Conn.SetWriteDeadline(d)
+	if !d.IsZero() && !d.After(time.Now()) {
+		c.once.Do(func() { close(c.cancelled) })
+	}
+	return err
+}
+
+func (c *deliveredWriteConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() { close(c.cancelled) })
+	return err
+}
+
+func TestCancellationAfterFrameDeliveryPreservesSession(t *testing.T) {
+	left, peer := net.Pipe()
+	c := &deliveredWriteConn{Conn: left, cancelled: make(chan struct{})}
+	s := newSession(c, bufio.NewReader(c))
+	t.Cleanup(func() { s.fail(ErrClosed); peer.Close() })
+	reader := bufio.NewReader(peer)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		r, err := s.open(ctx, readQuery())
+		if r != nil {
+			s.remove(r)
+		}
+		done <- err
+	}()
+	if _, err := readSentence(reader); err != nil {
+		t.Fatal("peer did not receive complete command")
+	}
+	cancel()
+	if err := faultReceive(t, done, "cancelled write stalled"); err != nil {
+		t.Fatal("delivered command lost its session before tagged cancellation")
+	}
+	go func() {
+		r, err := s.open(t.Context(), readQuery())
+		if r != nil {
+			s.remove(r)
+		}
+		done <- err
+	}()
+	if _, err := readSentence(reader); err != nil {
+		t.Fatal("next frame did not arrive on the same connection")
+	}
+	if err := faultReceive(t, done, "subsequent write stalled"); err != nil {
+		t.Fatal("write cancellation affected the next writer")
+	}
+}
+
+func TestCancellationDuringIncompleteFrameRetiresSession(t *testing.T) {
+	left, peer := net.Pipe()
+	s := newSession(left, bufio.NewReader(left))
+	t.Cleanup(func() { s.fail(ErrClosed); peer.Close() })
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() {
+		r, err := s.open(ctx, []string{"/system/script/set", "=.id=*1"})
+		done <- errors.Is(err, ErrDisconnected) && r != nil && r.sent
+	}()
+	var prefix [1]byte
+	if _, err := peer.Read(prefix[:]); err != nil {
+		t.Fatal("partial frame did not reach the peer")
+	}
+	cancel()
+	if !faultReceive(t, done, "partial write did not stop") {
+		t.Fatal("partial mutation lost its uncertain outcome")
+	}
+	faultReceive(t, s.done, "partial write left an incomplete session open")
+}

@@ -101,21 +101,30 @@ func (s *session) open(ctx context.Context, words []string) (*request, error) {
 	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
 		deadline = dl
 	}
-	_ = s.conn.SetWriteDeadline(deadline)
-	// Cancellation during a partial frame invalidates that socket, not just
-	// one request. The peer might already have received the mutation.
-	stop := context.AfterFunc(ctx, func() { s.fail(ErrDisconnected) })
-	defer stop()
+	if s.conn.SetWriteDeadline(deadline) != nil {
+		s.fail(ErrDisconnected)
+		return r, ErrDisconnected
+	}
+	// Interrupt a blocked write without closing a fully delivered frame.
+	// Join the callback before clearing its deadline or releasing the writer.
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		if s.conn.SetWriteDeadline(time.Now()) != nil {
+			s.fail(ErrDisconnected)
+		}
+		close(interrupted)
+	})
 	r.sent = true
-	if e = writeAll(s.conn, data); e != nil {
-		s.fail(ErrDisconnected)
-		return r, ErrDisconnected
-	}
+	e = writeAll(s.conn, data)
 	if !stop() {
+		<-interrupted
+	}
+	// A failed Write on TLS may have sent part of a record even when it
+	// reports zero plaintext bytes. Retire the connection on any such error.
+	if e != nil || s.conn.SetWriteDeadline(time.Time{}) != nil {
 		s.fail(ErrDisconnected)
 		return r, ErrDisconnected
 	}
-	_ = s.conn.SetWriteDeadline(time.Time{})
 	return r, nil
 }
 func (s *session) remove(r *request) {
