@@ -481,3 +481,27 @@ func TestCancellationDuringIncompleteFrameRetiresSession(t *testing.T) {
 	}
 	faultReceive(t, s.done, "partial write left an incomplete session open")
 }
+
+func TestCommandPreservesSessionFailureAfterFrameDelivery(t *testing.T) {
+	left, peer := net.Pipe()
+	c := &deliveredWriteConn{Conn: left, cancelled: make(chan struct{})}
+	s := newSession(c, bufio.NewReader(c))
+	t.Cleanup(func() { s.fail(ErrClosed); peer.Close() })
+
+	done := make(chan error, 1)
+	go func() {
+		r, err := s.open(t.Context(), readQuery())
+		if r != nil {
+			s.remove(r)
+		}
+		done <- err
+	}()
+	if _, err := readSentence(bufio.NewReader(peer)); err != nil {
+		t.Fatal("peer did not receive the complete command")
+	}
+	// The reader can invalidate the session before the local writer returns.
+	s.fail(ErrProtocol)
+	if got := faultReceive(t, done, "write did not return after the session ended"); !errors.Is(got, ErrProtocol) {
+		t.Fatal("finished write obscured the first session error")
+	}
+}

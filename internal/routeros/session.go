@@ -103,7 +103,7 @@ func (s *session) open(ctx context.Context, words []string) (*request, error) {
 	}
 	if s.conn.SetWriteDeadline(deadline) != nil {
 		s.fail(ErrDisconnected)
-		return r, ErrDisconnected
+		return r, s.err
 	}
 	// Interrupt a blocked write without closing a fully delivered frame.
 	// Join the callback before clearing its deadline or releasing the writer.
@@ -123,7 +123,7 @@ func (s *session) open(ctx context.Context, words []string) (*request, error) {
 	// reports zero plaintext bytes. Retire the connection on any such error.
 	if e != nil || s.conn.SetWriteDeadline(time.Time{}) != nil {
 		s.fail(ErrDisconnected)
-		return r, ErrDisconnected
+		return r, s.err
 	}
 	return r, nil
 }
