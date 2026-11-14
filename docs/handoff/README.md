@@ -1,14 +1,17 @@
 # tikray handoff
 
-Everything a new developer or AI assistant needs to continue tikray. Read this page first. Then read the spec, then the M2c plan and the M2c ledger.
-
-Written 2026-11-05, when work moved off the original cloud session. The handed-off state is commit `79f8582` on branch `claude/serene-goldberg-1as8mu`. At that commit, `make test` passes: `go vet` is clean and all 21 test packages pass.
+M3a is implemented and reviewed on `m3-routeros`. The final CHR runs used
+the signed images and test harness from clean commit `57d40cb`. Start with
+the [M3 ledger](m3/ledger.md) for results and decisions, the
+[approved plan](../superpowers/plans/2026-11-06-m3-routeros.md) for the
+delivery split, and the [owner instructions](../../routeros/README.md) for
+installation, emergency off and removal.
 
 ## What tikray is
 
 tikray is an xray-core **client** for MikroTik RouterOS v7. It connects a router to existing VLESS, VMess, Trojan and Shadowsocks servers; it does not create accounts. It runs as two RouterOS containers:
 
-- **tikray** is the control plane. It holds the desired state, renders the xray config, and serves the HTTPS API and CLI. The web UI comes in M4, the RouterOS reconciler in M3.
+- **tikray** is the control plane. It holds the desired state, renders the xray config, and serves the HTTPS API and CLI. On a managed installation it also reconciles the router's traffic rules. The web UI comes in M4.
 - **tikray-runner** is the data plane. It is PID 1 of its container and supervises xray. It applies every config through a trial with automatic rollback.
 
 Steering is hybrid: domestic traffic goes direct and the rest goes through xray. xray-core, geo data and tikray update independently, with verification and rollback. Supported targets are ARM64 and amd64/CHR.
@@ -25,11 +28,10 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M2a: state model and render | Done, merged (PR #4) | |
 | M2b: the service (`tikray serve`, HTTPS API, health, subscriptions) | Done, merged (PR #5) | |
 | M2c: human sign-in and hot server changes | Done, merged (PR #6) | |
-| M3: RouterOS (installer, reconciler, version adapters, watchdog, uninstall, CHR e2e) | M3a installer, watchdog, reconciler and owner uninstall implemented. Install and uninstall passed on all three pinned targets. The routing suite and whole-branch review remain before the M3a PR. | [Plan](../superpowers/plans/2026-11-06-m3-routeros.md), [task results and rulings](m3/ledger.md) |
+| M3a: RouterOS integration | Review and acceptance complete on the PR branch, awaiting owner merge. All three targets passed installer 6/6, routing 9/9 and uninstall 4/4. | [Ledger and image hashes](m3/ledger.md), [CHR results](../../test/e2e/results/) |
+| M3b: geo, image updates and CHR CI | Starts from merged M3a after owner approval. Includes geo diff/rollback, image update and rollback, outage/watchdog suites and the CHR CI job. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
 | M4: web UI | Not started | |
 | M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
-
-Roughly half of the total effort is done.
 
 ## M2c handoff
 
@@ -50,7 +52,7 @@ Roughly half of the total effort is done.
 | — | Final whole-branch review and fix wave | bf6b119 | reviewed; all three targets and the service rerun passed |
 | — | Independent review (three fresh reviewers) and its fix wave | 332393f..HEAD | approved by all three re-reviews; CHR 7.25 x86_64 re-run passed |
 
-### Next steps, in order
+### M2c acceptance history
 
 All nine tasks are implemented and tested. In WSL2 Ubuntu, QEMU's TCG ran
 `TestAuth` (6/6) and `TestHot` (4/4) on CHR 7.25 x86_64, 7.23.8 x86_64
@@ -101,13 +103,14 @@ These are the fixed values; the full list is in [`m2c/context.md`](m2c/context.m
 
 These come from PR #5 and the ledgers. Each needs doing in the milestone named.
 
-- **M3:**
-  - The installer must leave the tikray container's `cmd` unset, or set it to `serve`. RouterOS ignores `cmd=""`; use `/container/unset … cmd`.
-  - The installer must bootstrap the xray core before adding any server or subscription.
-  - Add a `ReadTimeout` to the runner's HTTP server, together with the firewall work.
-  - The e2e bridge uses `protocol-mode=none`. With the default RSTP, a freshly started container can't reach the runner. `install.rsc` must do the same.
-  - Set the containers' restart policy: a failing control-API listener stops xray.
-  - Check that devices and `network.subnet` don't overlap the bridge subnet, loopback or multicast.
+M3a completed the installer and firewall carries. Installation unsets the
+control command explicitly, bootstraps a verified xray core before admitting
+a server, uses a non-STP private bridge and sets container restart behavior.
+The runner has a 30-second HTTP read timeout. Store validation rejects device
+overlap with the private bridge, loopback or multicast and checks the bridge
+subnet against reserved ranges.
+
+- **M3b:** Follow the remaining scope in the approved M3 plan after M3a merges.
 - **M4:**
   - Events need a boot id, because `Seq` restarts at 1 after a restart.
   - The UI signs in with M2c's cookie and CSRF scheme.
@@ -163,7 +166,7 @@ Some countries can't reach Google's Go servers (go.dev, proxy.golang.org).
 - `go.sum` and Go's checksum database, reached through the mirror, still verify every module and toolchain download.
 
 The owner's Windows checkout is `C:\Users\Arman\Desktop\hakir\Projects\tikray`. In WSL that same folder is `/mnt/c/Users/Arman/Desktop/hakir/Projects/tikray`.
-- Clone it from inside WSL (`git clone -b claude/serene-goldberg-1as8mu https://github.com/Arman2122/tikray.git`).
+- Clone with Git in WSL. The M3a review branch is `m3-routeros`.
 - An editor or AI tool running on Windows edits the files in place, but must run every build or test command through WSL, e.g.:
   ```
   wsl -e bash -lc "cd /mnt/c/Users/Arman/Desktop/hakir/Projects/tikray && make test"
@@ -180,6 +183,22 @@ The owner's Windows checkout is `C:\Users\Arman\Desktop\hakir\Projects\tikray`. 
 | Compat against real xray releases | `sudo --preserve-env=PATH,HOME,GOPATH,GOMODCACHE,GOCACHE go test -tags compat -count=1 ./test/compat/...` | Network (downloads releases into `~/.cache/tikray-lab/xray`), root for TUN on releases before 26.10. `TIKRAY_COMPAT_VERSIONS` overrides the versions. |
 | Images | `make images` | Docker with the **classic** image store (`{"features":{"containerd-snapshotter":false}}`); RouterOS can't import containerd archives |
 | Lab, end to end on RouterOS CHR | `make lab-deps`, then e.g. `TIKRAY_LAB_CHANNEL=stable go test -tags lab -p 1 -count=1 -v -timeout 240m -run 'TestService' ./test/e2e/` | Linux host or WSL2 Ubuntu, root, QEMU, Docker. No KVM: CHR runs under QEMU's TCG emulation, x86_64 in minutes and arm64 slower. `TIKRAY_LAB_ARCH` picks the architecture. |
+
+For the M3a suites use the three reviewed bundles described in the
+[M3 ledger](m3/ledger.md#final-m3a-acceptance). Run the wrapper as root in
+Ubuntu with `TIKRAY_LAB_CACHE` pointing to the prepared lab cache.
+This example selects one target's signed archives and packaged scripts.
+
+```sh
+export TIKRAY_LAB_XRAY=v26.10.31
+export TIKRAY_LAB_IMAGES="$PWD/out/m3-reviewed/57d40cb565698a0ce865c408ee78c538384066a3/7.25-x86_64"
+scripts/test-m3-chr.sh 7.25 x86_64 '^TestM3(Install|Routing|Uninstall)$'
+```
+
+Select the matching bundle for 7.23.8 x86_64 and 7.25 arm64. Use the stable
+x86_64 bundle for `TestService`, `TestAuth` and `TestHot`. The wrapper
+starts each run with a private log and bounded QEMU lifetime and validates
+the results before publishing them.
 
 To repeat an exact RouterOS run after the channel moves, set
 `TIKRAY_LAB_CHANNEL` to the version, for example `7.25` or `7.23.8`. After
@@ -205,6 +224,9 @@ CI (`.github/workflows/ci.yml`) runs `make test`, the compat suite on the oldest
 | Path | What |
 |---|---|
 | `cmd/tikray` | Control plane: `tikray serve` and the CLI |
+| `cmd/tikray-installer`, `routeros/` | Signed archive packager and native installer, watchdog, emergency-off and uninstall scripts |
+| `internal/routeros/`, `internal/routeros/adapters/` | Pinned native API, scoped observations, policy reconciliation, version profiles and installer packaging |
+| `spike/m3/` | RouterOS capability, ownership, recovery and protocol regression checks |
 | `cmd/tikray-runner` | Data-plane runner: PID 1 of its container |
 | `internal/store` | Desired state: servers, subscriptions, devices, policies, routing, DNS, health; validation |
 | `internal/render` | State → xray config (inbounds, outbounds, balancers, rules, DNS); `Features` gates by xray version |
@@ -228,6 +250,7 @@ CI (`.github/workflows/ci.yml`) runs `make test`, the compat suite on the oldest
 ## Files in this folder
 
 - `README.md`: this page.
+- `m3/ledger.md`: M3a decisions, reviewed revision, CHR results and archive hashes.
 - `m2c/ledger.md`: the M2c execution ledger, holding the pre-flight table, every ruling, deferred minors and progress lines.
 - `m2c/context.md`: M2c global constraints and fixed values.
 - `m2c/reviewer-instructions.md`: what a task reviewer checks and how it reports.

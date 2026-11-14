@@ -374,3 +374,32 @@ The 7.25 x86_64 installer on product `ebfc334` and harness `356cd56` passed the 
 Ruling: After claiming an installer challenge, wait within its existing deadline for the current service process to complete its first verified RouterOS reconciliation before using its one authorized fresh login — an older ready file survives restart and can otherwise permit a challenge before the native client and verified policy are ready — cost if wrong: a startup that cannot verify its revision and runner selection within the deadline refuses the import and requires a new owner challenge. The wait holds no policy writer. The original pin, one attempt per nonce, live runner validation, current native readback and emergency fences still apply.
 
 On real 7.25 x86_64 the old pair refused when the native connection was restored two seconds after the nonce was claimed. The corrected build passed the same bridge ACL and two successive forced stopped-control reimports in that setup (500.33 seconds), preserving the original runner and claimed owner session. The standard pair passed in 445.17 seconds. Existing refusal controls, the full race tests, lab vet and the focused readiness tests passed.
+
+## Final M3a acceptance
+
+M3a is complete on `m3-routeros` and awaits owner approval to merge. The installer, native reconciler, version adapters, basic restart watchdog, emergency command and owner-run uninstall were reviewed against `main..HEAD`. After the review corrections, the exact product and test source was [57d40cb](https://github.com/Arman2122/tikray/commit/57d40cb565698a0ce865c408ee78c538384066a3). All twelve complete result files were committed in [5e62498](https://github.com/Arman2122/tikray/commit/5e624981720db12bf936fcbe832cc2f89707b9b2). The reviewed source also passed its [unit, compatibility and image CI jobs](https://github.com/Arman2122/tikray/actions/runs/43603687214).
+
+The final runs used WSL2 Ubuntu, QEMU TCG and xray-core 26.10.31. The product and test harness came from the same clean revision. Each row used its signed, version-specific installer and the same saved control and runner archives throughout. The two x86 targets used byte-identical archives and signatures.
+
+| CHR | Installer | Routing including emergency off | Uninstall | Basic watchdog within installer |
+|---|---|---|---|---|
+| 7.25 x86_64 | [6/6](../../../test/e2e/results/7.25-x86_64-m3-install.json), 1271.61 s | [9/9](../../../test/e2e/results/7.25-x86_64-m3-routing.json), 1336.89 s | [4/4](../../../test/e2e/results/7.25-x86_64-m3-uninstall.json), 876.29 s | 432.019 s |
+| 7.23.8 x86_64 | [6/6](../../../test/e2e/results/7.23.8-x86_64-m3-install.json), 1265.86 s | [9/9](../../../test/e2e/results/7.23.8-x86_64-m3-routing.json), 1260.57 s | [4/4](../../../test/e2e/results/7.23.8-x86_64-m3-uninstall.json), 767.86 s | 446.936 s |
+| 7.25 arm64 | [6/6](../../../test/e2e/results/7.25-arm64-m3-install.json), 1167.39 s | [9/9](../../../test/e2e/results/7.25-arm64-m3-routing.json), 1247.72 s | [4/4](../../../test/e2e/results/7.25-arm64-m3-uninstall.json), 729.52 s | 404.102 s |
+
+The stable amd64 pair also passed [TestService, 8/8](../../../test/e2e/results/7.25-x86_64-m2b.json) in 310.65 s, [TestAuth, 6/6](../../../test/e2e/results/7.25-x86_64-m2c-auth.json) in 112.06 s and [TestHot, 4/4](../../../test/e2e/results/7.25-x86_64-m2c-hot.json) in 209.95 s. All 75 expected case IDs had affirmative results. Every target's WAN capture observed zero closed-client packets and 299 direct-peer packets during 30 seconds without either closed route. The independent source-NAT test also held for 30 seconds with new closed-client flows reaching a proxy and the unrelated TCP connection intact. The router accepted two owner emergency commands with both containers stopped, retained owner management access and restored steering on the next successful reconcile.
+
+Ruling: Run each complete top-level suite in a separate bounded wrapper within the prescribed target order — an earlier aggregate failure withheld even the independent successful reports — cost if wrong: separate processes add harness startup time. Every final suite was run afresh from the same revision. All twelve wrappers returned zero. Each namespace was checked on exit and no task-owned QEMU process, tap, bridge or network namespace remained.
+
+### Final archive provenance
+
+| Saved Docker archive | SHA-256 |
+|---|---|
+| `tikray-amd64.tar` | `afa4c38c45afc9c2f727b3bef845b53581353fe136bd49a9115a13e52b0a44db` |
+| `tikray-runner-amd64.tar` | `e631cddf5cc3f5a243643bc9766571db043d699417ce5e5105de2967da54a18a` |
+| `tikray-arm64.tar` | `27786dbb82fd5f82c402fc215e72730cf7117645f1046ec7e20e547812cfaf97` |
+| `tikray-runner-arm64.tar` | `1e7ddbc342ebba7f9d5f775013bc77ee22f07df94c0eba474f0abbcf70b1b7c6` |
+
+The embedded Go executables reported clean revision `57d40cb565698a0ce865c408ee78c538384066a3`. The ELF architecture, saved image platform, entrypoint, default command and detached signatures were verified before the matrix. QA publisher public-key DER SPKI SHA-256 was `d143599c02dc77167db2b8b92086e8d4b5003ca8990eacb899cc8836cff01c47`. On the review machine the verified bundles are in `out/m3-reviewed/57d40cb565698a0ce865c408ee78c538384066a3/<version>-<arch>/`. Public release signing belongs to M5.
+
+For reproduction, set `TIKRAY_LAB_CACHE` to the prepared cache, `TIKRAY_LAB_XRAY=v26.10.31` and `TIKRAY_LAB_IMAGES` to the appropriate bundle directory. In Ubuntu, run `scripts/test-m3-chr.sh VERSION ARCH '^TestM3Install$'` as the lab owner, then the same command for `TestM3Routing` and `TestM3Uninstall`. Run the three legacy suites last on stable x86_64. M3b begins from the merged M3a revision after the owner's merge decision.
