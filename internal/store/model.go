@@ -174,6 +174,9 @@ type DNS struct {
 type Network struct {
 	// Subnet is an IPv4 prefix of /29 or larger, so that .1 to .3 fit.
 	Subnet netip.Prefix `json:"subnet"`
+	// RequireLocalBridge is set atomically with a subnet repaired over HTTPS.
+	// Recheck its local control address on restart before using runner credentials.
+	RequireLocalBridge bool `json:"require_local_bridge,omitempty"`
 }
 
 // host is the subnet's address number i.

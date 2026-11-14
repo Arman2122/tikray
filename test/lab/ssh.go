@@ -112,6 +112,22 @@ func (c *CHR) RunPrivate(ctx context.Context, cmd string) (string, error) {
 	return c.run(ctx, cmd, true)
 }
 
+// RunPrivateFresh gives an owner import its own SSH connection. The regular
+// session may still have asynchronous console output from a container shell.
+// Reserve this for operations crossing that boundary to keep logins infrequent.
+func (c *CHR) RunPrivateFresh(ctx context.Context, cmd string) (string, error) {
+	cl, err := c.dial(ctx)
+	if err != nil {
+		return "", errors.New("lab: private owner connection failed")
+	}
+	defer cl.Close()
+	s, err := newSession(ctx, cl)
+	if err != nil {
+		return "", errors.New("lab: private owner session failed")
+	}
+	return executeSession(ctx, s, cmd, true)
+}
+
 func (c *CHR) run(ctx context.Context, cmd string, private bool) (out string, err error) {
 	start := time.Now()
 	defer func() {
@@ -123,6 +139,10 @@ func (c *CHR) run(ctx context.Context, cmd string, private bool) (out string, er
 	if err != nil {
 		return "", err
 	}
+	return executeSession(ctx, s, cmd, private)
+}
+
+func executeSession(ctx context.Context, s *ssh.Session, cmd string, private bool) (string, error) {
 	defer s.Close()
 	type result struct {
 		out []byte

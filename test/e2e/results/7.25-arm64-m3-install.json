@@ -1,0 +1,38 @@
+[
+  {
+    "id": "preflight",
+    "pass": true,
+    "detail": "DNS, overlap, ownership and archive-integrity preflights refused unsafe installation.",
+    "seconds": 56.232
+  },
+  {
+    "id": "clean_install",
+    "pass": true,
+    "detail": "The signed core booted, the public ID matched the receipt and the source-restricted account passed its permission controls.",
+    "seconds": 41.988
+  },
+  {
+    "id": "bridge_acl",
+    "pass": true,
+    "detail": "LAN HTTPS access, private service isolation and owner forwarding were checked with live traffic.",
+    "seconds": 232.687
+  },
+  {
+    "id": "second_import",
+    "pass": true,
+    "detail": "Healthy reimport preserved owner access, installation identity and running processes. The stopped control command was repaired.",
+    "seconds": 42.997
+  },
+  {
+    "id": "interrupted_install",
+    "pass": true,
+    "detail": "Management remained available and admission stayed gated until signed bootstrap recovered.",
+    "seconds": 388.635
+  },
+  {
+    "id": "basic_watchdog",
+    "pass": true,
+    "detail": "Real scheduled recovery, wrong-service refusal, component isolation, backoff and emergency suppression passed.",
+    "seconds": 404.102
+  }
+]

@@ -17,6 +17,33 @@ func envOf(vars map[string]string) func(string) string {
 	return func(k string) string { return vars[k] }
 }
 
+func TestOfflineClientRefusesUnsafeBridge(t *testing.T) {
+	cfg := Config{Data: t.TempDir()}
+	if err := os.Mkdir(filepath.Join(cfg.Data, "run"), 0700); err != nil {
+		t.Fatal("could not create token directory")
+	}
+	if err := os.WriteFile(filepath.Join(cfg.Data, "run", "runner.token"), []byte("fixture"), 0600); err != nil {
+		t.Fatal("could not write fixture")
+	}
+	st := store.Default()
+	st.Network.Subnet = netip.MustParsePrefix("127.0.0.0/8")
+	if r, err := newRunner(cfg.withState(st)); r != nil || err == nil {
+		t.Fatal("constructed a credential-bearing client for an unsafe legacy bridge")
+	}
+	st.Network.Subnet = netip.MustParsePrefix("10.81.0.0/29")
+	if assignedBridge(st.Network) {
+		st.Network.Subnet = netip.MustParsePrefix("10.82.0.0/29")
+	}
+	st.Network.RequireLocalBridge = true
+	if r, err := newRunner(cfg.withState(st)); r != nil || err == nil {
+		t.Fatal("offline runner ignored the repaired subnet's namespace requirement")
+	}
+	st.Network.RequireLocalBridge = false
+	if r, err := newRunner(cfg.withState(st)); r == nil || err != nil {
+		t.Fatal("refused the existing standalone configuration")
+	}
+}
+
 func TestConfigFromEnv(t *testing.T) {
 	// The runner's three addresses and the probe URL default to the state's
 	// (TestDefaultsFromState), so the environment leaves them empty.

@@ -29,6 +29,8 @@ const (
 	// or revoked, the admin reset. The API records them (Record); none holds
 	// a secret.
 	KindAuth = "auth"
+	// KindRouter records verified repairs of previously applied steering.
+	KindRouter = "routeros"
 )
 
 // maxEvents is how many events the service keeps.

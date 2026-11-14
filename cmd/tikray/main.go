@@ -494,8 +494,15 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, configFile 
 	if err := prepareDirs(cfg.Data); err != nil {
 		return c.fail(err)
 	}
+	var targetErr error
+	if base.To != "" {
+		base.To, targetErr = xrayver.UpdateTarget(base.To)
+	}
 	if err := removeFileDurably(filepath.Join(stateDir(cfg.Data), lastResultName)); err != nil {
 		return c.refused(cfg, base, fmt.Errorf("removing the previous result: %w", err))
+	}
+	if targetErr != nil {
+		return c.refused(cfg, base, targetErr)
 	}
 	cl, running, err := c.daemon(ctx, cfg)
 	if err != nil {
@@ -512,6 +519,13 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, configFile 
 		return c.refused(cfg, base, err)
 	}
 	defer unlock()
+	// Only the running service can guard clients across the runner trial
+	// and router update. A dangling or unreadable install is still managed.
+	for _, name := range []string{"install.json", "state/install.request", "state/install.ready", "state/routeros.json", "state/router-policy.json"} {
+		if _, err := os.Lstat(filepath.Join(cfg.Data, name)); !errors.Is(err, os.ErrNotExist) {
+			return c.refused(cfg, base, errors.New("RouterOS steering requires tikray serve to apply changes"))
+		}
+	}
 	var st store.State
 	var rev uint64
 	if fromState {
@@ -788,6 +802,9 @@ func prepareDirs(data string) error {
 // newRunner is the client of the runner at cfg.RunnerURL, with the token from
 // <data>/run/runner.token.
 func newRunner(cfg Config) (*runnerapi.Client, error) {
+	if store.ValidateRouterNetwork(cfg.network, nil) != nil || cfg.network.RequireLocalBridge && !assignedBridge(cfg.network) {
+		return nil, errors.New("tikray: repair the container bridge over HTTPS and restart tikray serve")
+	}
 	tok, err := os.ReadFile(filepath.Join(cfg.Data, "run", "runner.token"))
 	if err != nil {
 		return nil, fmt.Errorf("reading the runner token: %w", err)

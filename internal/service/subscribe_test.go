@@ -472,7 +472,7 @@ func TestDisabledAndFailedRefreshOmitSensitiveLabels(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), short) {
 		t.Error("disabled subscription refusal leaked its credential-shaped label")
 	}
-	e.s.refreshFailed(sub, "fixture failure")
+	e.s.refreshFailed(context.Background(), sub, "fixture failure")
 	if ev := e.eventsOf(KindError); len(ev) != 1 || strings.Contains(ev[0], short) {
 		t.Error("failed refresh event leaked its credential-shaped label")
 	}

@@ -46,6 +46,7 @@ import (
 
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/auth"
+	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -58,6 +59,7 @@ const maxBody = 1 << 20
 type Backend interface {
 	State() (store.State, uint64)
 	Status(ctx context.Context) service.Status
+	Leases(ctx context.Context) ([]routeros.LeaseInfo, error)
 	Events(after uint64) []service.Event
 	Core(ctx context.Context) (service.CoreInfo, error)
 	ApplyNow(ctx context.Context) (artifacts.Result, error)
@@ -80,6 +82,7 @@ type Backend interface {
 
 	SetDevice(ctx context.Context, rev uint64, d store.Device) (uint64, error)
 	RemoveDevice(ctx context.Context, rev uint64, addr netip.Prefix) (uint64, error)
+	RepairNetwork(ctx context.Context, rev uint64, fix service.NetworkRepair) (bool, uint64, error)
 	SetDefaultPolicy(ctx context.Context, rev uint64, p store.Policy) (uint64, error)
 	SetRouting(ctx context.Context, rev uint64, r store.Routing) (uint64, error)
 	SetDNS(ctx context.Context, rev uint64, d store.DNS) (uint64, error)
@@ -103,7 +106,7 @@ type handler struct {
 // session of a, and the sign-in routes held to lim (neither may be nil). The
 // check sits in front of the routes, so that a caller without a credential
 // learns nothing about them.
-func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter) http.Handler {
+func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter, installationID string) http.Handler {
 	h := &handler{b: b, a: a, lim: lim, root: sha256.Sum256([]byte(root)), rootLen: len(root), hasRoot: root != "", now: time.Now}
 	mux := http.NewServeMux()
 	// The routes that need no credential, by their pattern: the one list. A
@@ -114,11 +117,17 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter) http.H
 		public[pattern] = true
 		mux.HandleFunc(pattern, f)
 	}
-	handlePublic("GET /healthz", healthz)
+	handlePublic("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, struct {
+			OK             bool   `json:"ok"`
+			InstallationID string `json:"installation_id,omitempty"`
+		}{true, installationID})
+	})
 
 	mux.HandleFunc("GET /v1/status", h.status)
 	mux.HandleFunc("GET /v1/state", h.state)
 	mux.HandleFunc("GET /v1/events", h.events)
+	mux.HandleFunc("GET /v1/routeros/leases", h.leases)
 
 	mux.HandleFunc("GET /v1/servers", h.listServers)
 	mux.HandleFunc("POST /v1/servers", h.addServer)
@@ -134,6 +143,7 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter) http.H
 	mux.HandleFunc("GET /v1/devices", h.listDevices)
 	mux.HandleFunc("PUT /v1/devices/{address}", h.setDevice)
 	mux.HandleFunc("DELETE /v1/devices/{address}", h.removeDevice)
+	mux.HandleFunc("PUT /v1/network", h.repairNetwork)
 
 	mux.HandleFunc("PUT /v1/policy", set(h, b.SetDefaultPolicy))
 	mux.HandleFunc("PUT /v1/routing", set(h, b.SetRouting))
@@ -165,11 +175,6 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter) http.H
 		h.writeError(w, http.StatusNotFound, codeNotFound, "no such route")
 	})
 	return h.guard(mux, public)
-}
-
-// healthz answers that the service runs: the handler exists only once it does.
-func healthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // --- reads
@@ -397,6 +402,26 @@ func (h *handler) removeDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.noContent(w, newRev)
+}
+
+// repairNetwork accepts only a complete fix of a previously permitted overlap.
+func (h *handler) repairNetwork(w http.ResponseWriter, r *http.Request) {
+	rev, ok := h.revision(w, r)
+	if !ok {
+		return
+	}
+	var fix service.NetworkRepair
+	if !h.decode(w, r, &fix) || h.maskedRequest(w, fix) {
+		return
+	}
+	restart, next, err := h.b.RepairNetwork(r.Context(), rev, fix)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.reply(w, http.StatusOK, next, struct {
+		RestartRequired bool `json:"restart_required"`
+	}{restart})
 }
 
 // address reads the device address of the path: a CIDR prefix (its slash

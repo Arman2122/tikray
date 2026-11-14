@@ -95,12 +95,7 @@ func run() int {
 
 	// No WriteTimeout: a trial request lasts as long as the xray run -test
 	// window.
-	srv := &http.Server{
-		Addr:              net.JoinHostPort(addr, listenPort),
-		Handler:           runner.NewServer(r, token, r.XrayAPI),
-		ReadHeaderTimeout: readHeaderTimeout,
-		IdleTimeout:       idleTimeout,
-	}
+	srv := controlServer(net.JoinHostPort(addr, listenPort), runner.NewServer(r, token, r.XrayAPI))
 	served := make(chan error, 1)
 	go func() { served <- srv.ListenAndServe() }()
 	log.Printf("serving the control API on %s", srv.Addr)
@@ -125,6 +120,11 @@ func run() int {
 	stopKeep() // Keep stops answering ping on its way out
 	<-keepDone
 	return code
+}
+
+func controlServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout: 30 * time.Second, IdleTimeout: idleTimeout}
 }
 
 // waitIngress waits for the IPv4 default route and an address on its link, and

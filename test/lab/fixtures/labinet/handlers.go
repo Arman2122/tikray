@@ -60,6 +60,25 @@ func DNSAnswer(qname string, src netip.Addr) (addr netip.Addr, ok bool) {
 	return poisoned, true
 }
 
+// The routing suite needs independent evidence of both resolver selection
+// and transport egress. Fresh names in this zone also avoid xray's cache.
+func routingDNSAnswer(name string, resolver, source netip.Addr) (netip.Addr, bool) {
+	if !strings.HasSuffix(name, ".routing-probe.test.") || !resolver.Is4() {
+		return netip.Addr{}, false
+	}
+	ip := resolver.As4()
+	if ip != [4]byte{203, 0, 113, 53} && ip != [4]byte{203, 0, 113, 54} {
+		return netip.Addr{}, false
+	}
+	last := byte(1)
+	if viaProxy(source) {
+		last = 2
+	} else if source != netip.MustParseAddr("198.51.100.2") {
+		return netip.Addr{}, false
+	}
+	return netip.AddrFrom4([4]byte{198, 18, ip[3], last}), true
+}
+
 // blobSize keeps the transfer test short under CHR's ~1 Mbps free-license
 // cap while still spanning well over a thousand full-size segments.
 const blobSize = 2 * 1024 * 1024
@@ -132,6 +151,11 @@ func DNSHandler() dns.Handler {
 		if len(req.Question) == 1 {
 			q := req.Question[0]
 			addr, ok := DNSAnswer(q.Name, src.Unmap())
+			local, _ := netip.ParseAddr(callerIP(w.LocalAddr().String()))
+			witness, route := routingDNSAnswer(q.Name, local.Unmap(), src.Unmap())
+			if route {
+				addr, ok = witness, true
+			}
 			switch {
 			case !ok:
 				m.Rcode = dns.RcodeNameError
@@ -140,6 +164,8 @@ func DNSHandler() dns.Handler {
 					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
 					A:   addr.AsSlice(),
 				})
+			case route && q.Qtype == dns.TypeAAAA:
+				m.Answer = append(m.Answer, &dns.AAAA{Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 1}, AAAA: net.ParseIP("2001:db8:4:1::2")})
 			}
 		}
 		w.WriteMsg(m)

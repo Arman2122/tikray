@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/Arman2122/tikray/internal/runnerapi"
+	"github.com/Arman2122/tikray/internal/xrayver"
 )
 
 const (
@@ -110,6 +111,13 @@ func readHistory(path string) ([]Result, error) {
 		line, err := br.ReadBytes('\n')
 		var r Result
 		if len(bytes.TrimSpace(line)) > 0 && json.Unmarshal(line, &r) == nil {
+			// Older refused updates copied an arbitrary target into both
+			// fields. Preserve their public outcome and timestamp on read.
+			if r.To != "" {
+				if _, e := xrayver.UpdateTarget(r.To); e != nil {
+					r.To, r.Detail = "", e.Error()
+				}
+			}
 			out = append(out, r)
 		}
 		if err == io.EOF {

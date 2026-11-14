@@ -161,8 +161,14 @@ type Result struct {
 // Result in the history, and returns an error with every outcome but
 // committed and noop.
 func (u *CoreUpdater) Update(ctx context.Context, version string, o UpdateOptions) (Result, error) {
-	res := Result{To: version}
-	return u.locked(&res, func() error { return u.update(ctx, version, o, &res) })
+	target, err := xrayver.UpdateTarget(version)
+	res := Result{To: target}
+	return u.locked(&res, func() error {
+		if err != nil {
+			return refuse(&res, err)
+		}
+		return u.update(ctx, target, o, &res)
+	})
 }
 
 // Rollback switches the runner, through the same trial, to the most recently

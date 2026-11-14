@@ -19,6 +19,7 @@ import (
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/health"
+	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
@@ -85,6 +86,8 @@ type fakeBackend struct {
 	// RefreshSubscription and SetDefaultPolicy, with the context they got.
 	gate func(method string, ctx context.Context)
 }
+
+func (f *fakeBackend) Leases(context.Context) ([]routeros.LeaseInfo, error) { return nil, f.err }
 
 func newFake() *fakeBackend {
 	return &fakeBackend{
@@ -246,6 +249,11 @@ func (f *fakeBackend) RemoveDevice(_ context.Context, rev uint64, a netip.Prefix
 	return f.change("RemoveDevice", rev, a)
 }
 
+func (f *fakeBackend) RepairNetwork(_ context.Context, rev uint64, fix service.NetworkRepair) (bool, uint64, error) {
+	next, err := f.change("RepairNetwork", rev, fix)
+	return false, next, err
+}
+
 func (f *fakeBackend) SetDefaultPolicy(ctx context.Context, rev uint64, p store.Policy) (uint64, error) {
 	f.enter("SetDefaultPolicy", ctx)
 	return f.change("SetDefaultPolicy", rev, p)
@@ -326,7 +334,7 @@ func newHandlerWithRoot(t testing.TB, b Backend, root string) http.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewHandler(b, root, a, auth.NewLimiter(nil))
+	return NewHandler(b, root, a, auth.NewLimiter(nil), "")
 }
 
 func mustJSON(t testing.TB, v any) string {
@@ -336,6 +344,20 @@ func mustJSON(t testing.TB, v any) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func TestManagedHealthReportsPublicInstallationID(t *testing.T) {
+	people, err := auth.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "bba00707962545289269840109d349f3"
+	srv := httptest.NewServer(NewHandler(newFake(), testToken, people, auth.NewLimiter(nil), id))
+	defer srv.Close()
+	r := request(t, srv, "GET", "/healthz", "", nil)
+	if r.status != http.StatusOK || strings.TrimSpace(string(r.body)) != `{"ok":true,"installation_id":"`+id+`"}` {
+		t.Fatal("managed health lacks the public identity or returned extra fields")
+	}
 }
 
 // sameJSON fails unless got and want are the same JSON value.

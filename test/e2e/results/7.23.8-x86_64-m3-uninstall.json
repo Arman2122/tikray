@@ -1,0 +1,26 @@
+[
+  {
+    "id": "keep_data",
+    "pass": true,
+    "detail": "Default keep restored routing and API access. Reinstall preserved the claimed admin, settings, UI identity and core.",
+    "seconds": 280.532
+  },
+  {
+    "id": "purge_owned_data",
+    "pass": true,
+    "detail": "Explicit purge removed the verified data root and owned bindings, and preserved the external owner data.",
+    "seconds": 101.819
+  },
+  {
+    "id": "shared_reference_refuses",
+    "pass": true,
+    "detail": "Foreign references, missing service proof and certificate substitution refused teardown.",
+    "seconds": 203.248
+  },
+  {
+    "id": "interrupted_and_repeat",
+    "pass": true,
+    "detail": "Removal resumed after a real interruption, restored ordinary traffic and repeated without owner changes.",
+    "seconds": 168.439
+  }
+]

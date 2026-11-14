@@ -1808,3 +1808,27 @@ func TestWithinReportsTheLastRealFailure(t *testing.T) {
 		t.Errorf("within = %v, want the last real failure, %v", err, cause)
 	}
 }
+
+func TestPrivateUpdateTargetNeverReachesHistory(t *testing.T) {
+	raw := "provider-" + strings.Repeat("x", 31)
+	u := CoreUpdater{Data: t.TempDir()}
+	res, err := u.Update(t.Context(), raw, UpdateOptions{})
+	hist, readErr := ReadHistory(u.Data)
+	if err == nil || readErr != nil || res.Outcome != OutcomeRefused || len(hist) != 1 ||
+		strings.Contains(fmt.Sprint(err, res, hist), raw) {
+		t.Fatal("invalid update target was accepted, echoed or persisted")
+	}
+}
+
+func TestHistoricalMalformedUpdateTargetIsPrivate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, historyName)
+	raw := "provider-" + strings.Repeat("x", 31)
+	if err := appendHistory(path, Result{To: raw, Outcome: OutcomeRefused, Detail: "invalid version " + raw, At: t0}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := readHistory(path)
+	if err != nil || len(rows) != 1 || rows[0].Outcome != OutcomeRefused || rows[0].At != t0 || strings.Contains(fmt.Sprint(rows), raw) {
+		t.Fatal("historic malformed version was exposed or its public outcome was lost")
+	}
+}

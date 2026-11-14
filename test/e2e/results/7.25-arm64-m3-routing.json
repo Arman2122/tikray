@@ -1,0 +1,56 @@
+[
+  {
+    "id": "policy_paths",
+    "pass": true,
+    "detail": "Direct, smart and full policy paths were distinguished by actual LAN egress and proxy observations.",
+    "seconds": 276.368
+  },
+  {
+    "id": "source_and_fasttrack",
+    "pass": true,
+    "detail": "Original source, owned marks, MSS and the FastTrack exception were verified with an unaffected peer.",
+    "seconds": 144.709
+  },
+  {
+    "id": "policy_mid_connection",
+    "pass": true,
+    "detail": "The affected connection changed path and the independent connection survived.",
+    "seconds": 145.595
+  },
+  {
+    "id": "failover",
+    "pass": true,
+    "detail": "After the selected server stopped, the LAN client reached the other proxy egress.",
+    "seconds": 62.119
+  },
+  {
+    "id": "dns_paths",
+    "pass": true,
+    "detail": "Native and steered DNS traffic reached the expected resolvers over TCP and UDP.",
+    "seconds": 35.493
+  },
+  {
+    "id": "ipv6_guard",
+    "pass": true,
+    "detail": "The proxied client encountered the IPv6 guard and the direct client retained external IPv6 connectivity.",
+    "seconds": 106.036
+  },
+  {
+    "id": "quic_sniff",
+    "pass": true,
+    "detail": "Real QUIC Initial packets distinguished name-based routing at the same destination address.",
+    "seconds": 29.888
+  },
+  {
+    "id": "drift_repair",
+    "pass": true,
+    "detail": "The service repaired owned drift. The WAN-side witness saw no closed-client leak during route loss.",
+    "seconds": 267.634
+  },
+  {
+    "id": "emergency_off",
+    "pass": true,
+    "detail": "Two owner commands restored ordinary routing with both containers stopped. Service recovery restored steering and protection.",
+    "seconds": 178.555
+  }
+]

@@ -1,6 +1,9 @@
 package xrayver
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParse(t *testing.T) {
 	for in, want := range map[string]string{"26.10.21": "26.10.21", "v26.1.18": "26.1.18", "v26.3.27": "26.3.27"} {
@@ -33,5 +36,19 @@ func TestAssetName(t *testing.T) {
 	}
 	if _, err := AssetName("mips"); err == nil {
 		t.Error("mips accepted")
+	}
+}
+
+func TestPublicUpdateTarget(t *testing.T) {
+	for raw, want := range map[string]string{"latest": "latest", "26.10.31": "26.10.31", "v26.10.31": "26.10.31"} {
+		if got, err := UpdateTarget(raw); err != nil || got != want {
+			t.Fatal("valid update target was lost")
+		}
+	}
+	for _, raw := range []string{"unknown-version", strings.Repeat("9", 80) + ".1.1", strings.Repeat("9", 19) + ".1.2"} {
+		got, err := UpdateTarget(raw)
+		if got != "" || err == nil || strings.Contains(err.Error(), raw) {
+			t.Fatal("invalid target was accepted or exposed")
+		}
 	}
 }

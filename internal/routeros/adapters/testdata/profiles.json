@@ -1,0 +1,521 @@
+[
+  {
+    "name": "stable CHR",
+    "version": "7.25",
+    "channel": "stable",
+    "arch": "x86_64",
+    "board": "CHR",
+    "wantVersion": "7.25",
+    "wantArch": "amd64",
+    "chr": true
+  },
+  {
+    "name": "long term CHR",
+    "version": "7.23.8 (long-term)",
+    "channel": "long-term",
+    "arch": "x86_64",
+    "board": "CHR",
+    "wantVersion": "7.23.8",
+    "wantArch": "amd64",
+    "chr": true
+  },
+  {
+    "name": "CHR with observed hypervisor label",
+    "version": "7.23.8 (long-term)",
+    "channel": "stable",
+    "arch": "x86_64",
+    "board": "CHR QEMU Ubuntu 26.04 PC (i440FX + PIIX, 1996)",
+    "wantVersion": "7.23.8",
+    "wantArch": "amd64",
+    "chr": true
+  },
+  {
+    "name": "ARM64 CHR with hypervisor label",
+    "version": "7.25 (stable)",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "CHR QEMU",
+    "wantVersion": "7.25",
+    "wantArch": "arm64",
+    "chr": true
+  },
+  {
+    "name": "stable ARM64 hardware",
+    "version": "7.25 (stable)",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009UG+S+",
+    "wantVersion": "7.25",
+    "wantArch": "arm64"
+  },
+  {
+    "name": "long term ARM64 hardware",
+    "version": "7.23.8",
+    "channel": "long-term",
+    "arch": "arm64",
+    "board": "hAP ax^3",
+    "wantVersion": "7.23.8",
+    "wantArch": "arm64"
+  },
+  {
+    "name": "ARM64 CHR",
+    "version": "7.25",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "CHR",
+    "wantVersion": "7.25",
+    "wantArch": "arm64",
+    "chr": true
+  },
+  {
+    "name": "channel independent bare release",
+    "version": "7.25",
+    "channel": "long-term",
+    "arch": "arm64",
+    "board": "RB5009",
+    "wantVersion": "7.25",
+    "wantArch": "arm64"
+  },
+  {
+    "name": "empty version",
+    "version": "",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "old major",
+    "version": "6.49.18",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "future major",
+    "version": "8.1",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "older minor",
+    "version": "7.9",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "untested family",
+    "version": "7.24",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "future minor",
+    "version": "7.26",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "future stable patch",
+    "version": "7.25.1",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "future long term patch",
+    "version": "7.23.9",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "older long term patch",
+    "version": "7.23.7",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "noncanonical zero patch",
+    "version": "7.25.0",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "missing patch",
+    "version": "7.23",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "extra component",
+    "version": "7.23.8.1",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "overflow major",
+    "version": "18446744073709551623.25",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "overflow minor",
+    "version": "7.18446744073709551641",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "overflow patch",
+    "version": "7.23.18446744073709551624",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "negative component",
+    "version": "7.-25",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "signed component",
+    "version": "+7.25",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "leading zero",
+    "version": "7.025",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "prefix",
+    "version": "v7.25",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "beta",
+    "version": "7.25beta1",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "candidate",
+    "version": "7.25rc1",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "development suffix",
+    "version": "7.25 (development)",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "installed long term with stable upgrade channel",
+    "version": "7.23.8 (long-term)",
+    "channel": "stable",
+    "wantVersion": "7.23.8",
+    "wantArch": "arm64",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "installed stable with long term upgrade channel",
+    "version": "7.25 (stable)",
+    "channel": "long-term",
+    "wantVersion": "7.25",
+    "wantArch": "arm64",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "testing release label with stable upgrade channel",
+    "version": "7.25 (testing)",
+    "channel": "stable",
+    "wantError": "routeros: unsupported version",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "mixed multiple release labels",
+    "version": "7.25 (stable) (long-term)",
+    "channel": "stable",
+    "wantError": "routeros: unsupported version",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "multiple suffixes",
+    "version": "7.25 (stable) (stable)",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "missing label space",
+    "version": "7.25(stable)",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "leading whitespace",
+    "version": " 7.25",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "trailing whitespace",
+    "version": "7.25 ",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "trailing newline",
+    "version": "7.25\n",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "nul suffix",
+    "version": "7.25\u0000",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "testing channel",
+    "version": "7.25",
+    "channel": "testing",
+    "wantError": "routeros: unsupported channel",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "channel case",
+    "version": "7.25",
+    "channel": "Stable",
+    "wantError": "routeros: unsupported channel",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "channel alias",
+    "version": "7.25",
+    "channel": "longterm",
+    "wantError": "routeros: unsupported channel",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "channel whitespace",
+    "version": "7.25",
+    "channel": "stable ",
+    "wantError": "routeros: unsupported channel",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "ARM32",
+    "version": "7.25",
+    "arch": "arm",
+    "wantError": "routeros: unsupported platform",
+    "channel": "stable",
+    "board": "RB5009"
+  },
+  {
+    "name": "amd64 alias",
+    "version": "7.25",
+    "arch": "amd64",
+    "board": "CHR",
+    "wantError": "routeros: unsupported platform",
+    "channel": "stable"
+  },
+  {
+    "name": "x86 hardware",
+    "version": "7.25",
+    "arch": "x86_64",
+    "board": "x86",
+    "wantError": "routeros: unsupported platform",
+    "channel": "stable"
+  },
+  {
+    "name": "CHR lookalike",
+    "version": "7.25",
+    "arch": "x86_64",
+    "board": "CHR-appliance",
+    "wantError": "routeros: unsupported platform",
+    "channel": "stable"
+  },
+  {
+    "name": "CHR missing separator",
+    "version": "7.25",
+    "arch": "x86_64",
+    "board": "CHRQEMU",
+    "wantError": "routeros: unsupported platform",
+    "channel": "stable"
+  },
+  {
+    "name": "CHR empty hypervisor label",
+    "version": "7.25",
+    "arch": "x86_64",
+    "board": "CHR ",
+    "wantError": "routeros: unsupported platform",
+    "channel": "stable"
+  },
+  {
+    "name": "CHR hypervisor leading space",
+    "version": "7.25",
+    "arch": "x86_64",
+    "board": "CHR  QEMU",
+    "wantError": "routeros: unsupported platform",
+    "channel": "stable"
+  },
+  {
+    "name": "CHR hypervisor trailing space",
+    "version": "7.25",
+    "arch": "x86_64",
+    "board": "CHR QEMU ",
+    "wantError": "routeros: unsupported platform",
+    "channel": "stable"
+  },
+  {
+    "name": "CHR tab separator",
+    "version": "7.25",
+    "arch": "x86_64",
+    "board": "CHR\tQEMU",
+    "wantError": "routeros: unsupported platform",
+    "channel": "stable"
+  },
+  {
+    "name": "CHR embedded prefix",
+    "version": "7.25",
+    "arch": "x86_64",
+    "board": "xCHR QEMU",
+    "wantError": "routeros: unsupported platform",
+    "channel": "stable"
+  },
+  {
+    "name": "CHR case",
+    "version": "7.25",
+    "arch": "x86_64",
+    "board": "chr",
+    "wantError": "routeros: unsupported platform",
+    "channel": "stable"
+  },
+  {
+    "name": "board newline",
+    "version": "7.25",
+    "arch": "arm64",
+    "board": "RB5009\n",
+    "wantError": "routeros: unsupported platform",
+    "channel": "stable"
+  },
+  {
+    "name": "board whitespace",
+    "version": "7.25",
+    "arch": "arm64",
+    "board": " RB5009",
+    "wantError": "routeros: unsupported platform",
+    "channel": "stable"
+  },
+  {
+    "name": "board control",
+    "version": "7.25",
+    "arch": "arm64",
+    "board": "RB\u00005009",
+    "wantError": "routeros: unsupported platform",
+    "channel": "stable"
+  },
+  {
+    "name": "oversized version",
+    "wantError": "routeros: unsupported version",
+    "version": "77777777777777777777777777777777777777777777777777777777777777777",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "oversized board",
+    "version": "7.25",
+    "arch": "arm64",
+    "wantError": "routeros: unsupported platform",
+    "board": "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR",
+    "channel": "stable"
+  },
+  {
+    "name": "missing channel",
+    "version": "7.25",
+    "channel": "",
+    "arch": "arm64",
+    "board": "RB5009",
+    "wantError": "routeros: unsupported channel"
+  },
+  {
+    "name": "missing architecture",
+    "version": "7.25",
+    "channel": "stable",
+    "arch": "",
+    "board": "CHR",
+    "wantError": "routeros: unsupported platform"
+  },
+  {
+    "name": "missing board",
+    "version": "7.25",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "",
+    "wantError": "routeros: unsupported platform"
+  }
+]

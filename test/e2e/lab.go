@@ -15,6 +15,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -95,7 +96,9 @@ var serverEgress = map[string]string{"a": "203.0.113.10", "b": "203.0.113.11"}
 // and a mirror with a signed hash index (203.0.113.41) serving Releases, and
 // subscriptions (http://203.0.113.30/sub/<name>) serving Subs.
 type Lab struct {
-	Net *lab.Network
+	workDir string
+	owner   *testing.T
+	Net     *lab.Network
 	// Inet is the fake internet, whose VLESS servers a test can stop and
 	// start.
 	Inet    *lab.Inet
@@ -126,6 +129,8 @@ func e2eDir() string {
 
 func repoRoot() string { return filepath.Join(e2eDir(), "..", "..") }
 
+func resultDirectory() string { return env("TIKRAY_LAB_RESULTS", filepath.Join(e2eDir(), "results")) }
+
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -144,31 +149,8 @@ func labArch() lab.Arch { return lab.Arch(env("TIKRAY_LAB_ARCH", string(lab.Arch
 func Deploy(ctx context.Context, t *testing.T) *Lab {
 	t.Helper()
 	runnerAPI = nil
-	l := &Lab{Arch: labArch(), Zips: map[string]string{}}
-	var err error
-	if l.Version, err = lab.ResolveChannel(ctx, "", env("TIKRAY_LAB_CHANNEL", "stable")); err != nil {
-		t.Fatal(err)
-	}
-	art, err := lab.FetchCHR(ctx, "", lab.CacheDir(), l.Version, l.Arch)
-	if err != nil {
-		t.Fatal(err)
-	}
-	goarch := l.Arch.GOARCH()
-	if l.Asset, err = xrayver.AssetName(goarch); err != nil {
-		t.Fatal(err)
-	}
-
-	wd, err := os.MkdirTemp("", "tikray-e2e-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if t.Failed() {
-			t.Logf("kept work dir %s", wd)
-			return
-		}
-		os.RemoveAll(wd)
-	})
+	l, art := newLab(ctx, t, t)
+	wd, goarch := l.workDir, l.Arch.GOARCH()
 	runnerImage, tikrayImage, err := buildImages(ctx, goarch)
 	if err != nil {
 		t.Fatal(err)
@@ -182,28 +164,7 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 		t.Fatal(err)
 	}
 
-	if l.Net, err = lab.SetupNetwork(ctx); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { l.Net.Teardown() })
-	l.Subs = filepath.Join(wd, "subs")
-	if err := os.MkdirAll(l.Subs, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if l.Inet, err = lab.StartInetLab(ctx, l.Net, lab.InetOptions{ReleasesDir: l.Releases, SubsDir: l.Subs}); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(l.Inet.Stop)
-
-	if l.CHR, err = lab.BootReadyCHR(ctx, l.Net, lab.BootOptions{
-		Version: l.Version, Arch: l.Arch, Artifacts: art, WorkDir: filepath.Join(wd, "vm"), Password: "tikray-lab",
-		// What the harness worked around, such as a push it had to retry,
-		// shows in a run that passes too.
-		Notef: t.Logf,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { l.CHR.Shutdown() })
+	bootLab(ctx, t, l, art)
 	c := l.CHR
 	if err := c.EnableContainers(ctx); err != nil {
 		t.Fatal(err)
@@ -244,6 +205,78 @@ func Deploy(ctx context.Context, t *testing.T) *Lab {
 		t.Fatal(err)
 	}
 	return l
+}
+
+// newLab allocates the disposable target. No installer or M1 image is
+// imported here, so the M3 tests can exercise every bootstrap operation.
+func newLab(ctx context.Context, t, owner *testing.T) (*Lab, lab.Artifacts) {
+	t.Helper()
+	l := &Lab{owner: owner, Arch: labArch(), Zips: map[string]string{}}
+	var err error
+	if l.Version, err = lab.ResolveChannel(ctx, "", env("TIKRAY_LAB_CHANNEL", "stable")); err != nil {
+		t.Fatal(err)
+	}
+	art, err := lab.FetchCHR(ctx, "", lab.CacheDir(), l.Version, l.Arch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goarch := l.Arch.GOARCH()
+	if l.Asset, err = xrayver.AssetName(goarch); err != nil {
+		t.Fatal(err)
+	}
+
+	wd, err := os.MkdirTemp("", "tikray-e2e-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.owner.Cleanup(func() {
+		if l.owner.Failed() {
+			t.Logf("kept work dir %s", wd)
+			return
+		}
+		os.RemoveAll(wd)
+	})
+	l.workDir = wd
+	return l, art
+}
+
+func bootLab(ctx context.Context, t *testing.T, l *Lab, art lab.Artifacts) {
+	t.Helper()
+	wd := l.workDir
+	var err error
+	if _, err := net.InterfaceByName("tklab-wan"); err == nil {
+		t.Fatal("shared CHR lab is in use")
+	}
+	if l.Net, err = lab.SetupNetwork(ctx); err != nil {
+		t.Fatal(err)
+	}
+	l.owner.Cleanup(func() { l.Net.Teardown() })
+	l.Subs = filepath.Join(wd, "subs")
+	if err := os.MkdirAll(l.Subs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if l.Inet, err = lab.StartInetLab(ctx, l.Net, lab.InetOptions{ReleasesDir: l.Releases, SubsDir: l.Subs}); err != nil {
+		t.Fatal(err)
+	}
+	l.owner.Cleanup(l.Inet.Stop)
+
+	// The cache is shared with the scoped capability probes. Reusing its
+	// private credential avoids replacing a good ready image.
+	pass := "tikray-lab"
+	if b, e := os.ReadFile(filepath.Join(lab.CacheDir(), "ready", l.Version, string(l.Arch), "password")); e == nil && len(b) > 0 {
+		pass = string(b)
+	} else if e != nil && !errors.Is(e, os.ErrNotExist) {
+		t.Fatal("could not read ready-image credential")
+	}
+	if l.CHR, err = lab.BootReadyCHR(ctx, l.Net, lab.BootOptions{
+		Version: l.Version, Arch: l.Arch, Artifacts: art, WorkDir: filepath.Join(wd, "vm"), Password: pass,
+		// What the harness worked around, such as a push it had to retry,
+		// shows in a run that passes too.
+		Notef: t.Logf,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	l.owner.Cleanup(func() { l.CHR.Shutdown() })
 }
 
 // buildImages uses the archives from make images when TIKRAY_LAB_IMAGES
@@ -303,7 +336,7 @@ func fakeXray(ctx context.Context, dir, mode, goarch string) (string, error) {
 // unverified core is only installed from the inbox. The signed hash index
 // lists only 26.3.27; buildReleases returns the PEM key it is signed with.
 func (l *Lab) buildReleases(ctx context.Context, wd, goarch string) ([]byte, error) {
-	newestTag, err := lab.ResolveXrayVersion(ctx, "latest")
+	newestTag, err := lab.ResolveXrayVersion(ctx, lab.LabXrayVersion())
 	if err != nil {
 		return nil, err
 	}
@@ -475,23 +508,29 @@ func runTikray(ctx context.Context, c *lab.CHR, args string) (artifacts.Result, 
 		case st != "stopped":
 			ran = true
 		default:
-			body, err := c.Get(ctx, fileContents(lastResult))
-			if err == nil && body != "" {
-				if err := json.Unmarshal([]byte(body), &res); err != nil {
-					return res, fmt.Errorf("tikray %s: last-result.json: %v: %q", args, err, body)
-				}
-				return res, nil
+			body, err := c.RunPrivate(ctx, ":put ["+fileContents(lastResult)+"]")
+			if err == nil && strings.TrimSpace(body) != "" {
+				return decodeCLIResult(body)
 			}
 			// A container that stopped before this loop saw it run may
 			// not have been started at all.
 			if ran || time.Since(start) > time.Minute {
-				return res, fmt.Errorf("tikray %s stopped without a result (%v); container log:\n%s", args, err, containerLog(c, 30))
+				return res, errors.New("lab: tikray stopped without a CLI result")
 			}
 		}
 		if err := sleep(ctx, 2*time.Second); err != nil {
-			return res, fmt.Errorf("tikray %s: %w; container log:\n%s", args, err, containerLog(c, 30))
+			return res, fmt.Errorf("lab: waiting for CLI result: %w", err)
 		}
 	}
+}
+
+// A corrupt result or a container log can include private router input.
+func decodeCLIResult(body string) (artifacts.Result, error) {
+	var res artifacts.Result
+	if json.Unmarshal([]byte(body), &res) != nil {
+		return artifacts.Result{}, errors.New("lab: malformed CLI result")
+	}
+	return res, nil
 }
 
 // serveWithin is how long the tikray container may take to start or to stop:
@@ -646,7 +685,7 @@ type result struct {
 func (l *Lab) recordChecks(t *testing.T, suite string) (check func(id string, f func(t *testing.T, note func(string, ...any)))) {
 	var results []result
 	t.Cleanup(func() {
-		dir := filepath.Join(e2eDir(), "results")
+		dir := resultDirectory()
 		os.MkdirAll(dir, 0o755)
 		b, _ := json.MarshalIndent(results, "", "  ")
 		name := fmt.Sprintf("%s-%s-%s", l.Version, l.Arch, suite)
@@ -665,7 +704,12 @@ func (l *Lab) recordChecks(t *testing.T, suite string) (check func(id string, f 
 			note := func(format string, args ...any) { notes = append(notes, fmt.Sprintf(format, args...)) }
 			start := time.Now()
 			defer func() {
-				results = append(results, result{ID: id, Pass: !t.Failed(), Detail: strings.Join(notes, "; "), Seconds: time.Since(start).Round(100 * time.Millisecond).Seconds()})
+				passed := !t.Failed() && !t.Skipped()
+				detail := "Check did not complete successfully."
+				if passed {
+					detail = strings.Join(notes, "; ")
+				}
+				results = append(results, result{ID: id, Pass: passed, Detail: detail, Seconds: time.Since(start).Round(100 * time.Millisecond).Seconds()})
 			}()
 			f(t, note)
 		})
@@ -700,19 +744,6 @@ func waitContainer(ctx context.Context, c *lab.CHR, name, want string) error {
 			return fmt.Errorf("container %s is %q (%v), want %s: %w", name, st, err, want, ctx.Err())
 		}
 	}
-}
-
-// containerLog is the last n lines RouterOS logged under the container topic,
-// where the containers' output goes (logging=yes).
-func containerLog(c *lab.CHR, n int) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	out, err := readContainerLog(ctx, c)
-	if err != nil {
-		return err.Error()
-	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	return strings.Join(lines[max(0, len(lines)-n):], "\n")
 }
 
 // Read each message value in RouterOS log order. /log/print formats a table

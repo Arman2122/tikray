@@ -156,6 +156,9 @@ type NewServer struct {
 // ignored in a link (its warnings) is recorded as one warning event each,
 // once the server is saved.
 func (s *Service) AddServer(ctx context.Context, rev uint64, n NewServer) (store.Server, uint64, error) {
+	if s.bootPending.Load() {
+		return store.Server{}, 0, ErrBootstrapPending
+	}
 	var link *string
 	if strings.TrimSpace(n.Link) != "" {
 		link = &n.Link
@@ -176,7 +179,7 @@ func (s *Service) AddServer(ctx context.Context, rev uint64, n NewServer) (store
 	if err != nil {
 		return store.Server{}, 0, err
 	}
-	st, next, err := s.change(rev, tested)
+	st, next, err := s.change(ctx, rev, tested)
 	if err != nil {
 		return store.Server{}, 0, err
 	}
@@ -201,6 +204,9 @@ type ServerPatch struct {
 // link or outbound as AddServer's does, and no other change; a new link's
 // warnings are recorded as AddServer's are.
 func (s *Service) UpdateServer(ctx context.Context, rev uint64, id string, p ServerPatch) (store.Server, uint64, error) {
+	if s.bootPending.Load() {
+		return store.Server{}, 0, ErrBootstrapPending
+	}
 	var src source
 	replace := p.Link != nil || len(p.Outbound) > 0
 	if replace {
@@ -239,7 +245,7 @@ func (s *Service) UpdateServer(ctx context.Context, rev uint64, id string, p Ser
 			return store.Server{}, 0, err
 		}
 	}
-	st, next, err := s.change(rev, patch)
+	st, next, err := s.change(ctx, rev, patch)
 	if err != nil {
 		return store.Server{}, 0, err
 	}
@@ -251,7 +257,7 @@ func (s *Service) UpdateServer(ctx context.Context, rev uint64, id string, p Ser
 // send traffic through it are dropped, each with a cleanup event: the state
 // would be invalid otherwise.
 func (s *Service) RemoveServer(ctx context.Context, rev uint64, id string) (uint64, error) {
-	_, next, err := s.change(rev, func(st *store.State) ([]note, error) {
+	_, next, err := s.change(ctx, rev, func(st *store.State) ([]note, error) {
 		i := serverIndex(st.Servers, id)
 		if i < 0 {
 			return nil, notFound(*st, "server", id)

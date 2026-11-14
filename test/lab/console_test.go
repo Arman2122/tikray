@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -64,5 +66,28 @@ func TestConsoleCommandReportsRouterOSError(t *testing.T) {
 	}
 	if err := c.command(ctx, "/ip/service/set ssh disabled=no"); err != nil {
 		t.Errorf("good command: %v", err)
+	}
+}
+
+func TestConsoleKeepsPeerOutputPrivate(t *testing.T) {
+	const witness = "private-console-witness"
+	c := fakeShell(t, func(string) string { return "failure: " + witness + "\r\n" })
+	if err := c.command(t.Context(), witness); err == nil || strings.Contains(err.Error(), witness) {
+		t.Error("console command diagnostic exposed private output or did not report rejection")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
+	defer cancel()
+	if _, err := c.expect(ctx, time.Hour, regexp.MustCompile("never-match")); err == nil || strings.Contains(err.Error(), witness) {
+		t.Error("console timeout exposed the pending prompt or did not expire")
+	}
+	files, err := filepath.Glob(c.log.Name() + "*")
+	if err != nil || len(files) == 0 {
+		t.Fatal("missing console diagnostic")
+	}
+	for _, file := range files {
+		b, err := os.ReadFile(file)
+		if err != nil || strings.Contains(string(b), witness) {
+			t.Error("console log retained private input or output")
+		}
 	}
 }

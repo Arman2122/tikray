@@ -19,6 +19,7 @@ import (
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/health"
+	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -87,6 +88,8 @@ type fakeBackend struct {
 	// gate, if set, runs in ApplyNow, CoreUpdate and CoreRollback.
 	gate func(ctx context.Context)
 }
+
+func (f *fakeBackend) Leases(context.Context) ([]routeros.LeaseInfo, error) { return nil, nil }
 
 var _ api.Backend = (*fakeBackend)(nil)
 
@@ -276,6 +279,11 @@ func (f *fakeBackend) RemoveDevice(_ context.Context, rev uint64, addr netip.Pre
 	return f.rev + 1, f.err
 }
 
+func (f *fakeBackend) RepairNetwork(_ context.Context, rev uint64, fix service.NetworkRepair) (bool, uint64, error) {
+	f.rec("RepairNetwork", rev, fix)
+	return false, f.rev + 1, f.err
+}
+
 func (f *fakeBackend) SetDefaultPolicy(_ context.Context, rev uint64, p store.Policy) (uint64, error) {
 	f.rec("SetDefaultPolicy", rev, p)
 	return f.rev + 1, f.err
@@ -308,7 +316,7 @@ func apiHandler(t testing.TB, b api.Backend, token string) http.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return api.NewHandler(b, token, a, auth.NewLimiter(nil))
+	return api.NewHandler(b, token, a, auth.NewLimiter(nil), "")
 }
 
 // daemon is the fake backend behind the real API handler, on a TLS test

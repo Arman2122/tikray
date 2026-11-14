@@ -67,15 +67,20 @@ type Store struct {
 	mu    sync.Mutex // held across the write in Update
 	state State
 	rev   uint64
+	// A failed replacement can have renamed its file before directory sync
+	// failed. The memory revision is still the last acknowledged one.
+	writeUncertain bool
 
 	degraded []string // what Open disabled; never changed after it
 }
 
 // Open opens the state in dir, creating dir (mode 0700) if it is missing. It
 // loads the newest state file this program can read, migrates it to Current
-// if it is older, and checks it with Validate. A directory without a state
-// file gives Default() at revision 0, and nothing is written until the first
-// Update.
+// if it is older, and checks it with the rules for stored state. A legacy
+// overlap with a router-reserved range or the container bridge stays available
+// for correction. Validate refuses it for writes and rendering. A directory
+// without a state file gives Default() at revision 0, and nothing is written
+// until the first Update.
 //
 // A server that fails the checks on its own (its name, the shape and protocol
 // of its outbound, and what xraypolicy refuses) does not make Open fail, as it
@@ -131,12 +136,10 @@ func openWith(dir string, current int, steps map[int]migration) (*Store, error) 
 	return s, nil
 }
 
-// admit checks a loaded state with Validate. A state that fails it only for
-// servers that fail the checks on their own (see State.degrade) is returned
-// with those servers disabled, and their IDs. Any other failure is an error:
-// the one Validate gives for the state with those servers disabled.
+// admit returns the stored state with any individually invalid servers
+// disabled, together with their IDs. All other M2 checks still apply.
 func admit(st State) (State, []string, error) {
-	err := st.Validate()
+	err := st.storedProblems().err()
 	if err == nil {
 		return st, []string{}, nil
 	}
@@ -144,7 +147,7 @@ func admit(st State) (State, []string, error) {
 	if len(ids) == 0 {
 		return State{}, nil, err
 	}
-	if err := held.Validate(); err != nil {
+	if err := held.storedProblems().err(); err != nil {
 		return State{}, nil, err
 	}
 	return held, ids, nil
@@ -256,6 +259,22 @@ func (s *Store) State() (State, uint64) {
 	return s.state.Clone(), s.rev
 }
 
+// EnsureDurable restores the acknowledged snapshot after a failed write.
+// Router steering must keep its transition guard until a restart would
+// load the same revision the live service is about to apply.
+func (s *Store) EnsureDurable() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.writeUncertain {
+		return nil
+	}
+	if err := s.write(s.state, s.rev); err != nil {
+		return fmt.Errorf("store: confirming the acknowledged revision: %w", err)
+	}
+	s.writeUncertain = false
+	return nil
+}
+
 // Degraded returns the IDs of the servers that Open disabled because they fail
 // this tikray's checks, in state order, or an empty list if there are none. It
 // is what Open found and does not change: a server that the file already held
@@ -301,8 +320,10 @@ func (s *Store) Update(rev uint64, fn func(*State) error) (State, uint64, error)
 		return State{}, 0, err
 	}
 	if err := s.write(next, s.rev+1); err != nil {
+		s.writeUncertain = true
 		return State{}, 0, fmt.Errorf("store: %s: %w", stateName(s.current), err)
 	}
+	s.writeUncertain = false
 	s.rev++
 	// The store keeps a copy of its own, out of reach of whatever fn kept a
 	// hold of and of whatever the caller does with the result.

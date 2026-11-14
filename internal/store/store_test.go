@@ -83,6 +83,43 @@ func get(t *testing.T, dir, name string) []byte {
 	return b
 }
 
+func TestLegacyOverlapCanBeCorrected(t *testing.T) {
+	dir := t.TempDir()
+	old := valid()
+	old.Servers[0].Outbound = json.RawMessage(fmt.Sprintf(trojanTLS, "server.example"))
+	old.Devices[0].Address = old.Network.Subnet
+	raw, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal("could not encode legacy state")
+	}
+	original := fileJSON(Current, 7, string(raw))
+	put(t, dir, stateName(Current), original)
+
+	s := mustOpen(t, dir)
+	st, rev := s.State()
+	if rev != 7 || st.Validate() == nil || !bytes.Equal(get(t, dir, stateName(Current)), original) {
+		t.Fatal("expected unchanged legacy file and a state refused for activation")
+	}
+	if _, _, err := s.Update(rev, func(st *State) error {
+		st.Health = Default().Health
+		return nil
+	}); err == nil {
+		t.Fatal("accepted a write retaining the overlap")
+	}
+	_, _, err = s.Update(rev, func(st *State) error {
+		st.Devices[0].Address = netip.MustParsePrefix("192.168.88.5/32")
+		return nil
+	})
+	if err != nil {
+		t.Fatal("refused correction")
+	}
+	st, rev = mustOpen(t, dir).State()
+	old.Devices[0].Address = netip.MustParsePrefix("192.168.88.5/32")
+	if rev != 8 || st.Validate() != nil || compact(t, st) != compact(t, old) {
+		t.Fatal("correction failed to preserve servers and subscriptions")
+	}
+}
+
 // names lists what dir holds, sorted.
 func names(t *testing.T, dir string) []string {
 	t.Helper()

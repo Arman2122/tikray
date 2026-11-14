@@ -57,6 +57,20 @@ type Runner interface {
 	Test(ctx context.Context, config []byte) (runnerapi.TestResult, error)
 }
 
+// A reserved legacy bridge cannot identify a trusted runner. Until serve is
+// restarted after repair, even a status request would send its token there.
+type unavailableBridge struct{}
+
+func (unavailableBridge) Status(context.Context) (runnerapi.Status, error) {
+	return runnerapi.Status{}, errBridgeRepair
+}
+
+func (unavailableBridge) Test(context.Context, []byte) (runnerapi.TestResult, error) {
+	return runnerapi.TestResult{}, errBridgeRepair
+}
+
+var errBridgeRepair = fmt.Errorf("%w: repair the container bridge over HTTPS and restart tikray serve", ErrRunnerUnavailable)
+
 // Updaters builds the CoreUpdater for a state and its revision: Render renders
 // st, NoState is rev == 0 (a state never saved), and Health and ProxyHealth
 // check the trial. The service sets Redact on what it returns, so the factory
@@ -71,6 +85,10 @@ type Config struct {
 	Store    *store.Store
 	Updaters Updaters
 	Runner   Runner
+	// Router manages steering when the installer configured a RouterOS peer.
+	Router       RouterController
+	Bootstrap    *Bootstrap // pending installer handoff, nil for an established installation
+	VerifyBridge bool       // installer credentials must stay on the assigned local bridge
 	// Monitor, if set, runs with Run, and gives Status its health. When its
 	// State is nil, New sets it to read the service's state.
 	Monitor *health.Monitor
@@ -97,19 +115,35 @@ type Config struct {
 	// the default Fetcher takes its second attempt through. Empty means the
 	// default Fetcher goes direct only.
 	Socks string
+	// LocalBridge verifies that the control container has the proposed .2
+	// address and exact prefix. Without it a bridge repair cannot be trusted.
+	LocalBridge func(store.Network) bool
 }
 
 // Service owns the desired state and keeps xray applied to it.
 type Service struct {
+	bootstrap   *Bootstrap
+	bootPending atomic.Bool
+	// The runner endpoints cannot be used during this process's lifetime
+	// if they were derived from an unsafe legacy bridge at startup.
+	repairBridge bool
+	localBridge  func(store.Network) bool
+
 	store    *store.Store
 	updaters Updaters
 	runner   Runner
 	monitor  *health.Monitor
-	data     string
-	debounce time.Duration
-	retry    time.Duration
-	now      func() time.Time
-	log      io.Writer
+	router   RouterController
+	// Tests may drive the router's 30 s ticker independently of apply timers.
+	routerSweep <-chan time.Time
+	routerHints chan struct{}
+	// routerReady closes after this process verifies its first effective router policy.
+	routerReady chan struct{}
+	data        string
+	debounce    time.Duration
+	retry       time.Duration
+	now         func() time.Time
+	log         io.Writer
 
 	// lock is held by the loop's pass, ApplyNow, CoreUpdate and CoreRollback
 	// while each runs: a channel, so that a caller's context can end the
@@ -128,9 +162,11 @@ type Service struct {
 	// kicked counts the kicks, and served is the count a pass that ended
 	// had read when it started: the kicks up to it are served. retrying is
 	// set while the loop waits to retry a pass.
-	kicked, served uint64
-	retrying       bool
-	lastApply      *artifacts.Result
+	kicked, served  uint64
+	retrying        bool
+	lastApply       *artifacts.Result
+	routerStatus    RouterStatus
+	routerSelection runnerapi.Selection
 	// renderErr is the render error last recorded, so that Status records
 	// each one once.
 	renderErr string
@@ -171,24 +207,47 @@ func New(c Config) (*Service, error) {
 	case c.Data == "":
 		return nil, errors.New("service: Config.Data is not set")
 	}
+	st, _ := c.Store.State()
+	if c.LocalBridge == nil {
+		c.LocalBridge = func(store.Network) bool { return false }
+	}
+	repairBridge := store.ValidateRouterNetwork(st.Network, nil) != nil ||
+		(st.Network.RequireLocalBridge || c.VerifyBridge) && !c.LocalBridge(st.Network)
+	if repairBridge {
+		c.Runner, c.Monitor, c.Socks = unavailableBridge{}, nil, ""
+	}
 	s := &Service{
-		store:    c.Store,
-		updaters: c.Updaters,
-		runner:   c.Runner,
-		monitor:  c.Monitor,
-		data:     c.Data,
-		debounce: orDefault(c.Debounce, defaultDebounce),
-		retry:    orDefault(c.Retry, defaultRetry),
-		now:      c.Now,
-		log:      c.Log,
-		lock:     make(chan struct{}, 1),
-		kicks:    make(chan struct{}, 1),
+		bootstrap:    c.Bootstrap,
+		repairBridge: repairBridge,
+		localBridge:  c.LocalBridge,
+
+		store:        c.Store,
+		updaters:     c.Updaters,
+		runner:       c.Runner,
+		router:       c.Router,
+		routerHints:  make(chan struct{}, 1),
+		routerReady:  make(chan struct{}),
+		routerStatus: RouterStatus{Pending: c.Router != nil},
+		monitor:      c.Monitor,
+		data:         c.Data,
+		debounce:     orDefault(c.Debounce, defaultDebounce),
+		retry:        orDefault(c.Retry, defaultRetry),
+		now:          c.Now,
+		log:          c.Log,
+		lock:         make(chan struct{}, 1),
+		kicks:        make(chan struct{}, 1),
 
 		fetcher:    c.Fetcher,
 		refreshing: make(chan struct{}, 1),
 		holds:      map[string]time.Time{},
 		after:      realTimer,
 		schedAfter: realTimer,
+	}
+	if c.Bootstrap != nil {
+		if c.Bootstrap.Version == "" || c.Bootstrap.Ready == nil {
+			return nil, errors.New("service: incomplete bootstrap configuration")
+		}
+		s.bootPending.Store(true)
 	}
 	if s.now == nil {
 		s.now = time.Now
@@ -205,7 +264,10 @@ func New(c Config) (*Service, error) {
 			}
 		}
 	}
-	st, _ := c.Store.State()
+	if repairBridge {
+		s.routerStatus.Degraded = "bridge_repair"
+		s.record(KindDegraded, errBridgeRepair.Error())
+	}
 	for _, id := range c.Store.Degraded() {
 		i := slices.IndexFunc(st.Servers, func(srv store.Server) bool { return srv.ID == id })
 		if i < 0 {
@@ -227,7 +289,33 @@ func (s *Service) Run(ctx context.Context) error {
 		return errors.New("service: Run is already running")
 	}
 	defer s.running.Store(false)
+	if s.repairBridge {
+		<-ctx.Done()
+		return nil
+	}
 	var wg sync.WaitGroup
+	if s.router != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.watchRouter(ctx)
+		}()
+	}
+	// Management is already listening. Ordinary applies and refreshes can
+	// start once the committed selection has survived the durable handshake.
+	for s.bootPending.Load() {
+		err := s.BootstrapCore(ctx, s.bootstrap.Version)
+		if err == nil {
+			break
+		}
+		s.routerPending("retry_bootstrap")
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return nil
+		case <-time.After(s.retry):
+		}
+	}
 	if s.monitor != nil {
 		wg.Add(1)
 		go func() {
@@ -252,8 +340,11 @@ func (s *Service) State() (store.State, uint64) { return s.store.State() }
 type Status struct {
 	Revision uint64 `json:"revision"`
 	// Applied: the render of the current state, for the runner's active core
-	// and geo, is the runner's active config.
+	// and geo, is the runner's active config and, when managed, the router
+	// has verified the same revision and committed selection.
 	Applied bool `json:"applied"`
+	// Router reports the last verified effective steering revision.
+	Router *RouterStatus `json:"routeros,omitempty"`
 	// Pending: the loop has an apply to make, waiting for the debounce or
 	// for a retry, or making it now.
 	Pending bool `json:"pending"`
@@ -287,16 +378,36 @@ func (s *Service) Status(ctx context.Context) Status {
 	}
 	s.mu.Lock()
 	out.Pending = s.kicked != s.served || s.retrying
+	verified := s.routerSelection
+	if s.router != nil {
+		router := s.routerStatus
+		router.Pending = router.Pending || router.Revision != rev || router.LastVerified.IsZero()
+		out.Router = &router
+		out.Pending = out.Pending || router.Pending
+	}
 	if s.lastApply != nil {
 		r := *s.lastApply
 		out.LastApply = &r
 	}
 	s.mu.Unlock()
 
+	if s.bootPending.Load() {
+		out.Pending = true
+		if out.Router != nil {
+			out.Router.Pending = true
+			if !s.repairBridge {
+				out.Router.Degraded = "retry_bootstrap"
+			}
+		}
+		return out
+	}
 	rctx, cancel := context.WithTimeout(ctx, statusTimeout)
 	rs, err := s.runner.Status(rctx)
 	cancel()
 	if err != nil || rs.Active == nil {
+		if out.Router != nil {
+			out.Pending, out.Router.Pending = true, true
+		}
 		return out
 	}
 	out.Core = rs.Active.Core
@@ -306,6 +417,11 @@ func (s *Service) Status(ctx context.Context) Status {
 	name, err := configName(s.updater(st, rev), rs.Active)
 	s.noteRender(rev, err, false)
 	out.Applied = err == nil && name == rs.Active.Config && !artifacts.HotPending(s.data)
+	if out.Router != nil {
+		out.Applied = out.Applied && rs.State == runnerapi.StateRunning && rs.Candidate == nil && verified == *rs.Active && !out.Router.Pending
+		out.Router.Pending = !out.Applied
+		out.Pending = out.Pending || !out.Applied
+	}
 	return out
 }
 

@@ -15,6 +15,37 @@ import (
 // The id of the server withServer adds; it is in serverOutbound.
 const serverSecret = "b831381d-6324-4d53-ad4f-8cda48b30811"
 
+func TestManagedOfflineUpdaterRequiresServe(t *testing.T) {
+	vars, data, runner := trialEnv(t, &runnerapi.Selection{Core: "26.10.21", Config: testConfigRel})
+	writeState(t, data, dnsRemote("9.9.9.9"))
+	path := filepath.Join(data, "state", "routeros.json")
+	// A dangling installer-provided link is a broken configuration, too.
+	if err := os.Symlink("missing", path); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"apply"}, {"core", "update", "26.10.21"}, {"core", "rollback"}} {
+		code, stdout, stderr := runFast(t, vars, args...)
+		if code != 1 || !strings.Contains(stdout+stderr, "tikray serve") {
+			t.Errorf("offline %s did not require the protected service", args[0])
+		}
+	}
+	runner.mu.Lock()
+	trials := len(runner.cands)
+	runner.mu.Unlock()
+	if trials != 0 {
+		t.Fatal("offline update started a trial without router protection")
+	}
+	if code, _, _ := runFast(t, vars, "core", "status"); code != 0 {
+		t.Fatal("read-only core status unavailable")
+	}
+	if err := os.Rename(path, filepath.Join(data, "state", "router-policy.json")); err != nil {
+		t.Fatal("journal fixture")
+	}
+	if code, out, msg := runFast(t, vars, "apply"); code != 1 || !strings.Contains(out+msg, "tikray serve") {
+		t.Fatal("missing config allowed offline writes with a managed journal")
+	}
+}
+
 // An xray that rejects a config can quote the credentials it was given. On the
 // direct paths, as in the daemon, what the commands print and what they record
 // has the state's secrets redacted.
