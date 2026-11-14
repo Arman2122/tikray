@@ -21,6 +21,21 @@ import (
 
 var countLine = regexp.MustCompile(`(?m)^m3-count=([0-9]+)[[:space:]]*$`)
 
+// Other terminal messages can arrive on the same SSH session. A complete
+// frame is required, and multiple observations cannot establish one verdict.
+func routerRunnerReady(output string) bool {
+	const prefix = "m3-router-runner|"
+	if strings.Count(output, prefix) != 1 {
+		return false
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == prefix+"ready|end" {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *installLab) checkBridge(ctx context.Context, t *testing.T) {
 	t.Helper()
 	f.ownerPortForward(ctx, t)
@@ -51,9 +66,23 @@ s=socket.create_connection((sys.argv[1],int(sys.argv[2])),2);s.close()`, host, s
 		t.Fatal("control cannot reach a running private service")
 	}
 	f.mustRun(ctx, t, `:if ([/ping 172.30.252.3 count=3 interval=500ms] = 0) do={:error "router cannot reach runner"}`)
-	routerRunner := f.mustRun(ctx, t, `{:local b [/file/get [find name="disk1/tikray/data/run/runner.token"] contents]; :set b [:pick $b 0 [:find ($b . "\n") "\n"]]; :local r [/tool/fetch url="http://172.30.252.3:8080/v1/status" http-header-field=("Authorization: Bearer " . $b) output=user as-value]; :local s [:deserialize from=json value=($r->"data")]; :put ((($s->"state")="running") and (($s->"gateway_up")=true))}`)
-	if routerRunner != "true" {
-		t.Fatal("router could not authenticate to the running runner")
+	// Use the router's own authenticated fetch after the control and ping
+	// controls. Require both status properties from the same bridge-local HTTP response.
+	const statusProbe = `{:local b [/file/get [find name="disk1/tikray/data/run/runner.token"] contents]; ` +
+		`:set b [:pick $b 0 [:find ($b . "\n") "\n"]]; ` +
+		`:local r [/tool/fetch url="http://172.30.252.3:8080/v1/status" duration=5s http-header-field=("Authorization: Bearer " . $b) output=user as-value]; ` +
+		`:local s [:deserialize from=json value=($r->"data")]; :local verdict "pending"; ` +
+		`:if ((($r->"status")="finished") and (($s->"state")="running") and (($s->"gateway_up")=true)) do={ :set verdict "ready" }; ` +
+		`:put ("m3-router-runner|" . $verdict . "|end")}`
+	const probeWindow = 20 * time.Second
+	probeCtx, stop := context.WithTimeout(ctx, probeWindow)
+	defer stop()
+	_, ready := poll(probeCtx, probeWindow, time.Second, func() bool {
+		out, err := f.CHR.RunPrivate(probeCtx, statusProbe)
+		return err == nil && routerRunnerReady(out)
+	})
+	if !ready {
+		t.Fatal("router could not verify an authenticated, running runner with its gateway up")
 	}
 
 	// UDP reachability needs a positive drop witness: a DNS timeout alone

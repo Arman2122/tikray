@@ -69,3 +69,24 @@ func TestPrivateInstallerFileRequiresWholeFrame(t *testing.T) {
 		}
 	}
 }
+
+func TestRouterRunnerProbeNeedsOneCompleteVerdict(t *testing.T) {
+	const ready = "m3-router-runner|ready|end"
+	const waiting = "m3-router-runner|pending|end"
+	for _, tc := range []struct {
+		output string
+		want   bool
+	}{
+		{"notice from console\r\n" + ready + "\r\n", true},
+		{ready + "\n" + ready, false},
+		{ready + "\n" + waiting, false},
+		{waiting, false},
+		{"true", false},
+		{"unrelated " + ready, false},
+		{"m3-router-runner|ready", false},
+	} {
+		if routerRunnerReady(tc.output) != tc.want {
+			t.Error("incorrect verdict from framed runner observation")
+		}
+	}
+}
