@@ -90,3 +90,23 @@ func TestRouterRunnerProbeNeedsOneCompleteVerdict(t *testing.T) {
 		}
 	}
 }
+
+func TestWatchdogTickReceiptRequiresThisCompletion(t *testing.T) {
+	const tag = "lab:tick/2/"
+	for _, tc := range []struct {
+		receipt string
+		done    bool
+		failed  bool
+	}{
+		{"lab:tick/1/done", false, false},
+		{tag + "entered", false, false},
+		{tag + "failed", false, true},
+		{tag + "done", true, false},
+		{tag + "done-extra", false, false},
+	} {
+		done, failed := watchdogTickReceipt(tc.receipt, tag)
+		if done != tc.done || failed != tc.failed {
+			t.Error("tick completion used an unverified receipt")
+		}
+	}
+}

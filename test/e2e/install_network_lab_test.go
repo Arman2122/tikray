@@ -242,6 +242,10 @@ func hasIPv4Answer(b []byte) bool {
 	return false
 }
 
+func watchdogTickReceipt(receipt, tag string) (done, failed bool) {
+	return receipt == tag+"done", receipt == tag+"failed"
+}
+
 func (f *installLab) watchdogTicker(ctx context.Context, t *testing.T) func() {
 	t.Helper()
 	owner := f.ownerSession(ctx, t)
@@ -255,6 +259,7 @@ func (f *installLab) watchdogTicker(ctx context.Context, t *testing.T) func() {
 		t.Fatal("fixture tick receipt unavailable")
 	}
 	rid := rec[0][".id"]
+	gen := owner.Generation()
 	t.Cleanup(func() {
 		clean, cancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
 		defer cancel()
@@ -270,10 +275,27 @@ func (f *installLab) watchdogTicker(ctx context.Context, t *testing.T) func() {
 		// acknowledgement via the independent pinned API session.
 		sequence++
 		tag := fmt.Sprintf("lab:tick/%d/", sequence)
-		_, _ = f.CHR.RunPrivate(ctx, `:onerror why in={ /system/script/run tikray-watchdog; /system/script/set `+rid+` comment="`+tag+`done" } do={ /system/script/set `+rid+` comment="`+tag+`failed" }`)
-		rows, e := owner.CommandAt(ctx, owner.Generation(), []string{"/system/script/print", "?.id=" + rid, "?name=" + receiptName, "=.proplist=comment"})
-		if e != nil || len(rows) != 1 || rows[0]["comment"] != tag+"done" {
-			t.Fatal("no verified completion for this explicit owner watchdog tick")
+		// Container-shell output from the shared session can arrive after its
+		// SSH command returns. Submit exactly once on a dedicated session.
+		command := `{:local id [/system/script/find where name="` + receiptName + `"]; :if (([:len $id]!=1) or ([:tostr [:pick $id 0]]!="` + rid + `")) do={:error "fixture receipt changed"}; ` +
+			`/system/script/set $id comment="` + tag + `entered"; :onerror ignored in={ /system/script/run tikray-watchdog; /system/script/set $id comment="` + tag + `done" } do={ /system/script/set $id comment="` + tag + `failed" }}`
+		runCtx, cancelRun := context.WithTimeout(ctx, 45*time.Second)
+		_, submitErr := f.CHR.RunPrivateFresh(runCtx, command)
+		cancelRun()
+		proofCtx, cancelProof := context.WithTimeout(ctx, 10*time.Second)
+		defer cancelProof()
+		var done, failed, found bool
+		_, _ = poll(proofCtx, 10*time.Second, 200*time.Millisecond, func() bool {
+			rows, err := owner.CommandAt(proofCtx, gen, []string{"/system/script/print", "?name=" + receiptName, "=.proplist=.id,comment"})
+			if err != nil || len(rows) != 1 || rows[0][".id"] != rid {
+				return false
+			}
+			found = true
+			done, failed = watchdogTickReceipt(rows[0]["comment"], tag)
+			return done || failed
+		})
+		if !done {
+			t.Fatalf("explicit watchdog invocation %d did not complete: submitted=%t receipt=%t reported_failure=%t", sequence, submitErr == nil, found, failed)
 		}
 	}
 }
