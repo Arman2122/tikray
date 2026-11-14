@@ -1,6 +1,6 @@
 # tikray handoff
 
-M3a is implemented and reviewed on `m3-routeros`. The final CHR runs used
+M3a merged into main in [PR #7](https://github.com/Arman2122/tikray/pull/7) at `acf1dab`. M3b Task 5 (geo) is in progress on `m3b-routeros`. The final M3a CHR runs used
 the signed images and test harness from clean commit `57d40cb`. Start with
 the [M3 ledger](m3/ledger.md) for results and decisions, the
 [approved plan](../superpowers/plans/2026-11-06-m3-routeros.md) for the
@@ -28,8 +28,8 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M2a: state model and render | Done, merged (PR #4) | |
 | M2b: the service (`tikray serve`, HTTPS API, health, subscriptions) | Done, merged (PR #5) | |
 | M2c: human sign-in and hot server changes | Done, merged (PR #6) | |
-| M3a: RouterOS integration | Review and acceptance complete on the PR branch, awaiting owner merge. All three targets passed installer 6/6, routing 9/9 and uninstall 4/4. | [Ledger and image hashes](m3/ledger.md), [CHR results](../../test/e2e/results/) |
-| M3b: geo, image updates and CHR CI | Starts from merged M3a after owner approval. Includes geo diff/rollback, image update and rollback, outage/watchdog suites and the CHR CI job. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
+| M3a: RouterOS integration | Merged in PR #7. All three targets passed installer 6/6, routing 9/9 and uninstall 4/4. | [Ledger and image hashes](m3/ledger.md), [CHR results](../../test/e2e/results/) |
+| M3b: geo, image updates and CHR CI | Task 5 started from the M3a merge. The read-only geo slot loader and config preview are implemented. Geo update, rollback and recovery are pending. Image update/rollback, outage/watchdog suites and CHR CI follow. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
 | M4: web UI | Not started | |
 | M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
 
@@ -166,7 +166,7 @@ Some countries can't reach Google's Go servers (go.dev, proxy.golang.org).
 - `go.sum` and Go's checksum database, reached through the mirror, still verify every module and toolchain download.
 
 The owner's Windows checkout is `C:\Users\Arman\Desktop\hakir\Projects\tikray`. In WSL that same folder is `/mnt/c/Users/Arman/Desktop/hakir/Projects/tikray`.
-- Clone with Git in WSL. The M3a review branch is `m3-routeros`.
+- Clone with Git in WSL. Current M3b work is on `m3b-routeros`.
 - An editor or AI tool running on Windows edits the files in place, but must run every build or test command through WSL, e.g.:
   ```
   wsl -e bash -lc "cd /mnt/c/Users/Arman/Desktop/hakir/Projects/tikray && make test"

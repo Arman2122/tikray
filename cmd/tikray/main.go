@@ -622,14 +622,27 @@ func (c *cli) configRender(ctx context.Context, args []string) int {
 	if err != nil {
 		return c.fail(err)
 	}
-	if core == nil {
-		v, err := activeCore(ctx, cfg)
+	input := render.Input{State: st}
+	if core != nil {
+		input.Core = *core
+	} else {
+		active, err := activeSelection(ctx, cfg)
 		if err != nil {
 			return c.fail(fmt.Errorf("no --core given, and the runner's active core is unknown: %w", err))
 		}
-		core = &v
+		input.Core, err = xrayver.Parse(active.Core)
+		if err != nil {
+			return c.fail(err)
+		}
+		if active.Geo != "" {
+			geo, _, err := artifacts.LoadGeo(cfg.Data, active.Geo)
+			if err != nil {
+				return c.fail(err)
+			}
+			input.Geo = &geo
+		}
 	}
-	out, err := renderConfig(st, *core, "")
+	out, err := render.Render(input)
 	if err != nil {
 		return c.fail(err)
 	}
@@ -639,28 +652,27 @@ func (c *cli) configRender(ctx context.Context, args []string) int {
 	return 0
 }
 
-// activeCore is the xray-core the runner has active.
-func activeCore(ctx context.Context, cfg Config) (xrayver.Version, error) {
+// Read core and geo in one observation so they belong to the same selection.
+func activeSelection(ctx context.Context, cfg Config) (*runnerapi.Selection, error) {
 	runner, err := newRunner(cfg)
 	if err != nil {
-		return xrayver.Version{}, err
+		return nil, err
 	}
 	st, err := runner.Status(ctx)
 	if err != nil {
-		return xrayver.Version{}, err
+		return nil, err
 	}
 	if st.Active == nil {
-		return xrayver.Version{}, errors.New("the runner has no active core")
+		return nil, errors.New("the runner has no active core")
 	}
-	return xrayver.Parse(st.Active.Core)
+	return st.Active, nil
 }
 
-// renderConfig is the xray config st renders to for core and the geo bundle
-// geo. Nothing installs geo bundles before M3, so any name is refused and the
-// empty one, none, is rendered with no geo data.
+// renderConfig serves the mutating apply/update path. A geo selection there
+// requires the coordinated runner trial and RouterOS address-list update.
 func renderConfig(st store.State, core xrayver.Version, geo string) ([]byte, error) {
 	if geo != "" {
-		return nil, fmt.Errorf("geo bundles are not supported yet (the selection names %q)", geo)
+		return nil, errors.New("geo bundles are not supported yet for updates")
 	}
 	return render.Render(render.Input{State: st, Core: core})
 }

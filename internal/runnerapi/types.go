@@ -52,10 +52,15 @@ func (s Selection) Validate() error {
 	if err != nil || v.String() != s.Core {
 		return fmt.Errorf("runnerapi: invalid core %q: want a version such as 26.10.21", s.Core)
 	}
-	if s.Geo != "" && (!geoRE.MatchString(s.Geo) || strings.Contains(s.Geo, "..")) {
-		return fmt.Errorf("runnerapi: invalid geo %q", s.Geo)
+	if s.Geo != "" && !ValidGeoName(s.Geo) {
+		return errors.New("runnerapi: invalid geo slot name")
 	}
 	return ValidateConfig(s.Config)
+}
+
+// ValidGeoName reports whether a nonempty publisher tag names a single geo slot.
+func ValidGeoName(name string) bool {
+	return geoRE.MatchString(name) && !strings.Contains(name, "..")
 }
 
 // ValidateConfig refuses a config name that is not config/<64 lowercase

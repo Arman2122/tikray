@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -254,14 +255,14 @@ func (r *renderer) serverTag(id string) (string, bool) {
 
 // checkGeo checks the geo matchers. With geo data, it returns an error
 // naming the first entry of geo that is not a geosite: or geoip: matcher
-// with a code (Geo.check). Without, it returns an error naming the first
+// with a code (Geo.Validate). Without, it returns an error naming the first
 // geosite: or geoip: matcher in st: xray loads them from geosite.dat and
 // geoip.dat, and refuses the whole config without those files. A matcher in
 // a rule that is not rendered, such as one naming a disabled server, counts
 // too: enabling that server must not be what breaks the config.
 func checkGeo(st store.State, geo *Geo) error {
 	if geo != nil {
-		return geo.check()
+		return geo.Validate()
 	}
 	type matchers struct {
 		path string
@@ -289,21 +290,34 @@ func checkGeo(st store.State, geo *Geo) error {
 	return nil
 }
 
-// check returns an error naming the first entry of g's Site that is not
+// Validate returns an error naming the first entry of g's Site that is not
 // geosite:<code>, or of its IP that is not geoip:<code>. The entries join
 // the domestic matchers as they are, and an empty or prefix-less domain
 // matcher matches every domain: the domestic rule would send all sniffed
 // traffic direct, kill-switch traffic among it.
-func (g *Geo) check() error {
+func (g *Geo) Validate() error {
 	for _, l := range []struct {
 		path, prefix string
 		list         []string
 	}{{"geo.site", "geosite:", g.Site}, {"geo.ip", "geoip:", g.IP}} {
 		for i, m := range l.list {
-			if code, ok := strings.CutPrefix(m, l.prefix); !ok || code == "" {
-				return fmt.Errorf("render: %s[%d]: %q is not %s<code>", l.path, i, m, l.prefix)
+			code, ok := strings.CutPrefix(m, l.prefix)
+			if !ok || !validGeoCode(code, l.prefix) {
+				return fmt.Errorf("render: %s[%d]: invalid %s matcher", l.path, i, l.prefix)
 			}
 		}
 	}
 	return nil
+}
+
+func validGeoCode(code, prefix string) bool {
+	if code == "" || strings.ContainsFunc(code, unicode.IsSpace) || strings.ContainsFunc(code, unicode.IsControl) {
+		return false
+	}
+	if prefix == "geoip:" {
+		// Xray strips leading negations before looking up the country code.
+		return strings.TrimLeft(code, "!") != ""
+	}
+	// Geosite attributes follow a nonempty code and must themselves be nonempty.
+	return !strings.HasPrefix(code, "@") && !strings.HasSuffix(code, "@") && !strings.Contains(code, "@@")
 }

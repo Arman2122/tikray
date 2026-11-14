@@ -1110,6 +1110,69 @@ func TestConfigRender(t *testing.T) {
 	})
 }
 
+func TestConfigRenderUsesVerifiedActiveGeo(t *testing.T) {
+	const version = "ir-2026"
+	selection := runnerapi.Selection{Core: "26.10.21", Geo: version, Config: testConfigRel}
+	vars, data := testEnv(t, runnerapi.Status{State: runnerapi.StateRunning, Active: &selection})
+	st := writeState(t, data, withServer)
+	core := xrayver.Version{Major: 26, Minor: 10, Patch: 21}
+	geo := render.Geo{Version: version, Site: []string{"geosite:ir"}, IP: []string{"geoip:ir"}}
+	want, err := render.Render(render.Input{State: st, Core: core, Geo: &geo})
+	if err != nil || !bytes.Contains(want, []byte("geosite:ir")) || !bytes.Contains(want, []byte("geoip:ir")) {
+		t.Fatal("expected both domestic matchers in the reference render")
+	}
+	const marker = "private-fixture-data"
+	requireRefusal := func() {
+		t.Helper()
+		code, out, diagnostic := runCLI(t, vars, "config", "render")
+		if code != 1 || out != "" || diagnostic == "" || strings.Contains(diagnostic, marker) {
+			t.Error("an unreadable geo slot produced a config or an unsafe diagnostic")
+		}
+	}
+	requireRefusal()
+
+	dir := filepath.Join(data, "geo", version)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// The tiny protobuf files contain the IR entries used in the preview.
+	files := map[string][]byte{
+		"geosite.dat":     []byte("\x0a\x0e\x0a\x02IR\x12\x08\x08\x02\x12\x04a.ir"),
+		"geoip.dat":       []byte("\x0a\x0e\x0a\x02IR\x12\x08\x0a\x04\xc0\x00\x02\x00\x10\x18"),
+		"domestic-v4.txt": []byte("192.0.2.0/24\n"),
+	}
+	hashes := map[string]string{}
+	for name, contents := range files {
+		h := sha256.Sum256(contents)
+		hashes[name] = hex.EncodeToString(h[:])
+		if err := os.WriteFile(filepath.Join(dir, name), contents, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	meta := map[string]any{"version": version, "site": geo.Site, "ip": geo.IP, "sha256": hashes}
+	manifest, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), manifest, 0644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, diagnostic := runCLI(t, vars, "config", "render")
+	if code != 0 || diagnostic != "" || out != string(want) {
+		t.Error("preview did not render the verified active geo matchers")
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "domestic-v4.txt"), []byte(marker), 0644); err != nil {
+		t.Fatal(err)
+	}
+	requireRefusal()
+
+	// The runner's reply is an input, too. A malformed selection may
+	// contain data that must not be repeated in the command's diagnostic.
+	selection.Geo = "../" + marker
+	requireRefusal()
+}
+
 func TestApplyCommand(t *testing.T) {
 	vars, data, runner := trialEnv(t, &runnerapi.Selection{Core: "26.10.21", Config: testConfigRel})
 	st := writeState(t, data, func(*store.State) {})
@@ -1297,8 +1360,9 @@ func TestStateRenderer(t *testing.T) {
 	if err != nil || !bytes.Equal(got, mustRender(t, st, "26.10.21")) {
 		t.Errorf("no geo: %q, %v; want render.Render's bytes", got, err)
 	}
-	if _, err := rend(core, "ir-2026"); err == nil || !strings.Contains(err.Error(), "geo bundles are not supported yet") {
-		t.Errorf("a geo bundle: %v, want the refusal", err)
+	const private = "private-geo-selection"
+	if _, err := rend(core, private); err == nil || !strings.Contains(err.Error(), "geo bundles are not supported yet") || strings.Contains(err.Error(), private) {
+		t.Error("mutating renderer did not safely refuse an unsupported geo selection")
 	}
 	if _, err := rend(xrayver.Version{Major: 26, Minor: 1, Patch: 17}, ""); err == nil || !strings.Contains(err.Error(), "26.1.17") {
 		t.Errorf("a core too old: %v, want render's refusal", err)

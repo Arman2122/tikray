@@ -649,6 +649,13 @@ func TestRenderRefusesInvalidGeo(t *testing.T) {
 		path string
 	}{
 		{"valid", Geo{Site: site, IP: ip}, ""},
+		{"site attributes", Geo{Site: []string{"geosite:google@cn@ads"}}, ""},
+		{"site with empty code and attr", Geo{Site: []string{"geosite:@cn"}}, "geo.site[0]"},
+		{"site with empty attr", Geo{Site: []string{"geosite:ir@"}}, "geo.site[0]"},
+		{"site with empty middle attr", Geo{Site: []string{"geosite:ir@@x"}}, "geo.site[0]"},
+		{"IP only negation", Geo{IP: []string{"geoip:!!"}}, "geo.ip[0]"},
+		{"IP reversed code", Geo{IP: []string{"geoip:!ir"}}, ""},
+
 		{"no matchers", Geo{Version: "202610250000"}, ""},
 		{"empty site", Geo{Site: []string{"geosite:category-ir", ""}, IP: ip}, "geo.site[1]"},
 		{"site without a code", Geo{Site: []string{"geosite:"}, IP: ip}, "geo.site[0]"},
