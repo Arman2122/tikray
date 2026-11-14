@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/routeros"
@@ -22,12 +23,71 @@ func (r *attestationRouter) VerifyInstallation(ctx context.Context, t routeros.T
 	return r.probe(ctx, t)
 }
 
+// A durable install.ready survives a stopped-control restart. The owner can
+// therefore challenge before this process has a working native controller.
+func TestInstallChallengeWaitsForCurrentRouterStartup(t *testing.T) {
+	e := newEnv(t)
+	e.inSync()
+	installCore(t, e.data, testCore)
+	r := &attestationRouter{}
+	e.s = e.newService(Config{Router: r})
+	logins := make(chan routeros.Target, 1)
+	r.probe = func(_ context.Context, target routeros.Target) error {
+		logins <- target
+		return nil
+	}
+
+	start := func(ctx context.Context) <-chan error {
+		done := make(chan error, 1)
+		go func() { done <- e.s.VerifyInstallation(ctx) }()
+		return done
+	}
+	// A failed initial reconciliation or expired check authorizes no login.
+	r.failVerify = true
+	st, rev := e.s.State()
+	if err := e.s.finishRouter(t.Context(), st, rev); err == nil {
+		t.Fatal("failed reconciliation became ready")
+	}
+	brief, stop := context.WithTimeout(t.Context(), 30*time.Millisecond)
+	if err := <-start(brief); err == nil || len(logins) != 0 {
+		stop()
+		t.Fatal("challenge was attempted before this process verified its router")
+	}
+	stop()
+
+	// Leave one real verification pending. Startup needs to be able to take
+	// the writer while that check waits, including at revision zero.
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	done := start(ctx)
+	if err := e.s.acquire(ctx); err != nil {
+		t.Fatal("waiting check blocked the policy writer")
+	}
+	r.failVerify = false
+	err := e.s.finishRouter(ctx, st, rev)
+	e.s.release()
+	if err != nil {
+		t.Fatal("valid startup did not reconcile")
+	}
+	if err = <-done; err != nil || len(logins) != 1 {
+		t.Fatal("the pending challenge did not verify the live router once")
+	}
+	target := <-logins
+	if target.Revision != rev || target.Selection.Core != testCore {
+		t.Fatal("startup challenge used a stale revision or selection")
+	}
+}
+
 func TestLiveInstallCheckRefusesStaleRouterAndRunner(t *testing.T) {
 	e := newEnv(t)
 	e.inSync()
 	installCore(t, e.data, testCore)
 	r := &attestationRouter{}
 	e.s = e.newService(Config{Router: r})
+	st, rev := e.s.State()
+	if err := e.s.finishRouter(t.Context(), st, rev); err != nil {
+		t.Fatal("failed to establish the running installation")
+	}
 	probes := 0
 	r.probe = func(context.Context, routeros.Target) error { probes++; return nil }
 	if err := e.s.VerifyInstallation(t.Context()); err != nil || probes != 1 {

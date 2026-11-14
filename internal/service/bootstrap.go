@@ -126,8 +126,16 @@ func (s *Service) stillRunning(ctx context.Context, active runnerapi.Selection) 
 // VerifyInstallation answers a fresh owner challenge. The regular status API
 // keeps serving its last verified revision during loss of either component.
 func (s *Service) VerifyInstallation(ctx context.Context) error {
-	if s.router == nil || s.bootPending.Load() || s.repairBridge {
+	if s.router == nil || s.repairBridge {
 		return ErrBootstrapPending
+	}
+	// The previous process's ready file is durable. Wait for this process
+	// to attach its native client and finish a reconciliation before using
+	// the owner's single fresh login. Startup needs the writer while we wait.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.routerReady:
 	}
 	// Installed slots are immutable. Hash before taking the policy writer
 	// and compare the committed selection again once we own the writer.
@@ -143,6 +151,9 @@ func (s *Service) VerifyInstallation(ctx context.Context) error {
 		return err
 	}
 	defer s.release()
+	if s.bootPending.Load() {
+		return ErrBootstrapPending
+	}
 	st, rev := s.store.State()
 	rs, err := s.runner.Status(ctx)
 	if err != nil || rs.Active == nil || *rs.Active != active || !s.verifiedInstallSelection(ctx, s.updater(st, rev), rs) || rs.Active.Geo != "" {

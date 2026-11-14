@@ -159,6 +159,11 @@ func (s *Service) finishRouter(ctx context.Context, st store.State, rev uint64) 
 	wasVerified := !s.routerStatus.LastVerified.IsZero() && s.routerStatus.Revision == rev && s.routerSelection == *rs.Active
 	s.routerStatus = RouterStatus{Revision: rev, LastVerified: s.now().UTC()}
 	s.routerSelection = *rs.Active
+	select {
+	case <-s.routerReady:
+	default:
+		close(s.routerReady)
+	}
 	s.mu.Unlock()
 	if wasVerified && report.Added+report.Set+report.Moved+report.Removed+report.Invalidated > 0 {
 		s.record(KindRouter, "drift corrected")

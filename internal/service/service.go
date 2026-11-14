@@ -137,6 +137,8 @@ type Service struct {
 	// Tests may drive the router's 30 s ticker independently of apply timers.
 	routerSweep <-chan time.Time
 	routerHints chan struct{}
+	// routerReady closes after this process verifies its first effective router policy.
+	routerReady chan struct{}
 	data        string
 	debounce    time.Duration
 	retry       time.Duration
@@ -224,6 +226,7 @@ func New(c Config) (*Service, error) {
 		runner:       c.Runner,
 		router:       c.Router,
 		routerHints:  make(chan struct{}, 1),
+		routerReady:  make(chan struct{}),
 		routerStatus: RouterStatus{Pending: c.Router != nil},
 		monitor:      c.Monitor,
 		data:         c.Data,
