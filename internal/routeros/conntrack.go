@@ -17,9 +17,10 @@ const (
 	ipv4Connections = "/ip/firewall/connection"
 	ipv6Connections = "/ipv6/firewall/connection"
 	// ICMP and keyed GRE use different tuple discriminators from TCP/UDP.
-	tupleFields      = ".id,src-address,dst-address,protocol,src-port,dst-port,icmp-type,icmp-code,icmp-id,gre-protocol,gre-version,gre-key"
-	connectionFields = tupleFields + ",reply-src-address,reply-src-port,reply-dst-address,reply-dst-port"
-	ipv4FlowFields   = connectionFields + ",connection-mark,fasttrack,dstnat"
+	tupleFields         = ".id," + originalTupleFields
+	originalTupleFields = "src-address,dst-address,protocol,src-port,dst-port,icmp-type,icmp-code,icmp-id,gre-protocol,gre-version,gre-key"
+	connectionFields    = tupleFields + ",reply-src-address,reply-src-port,reply-dst-address,reply-dst-port"
+	ipv4FlowFields      = connectionFields + ",connection-mark,fasttrack,dstnat"
 )
 
 var ErrIPv6FlowScope = errors.New("routeros: cannot verify all prior IPv6 FastTrack sources")
@@ -99,9 +100,9 @@ func purgePolicyFlows(ctx context.Context, c Native, a Actual, views []policyVie
 	return n + m, v6Err
 }
 
-func ipv4Candidates(o observation, a Actual, views []policyView, closedOnly, afterSwitch bool) (map[string]Row, error) {
+func ipv4Candidates(o observation, a Actual, views []policyView, closedOnly, keepTargetPath bool) (map[string]Row, error) {
 	var dnsRules map[string]Observed
-	if afterSwitch {
+	if keepTargetPath {
 		dnsRules = map[string]Observed{}
 		for _, r := range a.Rows {
 			if r.Menu == firewallNAT && !r.Dynamic && !onBit(r.Props["invalid"]) && strings.HasPrefix(r.Comment, "tikray:dns-") {
@@ -143,7 +144,7 @@ func ipv4Candidates(o observation, a Actual, views []policyView, closedOnly, aft
 			continue
 		}
 		queried = p
-		rows, err := o.read(ipv4Connections, ipv4FlowFields, sourceQuery(p)...)
+		rows, err := o.readConnections(ipv4Connections, ipv4FlowFields, sourceQuery(p), time.Now().Add(conntrackProofWindow))
 		if err != nil {
 			return nil, err
 		}
@@ -166,7 +167,7 @@ func ipv4Candidates(o observation, a Actual, views []policyView, closedOnly, aft
 					}
 				}
 			}
-			if !affected || closedOnly && !closed || afterSwitch && onNewPath(a.Topology, dnsRules, views[len(views)-1], r, src, dst) {
+			if !affected || closedOnly && !closed || keepTargetPath && onNewPath(a.Topology, dnsRules, views[len(views)-1], r, src, dst) {
 				continue
 			}
 			if !closed && !isDNS(r) && noConnMark(r) && len(a.Topology.ForeignRoutingMarks) > 0 {
@@ -224,8 +225,8 @@ func removeIPv4Candidates(o observation, candidates map[string]Row) (int, error)
 
 func noConnMark(r Row) bool { return r["connection-mark"] == "" || r["connection-mark"] == "no-mark" }
 
-// The permanent rules have been verified. A retry can identify the new
-// RouterOS route class or NAT binding without relying on a recycled row ID.
+// Identify a positive target route class or NAT binding from the observed
+// rules and tuple. The engine verifies all permanent rules before release.
 func onNewPath(t Topology, dnsRules map[string]Observed, v policyView, r Row, src, dst netip.Addr) bool {
 	p := policyAt(v, number(src))
 	ownedMark := r["connection-mark"] == "tikray-open" || r["connection-mark"] == "tikray-closed"
@@ -339,9 +340,50 @@ func parseConnection(r Row, v6 bool) (netip.Addr, netip.Addr, error) {
 	return src, dst, nil
 }
 
+// A projected ID may be retired while its kernel connection is still
+// carrying traffic. A different ID on the same tuple needs a fresh policy
+// classification; neither its disappearance nor its ownership is proved.
+var errBindingChanged = errors.New("routeros: tracked connection identity changed")
+
+const conntrackProofWindow = 4 * time.Second
+
+// RouterOS can expire an entry while it builds even a source-filtered
+// connection print, causing a definite trap. A trap proves nothing about
+// presence. Retry only the same read on the same authenticated generation.
+func (o observation) readConnections(menu, fields string, query []string, deadline time.Time) ([]Row, error) {
+	rows, err := o.read(menu, fields, query...)
+	if !errors.Is(err, ErrRejected) {
+		return rows, err
+	}
+	retry, cancel := context.WithDeadline(o.ctx, deadline)
+	defer cancel()
+	o.ctx = retry
+	for {
+		if o.c.Generation() != o.gen {
+			return nil, ErrStaleGeneration
+		}
+		select {
+		case <-retry.Done():
+			return nil, errors.Join(ErrRejected, retry.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+		rows, err = o.read(menu, fields, query...)
+		if !errors.Is(err, ErrRejected) {
+			return rows, err
+		}
+	}
+}
+
 func removeConnection(o observation, menu string, prior Row) (bool, error) {
+	if _, _, err := parseConnection(prior, menu == ipv6Connections); err != nil {
+		return false, err
+	}
+	// A retired ID can make an otherwise valid /print trap on RouterOS.
+	// Query the affected source and original tuple; compare the projected
+	// ID locally so a new binding using the same tuple survives the purge.
+	keys := strings.Split(originalTupleFields, ",")
 	var query []string
-	for _, k := range strings.Split(tupleFields, ",") {
+	for _, k := range keys {
 		if v, ok := prior[k]; ok {
 			query = append(query, "?"+k+"="+v)
 		}
@@ -350,17 +392,38 @@ func removeConnection(o observation, menu string, prior Row) (bool, error) {
 	if menu == ipv6Connections {
 		fields = connectionFields + ",fasttrack"
 	}
-	read := func() ([]Row, error) { return o.read(menu, fields, query...) }
-	rows, err := read()
-	if err != nil {
+	read := func(deadline time.Time) (Row, error) {
+		rows, err := o.readConnections(menu, fields, query, deadline)
+		if err != nil || len(rows) == 0 {
+			return nil, err
+		}
+		if len(rows) != 1 {
+			return nil, errDrift
+		}
+		r := rows[0]
+		if _, _, err := parseConnection(r, menu == ipv6Connections); err != nil {
+			return nil, err
+		}
+		for _, k := range keys {
+			if v, ok := prior[k]; ok {
+				if got, present := r[k]; !present || got != v {
+					return nil, ErrProtocol
+				}
+			}
+		}
+		if r[".id"] != prior[".id"] {
+			return nil, errBindingChanged
+		}
+		return r, nil
+	}
+	row, err := read(time.Now().Add(conntrackProofWindow))
+	if err != nil || row == nil {
 		return false, err
 	}
-	if len(rows) == 0 {
-		return false, nil
-	}
-	if len(rows) != 1 || !maps.Equal(rows[0], prior) {
+	if !maps.Equal(row, prior) {
 		return false, errDrift
 	}
+
 	_, removeErr := o.c.CommandAt(o.ctx, o.gen, []string{menu + "/remove", "=.id=" + prior[".id"]})
 	if removeErr != nil && !errors.Is(removeErr, ErrRejected) {
 		return false, removeErr
@@ -369,16 +432,16 @@ func removeConnection(o observation, menu string, prior Row) (bool, error) {
 	// receives remove. Its native print can also lag an expiry or an
 	// acknowledged deletion. Prove absence on this generation without
 	// replaying a mutation; only an acknowledgement counts as a removal.
-	deadline := time.Now().Add(4 * time.Second)
+	deadline := time.Now().Add(conntrackProofWindow)
 	for {
-		rows, err = read()
+		row, err = read(deadline)
 		if err != nil {
 			return false, err
 		}
-		if len(rows) == 0 {
+		if row == nil {
 			return removeErr == nil, nil
 		}
-		if len(rows) != 1 || !maps.Equal(rows[0], prior) || !time.Now().Before(deadline) {
+		if !maps.Equal(row, prior) || !time.Now().Before(deadline) {
 			if removeErr != nil {
 				return false, removeErr
 			}
@@ -513,7 +576,7 @@ func purgeIPv6(o observation, a Actual, views []policyView) (int, error) {
 				continue
 			}
 			q := append([]string{"?src-address=" + address.String()}, valuesQuery("fasttrack", "true", "yes")...)
-			rows, err := o.read(ipv6Connections, connectionFields+",fasttrack", q...)
+			rows, err := o.readConnections(ipv6Connections, connectionFields+",fasttrack", q, time.Now().Add(conntrackProofWindow))
 			if err != nil {
 				return n, err
 			}

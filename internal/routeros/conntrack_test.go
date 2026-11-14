@@ -3,6 +3,7 @@ package routeros
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/netip"
 	"slices"
 	"strings"
@@ -105,7 +106,7 @@ func TestPurgeRechecksIdentityAndNeverReplays(t *testing.T) {
 			f := &connectionRouter{diffRouter: newDiffRouter()}
 			id := f.flow(ct4, "10.12.0.10", "1.1.1.1", "443")
 			f.beforeRead = func(q []string) {
-				if q[0] != ct4+"/print" || !slices.Contains(q, "?.id="+id) {
+				if q[0] != ct4+"/print" || !slices.Contains(q, "?src-port=4567") {
 					return
 				}
 				switch change {
@@ -131,7 +132,7 @@ func TestPurgeRechecksIdentityAndNeverReplays(t *testing.T) {
 					f.rows = append(f.rows, r)
 					checks := 0
 					f.beforeRead = func(q []string) {
-						if q[0] != ct4+"/print" || !slices.Contains(q, "?.id="+id) {
+						if q[0] != ct4+"/print" || !slices.Contains(q, "?src-port=4567") {
 							return
 						}
 						checks++
@@ -199,7 +200,7 @@ func TestNestedPendingScopesShareOneConnectionRead(t *testing.T) {
 	}
 	reads := 0
 	for _, q := range f.reads {
-		if q[0] == ct4+"/print" && !slices.ContainsFunc(q, func(w string) bool { return strings.HasPrefix(w, "?.id=") }) {
+		if q[0] == ct4+"/print" && !slices.Contains(q, "?src-port=4567") {
 			reads++
 		}
 	}
@@ -487,6 +488,165 @@ func TestFrozenConntrackCanExpireAtNativeRemoval(t *testing.T) {
 			}
 			if scenario == "recycled ID" && f.row(id) == nil {
 				t.Fatal("reused native ID was removed")
+			}
+		})
+	}
+}
+
+// CHR can refuse a typed lookup on an expired connection ID before the
+// conjunction with the remaining tuple predicates is evaluated.
+type tupleLookupPeer struct {
+	*connectionRouter
+	rowsForTuple []Row
+	refuseTuple  bool
+	targetID     string
+	removes      int
+}
+
+func (f *tupleLookupPeer) CommandAt(ctx context.Context, g uint64, w []string) ([]Row, error) {
+	if g != f.gen {
+		return nil, ErrStaleGeneration
+	}
+	if w[0] == ct4+"/remove" {
+		f.removes++
+		if len(w) != 2 || w[1] != "=.id="+f.targetID {
+			return nil, ErrRequest
+		}
+		// Another connection can establish the same five-tuple after the ACK.
+		f.rowsForTuple = []Row{{".id": "*B", "src-address": "10.12.0.10", "dst-address": "1.1.1.1", "protocol": "udp", "src-port": "31940", "dst-port": "53"}}
+		return nil, nil
+	}
+	if w[0] != ct4+"/print" {
+		return f.connectionRouter.CommandAt(ctx, g, w)
+	}
+	if slices.ContainsFunc(w, func(s string) bool { return strings.HasPrefix(s, "?.id=") }) || f.refuseTuple {
+		return nil, ErrRejected
+	}
+	for _, q := range []string{"?src-address=10.12.0.10", "?dst-address=1.1.1.1", "?protocol=udp", "?src-port=31940", "?dst-port=53"} {
+		if !slices.Contains(w, q) {
+			return nil, ErrRequest
+		}
+	}
+	return f.rowsForTuple, nil
+}
+
+func TestConntrackProofSurvivesRetiredIDs(t *testing.T) {
+	old := Row{".id": "*A", "src-address": "10.12.0.10", "dst-address": "1.1.1.1", "protocol": "udp", "src-port": "31940", "dst-port": "53"}
+	replacement := maps.Clone(old)
+	replacement[".id"] = "*B"
+	wrongTuple := maps.Clone(replacement)
+	wrongTuple["src-address"] = "10.12.0.99"
+	badID := maps.Clone(replacement)
+	badID[".id"] = ""
+	for _, tc := range []struct {
+		name                  string
+		rows                  []Row
+		refuse, fail, removed bool
+	}{
+		{"retired before verification", nil, false, false, false},
+		{"new ID on frozen tuple", []Row{replacement}, false, true, false},
+		{"new ID after acknowledged removal", []Row{old}, false, true, false},
+		{"two indistinguishable flows", []Row{old, replacement}, false, true, false},
+		{"router ignored source filter", []Row{wrongTuple}, false, true, false},
+		{"malformed replacement ID", []Row{badID}, false, true, false},
+		{"no positive tuple proof", nil, true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &tupleLookupPeer{connectionRouter: &connectionRouter{diffRouter: newDiffRouter()}, rowsForTuple: tc.rows, refuseTuple: tc.refuse, targetID: old[".id"]}
+			removed, err := removeConnection(observation{ctx: t.Context(), c: f, gen: f.gen}, ct4, old)
+			attempted := tc.name == "new ID after acknowledged removal"
+			if removed != tc.removed || (err != nil) != tc.fail || f.removes > 1 || (f.removes == 1) != attempted {
+				t.Fatal("incorrect scoped proof or unsafe removal")
+			}
+		})
+	}
+}
+
+type churningInventory struct {
+	*connectionRouter
+	attempts int
+	onLookup func(int) error
+}
+
+func (f *churningInventory) CommandAt(ctx context.Context, g uint64, w []string) ([]Row, error) {
+	if w[0] == ct4+"/print" || w[0] == ct6+"/print" {
+		f.attempts++
+		if err := f.onLookup(f.attempts); err != nil {
+			return nil, err
+		}
+	}
+	return f.connectionRouter.CommandAt(ctx, g, w)
+}
+
+func TestConntrackReadRefusalNeedsSameGenerationProof(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		menu      string
+		fail      error
+		reconnect bool
+		wantReads int
+		wantErr   bool
+	}{
+		{"v4 inventory churn", ct4, ErrRejected, false, 3, false},
+		{"v6 inventory churn", ct6, ErrRejected, false, 3, false},
+		{"unavailable transport", ct4, ErrDisconnected, false, 1, true},
+		{"changed generation", ct4, ErrRejected, true, 1, true},
+		{"permanent refusal", ct4, ErrRejected, false, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &churningInventory{connectionRouter: &connectionRouter{diffRouter: newDiffRouter()}}
+			f.onLookup = func(n int) error {
+				if tc.reconnect {
+					f.gen++
+				}
+				if tc.name == "permanent refusal" || n < 3 {
+					return tc.fail
+				}
+				return nil
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			o := observation{ctx: ctx, c: f, gen: f.gen}
+			_, err := o.readConnections(tc.menu, connectionFields, []string{"?src-address=10.12.0.10"}, time.Now().Add(350*time.Millisecond))
+			if (err != nil) != tc.wantErr || tc.wantReads != 0 && f.attempts != tc.wantReads || tc.wantReads == 0 && (f.attempts < 2 || f.attempts > 5) || len(f.writes) != 0 {
+				t.Fatal("wrong read retry bound, outcome or generation")
+			}
+		})
+	}
+}
+
+func TestReobserveChangedConnectionBeforeClosedAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		safe bool
+	}{{"retained old path under a new handle", false}, {"reopened on the correct protected path", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &connectionRouter{diffRouter: newDiffRouter()}
+			src := netip.MustParsePrefix("10.12.0.10/32")
+			next := policyView{LANList: "inside", Sources: []sourceClass{{src, store.Policy{Mode: store.ModeFull, KillSwitch: true}}}}
+			views := []policyView{{}, next}
+			id := f.flow(ct4, src.Addr().String(), "1.1.1.1", "443")
+			var replacement string
+			f.beforeRead = func(q []string) {
+				if q[0] != ct4+"/print" || !slices.Contains(q, "?src-port=4567") {
+					return
+				}
+				f.beforeRead = nil
+				r := maps.Clone(f.row(id).Props)
+				f.rows = slices.DeleteFunc(f.rows, func(r Observed) bool { return r.ID == id })
+				if tc.safe {
+					r["connection-mark"] = "tikray-closed"
+				}
+				replacement = f.insert(ct4, "", r)
+			}
+			if n, err := purgeFlows(t.Context(), f, f.actual(), views); n != 0 || !errors.Is(err, errBindingChanged) || replacement == "" || f.row(replacement) == nil || len(f.writes) != 0 {
+				t.Fatal("a relabel or replacement was silently cleared or removed")
+			}
+			// The engine must re-observe the complete scope and guards before
+			// requesting this new classification.
+			n, err := purgeAfterSwitch(t.Context(), f, f.actual(), views)
+			if err != nil || (n == 0) != tc.safe || (f.row(replacement) != nil) != tc.safe {
+				t.Fatal("fresh classification kept a stale path or disrupted its safe replacement")
 			}
 		})
 	}

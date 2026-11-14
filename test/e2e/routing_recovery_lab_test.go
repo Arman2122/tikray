@@ -195,14 +195,7 @@ func (f *routingLab) checkDriftRepair(ctx context.Context, t *testing.T) {
 	f.setClientPolicy(ctx, t, store.Policy{Mode: store.ModeDirect})
 	w := newRoutingWAN(ctx, t, f)
 	startRoutingProcess(t, f.peer(ctx, "python3", "-c", routingEmitter, "192.168.88.110", "D", routingRemote, "stream"))
-	peer := f.tcpFlow(ctx, t, true, 31369)
-	if peer.echo(t) != egressDirect {
-		t.Fatal("direct peer did not receive its own WAN echo")
-	}
-	id := peer.id(ctx, t)
-	if id == "" {
-		t.Fatal("direct peer has no live two-way WAN flow")
-	}
+	peer := f.tcpFlow(ctx, t, true, 31369).directWitness(ctx, t)
 	_, ok := poll(ctx, 12*time.Second, 250*time.Millisecond, func() bool {
 		if f.Net.Client(ctx, "python3", "-c", routingEmitter, "192.168.88.10", "C", routingRemote, "once").Run() != nil {
 			t.Fatal("LAN emitter unavailable")
@@ -303,9 +296,7 @@ func (f *routingLab) checkDriftRepair(ctx context.Context, t *testing.T) {
 	if d := drops(); d <= d0 {
 		t.Fatalf("closed guard did not account for probes during route absence (%d -> %d)", d0, d)
 	}
-	if peer.echo(t) != egressDirect || peer.id(ctx, t) != id {
-		t.Fatal("unrelated TCP connection was interrupted during route absence")
-	}
+	peer.requireLive(ctx, t)
 	for _, tag := range tags {
 		if f.taggedID(ctx, t, routes, tag) != "" {
 			t.Fatal("closed route returned before the end of the polling window")
@@ -325,10 +316,11 @@ func (f *routingLab) checkDriftRepair(ctx context.Context, t *testing.T) {
 		t.Fatal("route repair rewrote unrelated policy rows")
 	}
 	_, ok = poll(ctx, 25*time.Second, 250*time.Millisecond, func() bool { return w.sample(t).closedProxy > s.closedProxy })
-	if !ok || w.sample(t).closedDirect != leakBase || peer.echo(t) != egressDirect || peer.id(ctx, t) != id {
+	if !ok || w.sample(t).closedDirect != leakBase {
 		t.Fatal("closed route repair leaked or failed to restore the proxy without interrupting its peer")
 	}
-	f.checkSourcePreservationWindow(ctx, t, w, peer, id)
+	peer.requireLive(ctx, t)
+	f.checkSourcePreservationWindow(ctx, t, w, peer)
 	f.checkOwnerRules(ctx, t)
 	t.Logf("zero direct closed packets with both routes absent for 30 seconds; %d direct peer packets received by the same WAN service; closed filter counters increased; same peer connection survived", s.peerDirect-peerBase)
 }
@@ -378,7 +370,7 @@ func (f *routingLab) ownerLANSSH(ctx context.Context, t *testing.T) func() {
 
 // Each fresh socket needs a new source-NAT decision. One established flow
 // could keep an old translation for the entire window and hide a real leak.
-func (f *routingLab) checkSourcePreservationWindow(ctx context.Context, t *testing.T, w *routingWAN, peer *routingFlow, peerID string) {
+func (f *routingLab) checkSourcePreservationWindow(ctx context.Context, t *testing.T, w *routingWAN, peer *directWitness) {
 	t.Helper()
 	const nat = "/ip/firewall/nat"
 	const tag = "tikray:preserve-closed"
@@ -426,9 +418,10 @@ while True:
 		}
 		s = next
 	}
-	if f.taggedID(ctx, t, nat, tag) != "" || f.taggedID(ctx, t, nat, backup) != survivor || f.packets(ctx, t, nat, backup) <= count || peer.echo(t) != egressDirect || peer.id(ctx, t) != peerID {
+	if f.taggedID(ctx, t, nat, tag) != "" || f.taggedID(ctx, t, nat, backup) != survivor || f.packets(ctx, t, nat, backup) <= count {
 		t.Fatal("source guard window lost its independent controls")
 	}
+	peer.requireLive(ctx, t)
 	release()
 	f.waitForDriftEvent(ctx, t, seq)
 	now := f.policyInventory(ctx, t)
@@ -445,11 +438,7 @@ while True:
 func (f *routingLab) checkEmergencyOff(ctx context.Context, t *testing.T) {
 	t.Helper()
 	f.setClientPolicy(ctx, t, store.Policy{Mode: store.ModeFull, KillSwitch: true})
-	peer := f.tcpFlow(ctx, t, true, 31370)
-	if peer.echo(t) != egressDirect {
-		t.Fatal("unaffected peer did not receive its own WAN echo")
-	}
-	id := peer.id(ctx, t)
+	peer := f.tcpFlow(ctx, t, true, 31370).directWitness(ctx, t)
 	ownerGeneration := f.ros.Generation()
 	lanSSH := f.ownerLANSSH(ctx, t)
 	ownerLive := func() {
@@ -459,9 +448,7 @@ func (f *routingLab) checkEmergencyOff(ctx context.Context, t *testing.T) {
 		if e != nil || len(rows) != 1 {
 			t.Fatal("original owner's API-SSL session did not survive")
 		}
-		if peer.echo(t) != egressDirect || peer.id(ctx, t) != id || id == "" {
-			t.Fatal("unrelated client connection lost continuity")
-		}
+		peer.requireLive(ctx, t)
 		f.checkOwnerRules(ctx, t)
 	}
 	paths := func(suspended bool) {
@@ -514,8 +501,7 @@ func (f *routingLab) checkEmergencyOff(ctx context.Context, t *testing.T) {
 		return n
 	}
 	tick := f.watchdogTicker(ctx, t)
-	var ordinary *routingFlow
-	var ordinaryID string
+	var ordinary *directWitness
 	for attempt := 1; attempt <= 2; attempt++ {
 		previous := runs()
 		f.mustRun(ctx, t, "/system/script/run tikray-emergency-off")
@@ -539,16 +525,10 @@ func (f *routingLab) checkEmergencyOff(ctx context.Context, t *testing.T) {
 		}
 		paths(true)
 		if attempt == 1 {
-			ordinary = f.tcpFlow(ctx, t, false, 31371)
+			ordinary = f.tcpFlow(ctx, t, false, 31371).directWitness(ctx, t)
+		} else {
+			ordinary.requireLive(ctx, t)
 		}
-		if ordinary.echo(t) != egressDirect {
-			t.Fatal("normal LAN flow was interrupted while suspended")
-		}
-		got := ordinary.id(ctx, t)
-		if got == "" || attempt == 2 && got != ordinaryID {
-			t.Fatal("repeating emergency off replaced a restored direct binding")
-		}
-		ordinaryID = got
 	}
 	setContainer("tikray-runner", "tikray:runner", "start", "running")
 	setContainer("tikray", "tikray:tikray", "start", "running")

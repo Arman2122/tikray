@@ -150,22 +150,20 @@ func (f *routingLab) policyMidConnection(ctx context.Context, t *testing.T) {
 	f.setClientPolicy(ctx, t, store.Policy{Mode: store.ModeDirect})
 	current := f.tcpFlow(ctx, t, false, 31827)
 	peer := f.tcpFlow(ctx, t, true, 31828)
-	for range 3 {
-		if current.echo(t) != egressDirect || peer.echo(t) != egressDirect {
-			t.Fatal("direct baseline streams unavailable")
-		}
-	}
-	old, keep := current.row(ctx, t), peer.id(ctx, t)
-	if old == nil || old[".id"] == "" || old["fasttrack"] != "true" || keep == "" {
-		t.Fatalf("missing accelerated baseline or peer witness: policy row=%t ID=%t accelerated=%t peer ID=%t", old != nil, old[".id"] != "", old["fasttrack"] == "true", keep != "")
+	old := current.directWitness(ctx, t)
+	keep := peer.directWitness(ctx, t)
+	if current.row(ctx, t)["fasttrack"] != "true" {
+		t.Fatal("direct policy baseline was not accelerated")
 	}
 	f.setClientPolicy(ctx, t, store.Policy{Mode: store.ModeFull, KillSwitch: true})
-	if current.id(ctx, t) == old[".id"] || current.exchange() == egressDirect {
-		t.Fatal("old direct stream survived closed admission")
+	if current.exchange() == egressDirect {
+		t.Fatal("old direct socket continued reaching the WAN after closed admission")
 	}
-	if peer.echo(t) != egressDirect || peer.id(ctx, t) != keep {
-		t.Fatal("independent live peer was reset")
+	_, gone := poll(ctx, 12*time.Second, 250*time.Millisecond, func() bool { return oldDirectEvicted(current.row(ctx, t), old.last, f.ros.Generation()) })
+	if !gone {
+		t.Fatal("old direct conntrack binding survived closed admission")
 	}
+	keep.requireLive(ctx, t)
 	replacement := f.tcpFlow(ctx, t, false, 31829)
 	if !isRoutingProxy(replacement.echo(t)) {
 		t.Fatal("replacement TCP stream did not use a real proxy")

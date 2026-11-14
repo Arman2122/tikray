@@ -298,7 +298,8 @@ func (s *routingFlow) exchange() string {
 }
 func (s *routingFlow) row(ctx context.Context, t *testing.T) routeros.Row {
 	t.Helper()
-	r := s.f.readROS(ctx, t, "/ip/firewall/connection", ".id,src-address,src-port,dst-address,dst-port,protocol,connection-mark,fasttrack",
+	r := s.f.readROS(ctx, t, "/ip/firewall/connection", ".id,src-address,src-port,dst-address,dst-port,protocol,connection-mark,fasttrack,"+
+		"reply-src-address,reply-src-port,reply-dst-address,reply-dst-port,tcp-state,assured,seen-reply,orig-packets,repl-packets,orig-bytes,repl-bytes",
 		"?protocol=tcp", "?src-address="+s.source, "?src-port="+strconv.Itoa(s.port), "?dst-address="+routingRemote, "?dst-port=31945")
 	if len(r) > 1 {
 		t.Fatal("ambiguous connection witness")
@@ -309,3 +310,59 @@ func (s *routingFlow) row(ctx context.Context, t *testing.T) routeros.Row {
 	return r[0]
 }
 func (s *routingFlow) id(ctx context.Context, t *testing.T) string { return s.row(ctx, t)[".id"] }
+
+type directWitness struct {
+	flow *routingFlow
+	last tcpBinding
+}
+
+func (s *routingFlow) directEchoes(t *testing.T, n int) {
+	t.Helper()
+	for range n {
+		if s.echo(t) != egressDirect {
+			t.Fatal("original TCP socket no longer reaches the WAN directly")
+		}
+	}
+}
+
+func (s *routingFlow) directWitness(ctx context.Context, t *testing.T) *directWitness {
+	t.Helper()
+	generation := s.f.ros.Generation()
+	s.directEchoes(t, 128)
+	var b tcpBinding
+	_, ok := poll(ctx, 12*time.Second, 250*time.Millisecond, func() bool {
+		var valid bool
+		b, valid = establishedBinding(s.row(ctx, t), s.f.ros.Generation())
+		return valid && b.generation == generation && b.warmed()
+	})
+	if !ok {
+		t.Fatal("original direct TCP flow did not establish its two-way accounting watermark")
+	}
+	return &directWitness{flow: s, last: b}
+}
+
+func (w *directWitness) requireLive(ctx context.Context, t *testing.T) {
+	t.Helper()
+	var start, end tcpBinding
+	_, ok := poll(ctx, 12*time.Second, 250*time.Millisecond, func() bool {
+		var valid bool
+		start, valid = establishedBinding(w.flow.row(ctx, t), w.flow.f.ros.Generation())
+		return valid && start.retains(w.last)
+	})
+	if !ok {
+		t.Fatal("independent TCP binding lost its original tuple, management session or two-way counters")
+	}
+	w.flow.directEchoes(t, 64)
+	_, ok = poll(ctx, 12*time.Second, 250*time.Millisecond, func() bool {
+		var valid bool
+		end, valid = establishedBinding(w.flow.row(ctx, t), w.flow.f.ros.Generation())
+		return valid && end.freshSince(start)
+	})
+	if !ok {
+		t.Fatal("independent TCP binding did not account for fresh traffic in both directions")
+	}
+	if w.last.id != end.id {
+		t.Log("native handle changed on the continuously accounted direct TCP socket")
+	}
+	w.last = end
+}

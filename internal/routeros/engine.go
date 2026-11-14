@@ -261,6 +261,39 @@ func (e *Engine) sync(ctx context.Context, p *pass, holds bool, wanted []Object)
 	return true, nil
 }
 
+// An old handle becoming unobservable is not proof that an accelerated
+// binding went away. Keep the guards, verify them on a fresh topology, and
+// classify the affected sources again. Only the fresh classification can
+// select a new handle. Connections already on their target path survive.
+func (e *Engine) cleanBindings(ctx context.Context, p *pass, final bool) (int, error) {
+	clean := e.purge
+	if final {
+		clean = e.finalPurge
+	}
+	views := p.purgeViews()
+	n, err := clean(ctx, p.fence, p.a, views)
+	if !errors.Is(err, errBindingChanged) {
+		return n, err
+	}
+	if err = e.verify(ctx, p); err != nil {
+		return n, err
+	}
+	ops, err := PlanHolds(p.a, p.holds)
+	if err != nil || len(ops) != 0 {
+		return n, ErrUnavailable
+	}
+	if final {
+		ops, err = Plan(p.a, p.rows)
+		if err != nil || len(ops) != 0 {
+			return n, ErrUnavailable
+		}
+	}
+	// This second pass uses the stricter target-path check even during
+	// preparation. A second ambiguous handle leaves the journal pending.
+	m, err := e.finalPurge(ctx, p.fence, p.a, views)
+	return n + m, err
+}
+
 func (e *Engine) prepare(ctx context.Context, t Target) (*pass, error) {
 	p := &pass{target: t, report: Report{Revision: t.Revision}}
 	var err error
@@ -381,7 +414,7 @@ func (e *Engine) prepare(ctx context.Context, t Target) (*pass, error) {
 		if err = e.save(p.j); err != nil {
 			return nil, err
 		}
-		n, err := e.purge(ctx, p.fence, p.a, p.purgeViews())
+		n, err := e.cleanBindings(ctx, p, false)
 		if err != nil {
 			return nil, err
 		}
@@ -435,7 +468,7 @@ func (e *Engine) Reconcile(ctx context.Context, t Target) (Report, error) {
 	}
 	if len(p.j.Pending) > 0 {
 		if changed || !p.j.FinalPurge {
-			n, err := e.finalPurge(ctx, p.fence, p.a, p.purgeViews())
+			n, err := e.cleanBindings(ctx, p, true)
 			if err != nil {
 				return p.report, publicEngineError(err)
 			}

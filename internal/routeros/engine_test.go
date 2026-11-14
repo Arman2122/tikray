@@ -246,3 +246,50 @@ func TestFailedHoldRepairRepeatsProtectionProof(t *testing.T) {
 		t.Fatal("a repaired guard reused the previous purge proof", err)
 	}
 }
+
+func TestChangedConnectionKeepsGuardsAcrossFreshClassification(t *testing.T) {
+	for _, mode := range []string{"verified", "damaged guard", "still changing"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newDiffRouter()
+			dir := t.TempDir()
+			if os.Chmod(dir, 0700) != nil {
+				t.Fatal("private state unavailable")
+			}
+			e := NewEngine(f, InstallScope{}, dir)
+			snapshots, before, fresh := 0, 0, 0
+			e.observe = func(context.Context, Native, InstallScope) (Actual, error) { snapshots++; return f.actual(), nil }
+			e.check = func(context.Context, Native, Actual, []policyView) error { return nil }
+			e.purge = func(context.Context, Native, Actual, []policyView) (int, error) {
+				before = snapshots
+				if mode == "damaged guard" {
+					for i := range f.rows {
+						if isHold(f.rows[i].Comment) && f.rows[i].Props["action"] == "drop" {
+							f.rows[i].Props["disabled"] = "yes"
+							break
+						}
+					}
+				}
+				return 0, errBindingChanged
+			}
+			e.finalPurge = func(context.Context, Native, Actual, []policyView) (int, error) {
+				fresh++
+				if snapshots <= before {
+					t.Fatal("reclassified on a stale snapshot")
+				}
+				if mode == "still changing" {
+					return 0, errBindingChanged
+				}
+				return 0, nil
+			}
+			target := Target{Revision: 1, Policy: PolicyInput{Network: store.Default().Network, Default: store.Policy{Mode: store.ModeFull, KillSwitch: true}}}
+			err := e.Prepare(t.Context(), target)
+			if (err == nil) != (mode == "verified") || fresh > 1 || (fresh == 0) != (mode == "damaged guard") {
+				t.Fatal("invalid admission, guard check, or retry bound")
+			}
+			j, e2 := e.readJournal()
+			if e2 != nil || len(j.Pending) == 0 || j.Protected != (err == nil) {
+				t.Fatal("unfinished guards were declared verified")
+			}
+		})
+	}
+}

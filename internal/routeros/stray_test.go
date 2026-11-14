@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -190,9 +191,10 @@ func TestInitialRepairPurgeKeepsVerifiedRunnerDNS(t *testing.T) {
 				f.insert(watchMenu, "tikray:runner-watch", map[string]string{"host": "172.31.255.3", "type": "simple", "status": tc.watch})
 			}
 			var ids []string
-			for _, kind := range []string{"healthy", "direct", "fasttrack", "foreign mark"} {
+			for i, kind := range []string{"healthy", "direct", "fasttrack", "foreign mark"} {
 				id := f.flow(ct4, p.Addr().String(), "8.8.8.8", "53")
 				row := f.row(id).Props
+				row["src-port"] = strconv.Itoa(4500 + i) // simultaneous TCP connections have distinct tuples
 				row["reply-src-address"], row["reply-src-port"], row["dstnat"] = "172.31.255.3", "53", "true"
 				if kind == "direct" {
 					row["reply-src-address"] = "8.8.8.8"
