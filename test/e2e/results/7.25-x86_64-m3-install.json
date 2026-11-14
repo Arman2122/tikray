@@ -1,38 +1,38 @@
 [
   {
-    "id": "interrupted_install",
-    "pass": true,
-    "detail": "Core absence kept HTTPS up and rejected admission. Retry committed the signed core and preserved the owner certificate.",
-    "seconds": 382.1
-  },
-  {
     "id": "preflight",
     "pass": true,
-    "detail": "DNS, overlapping LAN, owner name collision and altered archive failed before any owned network, account or container row.",
-    "seconds": 43.9
+    "detail": "DNS, overlap, ownership and archive-integrity preflights refused unsafe installation.",
+    "seconds": 65.758
   },
   {
     "id": "clean_install",
     "pass": true,
-    "detail": "Private API-SSL login from the control container succeeded and a privileged write failed in that session. The initial signed core runs with direct policy.",
-    "seconds": 40.4
+    "detail": "The signed core booted, the public ID matched the receipt and the source-restricted account passed its permission controls.",
+    "seconds": 58.04
   },
   {
     "id": "bridge_acl",
     "pass": true,
-    "detail": "LAN used the pinned HTTPS service. Fresh WAN and direct LAN probes could not reach private runner services. The control and router probes succeeded.",
-    "seconds": 192.9
+    "detail": "LAN HTTPS access, private service isolation and owner forwarding were checked with live traffic.",
+    "seconds": 261.648
   },
   {
     "id": "second_import",
     "pass": true,
-    "detail": "Healthy reimport preserved object and process IDs. An owner grant edit refused safely. A stopped control with an empty command recovered serving the original session, with the same xray instance.",
-    "seconds": 35
+    "detail": "Healthy reimport preserved owner access, installation identity and running processes. The stopped control command was repaired.",
+    "seconds": 47.624
+  },
+  {
+    "id": "interrupted_install",
+    "pass": true,
+    "detail": "Management remained available and admission stayed gated until signed bootstrap recovered.",
+    "seconds": 405.787
   },
   {
     "id": "basic_watchdog",
     "pass": true,
-    "detail": "Healthy HTTPS with another installation ID counted as a miss. The genuine response cleared it. The third real minute tick restarted only the stopped control. Runner-only failure, sustained control backoff and emergency suppression also passed.",
-    "seconds": 409.7
+    "detail": "Real scheduled recovery, wrong-service refusal, component isolation, backoff and emergency suppression passed.",
+    "seconds": 432.019
   }
 ]
