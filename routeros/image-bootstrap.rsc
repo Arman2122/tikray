@@ -20,6 +20,16 @@
             :if ([:len $dirs]=0) do={ $checkLease $lease; /file/add name=$slots type=directory }
             :if ([:len [/file/find where name=$slots and type=directory]]!=1) do={ :error "tikray: image slot directory conflict" }
         }
+        :local validRef do={
+            :local record $1
+            :if (([:typeof $record]!="array") or ([:len $record]!=5) or (($record->"component")!=$2) or ([:typeof ($record->"size")]!="num") or (($record->"size")<1) or (($record->"size")>134217728)) do={:return false}
+            :foreach field in={"image_id";"digest";"chain"} do={
+                :local n 64; :if ($field="chain") do={:set n 128}
+                :local v ($record->$field)
+                :if (([:typeof $v]!="str") or ([:len $v]!=$n) or (!($v~"^[0-9a-f]+\$"))) do={:return false}
+            }
+            :return true
+        }
         :foreach role in={"tikray";"runner"} do={
             :local componentName "tikray"; :if ($role="runner") do={ :set componentName "tikray-runner" }
             :local ref ($bundle->$role)
@@ -32,9 +42,17 @@
             :if ([:len $pinned]>0) do={
                 :if (([:len $records]!=1) or ([/file/get $records size]>4096)) do={ :error "tikray: installed image receipt missing; inspect before retry" }
                 :local receipt [:deserialize from=json options=json.no-string-conversion value=[/file/get $records contents]]
-                :if ((($receipt->"version")!=1) or (($receipt->"installation_id")!=$identity) or (($receipt->"active"->"component")!=$role)) do={ :error "tikray: installed image receipt conflict" }
-                :set expectedID ($receipt->"active"->"image_id")
-                :if (([:len $expectedID]!=64) or (!($expectedID~"^[0-9a-f]+\$"))) do={ :error "tikray: invalid installed image identity" }
+                :local active ($receipt->"active"); :local prior ($receipt->"previous")
+                :if (([:len $receipt]!=4) or (($receipt->"version")!=1) or (($receipt->"installation_id")!=$identity) or (![$validRef $active $role])) do={ :error "tikray: installed image receipt conflict" }
+                :if (([:typeof $prior]="nil") or ([:typeof $prior]="nothing")) do={
+                    # Only the first signed pair can have no predecessor.
+                    :foreach field in={"component";"image_id";"digest";"chain";"size"} do={
+                        :if (($active->$field)!=($ref->$field)) do={:error "tikray: installed image receipt conflict"}
+                    }
+                } else={
+                    :if ((![$validRef $prior $role]) or (($prior->"image_id")=($active->"image_id")) or (($prior->"digest")=($active->"digest"))) do={:error "tikray: installed image receipt conflict"}
+                }
+                :set expectedID ($active->"image_id")
             } else={
                 :if ([:len $records]>0) do={
                     :if (([:len $records]!=1) or ($identity="") or ([/file/get $records contents]!=$initial)) do={ :error "tikray: partial image baseline conflict" }
