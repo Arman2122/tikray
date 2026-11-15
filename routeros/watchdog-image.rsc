@@ -145,7 +145,7 @@
     :local high 134217728; :local limit 201326592
     :if ($component="runner") do={ :set targetName "tikray-runner"; :set side "runner"; :set ownerTag "tikray:runner"; :set iface "tikray-runner"; :set high 201326592; :set limit 268435456 }
     :local root ($base . "/containers/" . $side)
-    :local profile {"component"=$component;"name"=$targetName;"tag"=$ownerTag;"veth"=$iface;"root"=$root;"gateway"=$gateway;"high"=$high;"max"=$limit;"old"=$original;"new"=$candidate;"staging"=$staging;"data"=$data}
+    :local profile {"component"=$component;"name"=$targetName;"tag"=$ownerTag;"veth"=$iface;"root"=$root;"gateway"=$gateway;"high"=$high;"max"=$limit;"old"=$original;"new"=$candidate;"staging"=$staging;"data"=$data;"seed"=($boot->$component);"platform"=$arch}
     # Container-store children are hidden from /file/find. Native add never
     # replaces an existing child. An exact read, including the next possible
     # byte, rejects a foreign file that merely starts with the expected tag.

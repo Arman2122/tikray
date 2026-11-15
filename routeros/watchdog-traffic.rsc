@@ -53,11 +53,21 @@
         :local code [:tostr ($row->"image-id")]
         :if ([:pick $code ([:len $code]-1) [:len $code]]=" ") do={:set code [:pick $code 0 ([:len $code]-1)]}
         :if ([:pick $code 0 7]="sha256:") do={:set code [:pick $code 7 [:len $code]]}
-        :local expectedID $code
+        :local expectedID $code; :local input [:tostr ($row->"file")]
+        :if ([:pick $input 0 1]="/") do={:set input [:pick $input 1 [:len $input]]}
         :if ($partial) do={
             :set expectedID ($archive->"image_id")
-            :local input [:tostr ($row->"file")]; :if ([:pick $input 0 1]="/") do={:set input [:pick $input 1 [:len $input]]}
             :if (($input!="") and ($input!=(($p->"data") . "/images/" . ($p->"component") . "-" . ($archive->"digest") . ".tar"))) do={:error "image: provisional archive changed"}
+        } else={
+            # RouterOS can change the declared file without changing the
+            # running executable. Bind that field to this exact signed ref.
+            :if ($input!="") do={
+                :local ref ($p->"old"); :if (($ref->"image_id")!=$code) do={:set ref ($p->"new")}
+                :local data ($p->"data"); :local seed ($p->"seed")
+                :local cas ($data . "/images/" . ($p->"component") . "-" . ($ref->"digest") . ".tar")
+                :local original ([:pick $data 0 ([:len $data]-5)] . "/images/" . $n . "-" . ($p->"platform") . ".tar")
+                :if ((($ref->"image_id")!=$code) or (($input!=$cas) and (($input!=$original) or (($seed->"image_id")!=$code) or (($seed->"digest")!=($ref->"digest"))))) do={:error "image: owner execution settings differ"}
+            }
         }
         :local alternative (($rootPath . "-image-" . $expectedID)=$path)
         :if ($alternative and (($expectedID!=($p->"old"->"image_id")) and ($expectedID!=($p->"new"->"image_id")))) do={:error "image: foreign recovery root"}
@@ -69,6 +79,8 @@
         :foreach key in={"hostname";"domain-name";"user";"workdir";"cpu-list";"env";"mount";"hosts";"tmpfs";"remote-image";"layer-dir";"healthcheck-cmd";"healthcheck-interval";"healthcheck-retries";"healthcheck-start-interval";"healthcheck-start-period";"healthcheck-timeout";"stop-signal";"shell"} do={
             :if ([:len [:tostr ($row->$key)]]>0) do={:error "image: owner execution settings differ"}
         }
+        :local swap [:tostr ($row->"swap-max")]
+        :if (($swap!="") and ($swap!="0")) do={:error "image: owner execution settings differ"}
         :if ((($row->"shm-size")!=67108864) or (($row->"restart-max-count")!=0) or ([:tonsec ($row->"restart-interval")]!=0) or ([:tonsec ($row->"stop-time")]!=10000000000) or (($row->"stop-on-unhealthy")=true) or (($row->"ignore-remote-image-change")=true) or (($row->"check-certificate")!=true)) do={:error "image: owner execution settings differ"}
         :return {"id"=$id;"image_id"=$code;"tag"=$claim;"partial"=$partial;"root"=$path}
     }
