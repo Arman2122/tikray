@@ -27,6 +27,37 @@ A release name starts with an ASCII letter or digit, uses at most 64 letters, di
 
 For offline staging, place the two matching files for the requested component and architecture in `/data/inbox/images/<selector>/` on the control data volume. For example, update the runner from `/data/inbox/images/v1.2.3/tikray-runner-amd64.tar` and its `.sig`. Use the normal authenticated update command. A missing publisher URL leaves the inbox available; an unknown key or mismatched signature refuses the operation.
 
+## Owner configuration on RouterOS
+
+On an installed router, put the following JSON in `/data/state/image-source.json` on the control volume. Use a regular file with permissions `0600` in the private state directory, then restart the control container to load it. Use a publisher you trust and the signing key already pinned by the installer.
+
+```json
+{
+  "version": 1,
+  "upstream": "https://publisher.example/releases",
+  "control_mode": "notify",
+  "runner_mode": "manual",
+  "runner_window": "02:00-03:00"
+}
+```
+
+The optional `mirrors` array contains HTTPS templates. Each component accepts `manual`, `notify` (the default), or `auto`. Manual mode makes no automatic release checks. Notify records availability in events. Auto explicitly authorizes replacement. The optional `control_window` and `runner_window` use 24-hour UTC times and may cross midnight. Without a window, checks are at least 24 hours apart. With a window, the service attempts once per window when running. A malformed private file leaves policy service running and previously verified rollback available. Publisher settings cannot change the pinned key.
+
+## Updating and checking the result
+
+Run these commands with the authenticated tikray CLI:
+
+```sh
+tikray image status tikray
+tikray image update tikray v1.2.3
+tikray image status tikray
+tikray image update runner v1.2.3
+tikray image status runner
+tikray image rollback runner
+```
+
+Wait for one operation to settle before requesting the next. An accepted update or rollback returns the operation ID and the source and target archive digests. The corresponding HTTP mutations return 202. Poll the component's status until `pending` disappears, then check `active` against the requested digest. A successful change reports the replaced image under `previous`. A rejected candidate leaves the original image active once the watchdog verifies its recovery. The control API is unavailable while its own container restarts. The runner may keep forwarding throughout a control replacement. A runner replacement interrupts proxied connections.
+
 ## Initial rollback material
 
 The installer verifies the original pair under the installation's `images/` directory for container import. It then checks the exact tagged live container config IDs and copies the verified tars by native file ID into the separate, control-only `data/images/` directory. It binds the two current-image receipts to the installation ID and writes the publisher bootstrap record last. A missing receipt on an established installation stops reimport for inspection. Retain the original installation archives for reimport.

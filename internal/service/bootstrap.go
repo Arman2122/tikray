@@ -38,6 +38,9 @@ func (s *Service) bootstrapCore(ctx context.Context, version string) (artifacts.
 		return artifacts.Result{}, err
 	}
 	defer s.release()
+	if artifacts.ImagePending(s.data) {
+		return artifacts.Result{}, artifacts.ErrImageBusy
+	}
 	if !s.bootPending.Load() {
 		return artifacts.Result{Outcome: artifacts.OutcomeNoop, Detail: "bootstrap complete"}, nil
 	}
@@ -151,7 +154,7 @@ func (s *Service) VerifyInstallation(ctx context.Context) error {
 		return err
 	}
 	defer s.release()
-	if s.bootPending.Load() || artifacts.GeoPending(s.data) {
+	if s.bootPending.Load() || artifacts.GeoPending(s.data) || artifacts.ImagePending(s.data) {
 		return ErrBootstrapPending
 	}
 	st, rev := s.store.State()

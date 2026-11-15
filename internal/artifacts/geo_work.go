@@ -53,9 +53,9 @@ func cleanupGeoWork(parent int) error {
 				return true
 			}
 			return false
-		})
+		}, nil)
 }
-func cleanupSlotWork(parent int, markerName string, workingName, allowedFile func(string) bool) error {
+func cleanupSlotWork(parent int, markerName string, workingName, allowedFile func(string) bool, beforeRemove func(int) error) error {
 	marker := filepath.Join(geoFDPath(parent), markerName)
 	b, e := atomicfile.ReadRegular(marker, 2048, 0600)
 	if errors.Is(e, fs.ErrNotExist) {
@@ -84,6 +84,11 @@ func cleanupSlotWork(parent int, markerName string, workingName, allowedFile fun
 		for _, ent := range entries {
 			if !allowedFile(ent.Name()) || !ent.Type().IsRegular() {
 				return errGeoWork
+			}
+		}
+		if beforeRemove != nil {
+			if err := beforeRemove(fd); err != nil {
+				return err
 			}
 		}
 		for _, ent := range entries {

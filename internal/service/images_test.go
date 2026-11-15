@@ -40,6 +40,35 @@ func TestImageReplacementFencesOtherMutations(t *testing.T) {
 		t.Fatal("marker failed to fence state and runner")
 	}
 }
+
+// A failing refresh can return after the owner has already requested a swap.
+func TestImagePendingPreservesConfigurationDuringRecovery(t *testing.T) {
+	e, _ := newSubEnv(t)
+	sub, _ := e.addSub("provider")
+	r := &testRouter{}
+	e.s = e.newService(Config{Router: r})
+	_, rev := e.s.State()
+	if err := os.WriteFile(filepath.Join(e.data, "state", "image-update.json"), []byte("{"), 0600); err != nil {
+		t.Fatal("cannot stage interrupted image receipt")
+	}
+	e.s.refreshFailed(t.Context(), sub, "fixture failure")
+	if _, current := e.s.State(); current != rev {
+		t.Error("late subscription failure changed the state during image recovery")
+	}
+	if _, _, err := e.s.save(rev, func(*store.State) ([]note, error) {
+		t.Error("retry modified desired state before image recovery")
+		return nil, nil
+	}); !errors.Is(err, artifacts.ErrImageBusy) {
+		t.Error("metadata write bypassed the image fence")
+	}
+	if _, err := e.s.RefreshSubscription(t.Context(), sub.ID); !errors.Is(err, artifacts.ErrImageBusy) {
+		t.Error("refresh started during an image replacement")
+	}
+	if !e.s.pass(t.Context(), 0) || len(r.prepared) != 0 || r.count() != 0 {
+		t.Error("unreadable transition allowed the reconciler to change watchdog routing")
+	}
+}
+
 func TestImageHealthRequiresSameLiveDataPath(t *testing.T) {
 	e := newEnv(t)
 	e.inSync()

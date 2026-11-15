@@ -123,7 +123,9 @@ func (s *Service) change(ctx context.Context, rev uint64, fn edit) (store.State,
 			return store.State{}, 0, err
 		}
 	}
-	st, rev, err := s.save(current, func(st *store.State) ([]note, error) {
+	// Admission and native protection already happened under this writer. A
+	// failing store write must reach the store so it can heal its durable copy.
+	st, rev, err := s.writeState(current, func(st *store.State) ([]note, error) {
 		*st = next
 		return notes, nil
 	})
@@ -137,6 +139,13 @@ func (s *Service) change(ctx context.Context, rev uint64, fn edit) (store.State,
 // save also serves the retry of previously untested servers. That operation
 // already holds the apply lock and only changes server test metadata.
 func (s *Service) save(rev uint64, fn edit) (store.State, uint64, error) {
+	if artifacts.ImagePending(s.data) {
+		return store.State{}, 0, artifacts.ErrImageBusy
+	}
+	return s.writeState(rev, fn)
+}
+
+func (s *Service) writeState(rev uint64, fn edit) (store.State, uint64, error) {
 	var notes []note
 	st, next, err := s.store.Update(rev, func(st *store.State) (err error) {
 		if notes, err = fn(st); err != nil {

@@ -2,8 +2,12 @@ package artifacts
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Arman2122/tikray/internal/runnerapi"
+	"github.com/Arman2122/tikray/internal/xrayver"
 )
 
 func updateRef(component, hex string) ImageRef {
@@ -163,6 +168,16 @@ func TestImageReceiptMissingAfterCommitCannotSelectBootstrap(t *testing.T) {
 			t.Fatal("cannot write receipt")
 		}
 	}
+	for _, previous := range []string{"", `,"previous":{}`} {
+		active, _ := json.Marshal(boot.Tikray)
+		row := `{"version":1,"installation_id":"` + id + `","active":` + string(active) + previous + "}"
+		if err := os.WriteFile(filepath.Join(dir, "image-tikray.json"), []byte(row), 0600); err != nil {
+			t.Fatal("cannot write incomplete lineage")
+		}
+		if _, err := imageVersions(data, id, "tikray", boot); err == nil {
+			t.Error("an incomplete receipt discarded the rollback lineage")
+		}
+	}
 	save(boot.Tikray, nil, id)
 	if r, e := imageVersions(data, id, "tikray", boot); e != nil || r.Active != boot.Tikray || r.Previous.Valid() {
 		t.Fatal("initial verified receipt refused")
@@ -214,5 +229,65 @@ func TestStateRetentionUsesBothSignedControlSchemas(t *testing.T) {
 	}
 	if _, _, err := RetainedStateSchemas(t.Context(), u.Data); err == nil {
 		t.Fatal("used the schema of an unverified rollback image")
+	}
+}
+
+func TestOfflineRunnerRollbackNeedsCommittedSelection(t *testing.T) {
+	u, key := seedImageTrust(t)
+	for _, name := range []string{"v1", "v2"} {
+		b := testImage(t, "runner", "amd64", name)
+		putInboxImage(t, u, "runner", name, b, signImageFixture(t, key, b))
+	}
+	prior, err := u.StageImage(t.Context(), "runner", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := u.StageImage(t.Context(), "runner", "v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(u.Data, "state")
+	id := strings.Repeat("c", 32)
+	os.WriteFile(filepath.Join(state, "install.id"), []byte(id), 0600)
+	b, _ := json.Marshal(imageReceipt{1, id, current.Ref(), prior.Ref()})
+	os.WriteFile(filepath.Join(state, "image-runner.json"), b, 0600)
+	httpd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
+	defer httpd.Close()
+	u.Runner = &runnerapi.Client{BaseURL: httpd.URL, Token: "fixture", HTTP: httpd.Client()}
+	cfg := []byte(`{"routing":{}}`)
+	u.Render = func(xrayver.Version, string) ([]byte, error) { return cfg, nil }
+	sel := runnerapi.Selection{Core: "26.10.31", Config: ConfigName(cfg)}
+	run := filepath.Join(u.Data, "run")
+	os.MkdirAll(filepath.Join(run, "config"), 0700)
+	os.WriteFile(filepath.Join(run, sel.Config), cfg, 0600)
+	b, _ = json.Marshal(sel)
+	os.WriteFile(filepath.Join(run, "active.json"), b, 0600)
+	core := filepath.Join(u.Data, "cores", sel.Core)
+	os.MkdirAll(core, 0755)
+	bin := []byte("verified-fixture-core")
+	os.WriteFile(filepath.Join(core, "xray"), bin, 0755)
+	h := sha256.Sum256(bin)
+	m := Meta{Version: sel.Core, Verified: "dgst", BinarySHA256: hex.EncodeToString(h[:])}
+	b, _ = json.Marshal(m)
+	os.WriteFile(filepath.Join(core, "meta.json"), b, 0644)
+	if err := os.WriteFile(filepath.Join(run, "candidate.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := u.BeginImageRollback(t.Context(), "runner"); err == nil || ImagePending(u.Data) {
+		t.Fatal("queued alongside unresolved trial")
+	}
+	os.Remove(filepath.Join(run, "candidate.json"))
+	op, err := u.BeginImageRollback(t.Context(), "runner")
+	if err != nil || op.From != current.Ref().Digest || op.To != prior.Ref().Digest {
+		t.Fatal("could not queue proven rollback of unavailable runner", err)
+	}
+	request, err := readImageRequest(u.Data, id)
+	if err != nil || request.SelectionDigest != ImageSelectionDigest(sel) {
+		t.Fatal("did not bind offline rollback to the verified state")
+	}
+	os.Remove(filepath.Join(state, imageRequestFile))
+	os.WriteFile(filepath.Join(run, sel.Config), []byte("changed"), 0600)
+	if _, err = u.BeginImageRollback(t.Context(), "runner"); err == nil || ImagePending(u.Data) {
+		t.Fatal("corrupt saved selection authorized offline rollback")
 	}
 }

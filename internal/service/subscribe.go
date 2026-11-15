@@ -215,6 +215,9 @@ func (s *Service) RefreshSubscription(ctx context.Context, id string) (RefreshRe
 	if s.bootPending.Load() {
 		return RefreshResult{}, ErrBootstrapPending
 	}
+	if artifacts.ImagePending(s.data) {
+		return RefreshResult{}, artifacts.ErrImageBusy
+	}
 	if err := s.acquireRefresh(ctx); err != nil {
 		return RefreshResult{}, err
 	}
@@ -482,6 +485,9 @@ func (s *Service) refreshFailed(ctx context.Context, sub store.Subscription, rea
 			return
 		}
 		defer s.release()
+	}
+	if artifacts.ImagePending(s.data) {
+		return
 	}
 	label := sub.ID
 	var wait time.Duration

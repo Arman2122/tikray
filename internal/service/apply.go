@@ -139,6 +139,10 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 	st, rev := s.store.State()
 	if artifacts.ImagePending(s.data) {
 		// Preserve router-only protections without a competing runner trial.
+		if artifacts.HoldsRunnerPolicy(s.data) {
+			s.routerPending("image")
+			return true
+		}
 		if s.router == nil || artifacts.GeoPending(s.data) || s.store.EnsureDurable() != nil {
 			return true
 		}

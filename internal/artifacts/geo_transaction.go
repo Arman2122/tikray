@@ -137,7 +137,7 @@ func (g *GeoUpdater) change(ctx context.Context, profile, version string, rollba
 		if err := g.requireNoRunnerIntent(); err != nil {
 			return refuse(&res, err)
 		}
-		if err := g.verifyConfig(ctx, old.Config); err != nil {
+		if err := g.Core.verifyConfig(ctx, old.Config); err != nil {
 			return refuse(&res, err)
 		}
 
@@ -435,7 +435,7 @@ func (g *GeoUpdater) restore(ctx context.Context, p *geoTransition) error {
 	if err != nil {
 		return err
 	}
-	if err := g.verifyConfig(ctx, p.From.Config); err != nil {
+	if err := g.Core.verifyConfig(ctx, p.From.Config); err != nil {
 		return err
 	}
 	if g.Prepare != nil {
@@ -458,9 +458,9 @@ func (g *GeoUpdater) restore(ctx context.Context, p *geoTransition) error {
 
 // Verify the previous content-addressed file without loading an arbitrary
 // saved configuration into memory or following links in the shared run tree.
-func (g *GeoUpdater) verifyConfig(ctx context.Context, name string) error {
-	bad := errors.New("artifacts: previous geo config unavailable")
-	dir, err := openGeoDir(g.Core.Data, false, "run", "config")
+func (u *CoreUpdater) verifyConfig(ctx context.Context, name string) error {
+	bad := errors.New("artifacts: previous config unavailable")
+	dir, err := openGeoDir(u.Data, false, "run", "config")
 	if err != nil {
 		return bad
 	}

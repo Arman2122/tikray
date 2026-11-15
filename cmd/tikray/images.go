@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/Arman2122/tikray/internal/atomicfile"
-	"github.com/Arman2122/tikray/internal/service"
 	"io"
 	"io/fs"
 	"path/filepath"
@@ -14,6 +12,8 @@ import (
 
 	"github.com/Arman2122/tikray/internal/apiclient"
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/atomicfile"
+	"github.com/Arman2122/tikray/internal/service"
 )
 
 func (c *cli) imageCommand(ctx context.Context, args []string) int {

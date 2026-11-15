@@ -16,6 +16,7 @@ import (
 
 	"github.com/Arman2122/tikray/internal/atomicfile"
 	"github.com/Arman2122/tikray/internal/runnerapi"
+	"github.com/Arman2122/tikray/internal/xrayver"
 	"golang.org/x/sys/unix"
 )
 
@@ -186,15 +187,18 @@ func imageVersions(data, id, component string, boot ImageBootstrap) (imageReceip
 	if !imageNonce(id) || !ValidImageComponent(component) {
 		return imageReceipt{}, ErrImageState
 	}
-	var r imageReceipt
-	found, err := readImageJSON(data, "image-"+component+".json", &r)
-	if err != nil {
-		return r, err
+	var wire struct {
+		Version        int             `json:"version"`
+		InstallationID string          `json:"installation_id"`
+		Active         ImageRef        `json:"active"`
+		Previous       json.RawMessage `json:"previous"`
 	}
-	if !found || r.Version != 1 || r.InstallationID != id || !r.Active.Valid() || r.Active.Component != component {
+	found, err := readImageJSON(data, "image-"+component+".json", &wire)
+	r := imageReceipt{Version: wire.Version, InstallationID: wire.InstallationID, Active: wire.Active}
+	if err != nil || !found || r.Version != 1 || r.InstallationID != id || !r.Active.Valid() || r.Active.Component != component || len(wire.Previous) == 0 {
 		return imageReceipt{}, ErrImageState
 	}
-	if r.Previous == (ImageRef{}) {
+	if bytes.Equal(wire.Previous, []byte("null")) {
 		initial := boot.Tikray
 		if component == "runner" {
 			initial = boot.Runner
@@ -202,8 +206,12 @@ func imageVersions(data, id, component string, boot ImageBootstrap) (imageReceip
 		if r.Active != initial {
 			return imageReceipt{}, ErrImageState
 		}
-	} else if !r.Previous.Valid() || r.Previous.Component != component || r.Active.Digest == r.Previous.Digest || r.Active.ImageID == r.Previous.ImageID {
-		return imageReceipt{}, ErrImageState
+	} else {
+		dec := json.NewDecoder(bytes.NewReader(wire.Previous))
+		dec.DisallowUnknownFields()
+		if dec.Decode(&r.Previous) != nil || !r.Previous.Valid() || r.Previous.Component != component || r.Active.Digest == r.Previous.Digest || r.Active.ImageID == r.Previous.ImageID {
+			return imageReceipt{}, ErrImageState
+		}
 	}
 	return r, nil
 }
@@ -242,7 +250,15 @@ func ReadImageStatus(data, component string) (ImageStatus, error) {
 }
 
 func (u *CoreUpdater) BeginImageUpdate(ctx context.Context, image VerifiedImage) (ImageOperation, error) {
-	return u.beginImageChange(ctx, image.Ref().Component, image.Ref(), false)
+	op, err := u.beginImageChange(ctx, image.Ref().Component, image.Ref(), false)
+	if err != nil {
+		// A disconnected caller may still have published its request. Only
+		// discard this candidate after checking the live marker and lineage.
+		reclaim, done := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer done()
+		u.retireRefusedImage(reclaim, image.Ref())
+	}
+	return op, err
 }
 func (u *CoreUpdater) BeginImageRollback(ctx context.Context, component string) (ImageOperation, error) {
 	return u.beginImageChange(ctx, component, ImageRef{}, true)
@@ -296,10 +312,18 @@ func (u *CoreUpdater) beginImageChange(ctx context.Context, component string, ta
 		return ImageOperation{}, errors.New("artifacts: requested image is already active")
 	}
 	rs, err := u.Runner.Status(ctx)
-	if err != nil || rs.State != runnerapi.StateRunning || rs.Active == nil || rs.Candidate != nil || !rs.GatewayUp || !rs.RoutesOK {
+	var selection runnerapi.Selection
+	if err == nil && rs.State == runnerapi.StateRunning && rs.Active != nil && rs.Candidate == nil && rs.GatewayUp && rs.RoutesOK {
+		selection = *rs.Active
+	} else if rollback && component == "runner" && (err != nil || (rs.Candidate == nil && rs.State != runnerapi.StateTrial)) {
+		selection, err = u.savedImageSelection(ctx)
+		if err != nil {
+			return ImageOperation{}, err
+		}
+	} else {
 		return ImageOperation{}, ErrImageState
 	}
-	m, err := newImageRequest(id, r.Active, target, *rs.Active, u.now())
+	m, err := newImageRequest(id, r.Active, target, selection, u.now())
 	if err != nil {
 		return ImageOperation{}, err
 	}
@@ -382,6 +406,11 @@ func ProveRunnerImage(ctx context.Context, data string, verify func(context.Cont
 // identified active/previous pairs may establish a keep set. Initial archives
 // remain available for an owner re-import.
 func PruneInstalledImages(ctx context.Context, data string) error {
+	unlock, err := lockState(filepath.Join(data, "state"))
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if ImagePending(data) {
 		return ErrImageBusy
 	}
@@ -411,7 +440,7 @@ func PruneInstalledImages(ctx context.Context, data string) error {
 	if ImagePending(data) {
 		return ErrImageBusy
 	}
-	return PruneImages(ctx, data, boot.Arch, keep)
+	return pruneImagesLocked(ctx, data, boot.Arch, keep)
 }
 
 // RetainedStateSchemas verifies the two retained control archives rather than
@@ -450,4 +479,58 @@ func RetainedStateSchemas(ctx context.Context, data string) (int, int, error) {
 		return 0, 0, err
 	}
 	return a.StateSchema, p.StateSchema, nil
+}
+
+// A failed runner cannot authorize its own rollback. Verify its restart
+// selection from disk against the current owner's render, immutable config
+// bytes and authenticated installed core. The newly started runner still
+// has to pass the ordinary live proof before RouterOS retires this request.
+func (u *CoreUpdater) savedImageSelection(ctx context.Context) (runnerapi.Selection, error) {
+	var sel runnerapi.Selection
+	run, err := openGeoDir(u.Data, false, "run")
+	if err != nil {
+		return sel, ErrImageState
+	}
+	defer unix.Close(run)
+	var raw bytes.Buffer
+	if readGeoFile(run, "active.json", 4096, &raw) != nil || json.Unmarshal(raw.Bytes(), &sel) != nil || sel.Validate() != nil || u.Render == nil {
+		return runnerapi.Selection{}, ErrImageState
+	}
+	v, err := xrayver.Parse(sel.Core)
+	if err != nil {
+		return runnerapi.Selection{}, ErrImageState
+	}
+	b, err := u.Render(v, sel.Geo)
+	if err != nil || ConfigName(b) != sel.Config || u.verifyConfig(ctx, sel.Config) != nil {
+		return runnerapi.Selection{}, ErrImageState
+	}
+	if sel.Geo != "" {
+		if _, _, err := LoadGeo(u.Data, sel.Geo); err != nil {
+			return runnerapi.Selection{}, ErrImageState
+		}
+	}
+	slots, err := ListCores(u.coresDir())
+	if err != nil {
+		return runnerapi.Selection{}, ErrImageState
+	}
+	for _, s := range slots {
+		if s.Meta.Version == sel.Core && (s.Meta.Verified == "dgst" || s.Meta.Verified == "index") && s.VerifyBinary(ctx) == nil {
+			return sel, nil
+		}
+	}
+	return runnerapi.Selection{}, ErrImageState
+}
+
+// An unreadable request cannot authorize changing the watchdog's temporary
+// routing and DNS settings. The native scheduler works without the service.
+func HoldsRunnerPolicy(data string) bool {
+	if !ImagePending(data) {
+		return false
+	}
+	id, err := readImageID(data)
+	if err != nil {
+		return true
+	}
+	m, err := readImageRequest(data, id)
+	return err != nil || (m != nil && m.Component == "runner")
 }

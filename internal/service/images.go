@@ -55,7 +55,13 @@ func (s *Service) imageChange(ctx context.Context, component, version string) (a
 		return none, artifacts.ErrImageState
 	}
 	st, rev := s.store.State()
-	if err := s.finishRouter(ctx, st, rev); err != nil {
+	if version == "" && component == "runner" {
+		// Preparation retains native protections while the unavailable
+		// runner is verified from its durable selection by BeginImageRollback.
+		if err := s.prepareRouter(ctx, st, rev); err != nil {
+			return none, err
+		}
+	} else if err := s.finishRouter(ctx, st, rev); err != nil {
 		return none, err
 	}
 	u := s.updater(st, rev)
