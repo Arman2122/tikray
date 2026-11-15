@@ -92,7 +92,7 @@ func TestWatchdogInactiveExitsCleanly(t *testing.T) {
 		t.Fatal(e)
 	}
 	source := string(body)
-	for _, part := range []struct{ key, file string }{{"STEP", "watchdog-step.rsc"}, {"STATE", "watchdog-state.rsc"}, {"BINDINGS", "bindings.rsc"}} {
+	for _, part := range []struct{ key, file string }{{"STEP", "watchdog-step.rsc"}, {"STATE", "watchdog-state.rsc"}, {"BINDINGS", "bindings.rsc"}, {"IMAGE", "watchdog-image.rsc"}} {
 		b, e := routerosfiles.Sources.ReadFile(part.file)
 		if e != nil {
 			t.Fatal(e)

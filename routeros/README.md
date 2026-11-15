@@ -59,6 +59,13 @@ For a development installation, upload the repository's `emergency-off.rsc` file
 
 The release template includes this script. The watchdog checks for the emergency marker and job before acting on a container.
 
+## Updating the container images
+
+The signed installer provisions image-update trust and the original rollback
+archives for both components. See the [image publisher and owner
+guide](../docs/handoff/m3/image-publishers.md) for release files, offline
+staging and update commands.
+
 ## Basic watchdog
 
 On the private bridge, static ARP entries map control and runner addresses to their container-side MACs. Static bridge host entries map those MACs to the two owned veth ports. The bridge uses reply-only ARP. Both ports have MAC learning and unknown-unicast flooding disabled so a stopped or recreated control port cannot send health traffic to the runner. These settings apply only to the tagged tikray bridge and ports.

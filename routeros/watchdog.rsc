@@ -57,7 +57,30 @@
         # @TIKRAY_WATCHDOG_STEP@
         # @TIKRAY_WATCHDOG_STATE@
         :local savedState [$wdState "read"]
+        :local controlOK do={
+            :local ctlIP $1; :local gateway $2; :local savedState $3; :local healthy false
+            # @TIKRAY_WATCHDOG_HEALTH@
+            :return $healthy
+        }
+        # @TIKRAY_WATCHDOG_IMAGE@
+        :local updating "all"
+        :do { :set updating [$wdImage $data ($savedState->"installation_id") $gateway $controlOK $suspended] } on-error={
+            # Even when a target archive is missing or its row was retagged,
+            # a verified independent sibling can still need a basic restart.
+            :do {
+                :local reqs [/file/find where name=($data . "/state/image-update.json")]
+                :if (([:len $reqs]=1) and ([/file/get $reqs size]<=4096)) do={
+                    :local req [:deserialize from=json options=json.no-string-conversion value=[/file/get $reqs contents]]
+                    :if (($req->"installation_id")=($savedState->"installation_id")) do={
+                        :if (($req->"component")="tikray") do={:set updating "tikray"}
+                        :if (($req->"component")="runner") do={:set updating "tikray-runner"}
+                    }
+                }
+            } on-error={}
+            :log warning "tikray: image operation needs verification"
+        }
         :foreach component in={"tikray-runner";"tikray"} do={
+            :if (($component!=$updating) and ($updating!="all")) do={
             :local ownedTag "tikray:tikray"
             :local vethName "tikray-ctl"
             :if ($component = "tikray-runner") do={ :set ownedTag "tikray:runner"; :set vethName "tikray-runner" }
@@ -74,7 +97,7 @@
                         :if ($component = "tikray-runner") do={
                             :do { :set healthy ([/ping address=$runnerIP src-address=$gateway count=1 interval=400ms] = 1) } on-error={ :set healthy false }
                         } else={
-                            # @TIKRAY_WATCHDOG_HEALTH@
+                            :set healthy [$controlOK $ctlIP $gateway $savedState]
                         }
                     }
                     :local uptime ([:tonsec [/system/resource/get uptime]] / 1000000000)
@@ -99,6 +122,7 @@
             } else={
                 # An absent or foreign sibling cannot disable recovery of the other component.
                 :local clear [$wdState "save" $component ({"miss"=0;"delay"=1;"due"=0}) 0]
+            }
             }
         }
         :return true

@@ -1,14 +1,19 @@
 package adapters
 
 import (
-	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/sha256"
 	"crypto/sha512"
-	"encoding/json"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/pem"
 	"errors"
-	"fmt"
+	"github.com/Arman2122/tikray/internal/atomicfile"
+	"github.com/Arman2122/tikray/internal/imagearchive"
 	"io"
 	"net/url"
 	"os"
@@ -17,12 +22,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
 const (
 	installerChunkSize = 16 * 1024 // binary-safe on both measured CHRs
-	maxArchive         = 128 << 20
+	maxArchive         = imagearchive.MaxSize
 )
 
 var (
@@ -32,6 +38,8 @@ var (
 
 type VerifiedArchive struct {
 	component, arch, releaseBase string
+	publisher, signature         string
+	ref                          imagearchive.Ref
 	size                         int
 	digests                      [][sha512.Size]byte
 }
@@ -51,13 +59,19 @@ func VerifyArchive(ctx context.Context, p Profile, component, dir, key, releaseB
 	if err != nil {
 		return VerifiedArchive{}, errSignature
 	}
-	for _, f := range []string{keyPath, sig} {
-		st, e := os.Stat(f)
-		if e != nil || !st.Mode().IsRegular() || st.Size() < 1 || st.Size() > 1<<20 {
-			return VerifiedArchive{}, errSignature
-		}
+	keyPEM, err := atomicfile.ReadRegular(keyPath, 4096, 0)
+	if err != nil {
+		return VerifiedArchive{}, errSignature
 	}
-	f, err := os.Open(file)
+	block, tail := pem.Decode(keyPEM)
+	if block == nil || block.Type != "PUBLIC KEY" || len(bytes.TrimSpace(tail)) != 0 {
+		return VerifiedArchive{}, errSignature
+	}
+	sigText, err := atomicfile.ReadRegular(sig, 256, 0)
+	if err != nil {
+		return VerifiedArchive{}, errSignature
+	}
+	f, err := os.OpenFile(file, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return VerifiedArchive{}, errArchive
 	}
@@ -77,7 +91,14 @@ func VerifyArchive(ctx context.Context, p Profile, component, dir, key, releaseB
 	if cmd.Run() != nil {
 		return VerifiedArchive{}, errSignature
 	}
-	return describeArchive(p, component, b, releaseBase)
+	a, err := describeArchive(p, component, b, releaseBase)
+	if err != nil {
+		return VerifiedArchive{}, err
+	}
+	if err := a.bindSignature(block.Bytes, sigText); err != nil {
+		return VerifiedArchive{}, err
+	}
+	return a, nil
 }
 
 var safeReleaseURL = regexp.MustCompile(`^https://[A-Za-z0-9.:-]+(/[A-Za-z0-9._/-]+)?$`)
@@ -99,62 +120,36 @@ func describeArchive(p Profile, component string, b []byte, releaseBase string) 
 			}
 		}
 	}
-	var manifest []struct {
-		Config   string
-		RepoTags []string
+	role := component
+	if component == "tikray-runner" {
+		role = "runner"
 	}
-	var config []byte
-	reader := tar.NewReader(bytes.NewReader(b))
-	for {
-		h, e := reader.Next()
-		if e == io.EOF {
-			break
-		}
-		if e != nil {
-			return VerifiedArchive{}, errArchive
-		}
-		if h.Name != "manifest.json" {
-			continue
-		}
-		if manifest != nil || h.Typeflag != tar.TypeReg || h.Size > 1<<20 {
-			return VerifiedArchive{}, errArchive
-		}
-		data, e := io.ReadAll(reader)
-		if e != nil || json.Unmarshal(data, &manifest) != nil || len(manifest) != 1 {
-			return VerifiedArchive{}, errArchive
-		}
-	}
-	if len(manifest) != 1 || len(manifest[0].RepoTags) != 1 || manifest[0].RepoTags[0] != "tikray/"+component+":"+p.GOARCH() {
+	ref, _, err := imagearchive.Inspect(context.Background(), bytes.NewReader(b), int64(len(b)), role, p.GOARCH(), "")
+	if err != nil || imagearchive.ReleaseName(role) != component {
 		return VerifiedArchive{}, errArchive
 	}
-	reader = tar.NewReader(bytes.NewReader(b))
-	for {
-		h, e := reader.Next()
-		if e == io.EOF {
-			break
-		}
-		if e != nil {
-			return VerifiedArchive{}, errArchive
-		}
-		if h.Name != manifest[0].Config {
-			continue
-		}
-		if config != nil || h.Typeflag != tar.TypeReg || h.Size > 1<<20 {
-			return VerifiedArchive{}, errArchive
-		}
-		config, e = io.ReadAll(reader)
-		if e != nil {
-			return VerifiedArchive{}, errArchive
-		}
-	}
-	var meta struct{ Architecture, OS string }
-	sum := fmt.Sprintf("%x", sha256.Sum256(config))
-	if json.Unmarshal(config, &meta) != nil || meta.OS != "linux" || meta.Architecture != p.GOARCH() || manifest[0].Config != "blobs/sha256/"+sum && manifest[0].Config != sum+".json" {
-		return VerifiedArchive{}, errArchive
-	}
-	a := VerifiedArchive{component: component, arch: p.GOARCH(), releaseBase: strings.TrimRight(releaseBase, "/"), size: len(b)}
+	a := VerifiedArchive{component: component, arch: p.GOARCH(), releaseBase: strings.TrimRight(releaseBase, "/"), size: len(b), ref: ref}
 	for off := 0; off < len(b); off += installerChunkSize {
 		a.digests = append(a.digests, sha512.Sum512(b[off:min(off+installerChunkSize, len(b))]))
 	}
 	return a, nil
+}
+
+// Preserve the exact trust input in the installer. In-process verification
+// also prevents a replaced key or detached signature between two file reads
+// from being provisioned by an otherwise successful cosign subprocess.
+func (a *VerifiedArchive) bindSignature(der, sigText []byte) error {
+	k, e := x509.ParsePKIXPublicKey(der)
+	key, ok := k.(*ecdsa.PublicKey)
+	if e != nil || !ok || key.Curve != elliptic.P256() {
+		return errSignature
+	}
+	sig, e := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(string(sigText)))
+	digest, e2 := hex.DecodeString(a.ref.Digest)
+	if e != nil || e2 != nil || len(digest) != sha256.Size || !ecdsa.VerifyASN1(key, digest, sig) {
+		return errSignature
+	}
+	a.publisher = base64.StdEncoding.EncodeToString(der)
+	a.signature = base64.StdEncoding.EncodeToString(sig)
+	return nil
 }

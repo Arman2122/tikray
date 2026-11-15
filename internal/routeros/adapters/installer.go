@@ -2,8 +2,10 @@ package adapters
 
 import (
 	"crypto/sha512"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Arman2122/tikray/internal/artifacts"
 	"io"
 	"strings"
 
@@ -131,7 +133,7 @@ func buildInstaller(p Profile, images []VerifiedArchive, dst io.Writer, readSour
 	}
 	total := 0
 	for _, a := range images {
-		if a.arch != p.GOARCH() || a.size < 1 || a.size > maxArchive || len(a.digests) != (a.size+installerChunkSize-1)/installerChunkSize || a.releaseBase != images[0].releaseBase {
+		if a.arch != p.GOARCH() || a.size < 1 || a.size > maxArchive || len(a.digests) != (a.size+installerChunkSize-1)/installerChunkSize || a.releaseBase != images[0].releaseBase || !a.ref.Valid() || a.publisher == "" || a.signature == "" || a.publisher != images[0].publisher {
 			return errArchive
 		}
 		total += a.size
@@ -181,7 +183,7 @@ func buildInstaller(p Profile, images []VerifiedArchive, dst io.Writer, readSour
 	}
 	watchBody := string(watch)
 	var stateSource string
-	for _, part := range []struct{ slot, file string }{{"STEP", "watchdog-step.rsc"}, {"STATE", "watchdog-state.rsc"}, {"BINDINGS", "bindings.rsc"}, {"HEALTH", "watchdog-health.rsc"}} {
+	for _, part := range []struct{ slot, file string }{{"STEP", "watchdog-step.rsc"}, {"STATE", "watchdog-state.rsc"}, {"BINDINGS", "bindings.rsc"}, {"HEALTH", "watchdog-health.rsc"}, {"IMAGE", "watchdog-image.rsc"}} {
 		b, err := readSource(part.file)
 		if err != nil {
 			return errors.New("installer: missing watchdog logic")
@@ -208,6 +210,22 @@ func buildInstaller(p Profile, images []VerifiedArchive, dst io.Writer, readSour
 	}
 	platform := fmt.Sprintf(`:if (($arch != "%s") or ([:pick [/system/resource/get version] 0 [:find ([/system/resource/get version] . " ") " "]] != "%s")) do={ :error "tikray: obtain installer matching installed architecture and version" }; :set imageBytes %d`, p.GOARCH(), p.Version(), total)
 	if e = replace("# @TIKRAY_PLATFORM@", platform); e != nil {
+		return e
+	}
+	baseline, err := readSource("image-bootstrap.rsc")
+	if err != nil {
+		return errors.New("installer: missing image bootstrap")
+	}
+	b, err := json.Marshal(artifacts.ImageBootstrap{Version: 1, Arch: p.GOARCH(), Publisher: images[0].publisher, Tikray: images[0].ref, Runner: images[1].ref})
+	if err != nil {
+		return errArchive
+	}
+	constants := fmt.Sprintf(`:local bootstrap %q
+        :local signatureFor do={ :if ($1="tikray") do={ :return "%s" }; :return "%s" }`, string(b), images[0].signature, images[1].signature)
+	if strings.Count(string(baseline), "# @TIKRAY_IMAGE_CONSTANTS@") != 1 {
+		return errors.New("installer: invalid image bootstrap")
+	}
+	if e = replace("# @TIKRAY_IMAGE_BOOTSTRAP@", strings.Replace(string(baseline), "# @TIKRAY_IMAGE_CONSTANTS@", constants, 1)); e != nil {
 		return e
 	}
 	if e = replace("# @TIKRAY_VERIFIER@", archiveVerifier(images)); e != nil {

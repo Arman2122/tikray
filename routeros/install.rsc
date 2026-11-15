@@ -34,6 +34,8 @@
     :if (!(($folder = "tikray") or ($folder ~ "^tikray-[A-Za-z0-9_][A-Za-z0-9_-]*\$"))) do={ :error "tikray: select a dedicated tikray data folder" }
     :local base ($disk . "/" . $folder)
     :local data ($base . "/data")
+    :if (([:len [/file/find where name=($data . "/state/image-update.json")]] > 0) or ([:len [/system/script/find where name="tikray-image-transition" or comment~"^tikray:image-transition"]] > 0)) do={ :error "tikray: image transition active; retry after watchdog recovery" }
+
     :local arch [/system/resource/get architecture-name]
     :local version [:pick [:tostr [/system/resource/get version]] 0 [:find ([:tostr [/system/resource/get version]] . " ") " "]]
     :local installed [:tostr [/system/resource/get version]]
@@ -44,6 +46,7 @@
     :local imageBytes 0
     # @TIKRAY_PLATFORM@
     # @TIKRAY_VERIFIER@
+    # @TIKRAY_IMAGE_BOOTSTRAP@
     # @TIKRAY_LOCK@
     :if ($imageBytes = 0) do={ :error "tikray: use a packaged signed installer" }
     :if (([:len [/system/package/find where name="container" and !disabled]] != 1)) do={ :error "tikray: install the matching container package and reboot" }
@@ -240,6 +243,7 @@
         :local iface [/interface/bridge/port/get $port interface]; :local ownedTag [/interface/bridge/port/get $port comment]
         :if (!( (($iface = "tikray-ctl" or [:pick [:tostr $iface] 0 1] = "*") and $ownedTag = "tikray:port-ctl") or (($iface = "tikray-runner" or [:pick [:tostr $iface] 0 1] = "*") and $ownedTag = "tikray:port-runner") )) do={ :error "tikray: shared_reference_refuses; unexpected bridge port" }
     }
+    :local imagePreflight [$imageBaseline false $data $base $arch $verifyStaged]
     :local seedPath ($data . "/install.json")
     :local statePath ($data . "/state/routeros.json")
     :local readyPath ($data . "/state/install.ready")
@@ -389,6 +393,7 @@
             :while (([:len [/system/script/job/find where script="tikray-watchdog"]] > 0) and ($waitTick < 20)) do={ :delay 1s; :set waitTick ($waitTick+1) }
             :if (([:len [/system/script/job/find where script="tikray-watchdog" or script="tikray-emergency-off"]] > 0)) do={ :error "tikray: installer busy; retry after the local job completes" }
             $requireInstall $lease
+            :local imageClaim [$imageBaseline false $data $base $arch $verifyStaged]
             :if (([:tostr [/file/find where name=$seedPath]] != [:tostr $seedFiles]) or ([:tostr [/user/find where name="tikray" or comment="tikray:user"]] != [:tostr $originalUser]) or ([:tostr [/user/group/find where name="tikray" or comment="tikray:group"]] != [:tostr $groupId])) do={ :error "tikray: installation changed during preflight; retry import" }
             $dir $base; $dir ($base . "/images")
             :local archivesVerified false
@@ -552,6 +557,9 @@
         :if ($answer != ($nonce . " " . $httpsPin)) do={ :delay 1s; :set waited ($waited+1) }
     }
     :if ($answer != ($nonce . " " . $httpsPin)) do={ :error "tikray: retry bootstrap; live control, runner and router verification failed" }
+    # PUBLISH VERIFIED IMAGE BASELINE
+    $requireInstall $lease
+    :local imageReady [$imageBaseline true $data $base $arch $verifyStaged $requireInstall $lease]
     :if ($reuse) do={
         :local prior [/file/find where name=$retainedPath]
         :if (([:len $prior] != 1) or ([:tostr $prior] != [:tostr $kept]) or ([/file/get $prior contents] != $keptText)) do={ :error "tikray: retained-data receipt changed; inspect before retry" }

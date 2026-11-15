@@ -17,6 +17,11 @@
         :if (([:len $p] > 0) and ([:pick $p ([:len $p]-1) [:len $p]] = "/")) do={ :set p [:pick $p 0 ([:len $p]-1)] }
         :return $p
     }
+    :local imageIdle do={
+        :if (([:len [/system/script/find where name="tikray-image-transition" or comment~"^tikray:image-transition "]]>0) or (($1!="") and ([:len [/file/find where name=($1 . "/state/image-update.json")]]>0))) do={ :error "tikray: shared_reference_refuses; image transition active; wait for verified recovery" }
+        :return true
+    }
+    :local noImage [$imageIdle ""]
     :local role do={
         :local menu $1; :local tagValue $2
         :if ([:pick $tagValue 0 7] != "tikray:") do={ :return false }
@@ -171,6 +176,7 @@
     # @TIKRAY_RESTORE_SERVICE@
     # @TIKRAY_REFERENCES@
     # @TIKRAY_CLEANUP_DATA@
+    :set noImage [$imageIdle $data]
     :local checked [$references $inventory $checkTable $data $diskMount $diskSlot $normalize $subnet]
     :local peerCheck [$removeBindings "inspect"]
     :local serviceCheck [$restoreService "inspect" $phase $oldPin "" "" ($meta->"service")]
@@ -184,6 +190,7 @@
     # @TIKRAY_INSTALL_LOCK@
     :local lease [$acquireInstall]
     :onerror failure in={
+        :set noImage [$imageIdle $data]
     $requireInstall $lease
     :if ([:len $marker] = 0) do={
         :set meta {"version"=1;"phase"="detach";"choice"=$choice;"data"=$data;"installation_id"=$identity;"api_pin"=$oldPin;"subnet"=$subnet;"service"=$serviceCheck}

@@ -228,6 +228,24 @@ func (f *installLab) mustRun(ctx context.Context, t *testing.T, cmd string) stri
 
 func (f *installLab) packInstaller(ctx context.Context, t *testing.T) string {
 	t.Helper()
+	if delivered := os.Getenv("TIKRAY_LAB_INSTALLER"); delivered != "" {
+		// A delivered installer pins its publisher for subsequent image
+		// updates. Use the separately supplied public build artifacts.
+		bundle := filepath.Dir(f.controlTar)
+		target := filepath.Join(f.workDir, "verified-install.rsc")
+		cmd := exec.CommandContext(ctx, "go", "run", "./cmd/tikray-installer", "-arch", f.Arch.GOARCH(), "-version", f.Version,
+			"-key", filepath.Join(bundle, "cosign.pub"), "-images", bundle, "-out", target)
+		cmd.Dir = repoRoot()
+		if cmd.Run() != nil {
+			t.Fatal("installer packager refused the delivered signed image pair")
+		}
+		got, err := os.ReadFile(target)
+		want, e := os.ReadFile(delivered)
+		if err != nil || e != nil || len(got) == 0 || !bytes.Equal(got, want) {
+			t.Fatal("delivered installer differs from its verified image pair and publisher")
+		}
+		return delivered
+	}
 	dir := filepath.Join(f.workDir, "signed")
 	if os.MkdirAll(dir, 0700) != nil {
 		t.Fatal("could not stage archive signatures")
@@ -269,16 +287,6 @@ func (f *installLab) packInstaller(ctx context.Context, t *testing.T) string {
 	cmd.Dir = repoRoot()
 	if cmd.Run() != nil {
 		t.Fatal("real installer packager refused signed test inputs")
-	}
-	if delivered := os.Getenv("TIKRAY_LAB_INSTALLER"); delivered != "" {
-		// Test the exact artifact handed to the owner. A separately signed
-		// fixture with the same images must regenerate every byte.
-		want, err := os.ReadFile(target)
-		got, readErr := os.ReadFile(delivered)
-		if err != nil || readErr != nil || !bytes.Equal(want, got) {
-			t.Fatal("delivered installer differs from independently verified image pair")
-		}
-		return delivered
 	}
 	return target
 }
@@ -362,7 +370,7 @@ func installOutput(wire string) (string, error) {
 	}
 	// Error literals come only from the reviewed installer sources. Dynamic
 	// RouterOS diagnostics can contain router configuration or credentials.
-	for _, p := range []string{"install.rsc", "certificate.rsc", "bindings.rsc", "watchdog-preflight.rsc", "watchdog-state.rsc", "watchdog.rsc"} {
+	for _, p := range []string{"install.rsc", "certificate.rsc", "bindings.rsc", "watchdog-preflight.rsc", "watchdog-state.rsc", "watchdog-image.rsc", "image-bootstrap.rsc", "watchdog.rsc"} {
 		src, e := os.ReadFile(filepath.Join(repoRoot(), "routeros", p))
 		if e != nil {
 			continue

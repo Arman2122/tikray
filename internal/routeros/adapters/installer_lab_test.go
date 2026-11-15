@@ -21,6 +21,7 @@ func TestCompleteReleaseInstaller(t *testing.T) {
 		images = append(images, a)
 	}
 	var out bytes.Buffer
+	signFixturePair(t, &images[0], &images[1])
 	if err := BuildInstaller(p, images, &out); err != nil {
 		t.Fatal(err)
 	}

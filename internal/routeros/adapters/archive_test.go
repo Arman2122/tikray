@@ -11,6 +11,7 @@ import (
 	"crypto/sha512"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -23,7 +24,13 @@ import (
 
 func fixtureImage(t *testing.T, name, arch string) []byte {
 	t.Helper()
-	config := []byte(fmt.Sprintf(`{"os":"linux","architecture":%q,"config":{"Entrypoint":["/%s"]}}`, arch, name))
+	entry := "/" + name
+	var cmd []string
+	if name == "tikray" {
+		entry = "/usr/local/bin/tikray"
+		cmd = []string{"serve"}
+	}
+	config, _ := json.Marshal(map[string]any{"os": "linux", "architecture": arch, "config": map[string]any{"Entrypoint": []string{entry}, "Cmd": cmd}})
 	key := fmt.Sprintf("blobs/sha256/%x", sha256.Sum256(config))
 	manifest, _ := json.Marshal([]map[string]any{{"Config": key, "RepoTags": []string{"tikray/" + name + ":" + arch}, "Layers": []string{"layer.tar"}}})
 	var b bytes.Buffer
@@ -117,5 +124,35 @@ func TestReleaseImageIdentityAndChunkOrder(t *testing.T) {
 	}
 	if _, err := describeArchive(p, "tikray", b, "https://owner.github.io/project/releases/download/v1"); err != nil {
 		t.Fatal("refused a static release path")
+	}
+}
+
+func signFixture(t *testing.T, a *VerifiedArchive, k *ecdsa.PrivateKey) error {
+	t.Helper()
+	der, e := x509.MarshalPKIXPublicKey(&k.PublicKey)
+	if e != nil {
+		t.Fatal("fixture key")
+	}
+	sum, e := hex.DecodeString(a.ref.Digest)
+	if e != nil {
+		t.Fatal("fixture digest")
+	}
+	sig, e := ecdsa.SignASN1(rand.Reader, k, sum)
+	if e != nil {
+		t.Fatal("fixture signature")
+	}
+	return a.bindSignature(der, []byte(base64.StdEncoding.EncodeToString(sig)))
+}
+
+func signFixturePair(t *testing.T, images ...*VerifiedArchive) {
+	t.Helper()
+	key, e := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if e != nil {
+		t.Fatal("fixture signer")
+	}
+	for _, a := range images {
+		if signFixture(t, a, key) != nil {
+			t.Fatal("fixture signature")
+		}
 	}
 }

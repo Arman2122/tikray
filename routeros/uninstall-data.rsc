@@ -15,9 +15,30 @@
     :if (([:len $retained] > 0) and (([:len $retained] != 1) or ([/file/get $retained contents] != $contents))) do={ :error "tikray: shared_reference_refuses; retention identity differs" }
     :if ($choice="keep") do={
         :if (([:len $original]=0) and ([:len $retained]=0)) do={ :error "tikray: shared_reference_refuses; missing retained-data proof" }
+        # The two current-image receipts bind the initial publisher
+        # handoff to this installation. Refuse unrelated or conflicting files.
+        :local bootName ($prefix . "state/image-bootstrap.json")
+        :local boots [/file/find where name=$bootName]
+        :local receipts [:toarray ""]
+        :foreach side in={"tikray";"runner"} do={
+            :local name ($prefix . "state/image-" . $side . ".json"); :local files [/file/find where name=$name]
+            :if ([:len $files]>0) do={
+                :if (([:len $files]!=1) or ([/file/get $files type]="directory") or ([/file/get $files size]>4096)) do={:error "tikray: shared_reference_refuses; image receipt conflict"}
+                :local receipt [:deserialize from=json options=json.no-string-conversion value=[/file/get $files contents]]
+                :if ((($receipt->"version")!=1) or (($receipt->"installation_id")!=$identity) or (($receipt->"active"->"component")!=$side)) do={:error "tikray: shared_reference_refuses; image receipt conflict"}
+                :set ($receipts->$side) [:pick $files 0]
+            }
+        }
+        :if ([:len $boots]>0) do={
+            :if (([:len $boots]!=1) or ([:len $receipts]!=2) or ([/file/get $boots type]="directory") or ([/file/get $boots size]>4096)) do={:error "tikray: shared_reference_refuses; image bootstrap conflict"}
+            :local boot [:deserialize from=json options=json.no-string-conversion value=[/file/get $boots contents]]
+            :if ((($boot->"version")!=1) or (($boot->"tikray"->"component")!="tikray") or (($boot->"runner"->"component")!="runner")) do={:error "tikray: shared_reference_refuses; image bootstrap conflict"}
+        }
         :if ($op="apply") do={
             :if ([:len $retained] = 0) do={ $checkLease $lease; /file/add name=$kept type=file contents=$contents }
             :if ([:len [/file/find where name=$kept and contents=$contents]] != 1) do={ :error "tikray: could not verify retention receipt" }
+            :if ([:len $boots]=1) do={ $checkLease $lease; /file/remove [:pick $boots 0] }
+            :foreach side,id in=$receipts do={ $checkLease $lease; /file/remove $id }
             # Only installation admission and RouterOS identity are retired;
             # the owner's configuration, account, core and TLS identity remain.
             :foreach rel in={"install.check";"install.json";"state/install.checked";"state/install.attempt";"state/install.ready";"state/router-policy.json";"state/routeros.json";"state/install.request";"state/install.id"} do={

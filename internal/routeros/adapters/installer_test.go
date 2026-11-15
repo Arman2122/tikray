@@ -2,6 +2,9 @@ package adapters
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha512"
 	"encoding/hex"
 	"io/fs"
@@ -27,6 +30,7 @@ func TestInstallerBindsComponentArchitectureAndChunks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	signFixturePair(t, &a, &r)
 	for _, bad := range [][]VerifiedArchive{{a}, {r, a}, {a, a}, {a, {}}} {
 		var out bytes.Buffer
 		if err := BuildInstaller(p, bad, &out); err == nil || out.Len() != 0 {
@@ -87,5 +91,41 @@ func TestOnlineArchivesAuthenticateBeforePublication(t *testing.T) {
 	}
 	if strings.Contains(archiveChecks([]VerifiedArchive{{component: "tikray", arch: "amd64"}}), "/tool/fetch") {
 		t.Fatal("offline installer issued an outbound request")
+	}
+}
+
+func TestUpdateBootstrapBindsVerifiedPublisherAndLiveImages(t *testing.T) {
+	p, _ := Installed("7.25", "x86_64", "CHR")
+	var images []VerifiedArchive
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	for _, name := range []string{"tikray", "tikray-runner"} {
+		b := fixtureImage(t, name, "amd64")
+		a, e := describeArchive(p, name, b, "")
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e := signFixture(t, &a, key); e != nil {
+			t.Fatal("signed fixture failed")
+		}
+		images = append(images, a)
+	}
+	var out bytes.Buffer
+	if e := BuildInstaller(p, images, &out); e != nil {
+		t.Fatal("signed pair refused", e)
+	}
+	for _, visible := range []string{"image-bootstrap.json", images[0].publisher, images[1].ref.Chain, images[1].ref.Digest, images[1].ref.ImageID, "live image differs from verified archive", "/file/copy"} {
+		if !strings.Contains(out.String(), visible) {
+			t.Fatal("bootstrap is missing a trust or initial image witness")
+		}
+	}
+	if pos, ack := strings.Index(out.String(), "# PUBLISH VERIFIED IMAGE BASELINE"), strings.Index(out.String(), "live control, runner and router verification failed"); pos < ack || ack < 0 {
+		t.Fatal("bootstrap published before proof")
+	}
+	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if signFixture(t, &images[1], other) != nil {
+		t.Fatal("signed fixture failed")
+	}
+	if BuildInstaller(p, images, &bytes.Buffer{}) == nil {
+		t.Fatal("per-component mismatched signer accepted")
 	}
 }
