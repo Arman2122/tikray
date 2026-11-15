@@ -612,9 +612,10 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	if f.Net.Client(ctx, "ip", "addr", "add", unrelated+"/32", "dev", "eth0").Run() != nil {
 		t.Fatal("could not attach an unmanaged LAN address for the unrelated connection")
 	}
-	t.Cleanup(func() { _ = f.Net.Client(context.Background(), "ip", "addr", "del", unrelated+"/32", "dev", "eth0").Run() })
-	ownerFlow := f.unchangedClientFlow(ctx, t, unrelated, true)
-	ownerTracking := f.monitorForeignFlow(ctx, t, unrelated)
+	t.Cleanup(func() {
+		_ = f.Net.Client(context.Background(), "ip", "addr", "del", unrelated+"/32", "dev", "eth0").Run()
+	})
+	ownerTracking := f.monitorForeignFlow(ctx, t, unrelated, f.echoedOwnerPackets(ctx, t, unrelated))
 	generation := f.ros.Generation()
 	other, kind := "runner", "runner"
 	if component == "runner" {
@@ -633,7 +634,6 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	verifySibling := func() {
 		t.Helper()
 		ownerSSH()
-		ownerFlow()
 		ownerTracking()
 		r, ok := f.containerImage(ctx, other)
 		if f.ros.Generation() != generation || !ok || r.id != otherImage.id || r.imageID != otherImage.imageID || f.probe(ctx, t, kind) != otherProcess || f.activeImageSelection(ctx, t) != selection {

@@ -251,44 +251,11 @@ func (f *removalLab) refusalState(ctx context.Context, t *testing.T) (string, er
 func (f *removalLab) unchangedFlow(ctx context.Context, t *testing.T) func() {
 	t.Helper()
 	f.mustRun(ctx, t, `/ip/firewall/connection/tracking/set enabled=yes udp-timeout=8m udp-stream-timeout=8m`)
-	return f.unchangedClientFlow(ctx, t, "192.168.88.10", false)
-}
-
-func (f *installLab) unchangedClientFlow(ctx context.Context, t *testing.T, address string, requireUnmarked bool) func() {
-	t.Helper()
-	start := func(c *exec.Cmd) {
-		t.Helper()
-		if c.Start() != nil {
-			t.Fatal("unaffected-flow process did not start")
-		}
-		t.Cleanup(func() {
-			if c.Process != nil {
-				_ = c.Process.Kill()
-			}
-			_ = c.Wait()
-		})
-	}
-	start(f.Net.Inet(ctx, "python3", "-c", `import socket
-s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(("198.51.100.254",31931))
-while True:
- b,peer=s.recvfrom(16);s.sendto(b,peer)`))
-	file := filepath.Join(f.workDir, "unaffected-count")
-	start(f.Net.Client(ctx, "python3", "-c", `import pathlib,socket,sys,time
-s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind((sys.argv[2],31932));s.settimeout(1);i=0
-while True:
- try:
-  probe=str(i).encode();s.sendto(probe,("198.51.100.254",31931))
-  if s.recv(64)==probe:i+=1;pathlib.Path(sys.argv[1]).write_text(str(i))
- except (OSError,TimeoutError):pass
- time.sleep(.25)`, file, address))
-	count := func() int { b, _ := os.ReadFile(file); n, _ := strconv.Atoi(string(b)); return n }
-	if _, ok := poll(ctx, 12*time.Second, 200*time.Millisecond, func() bool { return count() >= 2 }); !ok {
-		t.Fatal("unrelated WAN stream has no positive replies")
-	}
-	query := nativeFlowQuery(address, requireUnmarked)
+	count := f.echoedOwnerPackets(ctx, t, "192.168.88.10")
+	const query = `{:local rows [/ip/firewall/connection/find where src-address=192.168.88.10 and dst-address=198.51.100.254 and protocol=udp and src-port=31932 and dst-port=31931];:put ("flow=" . [:len $rows] . "|" . [:convert [:tostr [:pick $rows 0]] to=hex] . "|end")}`
 	identity := func() string {
 		t.Helper()
-		fields := nativeFlowFrame.FindStringSubmatch(f.mustRun(ctx, t, query))
+		fields := regexp.MustCompile(`flow=([0-9]+)\|([a-fA-F0-9]*)\|end`).FindStringSubmatch(f.mustRun(ctx, t, query))
 		if len(fields) != 3 || fields[1] == "0" {
 			return ""
 		}
@@ -319,14 +286,39 @@ while True:
 	}
 }
 
-var nativeFlowFrame = regexp.MustCompile(`flow=([0-9]+)\|([a-fA-F0-9]*)\|end`)
-
-func nativeFlowQuery(address string, requireUnmarked bool) string {
-	ownership := ""
-	if requireUnmarked {
-		ownership = ` and connection-mark!="tikray-open" and connection-mark!="tikray-closed"`
+// The echo payload is a monotonic sequence from one socket with a fixed five-tuple.
+func (f *installLab) echoedOwnerPackets(ctx context.Context, t *testing.T, address string) func() int {
+	t.Helper()
+	start := func(c *exec.Cmd) {
+		t.Helper()
+		if c.Start() != nil {
+			t.Fatal("unaffected-flow process did not start")
+		}
+		t.Cleanup(func() {
+			if c.Process != nil {
+				_ = c.Process.Kill()
+			}
+			_ = c.Wait()
+		})
 	}
-	return `{:local rows [/ip/firewall/connection/find where src-address=[:toip "` + rosEscape(address) + `"] and dst-address=198.51.100.254 and protocol=udp and src-port=31932 and dst-port=31931` + ownership + `];:put ("flow=" . [:len $rows] . "|" . [:convert [:tostr [:pick $rows 0]] to=hex] . "|end")}`
+	start(f.Net.Inet(ctx, "python3", "-c", `import socket
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(("198.51.100.254",31931))
+while True:
+ b,peer=s.recvfrom(16);s.sendto(b,peer)`))
+	file := filepath.Join(f.workDir, "unaffected-count")
+	start(f.Net.Client(ctx, "python3", "-c", `import pathlib,socket,sys,time
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind((sys.argv[2],31932));s.settimeout(1);i=0
+while True:
+ try:
+  probe=str(i).encode();s.sendto(probe,("198.51.100.254",31931))
+  if s.recv(64)==probe:i+=1;pathlib.Path(sys.argv[1]).write_text(str(i))
+ except (OSError,TimeoutError):pass
+ time.sleep(.25)`, file, address))
+	count := func() int { b, _ := os.ReadFile(file); n, _ := strconv.Atoi(string(b)); return n }
+	if _, ok := poll(ctx, 12*time.Second, 200*time.Millisecond, func() bool { return count() >= 2 }); !ok {
+		t.Fatal("unrelated WAN stream has no positive replies")
+	}
+	return count
 }
 
 func TestM3Uninstall(t *testing.T) {

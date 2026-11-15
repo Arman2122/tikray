@@ -8,6 +8,7 @@ import (
 	_ "embed"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -63,33 +64,98 @@ with open(sys.argv[3],"wb",buffering=0) as log:
 	return flow
 }
 
-// Sparse lookups cannot establish continuity during a replacement. Observe
-// the exact native tuple and both packet counters throughout the transition.
-func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, address string) func() {
-	t.Helper()
-	type row struct {
-		id          string
-		orig, reply uint64
+type nativeFlowCounters struct {
+	id     string
+	values [4]uint64
+}
+
+func flowCounters(id string, fields []string) (nativeFlowCounters, bool) {
+	r := nativeFlowCounters{id: id}
+	if r.id == "" || len(fields) != len(r.values) {
+		return r, false
 	}
-	query := nativeFlowQuery(address, true)
-	read := func(c context.Context) (row, bool) {
-		rows, err := f.ros.CommandAt(c, f.ros.Generation(), []string{"/ip/firewall/connection/print", "=.proplist=.id,orig-packets,repl-packets,connection-mark", "?protocol=udp", "?src-address=" + address, "?src-port=31932", "?dst-address=198.51.100.254", "?dst-port=31931"})
-		if err != nil || len(rows) != 1 {
-			return row{}, false
+	for i, field := range fields {
+		v, e := strconv.ParseUint(field, 10, 64)
+		if e != nil {
+			return r, false
 		}
-		r := rows[0]
-		wire, err := f.CHR.RunPrivate(c, query)
-		fields := nativeFlowFrame.FindStringSubmatch(wire)
-		if err != nil || len(fields) != 3 || fields[1] != "1" || fields[2] == "" {
-			return row{}, false
+		r.values[i] = v
+	}
+	return r, true
+}
+
+func (r nativeFlowCounters) continued(prev nativeFlowCounters) bool {
+	if r.id != prev.id {
+		return false
+	}
+	for i, v := range r.values {
+		if v < prev.values[i] {
+			return false
 		}
-		orig, e1 := strconv.ParseUint(r["orig-packets"], 10, 64)
-		reply, e2 := strconv.ParseUint(r["repl-packets"], 10, 64)
-		return row{r[".id"] + "/" + fields[2], orig, reply}, r[".id"] != "" && r["connection-mark"] != "tikray-open" && r["connection-mark"] != "tikray-closed" && e1 == nil && e2 == nil
+	}
+	return true
+}
+
+func TestForeignFlowWitnessRejectsReusedID(t *testing.T) {
+	before := nativeFlowCounters{"*1", [4]uint64{900, 900, 27790, 27790}}
+	if !before.continued(before) {
+		t.Fatal("steady unrelated connection refused")
+	}
+	for i := range before.values {
+		removed := before
+		removed.values[i] = 4
+		if removed.continued(before) {
+			t.Fatal("a reset counter on the same native ID passed")
+		}
+	}
+	changed := before
+	changed.id = "*2"
+	if changed.continued(before) {
+		t.Fatal("a different native ID passed without an identity proof")
+	}
+}
+
+var ownerFlowFrame = regexp.MustCompile(`m3-owner-row[|]([*][0-9A-Fa-f]+)[|]([0-9]+)[|]([0-9]+)[|]([0-9]+)[|]([0-9]+)[|]end`)
+
+// The API and owner SSH sessions read the same unmarked tuple independently.
+// RouterOS can reuse its displayed ID even when a connection is erased.
+func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, address string, echoes func() int) func() {
+	t.Helper()
+	type pair [2]nativeFlowCounters
+	cmd := []string{"/ip/firewall/connection/print", "=.proplist=.id,orig-packets,repl-packets,orig-bytes,repl-bytes,connection-mark,reply-src-address,reply-src-port", "?protocol=udp", "?src-address=" + address, "?src-port=31932", "?dst-address=198.51.100.254", "?dst-port=31931"}
+	sshQuery := `{:local rows [/ip/firewall/connection/find where src-address=[:toip "` + rosEscape(address) + `"] and protocol=udp and src-port=31932 and dst-address=198.51.100.254 and dst-port=31931 and connection-mark!="tikray-open" and connection-mark!="tikray-closed"];:if ([:len $rows]=1) do={:local id [:pick $rows 0];:put ("m3-owner-row|" . [:tostr $id] . "|" . [/ip/firewall/connection/get $id orig-packets] . "|" . [/ip/firewall/connection/get $id repl-packets] . "|" . [/ip/firewall/connection/get $id orig-bytes] . "|" . [/ip/firewall/connection/get $id repl-bytes] . "|end")}}`
+	read := func(c context.Context) (pair, bool) {
+		var current pair
+		bound, end := context.WithTimeout(c, 7*time.Second)
+		defer end()
+		_, got := poll(bound, 7*time.Second, 200*time.Millisecond, func() bool {
+			rows, err := f.ros.CommandAt(bound, f.ros.Generation(), cmd)
+			if err != nil || len(rows) != 1 {
+				return false
+			}
+			r := rows[0]
+			if r["connection-mark"] == "tikray-open" || r["connection-mark"] == "tikray-closed" || r["reply-src-address"] != "198.51.100.254" || r["reply-src-port"] != "31931" {
+				return false
+			}
+			var apiOK bool
+			current[0], apiOK = flowCounters(r[".id"], []string{r["orig-packets"], r["repl-packets"], r["orig-bytes"], r["repl-bytes"]})
+			if !apiOK {
+				return false
+			}
+			wire, err := f.CHR.RunPrivate(bound, sshQuery)
+			parts := ownerFlowFrame.FindStringSubmatch(wire)
+			if err != nil || len(parts) != 6 {
+				return false
+			}
+			var sshOK bool
+			current[1], sshOK = flowCounters(parts[1], parts[2:])
+			return sshOK
+		})
+		return current, got
 	}
 	first, ok := read(ctx)
 	if !ok {
-		t.Fatal("unrelated connection's native packet counters unavailable")
+		t.Fatal("two independent owner sessions could not verify the unrelated flow")
 	}
 	monitor, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -97,30 +163,34 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 	go func() {
 		defer close(done)
 		prev := first
-		tick := time.NewTicker(time.Second)
+		tick := time.NewTicker(2 * time.Second)
 		defer tick.Stop()
 		for {
 			select {
 			case <-monitor.Done():
 				return
 			case <-tick.C:
-				cur, ok := read(monitor)
-				if !ok || cur.id != first.id || cur.orig < prev.orig || cur.reply < prev.reply {
+				now, ok := read(monitor)
+				if !ok || !now[0].continued(prev[0]) || !now[1].continued(prev[1]) {
 					if monitor.Err() == nil {
 						failed.Store(true)
 					}
 					return
 				}
-				prev = cur
+				prev = now
 			}
 		}
 	}()
 	t.Cleanup(func() { cancel(); <-done })
 	return func() {
 		t.Helper()
+		start := echoes()
+		if _, ok := poll(ctx, 10*time.Second, 200*time.Millisecond, func() bool { return echoes() >= start+2 }); !ok {
+			t.Fatal("the unrelated stream did not receive two fresh UDP replies")
+		}
 		now, ok := read(ctx)
-		if failed.Load() || !ok || now.id != first.id || now.orig <= first.orig || now.reply <= first.reply {
-			t.Fatal("unrelated connection's native identity or packet counters changed discontinuously")
+		if failed.Load() || !ok || !now[0].continued(first[0]) || !now[1].continued(first[1]) || now[0].values[1] <= first[0].values[1] || now[1].values[1] <= first[1].values[1] {
+			t.Fatalf("unrelated connection continuity failed: monitor=%t read=%t api_id=%t ssh_id=%t api_counts=%v->%v ssh_counts=%v->%v", !failed.Load(), ok, now[0].id == first[0].id, now[1].id == first[1].id, first[0].values, now[0].values, first[1].values, now[1].values)
 		}
 	}
 }
