@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 
 	"github.com/Arman2122/tikray/internal/atomicfile"
@@ -474,9 +473,52 @@ func recoverImagePublication(dir, work int, key *ecdsa.PublicKey) error {
 	return nil
 }
 
-// PruneImages removes orphaned slots created by this installer/runtime only
-// after the caller has verified the current/previous slots for both components.
-// Keep the bootstrap originals for exact package reimport and reinstall.
+type retainedImages struct {
+	refs    map[ImageRef]imagearchive.Metadata
+	control imageReceipt
+}
+
+// The artifact lock covers receipt inspection, archive authentication and the
+// subsequent removal decision. A plausible but corrupted receipt can name a
+// nonexistent or different slot, so its filename alone cannot authorize GC.
+func verifyRetainedImages(ctx context.Context, data string, dir int, boot ImageBootstrap, key *ecdsa.PublicKey, extra []ImageRef) (retainedImages, error) {
+	id, err := readImageID(data)
+	if err != nil {
+		return retainedImages{}, err
+	}
+	result := retainedImages{refs: make(map[ImageRef]imagearchive.Metadata)}
+	refs := []ImageRef{boot.Tikray, boot.Runner}
+	for _, component := range []string{"tikray", "runner"} {
+		r, e := imageVersions(data, id, component, boot)
+		if e != nil {
+			return retainedImages{}, e
+		}
+		refs = append(refs, r.Active)
+		if r.Previous.Valid() {
+			refs = append(refs, r.Previous)
+		}
+		if component == "tikray" {
+			result.control = r
+		}
+	}
+	for _, ref := range append(refs, extra...) {
+		if _, ok := result.refs[ref]; ok {
+			continue
+		}
+		meta, e := verifySlot(ctx, dir, key, boot.Arch, ref)
+		if e != nil {
+			return retainedImages{}, e
+		}
+		result.refs[ref] = meta
+	}
+	if ImagePending(data) {
+		return retainedImages{}, ErrImageBusy
+	}
+	return result, nil
+}
+
+// PruneImages preserves the verified installed lineage, original archives,
+// and any additional verified slots the caller asks to retain.
 func PruneImages(ctx context.Context, data, arch string, keep []ImageRef) error {
 	unlock, e := lockState(filepath.Join(data, "state"))
 	if e != nil {
@@ -486,24 +528,14 @@ func PruneImages(ctx context.Context, data, arch string, keep []ImageRef) error 
 	if ImagePending(data) {
 		return ErrImageBusy
 	}
-	return pruneImagesLocked(ctx, data, arch, keep)
-}
-
-func pruneImagesLocked(ctx context.Context, data, arch string, keep []ImageRef) error {
 	boot, e := ReadImageBootstrap(data)
 	if e != nil || boot.Arch != arch {
 		return errImageTrust
 	}
-	for _, ref := range keep {
-		if !ref.Valid() {
-			return errImageRef
-		}
-	}
-	keep = slices.Concat(keep, []ImageRef{boot.Tikray, boot.Runner})
-	protected := make(map[string]bool, len(keep))
-	for _, ref := range keep {
-		protected[imageFilename(ref)+".owned"] = true
-	}
+	return pruneImagesLocked(ctx, data, boot, keep)
+}
+
+func pruneImagesLocked(ctx context.Context, data string, boot ImageBootstrap, keep []ImageRef) error {
 	key, e := imageKey(boot.Publisher)
 	if e != nil {
 		return e
@@ -514,6 +546,15 @@ func pruneImagesLocked(ctx context.Context, data, arch string, keep []ImageRef) 
 	}
 	f := os.NewFile(uintptr(dir), "images")
 	defer f.Close()
+	lineage, e := verifyRetainedImages(ctx, data, dir, boot, key, keep)
+	if e != nil {
+		return e
+	}
+	protected := make(map[string]bool, len(lineage.refs))
+	for ref := range lineage.refs {
+		protected[imageFilename(ref)+".owned"] = true
+	}
+
 	if err := cleanupImageWork(dir, key); err != nil {
 		return err
 	}
@@ -530,7 +571,7 @@ func pruneImagesLocked(ctx context.Context, data, arch string, keep []ImageRef) 
 				continue
 			}
 			if !protected[n] {
-				if err := retireImage(ctx, dir, key, arch, n, ImageRef{}); err != nil {
+				if err := retireImage(ctx, dir, key, boot.Arch, n, ImageRef{}); err != nil {
 					return err
 				}
 			}
@@ -627,14 +668,6 @@ func (u *CoreUpdater) retireRefusedImage(ctx context.Context, ref ImageRef) {
 	if err != nil || ref.Digest == boot.Runner.Digest || ref.Digest == boot.Tikray.Digest {
 		return
 	}
-	id, err := readImageID(u.Data)
-	if err != nil {
-		return
-	}
-	receipt, err := imageVersions(u.Data, id, ref.Component, boot)
-	if err != nil || receipt.Active.Digest == ref.Digest || receipt.Previous.Digest == ref.Digest {
-		return
-	}
 	key, err := imageKey(boot.Publisher)
 	if err != nil {
 		return
@@ -644,6 +677,13 @@ func (u *CoreUpdater) retireRefusedImage(ctx context.Context, ref ImageRef) {
 		return
 	}
 	defer unix.Close(dir)
+	lineage, err := verifyRetainedImages(ctx, u.Data, dir, boot, key, nil)
+	if err != nil {
+		return
+	}
+	if _, keep := lineage.refs[ref]; keep {
+		return
+	}
 	_ = retireImage(ctx, dir, key, boot.Arch, imageFilename(ref)+".owned", ref)
 }
 

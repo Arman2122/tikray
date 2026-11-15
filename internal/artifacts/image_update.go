@@ -43,6 +43,7 @@ type imageRequest struct {
 	Nonce           string   `json:"nonce"`
 	Started         int64    `json:"started"`
 	Deadline        int64    `json:"deadline"`
+	OfflineRollback bool     `json:"offline_rollback,omitempty"`
 }
 
 type imageReceipt struct {
@@ -81,7 +82,8 @@ func (m imageRequest) valid() bool {
 	return m.Version == 1 && imageNonce(m.InstallationID) && imageNonce(m.Nonce) && m.Phase == "requested" &&
 		m.Started > 0 && m.Deadline > m.Started && m.Deadline-m.Started == int64(imageWindow/time.Second) &&
 		isSHA256Hex(m.SelectionDigest) && m.Candidate.Valid() && m.Previous.Valid() &&
-		m.Component == m.Candidate.Component && m.Component == m.Previous.Component && m.Candidate.Digest != m.Previous.Digest && m.Candidate.ImageID != m.Previous.ImageID
+		m.Component == m.Candidate.Component && m.Component == m.Previous.Component && m.Candidate.Digest != m.Previous.Digest && m.Candidate.ImageID != m.Previous.ImageID &&
+		(!m.OfflineRollback || m.Component == "runner")
 }
 
 // The checksum binds a runner proof to the exact active core, config and geo
@@ -326,6 +328,7 @@ func (u *CoreUpdater) beginImageChange(ctx context.Context, component string, ta
 	}
 	rs, err := u.Runner.Status(ctx)
 	var selection runnerapi.Selection
+	offlineRollback := false
 	if err == nil && rs.State == runnerapi.StateRunning && rs.Active != nil && rs.Candidate == nil && rs.GatewayUp && rs.RoutesOK {
 		selection = *rs.Active
 	} else if rollback && component == "runner" && (err != nil || (rs.Candidate == nil && rs.State != runnerapi.StateTrial)) {
@@ -333,6 +336,9 @@ func (u *CoreUpdater) beginImageChange(ctx context.Context, component string, ta
 		if err != nil {
 			return ImageOperation{}, err
 		}
+		// Only this explicit rollback verified the saved selection while
+		// the old runner could not prove a working data path.
+		offlineRollback = true
 	} else {
 		return ImageOperation{}, ErrImageState
 	}
@@ -340,6 +346,7 @@ func (u *CoreUpdater) beginImageChange(ctx context.Context, component string, ta
 	if err != nil {
 		return ImageOperation{}, err
 	}
+	m.OfflineRollback = offlineRollback
 	if err := ctx.Err(); err != nil {
 		return ImageOperation{}, err
 	}
@@ -435,44 +442,23 @@ func PruneInstalledImages(ctx context.Context, data string) error {
 	if err != nil {
 		return ErrImageState
 	}
-	id, err := readImageID(data)
-	if err != nil {
-		return err
-	}
-	var keep []ImageRef
-	for _, component := range []string{"tikray", "runner"} {
-		r, err := imageVersions(data, id, component, boot)
-		if err != nil {
-			return err
-		}
-		keep = append(keep, r.Active)
-		if r.Previous.Valid() {
-			keep = append(keep, r.Previous)
-		}
-	}
-	if ImagePending(data) {
-		return ErrImageBusy
-	}
-	return pruneImagesLocked(ctx, data, boot.Arch, keep)
+	return pruneImagesLocked(ctx, data, boot, nil)
 }
 
 // RetainedStateSchemas verifies the two retained control archives rather than
 // guessing schema support from a release name or current program version.
 func RetainedStateSchemas(ctx context.Context, data string) (int, int, error) {
+	unlock, err := lockState(filepath.Join(data, "state"))
+	if err != nil {
+		return 0, 0, err
+	}
+	defer unlock()
 	if ImagePending(data) {
 		return 0, 0, ErrImageBusy
 	}
 	b, err := ReadImageBootstrap(data)
 	if err != nil {
 		return 0, 0, ErrImageState
-	}
-	id, err := readImageID(data)
-	if err != nil {
-		return 0, 0, err
-	}
-	r, err := imageVersions(data, id, "tikray", b)
-	if err != nil || !r.Previous.Valid() {
-		return 0, 0, err
 	}
 	key, err := imageKey(b.Publisher)
 	if err != nil {
@@ -483,15 +469,14 @@ func RetainedStateSchemas(ctx context.Context, data string) (int, int, error) {
 		return 0, 0, ErrImageState
 	}
 	defer unix.Close(dir)
-	a, err := verifySlot(ctx, dir, key, b.Arch, r.Active)
+	lineage, err := verifyRetainedImages(ctx, data, dir, b, key, nil)
 	if err != nil {
 		return 0, 0, err
 	}
-	p, err := verifySlot(ctx, dir, key, b.Arch, r.Previous)
-	if err != nil {
-		return 0, 0, err
+	if !lineage.control.Previous.Valid() {
+		return 0, 0, nil
 	}
-	return a.StateSchema, p.StateSchema, nil
+	return lineage.refs[lineage.control.Active].StateSchema, lineage.refs[lineage.control.Previous].StateSchema, nil
 }
 
 // A failed runner cannot authorize its own rollback. Verify its restart

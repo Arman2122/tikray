@@ -64,6 +64,12 @@
         :if ((($row->"name")!=$n) or ((!$partial) and ($claim!=$c)) or ([:tostr ($row->"interface")]!=$v) or (($path!=$rootPath) and (!$alternative)) or ([:tostr ($row->"mountlists")]!=$n) or ([:tostr ($row->"envlists")]!=$n) or ([:tostr ($row->"dns")]!=[:tostr ($p->"gateway")]) or ([:len ($row->"entrypoint")]>0) or (($row->"logging")=true) or ([:len ($row->"devices")]>0) or (($row->"privileged")=true)) do={ :error "image: unverified container configuration" }
         :if (([:len ($row->"cmd")]>0) and ((($p->"component")!="tikray") or ([:tostr ($row->"cmd")]!="serve"))) do={ :error "image: owner command differs" }
         :if ((($row->"memory-high")!=($p->"high")) or (($row->"memory-max")!=($p->"max")) or ([:tostr ($row->"restart-policy")]!="on-failure") or ((!$partial) and (($row->"start-on-boot")!=true))) do={ :error "image: owner lifecycle settings differ" }
+        # These are explicit native overrides. The Docker config's intrinsic
+        # defaults have separate default-* fields and follow the verified bytes.
+        :foreach key in={"hostname";"domain-name";"user";"workdir";"cpu-list";"env";"mount";"hosts";"tmpfs";"remote-image";"layer-dir";"healthcheck-cmd";"healthcheck-interval";"healthcheck-retries";"healthcheck-start-interval";"healthcheck-start-period";"healthcheck-timeout";"stop-signal";"shell"} do={
+            :if ([:len [:tostr ($row->$key)]]>0) do={:error "image: owner execution settings differ"}
+        }
+        :if ((($row->"shm-size")!=67108864) or (($row->"restart-max-count")!=0) or ([:tonsec ($row->"restart-interval")]!=0) or ([:tonsec ($row->"stop-time")]!=10000000000) or (($row->"stop-on-unhealthy")=true) or (($row->"ignore-remote-image-change")=true) or (($row->"check-certificate")!=true)) do={:error "image: owner execution settings differ"}
         :return {"id"=$id;"image_id"=$code;"tag"=$claim;"partial"=$partial;"root"=$path}
     }
     :local operation $1; :local prior $2; :local peer $3; :local lan $4

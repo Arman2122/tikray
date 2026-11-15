@@ -8,6 +8,8 @@ import (
 	_ "embed"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -59,6 +61,68 @@ with open(sys.argv[3],"wb",buffering=0) as log:
 	startRoutingProcess(t, f.peer(ctx, "python3", "-c", keptImageDNS, routingPeer, flow.dns))
 	flow.requireProxy(ctx, t)
 	return flow
+}
+
+// Sparse lookups cannot establish continuity during a replacement. Observe
+// the exact native tuple and both packet counters throughout the transition.
+func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, address string) func() {
+	t.Helper()
+	type row struct {
+		id          string
+		orig, reply uint64
+	}
+	query := nativeFlowQuery(address, true)
+	read := func(c context.Context) (row, bool) {
+		rows, err := f.ros.CommandAt(c, f.ros.Generation(), []string{"/ip/firewall/connection/print", "=.proplist=.id,orig-packets,repl-packets,connection-mark", "?protocol=udp", "?src-address=" + address, "?src-port=31932", "?dst-address=198.51.100.254", "?dst-port=31931"})
+		if err != nil || len(rows) != 1 {
+			return row{}, false
+		}
+		r := rows[0]
+		wire, err := f.CHR.RunPrivate(c, query)
+		fields := nativeFlowFrame.FindStringSubmatch(wire)
+		if err != nil || len(fields) != 3 || fields[1] != "1" || fields[2] == "" {
+			return row{}, false
+		}
+		orig, e1 := strconv.ParseUint(r["orig-packets"], 10, 64)
+		reply, e2 := strconv.ParseUint(r["repl-packets"], 10, 64)
+		return row{r[".id"] + "/" + fields[2], orig, reply}, r[".id"] != "" && r["connection-mark"] != "tikray-open" && r["connection-mark"] != "tikray-closed" && e1 == nil && e2 == nil
+	}
+	first, ok := read(ctx)
+	if !ok {
+		t.Fatal("unrelated connection's native packet counters unavailable")
+	}
+	monitor, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	var failed atomic.Bool
+	go func() {
+		defer close(done)
+		prev := first
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-monitor.Done():
+				return
+			case <-tick.C:
+				cur, ok := read(monitor)
+				if !ok || cur.id != first.id || cur.orig < prev.orig || cur.reply < prev.reply {
+					if monitor.Err() == nil {
+						failed.Store(true)
+					}
+					return
+				}
+				prev = cur
+			}
+		}
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+	return func() {
+		t.Helper()
+		now, ok := read(ctx)
+		if failed.Load() || !ok || now.id != first.id || now.orig <= first.orig || now.reply <= first.reply {
+			t.Fatal("unrelated connection's native identity or packet counters changed discontinuously")
+		}
+	}
 }
 
 func (s *imagePeerFlow) count(path string, marker byte) int {

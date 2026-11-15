@@ -57,7 +57,8 @@
         :foreach field in={"component";"digest";"image_id";"chain";"size"} do={:if (($1->$field)!=($2->$field)) do={:return false}}
         :return true
     }
-    :if (([:len $req]!=10) or (($req->"version")!=1) or (($req->"phase")!="requested") or (($req->"installation_id")!=$identity) or (![$hexOK $nonce 32]) or (![$hexOK ($req->"selection_digest") 64]) or (($component!="tikray") and ($component!="runner")) or ([:typeof ($req->"started")]!="num") or (($req->"started")<=0) or ([:typeof ($req->"deadline")]!="num") or ((($req->"deadline")-($req->"started"))!=300)) do={ :error "image: invalid request" }
+    :local offline (([:typeof ($req->"offline_rollback")]="bool") and (($req->"offline_rollback")=true))
+    :if ((([:len $req]!=10) and (!($offline and ([:len $req]=11) and ($component="runner")))) or (($req->"version")!=1) or (($req->"phase")!="requested") or (($req->"installation_id")!=$identity) or (![$hexOK $nonce 32]) or (![$hexOK ($req->"selection_digest") 64]) or (($component!="tikray") and ($component!="runner")) or ([:typeof ($req->"started")]!="num") or (($req->"started")<=0) or ([:typeof ($req->"deadline")]!="num") or ((($req->"deadline")-($req->"started"))!=300)) do={ :error "image: invalid request" }
     :if ((![$validRef $original $hexOK $component]) or (![$validRef $candidate $hexOK $component]) or (($candidate->"digest")=($original->"digest")) or (($candidate->"image_id")=($original->"image_id"))) do={ :error "image: invalid archive identities" }
     :if ((!($data~"^[A-Za-z0-9][A-Za-z0-9_-]*/tikray(-[A-Za-z0-9_][A-Za-z0-9_-]*)?/data\$")) or ([:len [/file/find where name=($data . "/state/install.id") and contents=$identity]]!=1)) do={ :error "image: control volume changed" }
     :local staging {"target"=$component;"nonce"=$nonce;"original"=("tikray:image-import:" . $nonce . ":old");"candidate"=("tikray:image-import:" . $nonce . ":new");"emergency"=$emergency}
@@ -122,7 +123,7 @@
     :local states [/file/find where name=$statePath]
     :if (([:len $states]!=1) or ([/file/get [:pick $states 0] type]="directory") or ([/file/get [:pick $states 0] size]>4096)) do={:error "image: current receipt unavailable"}
     :local stateFile [:pick $states 0]; :local oldState [/file/get $stateFile contents]
-    :local installed; :local currentOK false
+    :local installed; :local retained; :local currentOK false
     :do {
         :local state [$jsonFile $statePath]; :local prior ($state->"previous")
         :local lineage false
@@ -130,7 +131,7 @@
             :set lineage (([$validRef $prior $hexOK $component]) and (($prior->"digest")!=($state->"active"->"digest")) and (($prior->"image_id")!=($state->"active"->"image_id")))
         }
         :if (([:len $state]=4) and (($state->"version")=1) and (($state->"installation_id")=$identity) and ([$validRef ($state->"active") $hexOK $component]) and $lineage) do={
-            :set installed ($state->"active"); :set currentOK true
+            :set installed ($state->"active"); :set retained $prior; :set currentOK true
         }
     } on-error={}
     # The receipt is never removed during commit. Only its verified ID in
@@ -201,6 +202,8 @@
         :if (![$sameRef $installed $original]) do={:error "image: stale previous selection"}
         :local live [$imageTraffic "row" $profile]
         :if ((($live->"image_id")!=($original->"image_id")) or ($live->"partial")) do={:error "image: installed bytes differ"}
+        :if ($offline and (([:typeof $retained]!="array") or (![$sameRef $candidate $retained]))) do={:error "image: unverified offline rollback"}
+        :local stopped ($offline and ([:len [/container/find where .id=($live->"id") and stopped]]=1))
         :local a [$imageTraffic "archive" $data $original]
         :local firstPhase "prepare"
         :if ([:len $emergency]>0) do={:set firstPhase "recover"}
@@ -208,7 +211,7 @@
         :local f [$checkGrant $grant]
         :set now ([:tonsec [/system/resource/get uptime]]/1000000000)
         :set j {"v"=1;"install"=$identity;"nonce"=$nonce;"component"=$component;"request"=$requestHash;"phase"=$firstPhase;"age"=0;"seen"=$now;"old"=$oldState;"receipt"=[:tostr $stateFile];"retry"=1;"next"=0}
-        :set ($j->"baseline") [:tostr ($live->"id")]; :set ($j->"fenced") false
+        :set ($j->"baseline") [:tostr ($live->"id")]; :set ($j->"offline") $stopped; :set ($j->"fenced") false
         :if (($component="runner") and ($firstPhase="prepare")) do={:set ($j->"traffic") [$imageTraffic "read" [:toarray ""] ($gateway+2) $trafficLAN $checkGrant $grant ([:len $emergency]>0)]}
         /system/script/add name=$phaseName source="" policy=read dont-require-permissions=no comment=($prefix . [:serialize to=json options=json.no-string-conversion value=$j])
         :set journals [/system/script/find where name=$phaseName]
@@ -252,10 +255,12 @@
     :local restoring (($phase="restore") or ($phase="recover") or ($phase="reverted"))
     :local want $candidate; :local other $original
     :if ($restoring) do={:set want $original; :set other $candidate}
+    :local mayRemoveStopped ($offline and ($component="runner") and (($j->"offline")=true) and ([:typeof $retained]="array") and ([$sameRef $candidate $retained]))
     :if ($phase="prepare") do={
         :local originalRow [$imageTraffic "row" $profile]
-        :if (([:tostr ($originalRow->"id")]!=($j->"baseline")) or (($originalRow->"image_id")!=($original->"image_id")) or ($originalRow->"partial") or (![$sameRef $installed $original])) do={:error "image: preparing baseline changed"}
-        :if ([:len [/container/find where .id=($originalRow->"id") and running]]!=1) do={:set ($j->"phase") "recover"; :set saved [$save $j $jid $prefix $saved]; :return $targetName}
+        :if (([:tostr ($originalRow->"id")]!=($j->"baseline")) or (($originalRow->"image_id")!=($original->"image_id")) or ($originalRow->"partial") or (![$sameRef $installed $original]) or ($oldState!=($j->"old")) or ([:tostr $stateFile]!=($j->"receipt"))) do={:error "image: preparing baseline changed"}
+        :if (($j->"offline")=true) do={:if ((!$mayRemoveStopped) or ([:len [/container/find where .id=($originalRow->"id") and stopped]]!=1)) do={:error "image: offline rollback baseline changed"}}
+        :if ((!$mayRemoveStopped) and ([:len [/container/find where .id=($originalRow->"id") and running]]!=1)) do={:set ($j->"phase") "recover"; :set saved [$save $j $jid $prefix $saved]; :return $targetName}
     }
     :local healthy false; :local canRestart true
     :if (($component="runner") and ([:len $emergency]=0) and ($phase="prepare") and (($j->"fenced")!=true)) do={:set ($j->"fenced") true; :set saved [$save $j $jid $prefix $saved]}
@@ -305,12 +310,15 @@
             # This write-ahead decision covers the first stop, any cut during
             # extraction, and the candidate trial across subsequent boots.
             :if ($phase="prepare") do={
-                :if (([:tostr $id]!=($j->"baseline")) or ($oldCode!=($original->"image_id")) or ([:len [/container/find where .id=$id and running]]!=1)) do={:error "image: preparing baseline changed"}
+                :if (([:tostr $id]!=($j->"baseline")) or ($oldCode!=($original->"image_id")) or ((!$mayRemoveStopped) and ([:len [/container/find where .id=$id and running]]!=1)) or ($mayRemoveStopped and ([:len [/container/find where .id=$id and stopped]]!=1)) or ([/file/get $stateFile contents]!=($j->"old"))) do={:error "image: preparing baseline changed"}
                 :set phase "replace"; :set ($j->"phase") $phase; :set ($j->"age") 0; :set ($j->"clock") [$makeClock]
                 :set ($j->"seen") ([:tonsec [/system/resource/get uptime]]/1000000000); :set saved [$save $j $jid $prefix $saved]
                 :set f [$checkGrant $grant]
             }
-            :if ([:len [/container/find where .id=$id and running]]=1) do={ /container/stop $id }
+            :local offlineBase (($j->"offline")=true and (!$restoring) and (!$mine) and ([:tostr $id]=($j->"baseline")))
+            :if ($offlineBase) do={
+                :if ((!$mayRemoveStopped) or ([:len [/container/find where .id=$id and stopped]]!=1) or ([/file/get $stateFile contents]!=($j->"old"))) do={:error "image: offline rollback baseline changed"}
+            } else={:if ([:len [/container/find where .id=$id and running]]=1) do={ /container/stop $id }}
             :local wait 0
             :while (([:len [/container/find where .id=$id and stopped]]=0) and ($wait<40)) do={:delay 250ms; :set wait ($wait+1)}
             :if (($wait=40) and (!$mine)) do={ :return $targetName }
@@ -324,6 +332,7 @@
             :if ($mine and ($oldCode="") and ([:len [/file/find where name=($live->"root")]]>0)) do={
                 :if (![$imageRootWitness "read" (($live->"root") . $witnessPath) $oldTag]) do={:error "image: incomplete root ownership unknown"}
             }
+            :if ($offlineBase and (([:len [/container/find where .id=$id and stopped]]!=1) or ([/file/get $stateFile contents]!=($j->"old")))) do={:error "image: offline rollback baseline changed"}
             /container/remove $id
             :set live [$imageTraffic "row" $profile]
         }

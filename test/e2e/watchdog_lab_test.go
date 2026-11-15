@@ -282,7 +282,7 @@ func (f *routingLab) containerAction(ctx context.Context, t *testing.T, componen
 	}
 }
 
-func (f *routingLab) imageOperation(ctx context.Context, t *testing.T, component, op, version string, from, to string) imageAcceptance {
+func (f *routingLab) imageOperation(ctx context.Context, t *testing.T, component, op, version string, from, to string, offlineRollback bool) imageAcceptance {
 	t.Helper()
 	f.scheduler(ctx, t, false)
 	q := f.imageRequest(ctx, t, component, op, version, http.StatusAccepted)
@@ -293,9 +293,10 @@ func (f *routingLab) imageOperation(ctx context.Context, t *testing.T, component
 		Version                 int `json:"version"`
 		Phase, Component, Nonce string
 		InstallationID          string `json:"installation_id"`
+		OfflineRollback         bool   `json:"offline_rollback"`
 		Candidate, Previous     struct{ Digest string }
 	}
-	if json.Unmarshal(f.exactFile(ctx, t, imageRequestFile), &m) != nil || m.InstallationID != f.checkHealthIdentity(ctx, t) || m.Version != 1 || m.Component != component || m.Nonce != q.OperationID || m.Candidate.Digest != to || m.Previous.Digest != from || m.Phase != "requested" {
+	if json.Unmarshal(f.exactFile(ctx, t, imageRequestFile), &m) != nil || m.InstallationID != f.checkHealthIdentity(ctx, t) || m.Version != 1 || m.Component != component || m.Nonce != q.OperationID || m.Candidate.Digest != to || m.Previous.Digest != from || m.Phase != "requested" || m.OfflineRollback != offlineRollback {
 		t.Fatal("durable private request does not identify exactly the two image choices")
 	}
 	if got := f.imageStatus(ctx, t, component); got.Pending == nil || *got.Pending != q || got.Active != from {
@@ -613,6 +614,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	}
 	t.Cleanup(func() { _ = f.Net.Client(context.Background(), "ip", "addr", "del", unrelated+"/32", "dev", "eth0").Run() })
 	ownerFlow := f.unchangedClientFlow(ctx, t, unrelated, true)
+	ownerTracking := f.monitorForeignFlow(ctx, t, unrelated)
 	generation := f.ros.Generation()
 	other, kind := "runner", "runner"
 	if component == "runner" {
@@ -632,6 +634,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		t.Helper()
 		ownerSSH()
 		ownerFlow()
+		ownerTracking()
 		r, ok := f.containerImage(ctx, other)
 		if f.ros.Generation() != generation || !ok || r.id != otherImage.id || r.imageID != otherImage.imageID || f.probe(ctx, t, kind) != otherProcess || f.activeImageSelection(ctx, t) != selection {
 			t.Fatal("replacement changed its sibling, selection or owner session")
@@ -654,7 +657,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	if component == "tikray" {
 		stream = f.imageStream(ctx, t, 31875)
 	}
-	f.imageOperation(ctx, t, component, "update", healthyImageVersion, initial.digest, valid.digest)
+	f.imageOperation(ctx, t, component, "update", healthyImageVersion, initial.digest, valid.digest, false)
 	f.waitImageCompletion(ctx, t, component, valid, initial.digest, base)
 	updated := f.requireImage(ctx, t, component, valid)
 	if f.probe(ctx, t, changedProbe) == priorProcess || !f.imageMarker(ctx, t, updated, healthyImageVersion) {
@@ -679,7 +682,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		f.scheduler(ctx, t, false)
 		f.containerAction(ctx, t, component, "stop", "stopped")
 	}
-	f.imageOperation(ctx, t, component, "rollback", "", valid.digest, initial.digest)
+	f.imageOperation(ctx, t, component, "rollback", "", valid.digest, initial.digest, component == "runner")
 	f.waitImageCompletion(ctx, t, component, initial, valid.digest, base)
 	verifySibling()
 	var kept *imagePeerFlow
@@ -687,7 +690,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		kept = f.keepImagePeerFlow(ctx, t)
 	}
 	start := time.Now()
-	q := f.imageOperation(ctx, t, component, "update", offlineImageVersion, initial.digest, bad.digest)
+	q := f.imageOperation(ctx, t, component, "update", offlineImageVersion, initial.digest, bad.digest, false)
 	trial := f.requireImage(ctx, t, component, bad)
 	if f.waitForContainer(ctx, imageContainer(component), "running") != nil {
 		t.Fatal("signed negative control never actually started")
@@ -797,7 +800,7 @@ func (f *routingLab) checkedImageReboot(ctx context.Context, t *testing.T) {
 	bad := f.stageImageFixture(ctx, t, c, offlineImageVersion, false)
 	active := f.activeImageSelection(ctx, t)
 	started := time.Now()
-	q := f.imageOperation(ctx, t, c, "update", offlineImageVersion, initial.digest, bad.digest)
+	q := f.imageOperation(ctx, t, c, "update", offlineImageVersion, initial.digest, bad.digest, false)
 	broken := f.requireImage(ctx, t, c, bad)
 	if f.waitForContainer(ctx, imageContainer(c), "running") != nil {
 		t.Fatal("reboot candidate never ran")

@@ -285,14 +285,10 @@ while True:
 	if _, ok := poll(ctx, 12*time.Second, 200*time.Millisecond, func() bool { return count() >= 2 }); !ok {
 		t.Fatal("unrelated WAN stream has no positive replies")
 	}
-	ownership := ""
-	if requireUnmarked {
-		ownership = ` and connection-mark!="tikray-open" and connection-mark!="tikray-closed"`
-	}
-	query := `{:local rows [/ip/firewall/connection/find where src-address=[:toip "` + rosEscape(address) + `"] and dst-address=198.51.100.254 and protocol=udp and src-port=31932 and dst-port=31931` + ownership + `];:put ("flow=" . [:len $rows] . "|" . [:convert [:tostr [:pick $rows 0]] to=hex] . "|end")}`
+	query := nativeFlowQuery(address, requireUnmarked)
 	identity := func() string {
 		t.Helper()
-		fields := regexp.MustCompile(`flow=([0-9]+)\|([a-fA-F0-9]*)\|end`).FindStringSubmatch(f.mustRun(ctx, t, query))
+		fields := nativeFlowFrame.FindStringSubmatch(f.mustRun(ctx, t, query))
 		if len(fields) != 3 || fields[1] == "0" {
 			return ""
 		}
@@ -321,6 +317,16 @@ while True:
 			t.Fatal("the unrelated stream acquired a different native conntrack binding")
 		}
 	}
+}
+
+var nativeFlowFrame = regexp.MustCompile(`flow=([0-9]+)\|([a-fA-F0-9]*)\|end`)
+
+func nativeFlowQuery(address string, requireUnmarked bool) string {
+	ownership := ""
+	if requireUnmarked {
+		ownership = ` and connection-mark!="tikray-open" and connection-mark!="tikray-closed"`
+	}
+	return `{:local rows [/ip/firewall/connection/find where src-address=[:toip "` + rosEscape(address) + `"] and dst-address=198.51.100.254 and protocol=udp and src-port=31932 and dst-port=31931` + ownership + `];:put ("flow=" . [:len $rows] . "|" . [:convert [:tostr [:pick $rows 0]] to=hex] . "|end")}`
 }
 
 func TestM3Uninstall(t *testing.T) {

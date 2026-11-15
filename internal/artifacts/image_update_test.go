@@ -38,6 +38,14 @@ func TestUpdateMarkerCrashRecovery(t *testing.T) {
 	if err != nil || m.Phase != "requested" || m.Deadline-m.Started != 300 || !m.valid() {
 		t.Fatal("invalid recovery envelope", err)
 	}
+	control := m
+	control.Component = "tikray"
+	control.Candidate.Component = "tikray"
+	control.Previous.Component = "tikray"
+	control.OfflineRollback = true
+	if control.valid() {
+		t.Fatal("offline runner permission applied to control")
+	}
 	const n = 8
 	var wg sync.WaitGroup
 	outcomes := make(chan error, n)
@@ -238,7 +246,7 @@ func TestImageReceiptMissingAfterCommitCannotSelectBootstrap(t *testing.T) {
 }
 
 func TestStateRetentionUsesBothSignedControlSchemas(t *testing.T) {
-	u, key := seedImageTrust(t)
+	u, key := seedInstalledImages(t)
 	id := strings.Repeat("a", 32)
 	state := filepath.Join(u.Data, "state")
 	os.WriteFile(filepath.Join(state, "install.id"), []byte(id), 0600)
@@ -322,9 +330,40 @@ func TestOfflineRunnerRollbackNeedsCommittedSelection(t *testing.T) {
 	if err != nil || request.SelectionDigest != ImageSelectionDigest(sel) {
 		t.Fatal("did not bind offline rollback to the verified state")
 	}
+	checkFlag := func(want bool) {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(state, imageRequestFile))
+		var fields map[string]json.RawMessage
+		if err != nil || json.Unmarshal(b, &fields) != nil {
+			t.Fatal("missing image intent")
+		}
+		v, present := fields["offline_rollback"]
+		if present != want || (present && string(v) != "true") {
+			t.Error("stopped-runner authority did not match the approved operation")
+		}
+	}
+	checkFlag(true)
 	os.Remove(filepath.Join(state, imageRequestFile))
 	os.WriteFile(filepath.Join(run, sel.Config), []byte("changed"), 0600)
 	if _, err = u.BeginImageRollback(t.Context(), "runner"); err == nil || ImagePending(u.Data) {
 		t.Fatal("corrupt saved selection authorized offline rollback")
 	}
+	if _, err = u.BeginImageUpdate(t.Context(), prior); err == nil || ImagePending(u.Data) {
+		t.Fatal("an ordinary release request authorized replacement of an offline runner")
+	}
+	live := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(runnerapi.Status{State: runnerapi.StateRunning, Active: &sel, RoutesOK: true, GatewayUp: true})
+	}))
+	defer live.Close()
+	u.Runner = &runnerapi.Client{BaseURL: live.URL, Token: "fixture", HTTP: live.Client()}
+	if _, err = u.BeginImageUpdate(t.Context(), prior); err != nil {
+		t.Fatal("could not request previous bytes as a normal release", err)
+	}
+	checkFlag(false)
+	os.Remove(filepath.Join(state, imageRequestFile))
+	if _, err = u.BeginImageRollback(t.Context(), "runner"); err != nil {
+		t.Fatal("normal live rollback refused", err)
+	}
+	checkFlag(false)
+
 }

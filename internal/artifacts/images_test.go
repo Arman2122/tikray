@@ -192,7 +192,7 @@ func TestImageRejectsWrongSignatureArchAndPath(t *testing.T) {
 }
 
 func TestImageFallbackAndRetention(t *testing.T) {
-	u, key := seedImageTrust(t)
+	u, key := seedInstalledImages(t)
 	raw := testImage(t, "tikray", "amd64", "v10")
 	sig := signImageFixture(t, key, raw)
 	var attempts []string
@@ -238,7 +238,7 @@ func TestImageFallbackAndRetention(t *testing.T) {
 }
 
 func TestImageRetirementPreservesForeignSignaturesAndResumes(t *testing.T) {
-	u, k := seedImageTrust(t)
+	u, k := seedInstalledImages(t)
 	type slot struct {
 		ref      ImageRef
 		tar, sig string
@@ -371,7 +371,7 @@ func TestStageImageOnlyReclaimsProvenInterruptedWork(t *testing.T) {
 }
 
 func TestImageRetentionKeepsDigestOnDisputedReceipt(t *testing.T) {
-	u, k := seedImageTrust(t)
+	u, k := seedInstalledImages(t)
 	raw := testImage(t, "runner", u.Arch, "a")
 	putInboxImage(t, u, "runner", "a", raw, signImageFixture(t, k, raw))
 	img, e := u.StageImage(t.Context(), "runner", "a")
