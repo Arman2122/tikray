@@ -61,6 +61,16 @@ func TestM3ImageBootstrapMigration(t *testing.T) {
 		t.Fatal("missing new traffic helper identity")
 	}
 	rows := append(strings.Split(original[0], "\n"), "/system/script|"+helperID+"|tikray:watchdog-traffic")
+	// The historical installer predates the pre-PID1 return guard. Permit
+	// its exact newly enrolled filter rows while every old identity survives.
+	for _, role := range []string{"acl-runner-transit", "acl-runner-transit-dst", "acl-transit-deny", "acl-transit-deny-backup", "acl-transit-lan:192.168.88.0/24"} {
+		tag := "tikray:" + role
+		id := f.mustRun(ctx, t, `:put [:tostr [/ip/firewall/filter/find where comment="`+tag+`"]]`)
+		if !regexp.MustCompile(`^\*[0-9A-Fa-f]+$`).MatchString(id) {
+			t.Fatal("missing unique migrated pre-start guard", role)
+		}
+		rows = append(rows, "/ip/firewall/filter|"+id+"|"+tag)
+	}
 	slices.Sort(rows)
 	original[0] = strings.Join(rows, "\n")
 	f.requireStable(ctx, t, original, "image baseline migration")

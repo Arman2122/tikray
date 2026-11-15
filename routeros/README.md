@@ -121,6 +121,12 @@ subnet and set the printed ID before importing the packaged installer.
 The new installation receives fresh RouterOS credentials and an installation
 ID. The kept user state and control-plane TLS identity remain on the volume.
 
+## Private bridge return traffic
+
+A container can forward packets before its first process runs. RouterOS therefore checks packets arriving from the dedicated tikray bridge with a source outside its private subnet. A packet returning from the tunnel must be addressed to an enrolled LAN prefix and leave through the configured LAN interface list. A matching return resumes the owner's forward firewall rules. Two terminal drops in the private IPv4 filter chain cover other destinations. The control and runner use their own private addresses for their transport connections.
+
+The installer and watchdog verify this protection before starting the runner. The reconciler repairs missing or displaced tagged rules by their verified identities. A foreign jump into the private chain or an altered rule shape leaves the operation pending for inspection. Keep both tagged forward rules above permissive owner rules and FastTrack. A RouterOS automatic start after a power cycle uses the saved firewall order before the scheduler gets a turn.
+
 ## Existing source NAT
 
 When a LAN device first enters a proxy policy, tikray checks whether an owner source-NAT rule could rewrite that device's address on the way to the runner. A broad LAN masquerade can do this. If admission is refused, inspect the rule's outgoing interface or interface list. An owner rule scoped to the actual WAN lets xray see the original LAN address.

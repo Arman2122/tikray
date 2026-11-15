@@ -46,6 +46,7 @@
         :if ($menu = "/routing/table") do={ :return ($roleName ~ "^table-(open|closed)\$") }
         :if ($menu = "/ip/route") do={ :return ($roleName ~ "^route-(open|closed)-(runner|fallback)\$") }
         :if ($menu = "/tool/netwatch") do={ :return ($roleName = "runner-watch") }
+        :if (($menu="/ip/firewall/filter") and (($roleName~"^acl-transit-lan:[0-9.]+/[0-9]+\$") or ($roleName="acl-transit-deny") or ($roleName="acl-transit-deny-backup"))) do={:return true}
         :if ($menu = "/ip/firewall/raw") do={ :return ($roleName = "acl-runner-direct") }
         :if (($menu = "/ip/firewall/address-list") or ($menu = "/ip/firewall/filter") or ($menu = "/ipv6/firewall/filter")) do={
             :if (($roleName ~ "^hold:[a-f0-9]+\$") and ([:len $roleName] = 37)) do={ :return true }
@@ -55,7 +56,7 @@
             :if (($roleName ~ "^skip-owner-route:[a-f0-9]+\$") and ([:len $roleName] = 49)) do={ :return true }
             :return ($roleName ~ "^(jump-pre|skip-(router|local|dns-(tcp|udp))|(mss|packet|route)-(open|closed)|conn-(full|smart)-(open|closed))\$")
         }
-        :if ($menu = "/ip/firewall/filter") do={ :return ($roleName ~ "^(egress-(guard|skip-local|drop-(marked|smart|full)|dns-(full|smart)-(open|closed)-(tcp|udp))|no-fasttrack|acl-(control-runner|runner-reply|established|lan-https|dns-(tcp|udp)|deny|input-(dns-(tcp|udp)|reply|api|deny|hook)|hook|wan-api))\$") }
+        :if ($menu = "/ip/firewall/filter") do={ :return ($roleName ~ "^(egress-(guard|skip-local|drop-(marked|smart|full)|dns-(full|smart)-(open|closed)-(tcp|udp))|no-fasttrack|acl-(control-runner|runner-transit(-dst)?|runner-reply|established|lan-https|dns-(tcp|udp)|deny|input-(dns-(tcp|udp)|reply|api|deny|hook)|hook|wan-api))\$") }
         :if ($menu = "/ipv6/firewall/filter") do={ :return (($roleName ~ "^(acl-v6-bridge|acl-wan-api6|ipv6:(jump|host:[0-9.]+))\$") or (($roleName ~ "^ipv6:ingress:[0-9a-f]+\$") and ([:len $roleName] = 45))) }
         :if ($menu = "/ip/firewall/nat") do={ :return ($roleName ~ "^(nat-containers|preserve-(backup-)?(open|closed|dns-(smart|full)-(open|closed)-(tcp|udp))|dns-((smart|full)-(open|closed)|router-(smart|full)-open)-(tcp|udp))\$") }
         :return false
@@ -82,7 +83,8 @@
                             } else={
                                 :local sep [:find $name ":"]
                                 :local member [:tostr ($row->"address")]; :if ([:typeof [:find $member "/"]]!="num") do={ :set member ($member . "/32") }
-                                :if ((($row->"list")!=("tikray-" . [:pick $name 0 $sep])) or ($member!=[:pick $name ($sep+1) [:len $name]])) do={ :error "tikray: shared_reference_refuses; address-list member changed identity" }
+                                :local memberList ("tikray-" . [:pick $name 0 $sep])
+                                :if ((($row->"list")!=$memberList) or ($member!=[:pick $name ($sep+1) [:len $name]])) do={ :error "tikray: shared_reference_refuses; address-list member changed identity" }
                             }
                         }
                         :if ($menu="/ip/route") do={
@@ -110,6 +112,8 @@
     }
     :local base ""; :local data ""; :local diskMount ""; :local diskSlot ""; :local identity ""; :local oldPin ""; :local subnet ""; :local phase "preflight"
     :local choice $requested; :if ($choice = "") do={ :set choice "keep" }
+    # @TIKRAY_TRANSIT_GUARD@
+    :local transitLAN ""; :local transitLANs [:toarray ""]
     :local markerTag "tikray:uninstall-state "
     :local meta [:toarray ""]
     :if ([:len $marker] > 0) do={
@@ -119,7 +123,7 @@
         :if ([:pick $label 0 [:len $markerTag]] != $markerTag) do={ :error "tikray: shared_reference_refuses; invalid uninstall marker" }
         :set meta [:deserialize from=json options=json.no-string-conversion value=[:pick $label [:len $markerTag] [:len $label]]]
         :if ((($meta->"version") != 1) or ([:typeof ($meta->"service")]!="array") or ([:typeof [:find {"detach";"remove";"retire";"files";"empty"} ($meta->"phase")]] != "num") or ([:typeof [:find {"keep";"purge"} ($meta->"choice")]] != "num")) do={ :error "tikray: shared_reference_refuses; invalid uninstall journal" }
-        :set choice ($meta->"choice"); :set phase ($meta->"phase"); :set data ($meta->"data"); :set identity ($meta->"installation_id"); :set oldPin ($meta->"api_pin"); :set subnet ($meta->"subnet")
+        :set choice ($meta->"choice"); :set phase ($meta->"phase"); :set data ($meta->"data"); :set identity ($meta->"installation_id"); :set oldPin ($meta->"api_pin"); :set subnet ($meta->"subnet"); :set transitLAN [:tostr ($meta->"transit_lan")]
         :if (($requested != "") and ($requested != $choice)) do={ :error "tikray: resume the original uninstall data choice" }
         :if ((($phase="files") or ($phase="empty")) and ([:len $inventory] != 0)) do={ :error "tikray: shared_reference_refuses; router objects reappeared after detachment" }
     }
@@ -149,6 +153,13 @@
         :set diskSlot [:tostr [/disk/get $volume slot]]
         :local proofFile [/file/find where name=($data . "/state/install.id")]
         :local request [/file/find where name=($data . "/install.json")]
+        :if (([:len $request]=1) and ([:len [/ip/firewall/filter/find where comment="tikray:acl-runner-transit" or comment="tikray:acl-runner-transit-dst" or chain="tikray-transit" or comment~"^tikray:acl-transit-lan:"]]>0)) do={
+            :if ([/file/get $request size]>60000) do={:error "tikray: shared_reference_refuses; oversized runner return scope"}
+            :local original [:deserialize from=json options=json.no-string-conversion value=[/file/get [:pick $request 0] contents]]
+            :local scope ($original->"scope")
+            :if ((($subnet!="") and ($subnet!=($scope->"subnet"))) or (($transitLAN!="") and ($transitLAN!=($scope->"lan_list")))) do={:error "tikray: shared_reference_refuses; conflicting runner return scope"}
+            :set subnet ($scope->"subnet"); :set transitLAN [:tostr ($scope->"lan_list")]; :set transitLANs ($scope->"lans")
+        }
         :if ([:len $proofFile] = 1) do={
             :local liveId [/file/get $proofFile contents]
             :if (([:len $liveId] != 32) or (!($liveId ~ "^[0-9a-f]+\$")) or (($identity != "") and ($identity != $liveId))) do={ :error "tikray: shared_reference_refuses; data identity differs" }
@@ -163,7 +174,7 @@
             :local s [:deserialize from=json options=json.no-string-conversion value=[:pick $c [:len "tikray:watchdog-state "] [:len $c]]]
             :if (($s->"installation_id") != $identity) do={ :error "tikray: shared_reference_refuses; wrong installation volume" }
             :local r [:deserialize from=json options=json.no-string-conversion value=[/file/get $request contents]]
-            :set oldPin ($r->"fingerprint"); :set subnet ($r->"scope"->"subnet")
+            :set oldPin ($r->"fingerprint"); :set subnet ($r->"scope"->"subnet"); :set transitLAN [:tostr ($r->"scope"->"lan_list")]
         }
     } else={
         :if (($choice="purge") or ([:len ($inventory->"/container")] > 0)) do={ :error "tikray: shared_reference_refuses; data root cannot be verified" }
@@ -179,6 +190,20 @@
     # @TIKRAY_REFERENCES@
     # @TIKRAY_CLEANUP_DATA@
     :set noImage [$imageIdle $data]
+    :local verifyTransit do={
+        :local inv $1; :local guard $2; :local net $3; :local lan $4
+        :local owns false
+        :foreach tag,id in=($inv->"/ip/firewall/filter") do={:if (($tag~"^tikray:acl-runner-transit(-dst)?\$") or ($tag~"^tikray:acl-transit-deny(-backup)?\$") or ([:pick $tag 0 [:len "tikray:acl-transit-lan:"]]="tikray:acl-transit-lan:")) do={:set owns true}}
+        :if (!$owns) do={
+            :if ([:len [/ip/firewall/address-list/find where comment~"^tikray:acl-transit-lan:"]]>0) do={:error "tikray: shared_reference_refuses; incompatible runner transit ownership"}
+            :return true
+        }
+        :local id ($inv->"/ip/firewall/filter"->"tikray:acl-runner-transit")
+        :local now [$guard "check" $net $lan "" "" $5]
+        :if ([:tostr $id]!=[:tostr $now]) do={:error "tikray: shared_reference_refuses; runner transit identity changed"}
+        :return true
+    }
+    :local verifiedTransit [$verifyTransit $inventory $transitGuard $subnet $transitLAN $transitLANs]
     :local checked [$references $inventory $checkTable $data $diskMount $diskSlot $normalize $subnet]
     :local peerCheck [$removeBindings "inspect"]
     :local serviceCheck [$restoreService "inspect" $phase $oldPin "" "" ($meta->"service")]
@@ -195,13 +220,14 @@
         :set noImage [$imageIdle $data]
     $requireInstall $lease
     :if ([:len $marker] = 0) do={
-        :set meta {"version"=1;"phase"="detach";"choice"=$choice;"data"=$data;"installation_id"=$identity;"api_pin"=$oldPin;"subnet"=$subnet;"service"=$serviceCheck}
+        :set meta {"version"=1;"phase"="detach";"choice"=$choice;"data"=$data;"installation_id"=$identity;"api_pin"=$oldPin;"subnet"=$subnet;"transit_lan"=$transitLAN;"service"=$serviceCheck}
         /system/script/add name=tikray-uninstall-state policy=read dont-require-permissions=no source="" comment=($markerTag . [:serialize to=json options=json.no-string-conversion value=$meta])
         :set marker [/system/script/find where name="tikray-uninstall-state" and comment=($markerTag . [:serialize to=json options=json.no-string-conversion value=$meta])]
         :if ([:len $marker] != 1) do={ :error "tikray: uninstall marker changed" }
         :set phase "detach"
     }
     :set marker [:pick $marker 0]
+        :set verifiedTransit [$verifyTransit $inventory $transitGuard $subnet $transitLAN $transitLANs]
         :local again [$references $inventory $checkTable $data $diskMount $diskSlot $normalize $subnet]
         :local restored [$restoreService "restore" $phase $oldPin $requireInstall $lease ($meta->"service")]
         :local sched [/system/scheduler/find where name="tikray-watchdog" and comment="tikray:watchdog-scheduler"]
@@ -238,6 +264,10 @@
                     $checkLease $claim
                     :local fresh [$lookup $c]
                     :if (([:len $fresh] != 1) or ([:pick $fresh 0] != $id)) do={ :error "tikray: uninstall identity changed; retry" }
+                    :if (($menu="/ip/firewall/filter") and (($c="tikray:acl-runner-transit") or ($c="tikray:acl-runner-transit-dst") or ($c="tikray:acl-transit-deny") or ($c="tikray:acl-transit-deny-backup") or ([:pick $c 0 [:len "tikray:acl-transit-lan:"]]="tikray:acl-transit-lan:"))) do={
+                        :local guard $6; :local verified [$guard "check" $7 $8 "" "" $9]
+                        :if (([:len [$lookup $c]]!=1) or ([:pick [$lookup $c] 0]!=$id)) do={:error "tikray: shared_reference_refuses; runner transit identity changed"}
+                    }
                     # Tables and groups can acquire dependencies between
                     # preflight and the last operation. Both are empty now.
                     :if ($menu="/routing/table") do={
@@ -254,6 +284,7 @@
         }
         :if ($phase = "remove") do={
             :set inventory [$scan $menus $role]
+            :set verifiedTransit [$verifyTransit $inventory $transitGuard $subnet $transitLAN $transitLANs]
             :local rechecked [$references $inventory $checkTable $data $diskMount $diskSlot $normalize $subnet]
             # Remove the control and runner before exposing any bridge port.
             $drop "/container" $inventory "all" $requireInstall $lease
@@ -261,7 +292,11 @@
             $drop "/tool/netwatch" $inventory "all" $requireInstall $lease
             $drop "/ip/firewall/mangle" $inventory "all" $requireInstall $lease
             $drop "/ip/firewall/nat" $inventory "all" $requireInstall $lease
-            $drop "/ip/firewall/filter" $inventory "all" $requireInstall $lease
+            :if ([:len [:tostr ($inventory->"/ip/firewall/filter"->"tikray:acl-runner-transit-dst")]]>0) do={
+                $drop "/ip/firewall/filter" $inventory "tikray:acl-runner-transit-dst" $requireInstall $lease $transitGuard $subnet $transitLAN $transitLANs
+                :set inventory [$scan $menus $role]
+            }
+            $drop "/ip/firewall/filter" $inventory "all" $requireInstall $lease $transitGuard $subnet $transitLAN $transitLANs
             $drop "/ipv6/firewall/filter" $inventory "all" $requireInstall $lease
             $drop "/ip/firewall/raw" $inventory "all" $requireInstall $lease
             $drop "/ip/firewall/address-list" $inventory "all" $requireInstall $lease

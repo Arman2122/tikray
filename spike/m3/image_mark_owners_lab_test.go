@@ -26,7 +26,7 @@ func TestRunnerImagePreservesNewOwnerMarkUsers(t *testing.T) {
 	}
 	setupRunnerImageRouting(t, r, run, "172.31.255.3")
 	watch, helper, e := adapters.WatchdogScripts()
-	a, b := strings.Index(watch, ":local imageTraffic do={"), strings.Index(watch, ":local grant {")
+	a, b := strings.Index(watch, ":local imageTraffic do={"), strings.Index(watch, ":if ($7=\"transit\")")
 	if e != nil || a < 0 || b <= a {
 		t.Fatal("missing released native helper")
 	}

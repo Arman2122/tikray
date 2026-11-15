@@ -34,7 +34,7 @@ func BuildUninstaller(dst io.Writer) error {
 	if e != nil {
 		return e
 	}
-	for _, f := range []struct{ key, file string }{{"RESTORE_SERVICE", "uninstall-service.rsc"}, {"REFERENCES", "uninstall-references.rsc"}, {"CLEANUP_DATA", "uninstall-data.rsc"}, {"INSTALL_LOCK", "install-lock.rsc"}} {
+	for _, f := range []struct{ key, file string }{{"RESTORE_SERVICE", "uninstall-service.rsc"}, {"REFERENCES", "uninstall-references.rsc"}, {"CLEANUP_DATA", "uninstall-data.rsc"}, {"INSTALL_LOCK", "install-lock.rsc"}, {"TRANSIT_GUARD", "transit-guard.rsc"}} {
 		part, err := source(f.file)
 		if err == nil && f.key == "CLEANUP_DATA" {
 			part, err = fillImageReference(part, routerosfiles.Sources.ReadFile)

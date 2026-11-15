@@ -2,6 +2,48 @@
 # ping before its xray or DNS is usable, so native check-gateway alone is
 # insufficient during a replacement.
 :local imageTraffic do={
+    :if ($1="json") do={
+        :local bound 4096; :if ($3=60000) do={:set bound 60000}
+        :local rows [/file/find where name=$2]
+        :if ([:len $rows]!=1) do={ :error "image: missing proof" }
+        :local id [:pick $rows 0]
+        :if (([/file/get $id size]>$bound) or ([/file/get $id type]="directory")) do={ :error "image: invalid proof" }
+        :return [:deserialize from=json options=json.no-string-conversion value=[/file/get $id contents]]
+    }
+    :if ($1="clock-alive") do={
+        :if ([:typeof ($2->"job")]!="str") do={:return false}
+        :local id [:toid ($2->"job")]; :if ([:typeof $id]!="id") do={:return false}
+        :local found [/system/script/job/find where .id=$id]
+        :if ([:len $found]!=1) do={:return false}
+        :return ([:tostr [/system/script/job/get $id started]]=($2->"born"))
+    }
+    :if ($1="clock-new") do={
+        # A fixed delay job has no router authority. Its ID and start value
+        # distinguish equal-uptime ticks on separate boots, like install-lock.
+        :local id [:execute {:delay 10m}]
+        :return {"job"=[:tostr $id];"born"=[:tostr [/system/script/job/get $id started]]}
+    }
+    :if ($1="journal") do={
+        :local id $2; :local pref $3
+        :local row [/system/script/get $id]; :local comment ($row->"comment")
+        :if ((($row->"name")!="tikray-image-transition") or ([:pick $comment 0 [:len $pref]]!=$pref) or ([:len ($row->"source")]!=0) or ($row->"dont-require-permissions") or ([:len $comment]>4096)) do={ :error "image: foreign transition state" }
+        :local readOnly false
+        :foreach p in=($row->"policy") do={ :if ([:pick $p 0 1]!="!") do={ :if ($p!="read") do={:error "image: foreign transition permissions"}; :set readOnly true } }
+        :if (!$readOnly) do={ :error "image: foreign transition permissions" }
+        :return [:deserialize from=json options=json.no-string-conversion value=[:pick $comment [:len $pref] [:len $comment]]]
+    }
+    :if ($1="transit") do={
+        :local data $2; :local identity $3; :local check $4; :local grant $5
+        $check $grant
+        :if ([:len [/file/find where name=($data . "/state/install.id") and contents=$identity]]!=1) do={:error "image: runner return scope identity differs"}
+        :local rows [/file/find where name=($data . "/state/install.request")]
+        :if (([:len $rows]!=1) or ([/file/get $rows size]>60000)) do={:error "image: runner return scope unavailable"}
+        :local r [:deserialize from=json options=json.no-string-conversion value=[/file/get $rows contents]]
+        :if (([:typeof ($r->"version")]!="num") or (($r->"version")!=1) or (($r->"installation_id")!=$identity)) do={:error "image: runner return scope identity differs"}
+        :local sc ($r->"scope")
+        # @TIKRAY_NATIVE_TRANSIT_GUARD@
+        :return [$transitGuard "repair" ($sc->"subnet") ($sc->"lan_list") $check $grant ($sc->"lans")]
+    }
     :if ($1="root") do={
         :local base $2; :local root $3; :local ownID $4
         # Removing a native row retires its extraction root. Include owner

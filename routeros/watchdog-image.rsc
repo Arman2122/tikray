@@ -3,6 +3,11 @@
 :local wdImage do={
     :local data $1; :local identity $2; :local gateway $3
     :local controlOK $4; :local stopCheck $5; :local emergency $6
+    # @TIKRAY_WATCHDOG_TRAFFIC@
+    :if ($7="transit") do={
+        :local permitted do={:local pause $1; :if ([$pause "restart"]) do={:error "image: runner start suspended"}; :return true}
+        :return [$imageTraffic "transit" $data $identity $permitted $stopCheck]
+    }
     :local pending ($data . "/state/image-update.request")
     :local phaseName "tikray-image-transition"; :local prefix "tikray:image-transition "
     :local files [/file/find where name=$pending]
@@ -14,28 +19,11 @@
     :local hexOK do={
         :return (([:typeof $1]="str") and ([:len $1]=$2) and ($1~"^[0-9a-f]+\$"))
     }
-    :local jsonFile do={
-        :local bound 4096; :if ($2=60000) do={:set bound 60000}
-        :local rows [/file/find where name=$1]
-        :if ([:len $rows]!=1) do={ :error "image: missing proof" }
-        :local id [:pick $rows 0]
-        :if (([/file/get $id size]>$bound) or ([/file/get $id type]="directory")) do={ :error "image: invalid proof" }
-        :return [:deserialize from=json options=json.no-string-conversion value=[/file/get $id contents]]
-    }
-    :local readJournal do={
-        :local id $1; :local pref $2
-        :local row [/system/script/get $id]; :local comment ($row->"comment")
-        :if ((($row->"name")!="tikray-image-transition") or ([:pick $comment 0 [:len $pref]]!=$pref) or ([:len ($row->"source")]!=0) or ($row->"dont-require-permissions") or ([:len $comment]>4096)) do={ :error "image: foreign transition state" }
-        :local readOnly false
-        :foreach p in=($row->"policy") do={ :if ([:pick $p 0 1]!="!") do={ :if ($p!="read") do={:error "image: foreign transition permissions"}; :set readOnly true } }
-        :if (!$readOnly) do={ :error "image: foreign transition permissions" }
-        :return [:deserialize from=json options=json.no-string-conversion value=[:pick $comment [:len $pref] [:len $comment]]]
-    }
     :local j [:toarray ""]
     :local jid
     :if ([:len $journals]>0) do={
         :if ([:len $journals]!=1) do={ :error "image: ambiguous transition" }
-        :set jid [:pick $journals 0]; :set j [$readJournal $jid $prefix]
+        :set jid [:pick $journals 0]; :set j [$imageTraffic "journal" $jid $prefix]
         :if ((($j->"v")!=1) or (($j->"install")!=$identity) or (![$hexOK ($j->"nonce") 32]) or ((($j->"component")!="runner") and (($j->"component")!="tikray"))) do={ :error "image: transition identity changed" }
     }
     :if ([:len $files]=0) do={
@@ -45,7 +33,7 @@
         }
         :error "image: request missing during transition"
     }
-    :local req [$jsonFile $pending]; :local rid [:pick $files 0]; :local requestText [/file/get $rid contents]
+    :local req [$imageTraffic "json" $pending]; :local rid [:pick $files 0]; :local requestText [/file/get $rid contents]
     :local component ($req->"component"); :local nonce ($req->"nonce")
     :local requestHash [:convert [:convert $requestText from=raw transform=sha512 to=hex] transform=lc]
     :local original ($req->"previous"); :local candidate ($req->"candidate")
@@ -117,7 +105,7 @@
     }
     :local scopeVerified [$checkMounts $data $identity $staging]
     :local arch [/system/resource/get architecture-name]; :if ($arch="x86_64") do={:set arch "amd64"}
-    :local boot [$jsonFile ($data . "/state/image-bootstrap.receipt")]
+    :local boot [$imageTraffic "json" ($data . "/state/image-bootstrap.receipt")]
     :if ((($boot->"version")!=1) or (($boot->"arch")!=$arch) or (![$validRef ($boot->$component) $hexOK $component])) do={ :error "image: bootstrap proof unavailable" }
     :local statePath ($data . "/state/image-" . $component . ".receipt")
     :local states [/file/find where name=$statePath]
@@ -125,7 +113,7 @@
     :local stateFile [:pick $states 0]; :local oldState [/file/get $stateFile contents]
     :local installed; :local retained; :local currentOK false
     :do {
-        :local state [$jsonFile $statePath]; :local prior ($state->"previous")
+        :local state [$imageTraffic "json" $statePath]; :local prior ($state->"previous")
         :local lineage false
         :if (([:typeof $prior]="nil") or ([:typeof $prior]="nothing")) do={:set lineage [$sameRef ($state->"active") ($boot->$component)]} else={
             :set lineage (([$validRef $prior $hexOK $component]) and (($prior->"digest")!=($state->"active"->"digest")) and (($prior->"image_id")!=($state->"active"->"image_id")))
@@ -169,7 +157,6 @@
         :if ($age>300) do={:set age 300}
         :return $age
     }
-    # @TIKRAY_WATCHDOG_TRAFFIC@
     :local grant {"paused"=$stopCheck;"p"=$pending;"id"=$rid;"text"=$requestText;"data"=$data;"identity"=$identity;"mounts"=$checkMounts;"staging"=$staging}
     :local checkGrant do={
         :local g $1; :local check ($g->"paused"); :local path ($g->"p"); :local id ($g->"id"); :local token ($g->"staging")
@@ -180,22 +167,9 @@
     }
     :local trafficLAN ""
     :if ($component="runner") do={
-        :local in [$jsonFile ($data . "/state/install.request") 60000]
+        :local in [$imageTraffic "json" ($data . "/state/install.request") 60000]
         :set trafficLAN ($in->"scope"->"lan_list")
         :if (([:typeof $trafficLAN]!="str") or (!($trafficLAN~"^[A-Za-z0-9_][A-Za-z0-9_.-]*\$"))) do={:error "image: unknown managed LAN"}
-    }
-    :local clockAlive do={
-        :if ([:typeof ($1->"job")]!="str") do={:return false}
-        :local id [:toid ($1->"job")]; :if ([:typeof $id]!="id") do={:return false}
-        :local found [/system/script/job/find where .id=$id]
-        :if ([:len $found]!=1) do={:return false}
-        :return ([:tostr [/system/script/job/get $id started]]=($1->"born"))
-    }
-    :local makeClock do={
-        # A fixed delay job has no router authority. Its ID and start value
-        # distinguish equal-uptime ticks on separate boots, like install-lock.
-        :local id [:execute {:delay 10m}]
-        :return {"job"=[:tostr $id];"born"=[:tostr [/system/script/job/get $id started]]}
     }
     :local now ([:tonsec [/system/resource/get uptime]]/1000000000)
     :if ([:len $journals]=0) do={
@@ -216,7 +190,7 @@
         /system/script/add name=$phaseName source="" policy=read dont-require-permissions=no comment=($prefix . [:serialize to=json options=json.no-string-conversion value=$j])
         :set journals [/system/script/find where name=$phaseName]
         :if ([:len $journals]!=1) do={:error "image: transition publication failed"}
-        :set jid [:pick $journals 0]; :set j [$readJournal $jid $prefix]
+        :set jid [:pick $journals 0]; :set j [$imageTraffic "journal" $jid $prefix]
     }
     :if (($j->"nonce")!=$nonce) do={
         # A new request may land just after retirement of the previous file.
@@ -236,9 +210,9 @@
     :if ([:typeof [:find {"prepare";"replace";"verify";"restore";"recover";"commit";"committed";"reverted"} $phase]]!="num") do={:error "image: invalid transition phase"}
     :if (([:typeof ($j->"age")]!="num") or (($j->"age")<0) or (($j->"age")>300) or ([:typeof ($j->"seen")]!="num") or (($j->"seen")<0)) do={:error "image: invalid native timer"}
     :if (($phase="replace") or ($phase="verify")) do={
-        :local newBoot (![$clockAlive ($j->"clock")])
+        :local newBoot (![$imageTraffic "clock-alive" ($j->"clock")])
         :local age [$advanceAge ($j->"age") ($j->"seen") $now $newBoot]
-        :if ($newBoot) do={:set ($j->"clock") [$makeClock]}
+        :if ($newBoot) do={:set ($j->"clock") [$imageTraffic "clock-new"]}
         :set ($j->"age") $age; :set ($j->"seen") $now
         :if ($age>=300) do={:set phase "restore"; :set ($j->"phase") $phase}
         :set saved [$save $j $jid $prefix $saved]
@@ -291,10 +265,10 @@
                 # After a reboot or timeout retry only our nonce-bound row,
                 # with the original signed archive and a bounded backoff.
                 :if ((!$restoring) or (($live->"tag")!=($staging->"original"))) do={:return $targetName}
-                :if (([$clockAlive ($j->"clock")]) and ($now>=($j->"added")) and ($now<(($j->"added")+120))) do={:return $targetName}
-                :if (([$clockAlive ($j->"clock")]) and ($now<($j->"next"))) do={:return $targetName}
+                :if (([$imageTraffic "clock-alive" ($j->"clock")]) and ($now>=($j->"added")) and ($now<(($j->"added")+120))) do={:return $targetName}
+                :if (([$imageTraffic "clock-alive" ($j->"clock")]) and ($now<($j->"next"))) do={:return $targetName}
                 :local delay ($j->"retry"); :if (([:typeof $delay]!="num") or ($delay<1) or ($delay>15)) do={:error "image: invalid retry clock"}
-                :if (![$clockAlive ($j->"clock")]) do={:set ($j->"clock") [$makeClock]}
+                :if (![$imageTraffic "clock-alive" ($j->"clock")]) do={:set ($j->"clock") [$imageTraffic "clock-new"]}
                 :set ($j->"next") ($now+60*$delay); :set delay ($delay*2); :if ($delay>15) do={:set delay 15}; :set ($j->"retry") $delay
                 :set saved [$save $j $jid $prefix $saved]
             }
@@ -302,6 +276,7 @@
             :if (([:len $emergency]>0) and ([:len [/container/find where .id=($live->"id") and running]]=1)) do={:return $targetName}
             # A verified fallback must be available before stopping a working image.
             :if (!$restoring) do={:local backup [$imageTraffic "archive" $data $original]}
+            :if ($component="runner") do={:local guarded [$imageTraffic "transit" $data $identity $checkGrant $grant]}
             :local rootChecked [$imageTraffic "root" $base ($live->"root") ($live->"id")]
             :local f [$checkGrant $grant]
             :local id ($live->"id"); :local oldTag ($live->"tag"); :local oldCode ($live->"image_id"); :set live [$imageTraffic "row" $profile]
@@ -311,7 +286,7 @@
             # extraction, and the candidate trial across subsequent boots.
             :if ($phase="prepare") do={
                 :if (([:tostr $id]!=($j->"baseline")) or ($oldCode!=($original->"image_id")) or ((!$mayRemoveStopped) and ([:len [/container/find where .id=$id and running]]!=1)) or ($mayRemoveStopped and ([:len [/container/find where .id=$id and stopped]]!=1)) or ([/file/get $stateFile contents]!=($j->"old"))) do={:error "image: preparing baseline changed"}
-                :set phase "replace"; :set ($j->"phase") $phase; :set ($j->"age") 0; :set ($j->"clock") [$makeClock]
+                :set phase "replace"; :set ($j->"phase") $phase; :set ($j->"age") 0; :set ($j->"clock") [$imageTraffic "clock-new"]
                 :set ($j->"seen") ([:tonsec [/system/resource/get uptime]]/1000000000); :set saved [$save $j $jid $prefix $saved]
                 :set f [$checkGrant $grant]
             }
@@ -349,6 +324,8 @@
                 :set root ($root . "-image-" . ($want->"image_id"))
                 :if ([:len [/file/find where name=$root]]>0) do={:error "image: both extraction roots occupied"}
             }
+            :if ($component="runner") do={:local guarded [$imageTraffic "transit" $data $identity $checkGrant $grant]}
+            :if ([:len [/file/find where name=$root]]!=0) do={:error "image: extraction root became occupied"}
             :local f [$checkGrant $grant]
             :if ([:len [$imageTraffic "row" $profile]]!=0) do={:error "image: slot acquired another container"}
             :local rootChecked [$imageTraffic "root" $base $root ""]
@@ -370,6 +347,10 @@
             :while (([:len [/container/find where name=$targetName and comment=$importing and running]]=0) and ([:len [/container/find where name=$targetName and comment=$importing and stopped]]=0) and ($wait<120)) do={:delay 500ms; :set wait ($wait+1)}
             :if ($wait=120) do={ :return $targetName }
             :set live [$imageTraffic "row" $profile]
+        }
+        :if (($component="runner") and ([:len $emergency]=0)) do={
+            :local priorID ($live->"id"); :local guarded [$imageTraffic "transit" $data $identity $checkGrant $grant]
+            :set live [$imageTraffic "row" $profile]; :if (($live->"id")!=$priorID) do={:error "image: verified row changed before start"}
         }
         :if (($live->"image_id")!=($want->"image_id")) do={:error "image: import did not produce expected config ID"}
         :local id ($live->"id"); :local f [$checkGrant $grant]
@@ -444,11 +425,15 @@
                 :local f [$checkGrant $grant]; :local id ($live->"id")
                 :if ([:len [/container/find where .id=$id and running]]=1) do={/container/stop $id}
                 :local waited 0; :while (([:len [/container/find where .id=$id and stopped]]=0) and ($waited<40)) do={ :delay 250ms; :set waited ($waited+1) }
+                :if ($component="runner") do={:local guarded [$imageTraffic "transit" $data $identity $checkGrant $grant]}
                 :set f [$checkGrant $grant]; :local retryRow [$imageTraffic "row" $profile]
-                :if ((($retryRow->"id")=$id) and (($retryRow->"image_id")=($want->"image_id")) and ([:len [/container/find where .id=$id and stopped]]=1)) do={/container/start $id}
+                :if ((($retryRow->"id")=$id) and (($retryRow->"image_id")=($want->"image_id")) and ([:len [/container/find where .id=$id and stopped]]=1)) do={
+                    /container/start $id
+                }
             }
             :return $targetName
         }
+        :if (($component="runner") and ($live->"partial")) do={:local guarded [$imageTraffic "transit" $data $identity $checkGrant $grant]}
         :local again [$imageTraffic "row" $profile]; :local f [$checkGrant $grant]
         :if ((($live->"id")!=($again->"id")) or (($again->"image_id")!=($want->"image_id")) or ([:len [/container/find where .id=($again->"id") and running]]!=1)) do={:error "image: trial identity changed"}
         :if ($again->"partial") do={
@@ -464,7 +449,7 @@
         :if ((![$sameRef $installed $original]) and (![$sameRef $installed $candidate])) do={:error "image: committed lineage changed"}
         :if (([:len [/file/find where name=$statePath and .id=$stateFile]]!=1) or ([/file/get $stateFile contents]!=$oldState)) do={:error "image: committed lineage changed"}
         :if ($oldState!=$body) do={ /file/set $stateFile contents=$body }
-        :local state [$jsonFile $statePath]
+        :local state [$imageTraffic "json" $statePath]
         :if ((![$sameRef ($state->"active") $candidate]) or (![$sameRef ($state->"previous") $original])) do={:error "image: commit readback failed"}
         :set ($j->"phase") "committed"; :set saved [$save $j $jid $prefix $saved]; :set phase "committed"
     }
@@ -497,7 +482,7 @@
         :set f [$checkGrant $grant]
         /file/remove $rid
         :if ([:len [/file/find where name=$pending and .id=$rid]]!=0) do={:error "image: completion not persisted"}
-        :if ([$clockAlive ($j->"clock")]) do={/system/script/job/remove [:toid ($j->"clock"->"job")]}
+        :if ([$imageTraffic "clock-alive" ($j->"clock")]) do={/system/script/job/remove [:toid ($j->"clock"->"job")]}
         :if ([/system/script/get $jid comment]=$saved) do={ /system/script/remove $jid }
         :log info ("tikray: image " . $phase . " " . $targetName)
     }

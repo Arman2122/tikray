@@ -38,6 +38,7 @@ func (f *routingLab) imageAlternateGateway(ctx context.Context, t *testing.T, wi
 	cmd := f.Net.Inet(ctx, "python3", "-c", `import socket,sys,struct
 s=socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.htons(0x0800));s.bind((sys.argv[1],0))
 addr=socket.inet_aton(sys.argv[3]);mac=bytes.fromhex(sys.argv[4].replace(":",""))
+prefix=b"wd6b"+bytes.fromhex(sys.argv[5]);wan=socket.inet_aton(sys.argv[6])
 with open(sys.argv[2],"wb",buffering=0) as log:
  while True:
   b=s.recv(65535)
@@ -46,7 +47,9 @@ with open(sys.argv[2],"wb",buffering=0) as log:
   if len(b)<start+9:continue
   _,port,size,_=struct.unpack_from("!4H",b,start)
   p=b[start+8:start+size]
-  if port==31947 and p in (b"C",b"D"):log.write(p)`, link, capture, routingRemote, mac)
+  if port!=31947 or len(p)!=len(prefix)+3 or p[1:-2]!=prefix or not 33000<=int.from_bytes(p[-2:],"big")<=65000:continue
+  if p[:1]==b"C":log.write(b"C")
+  elif p[:1]==b"D":log.write(b"D" if b[26:30]==wan else b"?")`, link, capture, routingRemote, mac, wire.nonce, egressDirect)
 	startRoutingProcess(t, cmd)
 	if _, ok := poll(ctx, 3*time.Second, 100*time.Millisecond, func() bool { _, e := os.Stat(capture); return e == nil }); !ok {
 		t.Fatal("second WAN wire capture unavailable")
@@ -83,7 +86,7 @@ with open(sys.argv[2],"wb",buffering=0) as log:
 		return bytes.Count(b, []byte{'D'}) >= 2
 	})
 	b, e := os.ReadFile(capture)
-	if e != nil || !reached || bytes.Contains(b, []byte{'C'}) {
+	if e != nil || !reached || bytes.Contains(b, []byte{'C'}) || bytes.Contains(b, []byte{'?'}) {
 		t.Fatal("changed main gateway lacked open traffic or received a closed packet while runner was unverified")
 	}
 }

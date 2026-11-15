@@ -219,3 +219,18 @@ func TestTransitChainPreservesExperimentalListMember(t *testing.T) {
 		t.Fatal("mixed ownership generations were adopted")
 	}
 }
+
+func TestTransitGuardRefusesDormantOwnerLogPrefix(t *testing.T) {
+	f := newDiffRouter()
+	scope := testTransitScope()
+	if err := ReconcileTransitGuard(t.Context(), f, scope, true, false); err != nil {
+		t.Fatal(err)
+	}
+	row := f.tag(transitDeny)
+	row.Props["log-prefix"] = "owner-prefix"
+	row.Props["disabled"] = "true"
+	n := len(f.writes)
+	if err := ReconcileTransitGuard(t.Context(), f, scope, true, false); !errors.Is(err, ErrPolicyConflict) || len(f.writes) != n || !onBit(row.Props["disabled"]) {
+		t.Fatal("re-enabled a row with changed owner logging metadata")
+	}
+}

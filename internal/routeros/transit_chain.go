@@ -61,7 +61,9 @@ func observeTransitChain(o observation, scope InstallScope, headID string) (bind
 	}
 	// Project only the presence of unsupported and potentially private matchers.
 	owned := anyQuery(q, valuesQuery("comment", transitTag, transitDestTag))
-	count, err := o.count(firewallFilter, append(owned, predicatesPresent(unsupportedPredicates)...)...)
+	nonemptyLogPrefix := []string{"?log-prefix", "?log-prefix=", "?#!", "?#&"}
+	extra := anyQuery(predicatesPresent(unsupportedPredicates), nonemptyLogPrefix)
+	count, err := o.count(firewallFilter, append(owned, extra...)...)
 	if err != nil {
 		return p, err
 	}

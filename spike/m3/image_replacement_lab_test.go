@@ -252,7 +252,7 @@ func newNativeImageCase(t *testing.T) *nativeImageCase {
 		t.Fatal("missing image machine")
 	}
 	compiled, helper, err := adapters.WatchdogScripts()
-	start, end := strings.Index(compiled, ":local imageTraffic do={"), strings.Index(compiled, ":local grant {")
+	start, end := strings.Index(compiled, ":local imageTraffic do={"), strings.Index(compiled, ":if ($7=\"transit\")")
 	if err != nil || start < 0 || end <= start {
 		t.Fatal("cannot assemble production private helper")
 	}
@@ -443,9 +443,14 @@ func nativeProbeArchive(t *testing.T, label string) ([]byte, string) {
 
 func nativeProbeArchiveWithFiles(t *testing.T, label string, count int) ([]byte, string) {
 	t.Helper()
+	return nativeProbeProgram(t, label, count, []byte("package main\nimport \"time\"\nfunc main(){for {time.Sleep(time.Hour)}}\n"))
+}
+
+func nativeProbeProgram(t *testing.T, label string, count int, program []byte) ([]byte, string) {
+	t.Helper()
 	dir := t.TempDir()
 	src := filepath.Join(dir, "main.go")
-	if os.WriteFile(src, []byte("package main\nimport \"time\"\nfunc main(){for {time.Sleep(time.Hour)}}\n"), 0600) != nil {
+	if os.WriteFile(src, program, 0600) != nil {
 		t.Fatal("cannot stage native fixture executable")
 	}
 	output := filepath.Join(dir, "pause")
@@ -535,9 +540,15 @@ func TestImageUpdateBootWitness(t *testing.T) {
 	}
 }
 
+func setupRunnerGuardScope(t *testing.T, run func(string) string, gateway string) {
+	t.Helper()
+	run(`:if ([:len [/interface/list/find where name=m3-images-lan]]=0) do={/interface/list/add name=m3-images-lan; /interface/list/member/add list=m3-images-lan interface=ether2}`)
+	run(`:if ([:len [/interface/bridge/find where name=tikray]]=0) do={/interface/bridge/add name=tikray protocol-mode=none comment="tikray:bridge"; /ip/address/add interface=tikray address=` + gateway + `/29 comment="tikray:addr"}`)
+}
 func setupRunnerImageRouting(t *testing.T, r *rig, run func(string) string, peer string) (string, string, string) {
 	t.Helper()
-	run(`/interface/list/add name=m3-images-lan; /interface/list/member/add interface=ether2 list=m3-images-lan`)
+	setupRunnerGuardScope(t, run, "172.27.248.1")
+
 	if run(`:put [:len [/ip/route/find where routing-table="main" and dst-address="0.0.0.0/0" and active]]`) == "0" {
 		run(`/ip/route/add dst-address=0.0.0.0/0 gateway=198.51.100.254 comment=wan-fixture`)
 	}
@@ -651,7 +662,7 @@ while True:
 		t.Fatal("native watchdog source unavailable")
 	}
 	start := strings.Index(compiled, ":local imageTraffic do={")
-	end := strings.Index(compiled, ":local grant {")
+	end := strings.Index(compiled, ":if ($7=\"transit\")")
 	if start < 0 || end <= start {
 		t.Fatal("missing deployed traffic binding")
 	}

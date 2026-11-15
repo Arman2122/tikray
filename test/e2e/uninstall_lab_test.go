@@ -495,6 +495,17 @@ func TestM3Uninstall(t *testing.T) {
 				st.Fatal("owner dependency refused after mutation", reason)
 			}
 		}
+		const guard = `[find where comment="tikray:acl-runner-transit"]`
+		guardID := f.mustRun(ctx, st, `:put [:tostr [/ip/firewall/filter/find where comment="tikray:acl-runner-transit"]]`)
+		f.mustRun(ctx, st, `/ip/firewall/filter/set `+guard+` log=yes`)
+		unchangedRefusal("runner transit guard changed")
+		if got := f.mustRun(ctx, st, `:put [:tostr [/ip/firewall/filter/find where comment="tikray:acl-runner-transit"]]`); got != guardID || got == "" {
+			st.Fatal("changed private return guard was replaced during refusal")
+		}
+		f.mustRun(ctx, st, `/ip/firewall/filter/set `+guard+` log=no`)
+		f.mustRun(ctx, st, `/ip/firewall/filter/add chain=m3-owner-transit action=jump jump-target=tikray-transit comment="owner:transit-jump"`)
+		unchangedRefusal("owner uses private runner transit chain")
+		f.mustRun(ctx, st, `/ip/firewall/filter/remove [find where comment="owner:transit-jump"]`)
 		f.mustRun(ctx, st, `/interface/wifi/capsman/set ca-certificate=tikray-api`)
 		unchangedRefusal("wifi certificate dependency")
 		if f.mustRun(ctx, st, `:put [/interface/wifi/capsman/get ca-certificate]`) != "tikray-api" {

@@ -103,7 +103,7 @@
                 :do {
                     :local id [/container/find where name=$component and comment=$ownedTag and interface=$vethName]
                     :local healthy false
-                    :if ([:len [/container/find where .id=$id and running]] = 1) do={
+                    :if ((![$suspended "restart"]) and ([$verified $component $ownedTag $vethName]) and ([:len [/container/find where .id=$id and name=$component and comment=$ownedTag and running]]=1)) do={
                         :if ($component = "tikray-runner") do={
                             :do { :set healthy ([/ping address=$runnerIP src-address=$gateway count=1 interval=400ms] = 1) } on-error={ :set healthy false }
                         } else={
@@ -118,11 +118,13 @@
                     :local state [$wdStep $prior $healthy $uptime]
                     :if ([$wdState "save" $component $state $uptime] != true) do={ :error "tikray: watchdog state unverified" }
                     :if (($state->"restart") and (![$suspended "restart"]) and ([$verified $component $ownedTag $vethName])) do={
+                        :if ($component="tikray-runner") do={:local protected [$wdImage $data ($savedState->"installation_id") $gateway $controlOK $suspended $emergency "transit"]}
                         :if ([:len [/container/find where .id=$id and running]] = 1) do={
                             /container/stop $id
                             :local waits 0
                             :while (([:len [/container/find where .id=$id and stopped]] = 0) and ($waits < 40)) do={ :delay 250ms; :set waits ($waits+1) }
                         }
+                        :if ($component="tikray-runner") do={:local protected [$wdImage $data ($savedState->"installation_id") $gateway $controlOK $suspended $emergency "transit"]}
                         :if ((![$suspended "restart"]) and ([$verified $component $ownedTag $vethName]) and ([:len [/container/find where .id=$id and name=$component and comment=$ownedTag and stopped]] = 1)) do={
                             /container/start $id
                             :log warning ("tikray: watchdog restarted " . $component)

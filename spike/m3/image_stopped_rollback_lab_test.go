@@ -22,6 +22,7 @@ type stoppedRunnerCase struct {
 func newStoppedRunnerCase(t *testing.T) *stoppedRunnerCase {
 	t.Helper()
 	f := newNativeImageCase(t)
+	setupRunnerGuardScope(t, f.run, "172.27.248.1")
 	runnerRef := func(ref map[string]any) map[string]any {
 		out := maps.Clone(ref)
 		out["component"] = "runner"
@@ -34,7 +35,7 @@ func newStoppedRunnerCase(t *testing.T) *stoppedRunnerCase {
 		f.write("image-runner.receipt", map[string]any{"version": 1, "installation_id": nativeImageIdentity, "active": active, "previous": previous})
 	}
 	f.write("image-bootstrap.receipt", map[string]any{"version": 1, "arch": "amd64", "publisher": "fixture", "tikray": f.first, "runner": old})
-	f.write("install.request", map[string]any{"scope": map[string]string{"lan_list": "m3-images-lan"}})
+	f.write("install.request", map[string]any{"version": 1, "installation_id": nativeImageIdentity, "scope": map[string]any{"subnet": "172.27.248.0/29", "lan_list": "m3-images-lan", "lans": []map[string]string{{"prefix": "192.168.88.0/24"}}}})
 	state(old)
 	f.run(`/interface/veth/add name=tikray-runner comment="tikray:veth-runner" address=172.27.248.3/29 gateway=172.27.248.1`)
 	root := strings.TrimSuffix(f.data, "/data") + "/containers/runner"

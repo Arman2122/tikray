@@ -122,6 +122,12 @@ func TestRestrictedRunnerTransitRepair(t *testing.T) {
 	if get(guard)[".id"] != id || get(foreign)[".id"] != owner || verify(false) != nil {
 		t.Fatal("repair changed native identities")
 	}
+	add(menu+"/set", "=.id="+id, "=log-prefix=m3-owner-prefix", "=log=no")
+	n = client.writes
+	if !errors.Is(verify(true), routeros.ErrPolicyConflict) || n != client.writes {
+		t.Fatal("claimed disabled owner logging metadata")
+	}
+	add(menu+"/set", "=.id="+id, "=log-prefix=")
 	add(menu+"/set", "=.id="+id, "=protocol=tcp")
 	n = client.writes
 	if !errors.Is(verify(true), routeros.ErrPolicyConflict) || client.writes != n {

@@ -184,6 +184,11 @@ func watchdogSource(readSource func(string) ([]byte, error)) (string, string, st
 			}
 			flowsBody := strings.Replace(string(flows), "# @TIKRAY_FLOW_IDENTITY@", ":local capture do={"+shared, 1)
 			code = strings.Replace(code, "# @TIKRAY_IMAGE_FLOWS@", flowsBody, 1)
+			transit, err := readSource("transit-guard.rsc")
+			if err != nil || strings.Count(code, "# @TIKRAY_NATIVE_TRANSIT_GUARD@") != 1 {
+				return "", "", "", errors.New("installer: missing native runner transit protection")
+			}
+			code = strings.Replace(code, "# @TIKRAY_NATIVE_TRANSIT_GUARD@", string(transit), 1)
 			trafficSource = compactScript(code + "\n:return [$imageTraffic $1 $2 $3 $4 $5 $6 $7]\n")
 			call, err := readSource("watchdog-traffic-call.rsc")
 			if err != nil || strings.Count(string(call), "@TIKRAY_TRAFFIC_HASH@") != 1 || strings.Count(string(call), "@TIKRAY_TRAFFIC_SIZE@") != 1 {
@@ -237,7 +242,7 @@ func buildInstaller(p Profile, images []VerifiedArchive, dst io.Writer, readSour
 		source = strings.Replace(source, key, value, 1)
 		return nil
 	}
-	for _, f := range []struct{ slot, file string }{{"CERTIFICATE", "certificate.rsc"}, {"LOCK", "install-lock.rsc"}, {"EMERGENCY", "emergency-off.rsc"}, {"BINDINGS", "bindings.rsc"}} {
+	for _, f := range []struct{ slot, file string }{{"CERTIFICATE", "certificate.rsc"}, {"LOCK", "install-lock.rsc"}, {"EMERGENCY", "emergency-off.rsc"}, {"BINDINGS", "bindings.rsc"}, {"TRANSIT_GUARD", "transit-guard.rsc"}} {
 		data, err := readSource(f.file)
 		if err != nil {
 			return errors.New("installer: missing script fragment")

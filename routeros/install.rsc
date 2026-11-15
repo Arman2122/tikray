@@ -176,6 +176,7 @@
     # @TIKRAY_EMERGENCY_PROOF@
     # Menu and property names here are installer constants. Values from the
     # environment are arguments to parsed functions, never executable source.
+    # @TIKRAY_TRANSIT_GUARD@
     :local ensure do={
         :local menu $1; :local role $2; :local keys $3; :local props $4; :local apply $5; :local anchor $6
         :if ($apply) do={ :local check $7; $check $8 }
@@ -396,6 +397,12 @@
     }
     :local lease [:toarray ""]
     :onerror installError in={
+    :local transitLANs $lans
+    :if ([:len $seedFiles]=1) do={
+        :local existing [:deserialize from=json options=json.no-string-conversion value=[/file/get [:pick $seedFiles 0] contents]]
+        :set transitLANs ($existing->"scope"->"lans")
+    }
+    :local oldTransit [$transitGuard "check" $subnet $lanList $requireInstall $lease $transitLANs]
     :foreach apply in={false;true} do={
         :if ($apply) do={
             :set lease [$acquireInstall]
@@ -453,13 +460,17 @@
         :foreach rowID in=[/ip/firewall/filter/find where chain="forward" and !dynamic] do={
             :local row [/ip/firewall/filter/get $rowID]
             :local label [:tostr ($row->"comment")]
-            :if ($label = "tikray:acl-hook") do={ :set sawBridge true } else={
-                :local guard (([:pick $label 0 12] = "tikray:hold:") and ((($row->"action") = "drop") or (($row->"action") = "reject")))
-                :if (($label = "tikray:egress-guard") and (($row->"action") = "jump") and (($row->"jump-target") = "tikray-egress") and $onlyRestricts) do={ :set guard true }
-                :if ($guard) do={
-                    :if ([:len [:tostr $first]] > 0) do={ :error "tikray: wait for closed policy guard order to be repaired" }
-                    :if ($sawBridge) do={ :set moveBelowGuard true }
-                } else={ :if ([:len [:tostr $first]] = 0) do={ :set first $rowID } }
+            :if (($label = "tikray:acl-runner-transit") or ($label = "tikray:acl-runner-transit-dst")) do={
+                :if ($sawBridge) do={ :set moveBelowGuard true }
+            } else={
+                :if ($label = "tikray:acl-hook") do={ :set sawBridge true } else={
+                    :local guard (([:pick $label 0 12] = "tikray:hold:") and ((($row->"action") = "drop") or (($row->"action") = "reject")))
+                    :if (($label = "tikray:egress-guard") and (($row->"action") = "jump") and (($row->"jump-target") = "tikray-egress") and $onlyRestricts) do={ :set guard true }
+                    :if ($guard) do={
+                        :if ([:len [:tostr $first]] > 0) do={ :error "tikray: wait for closed policy guard order to be repaired" }
+                        :if ($sawBridge) do={ :set moveBelowGuard true }
+                    } else={ :if ([:len [:tostr $first]] = 0) do={ :set first $rowID } }
+                }
             }
         }
         # End guard order observation.
@@ -522,6 +533,9 @@
     :if ([:len $seedFiles] = 0) do={
         /file/add name=$seedPath type=file contents=[:serialize to=json options=json.no-string-conversion value=$seed]
     }
+    # The enrolled networks are durable before either outside-source guard or
+    # an allowed reply prefix is installed, including on an interrupted import.
+    :local permittedTransit [$transitGuard "place" $subnet $lanList $requireInstall $lease $transitLANs]
     :if ([:len $groupId] = 0) do={ /user/group/add name=tikray policy=read,write,api comment="tikray:group" }
     :foreach componentName in={"tikray-runner";"tikray"} do={
         :local ownedTag "tikray:tikray"; :local iface "tikray-ctl"; :local root ($base . "/containers/control"); :local high 134217728; :local maxMem 201326592

@@ -25,7 +25,7 @@ func TestNativeLargeRunnerPreparationPreservesTrialWindow(t *testing.T) {
 	old, next := stage(f.first), stage(f.second)
 	f.write("image-bootstrap.receipt", map[string]any{"version": 1, "arch": "amd64", "publisher": "fixture", "tikray": f.first, "runner": old})
 	f.write("image-runner.receipt", map[string]any{"version": 1, "installation_id": nativeImageIdentity, "active": old, "previous": nil})
-	f.write("install.request", map[string]any{"scope": map[string]string{"lan_list": "m3-images-lan"}})
+	f.write("install.request", map[string]any{"version": 1, "installation_id": nativeImageIdentity, "scope": map[string]any{"subnet": "172.27.248.0/29", "lan_list": "m3-images-lan", "lans": []map[string]string{{"prefix": "192.168.88.0/24"}}}})
 	f.run(`/interface/veth/add name=tikray-runner comment="tikray:veth-runner" address=172.27.248.3/29 gateway=172.27.248.1`)
 	root := strings.TrimSuffix(f.data, "/data") + "/containers/runner"
 	f.run(`/container/add name=tikray-runner comment="tikray:runner" interface=tikray-runner file="` + f.data + "/images/runner-" + old["digest"].(string) + `.tar" root-dir="` + root + `" envlists=tikray-runner mountlists=tikray-runner dns=172.27.248.1 memory-high=201326592 memory-max=268435456 restart-policy=on-failure start-on-boot=yes logging=no`)
