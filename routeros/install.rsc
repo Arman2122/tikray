@@ -480,8 +480,32 @@
         :set first [:pick [/ip/firewall/raw/find where chain="prerouting" and !dynamic] 0]
         :set hook [$ensure "/ip/firewall/raw" "tikray:acl-runner-direct" $noKeys ({"chain"="prerouting";"action"="drop";"in-interface-list"=$lanList;"dst-address"=$runnerIP}) $apply $first $requireInstall $lease]
         :if ($apply and ([:len [:tostr $first]] > 0) and ($first != $hook) and ([:pick [/ip/firewall/raw/find where chain="prerouting" and !dynamic] 0] != $hook)) do={ /ip/firewall/raw/move $hook destination=$first }
-        :set first [:pick [/ipv6/firewall/filter/find where chain="forward" and !dynamic] 0]
+        # Keep the private bridge drop before anything that can accept IPv6.
+        # A running policy's restrictive jump (or its temporary hold) may
+        # precede it. Promoting the drop above that jump makes a healthy
+        # installation fail the owner's fresh read-only verification.
+        :set first ""; :local sawV6Bridge false; :local moveBelowV6 false
+        :foreach ruleID in=[/ipv6/firewall/filter/find where chain="forward" and !dynamic] do={
+            :local rule [/ipv6/firewall/filter/get $ruleID]; :local tag [:tostr ($rule->"comment")]
+            :if ($tag="tikray:acl-v6-bridge") do={:set sawV6Bridge true} else={
+                :local guarded false; :local target [:tostr ($rule->"jump-target")]
+                :local hold (($tag~"^tikray:hold:[0-9a-f]+\$") and ([:len $tag]=44))
+                :if ($hold and ((($rule->"action")="drop") or (($rule->"action")="reject"))) do={:set guarded true}
+                :if ((($tag="tikray:ipv6:jump") and ($target="tikray-ipv6")) or ($hold and ($target~"^tikray-h[0-9a-f]+\$") and ([:len $target]=40))) do={
+                    :if ((($rule->"action")="jump") and ([:tostr ($rule->"in-interface-list")]=$lanList)) do={
+                        :set guarded ([:len [/ipv6/firewall/filter/find where chain=$target and !disabled and action!="return" and action!="drop" and action!="reject"]]=0)
+                    }
+                }
+                :if ($guarded) do={
+                    :if ($sawV6Bridge and ([:len [:tostr $first]]=0)) do={:set moveBelowV6 true}
+                } else={:if ([:len [:tostr $first]]=0) do={:set first $ruleID}}
+            }
+        }
         :set hook [$ensure "/ipv6/firewall/filter" "tikray:acl-v6-bridge" $noKeys ({"chain"="forward";"action"="drop";"out-interface"="tikray"}) $apply $first $requireInstall $lease]
+        :if ($apply and $moveBelowV6) do={
+            $requireInstall $lease
+            :if ([:len [:tostr $first]]>0) do={/ipv6/firewall/filter/move $hook destination=$first} else={/ipv6/firewall/filter/move $hook}
+        }
         :set i [$ensure "/container/envs" "tikray:env-ctl-data" $noKeys ({"list"="tikray";"key"="TIKRAY_DATA";"value"="/data"}) $apply "" $requireInstall $lease]
         :set i [$ensure "/container/envs" "tikray:env-runner-data" $noKeys ({"list"="tikray-runner";"key"="TIKRAY_DATA";"value"="/data"}) $apply "" $requireInstall $lease]
         :set i [$ensure "/container/mounts" "tikray:mount-tikray-data" ({"list"="tikray";"dst"="/data"}) ({"list"="tikray";"dst"="/data";"src"=$data;"mode"="rw"}) $apply "" $requireInstall $lease]
