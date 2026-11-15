@@ -41,7 +41,13 @@ type Target struct {
 	Revision  uint64
 	Selection runnerapi.Selection
 	Geo       []netip.Prefix
-	Verify    func(context.Context) error `json:"-"`
+	// Prepare uses KeepGeo for a state edit that does not select another
+	// bundle, including edits while the runner is unreachable.
+	KeepGeo bool
+	// WithdrawGeo stages the candidate policy under holds and removes only
+	// obsolete domestic exemptions. Reconcile adds new ranges after trial.
+	WithdrawGeo bool
+	Verify      func(context.Context) error `json:"-"`
 }
 type Report struct {
 	Added, Set, Moved, Removed, Invalidated int

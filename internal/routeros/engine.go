@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sync"
 	"time"
 
@@ -301,6 +302,10 @@ func (e *Engine) prepare(ctx context.Context, t Target) (*pass, error) {
 	if err != nil {
 		return nil, err
 	}
+	if t.KeepGeo {
+		t.Geo = p.j.Geo
+		p.target.Geo = t.Geo
+	}
 	if e.managedBindings {
 		if err = ReconcileBindings(ctx, e.c, e.scope.Subnet, true); err != nil {
 			return nil, err
@@ -353,7 +358,7 @@ func (e *Engine) prepare(ctx context.Context, t Target) (*pass, error) {
 			admission = []policyView{{}, p.view}
 			p.j.Emergency = true
 		}
-		if p.j.Verified == nil || p.target.Revision != p.j.Revision {
+		if p.j.Verified == nil || p.target.Revision != p.j.Revision || t.WithdrawGeo {
 			if err = e.check(ctx, p.fence, p.a, admission); err != nil {
 				// A rejected addition cannot leave damage to a previously
 				// acknowledged client uncovered. Stage only the saved policy;
@@ -438,7 +443,10 @@ func (e *Engine) Prepare(ctx context.Context, t Target) error {
 		return err
 	}
 	defer func() { <-e.gate }()
-	_, err := e.prepare(ctx, t)
+	p, err := e.prepare(ctx, t)
+	if err == nil && t.WithdrawGeo {
+		err = e.withdrawDomestic(ctx, p)
+	}
 	return publicEngineError(err)
 }
 func (e *Engine) Reconcile(ctx context.Context, t Target) (Report, error) {
@@ -518,7 +526,7 @@ func (e *Engine) Reconcile(ctx context.Context, t Target) (Report, error) {
 			return p.report, publicEngineError(err)
 		}
 	}
-	if p.j.Verified == nil || len(p.j.Pending) > 0 || p.j.Revision != t.Revision {
+	if p.j.Verified == nil || len(p.j.Pending) > 0 || p.j.Revision != t.Revision || !slices.Equal(p.j.Geo, t.Geo) {
 		if err = e.save(checkpoint{Version: 1, Verified: &p.view, Policy: &t.Policy, Geo: t.Geo, Revision: t.Revision}); err != nil {
 			return p.report, err
 		}

@@ -421,3 +421,9 @@ Remaining Task 5 work includes publisher-profile fetch and authenticated checksu
 The first Task 5 checkpoint is `94ffe53`. The baseline and pre-commit `make test` passed, as did the uncached race suites for artifacts, RouterOS, service, API, CLI, render and runner API. Its independent slice review approved the loader and read-only behavior. The branch's first push CI exposed a separate nondeterministic error-classification failure in the existing RouterOS native-client tests.
 
 Ruling: Preserve the first fixed session error when a native write completes as the reader retires that session — the socket deadline reset can then fail on a closed descriptor and mask an already classified protocol error — cost if wrong: callers could misclassify a structurally invalid peer response as a generic reconnect. Requests still retain uncertain-outcome handling for writes. A deterministic frame-delivery regression first failed on the old client. It and the cancellation, malformed reply and partial-write controls then passed 75 repetitions under the race detector.
+
+### Task 5 — coordinated geo updates
+
+Ruling: Stage the native candidate's closed-traffic guards before the runner trial and withdraw only obsolete owned domestic rows. Defer all newly permitted rows to a verified post-trial reconcile — publishing the full candidate early would admit untested bypasses — cost if wrong: a failed trial can temporarily keep changed destinations under a hold until recovery verifies the old selection. Ordinary state edits use the geo ranges saved by the last verified native reconcile even while the runner is unreachable.
+
+`TestGeoPrepareWithdrawsBeforeTrial` initially failed because the native target did not distinguish these operations. It now proves withdrawal, shared row ID preservation, retention of holds across repeated preparation, post-commit admission and a zero-write ordinary pass. The focused native race tests passed.

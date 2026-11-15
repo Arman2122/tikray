@@ -1,11 +1,15 @@
 package routeros
 
 import (
+	"context"
 	"errors"
+	"github.com/Arman2122/tikray/internal/runnerapi"
 	"maps"
 	"net/netip"
+	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Arman2122/tikray/internal/store"
@@ -99,5 +103,72 @@ func TestDomesticDiffOnlyChangedRanges(t *testing.T) {
 	}
 	if !reflect.DeepEqual(f.rows, before.Rows) {
 		t.Fatal("foreign member or installation changed on refusal")
+	}
+}
+
+// The runner still uses A until its trial commits. Preparation can withdraw
+// an exemption, but neither a new exemption nor a released hold is safe yet.
+func TestGeoPrepareWithdrawsBeforeTrial(t *testing.T) {
+	f := newDiffRouter()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(f, InstallScope{}, dir)
+	e.observe = func(context.Context, Native, InstallScope) (Actual, error) { return f.actual(), nil }
+	e.purge = func(context.Context, Native, Actual, []policyView) (int, error) { return 0, nil }
+	e.finalPurge = e.purge
+	e.check = func(context.Context, Native, Actual, []policyView) error { return nil }
+	a, b, c := netip.MustParsePrefix("93.184.216.0/27"), netip.MustParsePrefix("93.184.216.64/27"), netip.MustParsePrefix("93.184.216.128/27")
+	target := Target{Revision: 1, Selection: runnerapi.Selection{Core: "26.10.31", Geo: "a", Config: "config/" + strings.Repeat("a", 64) + ".json"}, Geo: []netip.Prefix{a, b}, Policy: PolicyInput{Network: store.Default().Network, Default: store.Policy{Mode: store.ModeSmart, KillSwitch: true}}, Verify: func(context.Context) error { return nil }}
+	if _, err := e.Reconcile(t.Context(), target); err != nil {
+		t.Fatal(err)
+	}
+	id := func(p netip.Prefix) string {
+		for _, r := range f.rows {
+			if r.Comment == "tikray:domestic:"+p.String() {
+				return r.ID
+			}
+		}
+		return ""
+	}
+	held := func() bool {
+		for _, r := range f.rows {
+			if isHold(r.Comment) {
+				return true
+			}
+		}
+		return false
+	}
+	shared := id(b)
+	if id(a) == "" || shared == "" || id(c) != "" {
+		t.Fatal("initial ranges missing")
+	}
+	target.Selection.Geo = "b"
+	target.Geo = []netip.Prefix{b, c}
+	target.WithdrawGeo = true
+	if err := e.Prepare(t.Context(), target); err != nil {
+		t.Fatal(err)
+	}
+	if id(a) != "" || id(b) != shared || id(c) != "" || !held() {
+		t.Fatal("pre-trial diff did not withdraw only the obsolete exemption under guard")
+	}
+	if err := e.Prepare(t.Context(), target); err != nil {
+		t.Fatal(err)
+	}
+	target.WithdrawGeo = false
+	if _, err := e.Reconcile(t.Context(), target); err != nil {
+		t.Fatal(err)
+	}
+	if id(a) != "" || id(b) != shared || id(c) == "" || held() {
+		t.Fatal("committed diff did not preserve the shared row and finish the switch")
+	}
+	// Normal state edits can prepare during a runner outage. The verified
+	// set is available in the native journal even after a process restart.
+	writes := len(f.writes)
+	target.Geo = nil
+	target.KeepGeo = true
+	if err := e.Prepare(t.Context(), target); err != nil || len(f.writes) != writes {
+		t.Fatal("ordinary prepare interpreted unknown geo as an empty set", err)
 	}
 }
