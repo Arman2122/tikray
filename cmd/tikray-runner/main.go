@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sort"
 	"syscall"
 	"time"
 
@@ -55,10 +54,15 @@ func main() {
 }
 
 func run() int {
+	// RouterOS can already route packets to this namespace before the
+	// ingress address, token or previously selected core is ready.
+	if err := netsetup.StartClosed(); err != nil {
+		log.Printf("cannot close the ingress path: %v", err)
+		return 1
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	logSysctls(netsetup.Sysctls())
 	ingress, addr, err := waitIngress(ctx)
 	if err != nil {
 		log.Print(err)
@@ -159,19 +163,6 @@ func firstIPv4(link netlink.Link) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("%s has no IPv4 address", link.Attrs().Name)
-}
-
-func logSysctls(res map[string]error) {
-	keys := make([]string, 0, len(res))
-	for k := range res {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		if res[k] != nil {
-			log.Printf("sysctl %s: %v", k, res[k])
-		}
-	}
 }
 
 func env(key, def string) string {

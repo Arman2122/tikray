@@ -3,6 +3,7 @@
 package netsetup
 
 import (
+	"context"
 	"os"
 	"runtime"
 	"testing"
@@ -74,7 +75,7 @@ func TestRoutesRuleWithoutTun(t *testing.T) {
 
 	// xray creates xray0: the default route through it follows, and the rule
 	// is not added again.
-	tun := addLink(t, TunName)
+	tun := addTestTun(t)
 	for range 2 {
 		if !k.ensureRoutes() {
 			t.Fatal("routes not in place with xray0")
@@ -93,4 +94,31 @@ func TestRoutesRuleWithoutTun(t *testing.T) {
 	if !viaTun || !unreachable {
 		t.Errorf("table %d holds %v; want the default via %s and the unreachable default", TunTable, routes, TunName)
 	}
+}
+
+func TestNamedLinkAloneCannotOpenGateway(t *testing.T) {
+	inNewNetns(t)
+	ing := addLink(t, "ing0")
+	addLink(t, TunName)
+	if err := StartClosed(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	Keep(ctx, ing, func() bool { return true }, func(routes, up bool) {
+		if routes || up {
+			t.Error("ordinary link named xray0 incorrectly announced a TUN")
+		}
+		cancel()
+	})
+}
+
+func addTestTun(t *testing.T) *netlink.Tuntap {
+	t.Helper()
+	tun := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: TunName}, Mode: netlink.TUNTAP_MODE_TUN, Flags: netlink.TUNTAP_NO_PI, Queues: 1, NonPersist: true}
+	if err := netlink.LinkAdd(tun); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { tun.Fds[0].Close() })
+	return tun
 }

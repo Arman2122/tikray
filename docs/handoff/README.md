@@ -29,7 +29,7 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M2b: the service (`tikray serve`, HTTPS API, health, subscriptions) | Done, merged (PR #5) | |
 | M2c: human sign-in and hot server changes | Done, merged (PR #6) | |
 | M3a: RouterOS integration | Merged in PR #7. All three targets passed installer 6/6, routing 9/9 and uninstall 4/4. | [Ledger and image hashes](m3/ledger.md), [CHR results](../../test/e2e/results/) |
-| M3b: geo, image updates and CHR CI | Task 5 implements verified geo updates, guarded native diffs, rollback and restart recovery. Task 6b implements signed control and runner image updates, explicit rollback and reboot recovery. The watchdog acceptance matrix is in progress. Outage coverage and CHR CI follow. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
+| M3b: geo, image updates and CHR CI | Task 5 implements verified geo updates, guarded native diffs, rollback and restart recovery. Task 6b implements signed control and runner image updates, explicit rollback and reboot recovery. The previously tested image kit has a confirmed closed-traffic leak on rapid runner restart. The runner and router-side fix require a new signed matrix. Outage coverage and CHR CI follow. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
 | M4: web UI | Not started | |
 | M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
 

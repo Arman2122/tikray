@@ -4,10 +4,12 @@ package netsetup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,33 +26,55 @@ const (
 	// back, so this is also the longest outage a restart causes.
 	keepInterval = time.Second
 
-	gatewayFile = "/proc/sys/net/ipv4/icmp_echo_ignore_all"
+	gatewayFile    = "/proc/sys/net/ipv4/icmp_echo_ignore_all"
+	forwardingFile = "/proc/sys/net/ipv4/ip_forward"
+	confDir        = "/proc/sys/net/ipv4/conf"
 )
 
-// sysctlWrites is what Sysctls writes, in order. Packets that arrive on the
-// ingress link leave through xray0, so forwarding must be on and reverse-path
-// filtering off. The last one starts the runner as "not a gateway": the kernel
-// answers ping from the moment the container starts, long before xray runs, and
-// Keep opens the gateway only when xray and its routes are ready.
-var sysctlWrites = []struct{ key, value string }{
-	{"net.ipv4.ip_forward", "1"},
-	{"net.ipv4.conf.all.rp_filter", "0"},
-	{"net.ipv4.conf.default.rp_filter", "0"},
-	{"net.ipv4.icmp_echo_ignore_all", GatewaySysctl(false, false)},
-}
-
-// Sysctls writes the runner's kernel settings and returns, per setting, the
-// error of its write (nil on success).
-func Sysctls() map[string]error {
-	res := make(map[string]error, len(sysctlWrites))
-	for _, s := range sysctlWrites {
-		res[s.key] = writeSysctl(s.key, s.value)
+// StartClosed runs before waiting for the veth or booting xray. Local
+// sockets remain reachable. The namespace can inherit forwarding, including
+// an interface-specific override even when the global switch reads zero.
+func StartClosed() error {
+	err := setValue(forwardingFile, "0")
+	err = errors.Join(err, setValue(gatewayFile, "1"))
+	links, e := os.ReadDir(confDir)
+	if e != nil {
+		return errors.Join(err, e)
 	}
-	return res
+	for _, link := range links {
+		if link.Name() == "all" {
+			continue
+		}
+		e = setValue(filepath.Join(confDir, link.Name(), "forwarding"), "0")
+		if !errors.Is(e, os.ErrNotExist) {
+			err = errors.Join(err, e)
+		}
+	}
+	return err
 }
 
-func writeSysctl(key, value string) error {
-	return os.WriteFile("/proc/sys/"+strings.ReplaceAll(key, ".", "/"), []byte(value), 0o644)
+// Checking the existing value also supports a read-only sysctl already set
+// correctly by the container runtime. Confirm writes before reporting ready.
+func setValue(path, value string) error {
+	read := func() (string, error) {
+		b, e := os.ReadFile(path)
+		return strings.TrimSpace(string(b)), e
+	}
+	current, err := read()
+	if err != nil || current == value {
+		return err
+	}
+	if err = os.WriteFile(path, []byte(value), 0644); err != nil {
+		return err
+	}
+	current, err = read()
+	if err != nil {
+		return err
+	}
+	if current != value {
+		return fmt.Errorf("netsetup: kernel did not retain %s", path)
+	}
+	return nil
 }
 
 // Ingress returns the link that holds the IPv4 default route: where traffic
@@ -95,19 +119,23 @@ func isDefaultDst(dst *net.IPNet) bool {
 // lookup TunTable" from the start, and while xray0 exists "default dev xray0
 // table TunTable", putting it back after every xray restart. After each check
 // it sets the ping answer (see GatewaySysctl) and calls report with whether
-// the routes are in place and whether the runner now answers ping. When ctx
-// ends the runner stops answering ping.
+// the routes are in place and whether the runner actually answers ping. When ctx
+// ends or a check fails, it closes forwarding and the ping response.
 func Keep(ctx context.Context, ingress netlink.Link, healthy func() bool, report func(routesOK, gatewayUp bool)) {
 	k := &keeper{ingress: ingress.Attrs().Name, logged: map[string]string{}}
-	defer k.setGateway(GatewaySysctl(false, false))
+	defer k.closeGateway()
 	ticker := time.NewTicker(keepInterval)
 	defer ticker.Stop()
 	for {
-		k.ensureUnreachable()
-		routesOK := k.ensureRoutes()
-		value := GatewaySysctl(healthy(), routesOK)
-		k.setGateway(value)
-		report(routesOK, value == GatewaySysctl(true, true))
+		routesOK := k.ensureUnreachable() && k.ensureRoutes()
+		up := false
+		if routesOK && healthy() {
+			up = k.openGateway()
+		}
+		if !up {
+			k.closeGateway()
+		}
+		report(routesOK, up)
 		select {
 		case <-ctx.Done():
 			return
@@ -137,13 +165,14 @@ func (k *keeper) note(topic, msg string) {
 }
 
 // ensureUnreachable keeps the low-priority "unreachable default" in TunTable.
-func (k *keeper) ensureUnreachable() {
+func (k *keeper) ensureUnreachable() bool {
 	r := &netlink.Route{Dst: defaultDst, Table: TunTable, Type: unix.RTN_UNREACHABLE, Priority: UnreachablePriority}
 	if err := netlink.RouteReplace(r); err != nil {
 		k.note("unreachable", fmt.Sprintf("unreachable default in table %d: %v", TunTable, err))
-		return
+		return false
 	}
 	k.note("unreachable", "")
+	return true
 }
 
 var defaultDst = &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)}
@@ -154,29 +183,50 @@ var defaultDst = &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)}
 // and at boot, TunTable's unreachable default must reject what arrives on the
 // ingress link, or the main table would send it back to the router.
 func (k *keeper) ensureRoutes() bool {
-	ruleOK := k.ensureRule()
+	if !k.ensureRule() {
+		return false
+	}
 	tun, err := netlink.LinkByName(TunName)
 	if err != nil { // xray has not created it yet, or has stopped
 		k.note("routes", TunName+" is missing")
+		return false
+	}
+	device, ok := tun.(*netlink.Tuntap)
+	if !ok || device.Mode != netlink.TUNTAP_MODE_TUN {
+		k.note("routes", TunName+" is not a TUN device")
 		return false
 	}
 	if err := netlink.LinkSetUp(tun); err != nil {
 		k.note("routes", fmt.Sprintf("set %s up: %v", TunName, err))
 		return false
 	}
-	// A new xray0 takes its rp_filter from conf.default, which Sysctls
-	// cleared; setting it again costs nothing and the effective value is the
-	// larger of "all" and the interface's.
-	if err := writeSysctl("net.ipv4.conf."+TunName+".rp_filter", "0"); err != nil {
-		k.note("rp_filter", fmt.Sprintf("rp_filter of %s: %v", TunName, err))
-	}
 	route := &netlink.Route{LinkIndex: tun.Attrs().Index, Dst: defaultDst, Table: TunTable}
 	if err := netlink.RouteReplace(route); err != nil {
 		k.note("routes", fmt.Sprintf("default dev %s table %d: %v", TunName, TunTable, err))
 		return false
 	}
-	if !ruleOK {
-		k.note("routes", "")
+	// RouteReplace acknowledges our two entries but does not remove some
+	// other, more preferred default. It could take over immediately on TUN
+	// loss, before the next health check. The runner owns this private table.
+	installed, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Table: TunTable}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		k.note("routes", fmt.Sprintf("verify table %d: %v", TunTable, err))
+		return false
+	}
+	var viaTun, unreachable bool
+	for _, r := range installed {
+		switch {
+		case isDefaultDst(r.Dst) && r.Type == unix.RTN_UNICAST && r.LinkIndex == tun.Attrs().Index && r.Priority == 0 && len(r.Gw) == 0 && len(r.MultiPath) == 0:
+			viaTun = true
+		case isDefaultDst(r.Dst) && r.Type == unix.RTN_UNREACHABLE && r.Priority == UnreachablePriority:
+			unreachable = true
+		default:
+			k.note("routes", "unexpected route in the private TUN table")
+			return false
+		}
+	}
+	if !viaTun || !unreachable {
+		k.note("routes", "TUN or fallback route not present")
 		return false
 	}
 	k.note("routes", "routes in place")
@@ -191,14 +241,27 @@ func (k *keeper) ensureRule() bool {
 		k.note("rule", fmt.Sprintf("list rules: %v", err))
 		return false
 	}
-	for _, r := range rules {
-		if r.Priority == rulePriority && r.Table == TunTable && r.IifName == k.ingress {
-			k.note("rule", "")
-			return true
-		}
-	}
 	rule := netlink.NewRule()
 	rule.Priority, rule.Table, rule.IifName = rulePriority, TunTable, k.ingress
+	found := false
+	for _, r := range rules {
+		if r.Priority > rulePriority || r.Table == unix.RT_TABLE_LOCAL || (!r.Invert && r.IifName != "" && r.IifName != k.ingress) {
+			continue
+		}
+		// A matching table with a narrower selector, or an earlier lookup
+		// of main, would leave some incoming packets outside the guard.
+		expected := *rule
+		expected.Family, expected.Protocol = r.Family, r.Protocol
+		if r != expected {
+			k.note("rule", "netsetup: another IPv4 policy rule can precede the ingress guard")
+			return false
+		}
+		found = true
+	}
+	if found {
+		k.note("rule", "")
+		return true
+	}
 	if err := netlink.RuleAdd(rule); err != nil {
 		k.note("rule", fmt.Sprintf("rule iif %s lookup %d: %v", k.ingress, TunTable, err))
 		return false
@@ -207,14 +270,40 @@ func (k *keeper) ensureRule() bool {
 	return true
 }
 
-// setGateway writes value to icmp_echo_ignore_all unless it holds it already.
-func (k *keeper) setGateway(value string) {
-	if cur, err := os.ReadFile(gatewayFile); err == nil && strings.TrimSpace(string(cur)) == value {
+// Keep forwarding closed if any part of activation fails. In particular the
+// unreachable default must already be effective before ip_forward changes.
+func (k *keeper) openGateway() bool {
+	if err := setValue(forwardingFile, "1"); err != nil {
+		k.note("open", err.Error())
+		return false
+	}
+	// Changing Linux forwarding mode can reset per-interface defaults. Xray
+	// traffic can arrive on a different link from the route to its source.
+	for _, name := range []string{"all", "default", k.ingress, TunName} {
+		if err := setValue(filepath.Join(confDir, name, "rp_filter"), "0"); err != nil {
+			k.note("open", err.Error())
+			return false
+		}
+	}
+	for _, name := range []string{k.ingress, TunName} {
+		if err := setValue(filepath.Join(confDir, name, "forwarding"), "1"); err != nil {
+			k.note("open", err.Error())
+			return false
+		}
+	}
+	if err := setValue(gatewayFile, GatewaySysctl(true, true)); err != nil {
+		k.note("open", err.Error())
+		return false
+	}
+	k.note("open", "")
+	k.note("gateway", "answering ping: true")
+	return true
+}
+
+func (k *keeper) closeGateway() {
+	if err := StartClosed(); err != nil {
+		k.note("gateway", err.Error())
 		return
 	}
-	if err := os.WriteFile(gatewayFile, []byte(value), 0o644); err != nil {
-		k.note("gateway", fmt.Sprintf("icmp_echo_ignore_all=%s: %v", value, err))
-		return
-	}
-	k.note("gateway", fmt.Sprintf("answering ping: %v", value == GatewaySysctl(true, true)))
+	k.note("gateway", "answering ping: false")
 }
