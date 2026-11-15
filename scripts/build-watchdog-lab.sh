@@ -96,7 +96,8 @@ for arch in "${arches[@]}"; do
         for v in 6.0.1 6.0.2; do cp "$baseline/$v/"*.tar{,.sig} "$dest/updates/$v/"; done
         "$work/packager" -version "$release" -arch "$arch" -images "$dest" -key "$dest/cosign.pub" -out "$dest/install.rsc" -uninstall-out "$dest/uninstall.rsc"
         echo "$rev" >"$dest/SOURCE_COMMIT"
-        (cd "$dest" && sha256sum cosign.pub install.rsc uninstall.rsc SOURCE_COMMIT *.tar{,.sig} updates/*/*.tar{,.sig} >SHA256SUMS)
+        echo "$rev" >"$dest/NATIVE_COMMIT"
+        (cd "$dest" && sha256sum cosign.pub install.rsc uninstall.rsc SOURCE_COMMIT NATIVE_COMMIT *.tar{,.sig} updates/*/*.tar{,.sig} >SHA256SUMS)
         echo "Verified signed image fixtures for $release $ros_arch"
     done
 done

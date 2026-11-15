@@ -11,14 +11,16 @@ import (
 	"time"
 )
 
+const alternateImageGatewayMAC = "02:00:00:6b:00:fd"
+
 // The two gateways share a lab subnet, but have different Ethernet MACs.
 // Receiving the marked open client's UDP on the second MAC distinguishes
 // following the owner's new main default from using a stale tikray table.
-func (f *routingLab) imageAlternateGateway(ctx context.Context, t *testing.T) {
+func (f *routingLab) imageAlternateGateway(ctx context.Context, t *testing.T, wire *imageWANProof) {
 	t.Helper()
 	const link = "wd-gateway6b"
 	const address = "198.51.100.253"
-	const mac = "02:00:00:6b:00:fd"
+	const mac = alternateImageGatewayMAC
 	run := func(args ...string) {
 		t.Helper()
 		if f.Net.Inet(ctx, "ip", args...).Run() != nil {
@@ -61,10 +63,15 @@ with open(sys.argv[2],"wb",buffering=0) as log:
 	if !read(first) {
 		t.Fatal("main default before WAN change could not be identified")
 	}
+	if os.WriteFile(wire.alternate, []byte("active"), 0600) != nil {
+		t.Fatal("could not declare the alternate gateway to both wire observers")
+	}
+	defer os.Remove(wire.alternate)
 	f.routingWrite(ctx, t, "/ip/route/set", "=.id="+id, "=gateway="+address)
 	defer func() {
+		before := wire.originalGatewayCounts(t)
 		f.routingWrite(ctx, t, "/ip/route/set", "=.id="+id, "=gateway="+first)
-		if _, ok := poll(ctx, 5*time.Second, 200*time.Millisecond, func() bool { return read(first) }); !ok {
+		if _, ok := poll(ctx, 5*time.Second, 200*time.Millisecond, func() bool { return read(first) && newWirePackets(before, wire.originalGatewayCounts(t)) >= 2 }); !ok {
 			t.Fatal("owner's original WAN gateway did not return")
 		}
 	}()

@@ -4,11 +4,11 @@ package e2e
 
 import (
 	"archive/tar"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"maps"
 	"net/http"
@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
+	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/store"
 	"github.com/Arman2122/tikray/test/lab"
@@ -427,7 +428,7 @@ func (s *proxyStream) requireSince(t *testing.T, before uint64) {
 }
 
 // Exercise simultaneous open and closed clients using fresh UDP tuples.
-func (f *routingLab) imageWAN(ctx context.Context, t *testing.T) *routingWAN {
+func (f *routingLab) imageWAN(ctx context.Context, t *testing.T) *imageWANProof {
 	t.Helper()
 	f.setClientPolicy(ctx, t, store.Policy{Mode: store.ModeFull, KillSwitch: true})
 	if _, err := f.api.SetDevice(ctx, store.Device{Address: netip.MustParsePrefix(routingPeer + "/32"), MAC: f.peerMAC, Policy: fullOpen}); err != nil {
@@ -437,19 +438,20 @@ func (f *routingLab) imageWAN(ctx context.Context, t *testing.T) *routingWAN {
 	if !isRoutingProxy(f.peerEgress(ctx, routingRemote)) {
 		t.Fatal("open peer did not demonstrate a real proxy before outage")
 	}
-	wan := newRoutingWAN(ctx, t, f)
+	wan := f.newImageWire(ctx, t)
 	// Fresh source ports force independent bindings across the loss and return.
-	emit := `import errno,socket,sys,time
+	emit := `import errno,os,socket,sys,time
+prefix=sys.argv[2].encode()+b"wd6b"+bytes.fromhex(sys.argv[4])
 for port in range(33000,65001):
  with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as s:
   try:s.bind((sys.argv[1],port))
   except OSError as e:
    if e.errno==errno.EADDRINUSE:continue
    raise
-  s.sendto(sys.argv[2].encode(),(sys.argv[3],31947))
- time.sleep(.15)`
-	startRoutingProcess(t, f.Net.Client(ctx, "python3", "-c", emit, "192.168.88.10", "C", routingRemote))
-	startRoutingProcess(t, f.peer(ctx, "python3", "-c", emit, routingPeer, "D", routingRemote))
+  s.sendto(prefix+port.to_bytes(2,"big"),(sys.argv[3],31947))
+ time.sleep(.04 if os.path.exists(sys.argv[5]) else .15)`
+	startRoutingProcess(t, f.Net.Client(ctx, "python3", "-c", emit, "192.168.88.10", "C", routingRemote, wan.nonce, wan.burst))
+	startRoutingProcess(t, f.peer(ctx, "python3", "-c", emit, routingPeer, "D", routingRemote, wan.nonce, wan.burst))
 	_, ok := poll(ctx, 20*time.Second, 300*time.Millisecond, func() bool { return wan.sample(t).closedProxy > 0 })
 	if !ok || wan.sample(t).closedDirect != 0 {
 		t.Fatal("missing healthy positive closed-path control")
@@ -518,19 +520,19 @@ func (f *routingLab) checkedRestart(ctx context.Context, t *testing.T, component
 	other := f.probe(ctx, t, kind)
 	active := f.activeImageSelection(ctx, t)
 	ssh := f.ownerLANSSH(ctx, t)
-	var wan *routingWAN
-	var openBase int
+	var wan *imageWANProof
+	var openBase [2]int
 	var stream *proxyStream
 	if component == "runner" {
 		wan = f.imageWAN(ctx, t)
 		active = f.activeImageSelection(ctx, t)
-		openBase = wan.sample(t).peerDirect
+		openBase = wan.directCounts(t)
 	} else {
 		stream = f.imageStream(ctx, t, 31874)
 	}
 	f.containerAction(ctx, t, component, "stop", "stopped")
 	if wan != nil {
-		_, ok := poll(ctx, 80*time.Second, time.Second, func() bool { return wan.sample(t).peerDirect > openBase })
+		_, ok := poll(ctx, 80*time.Second, time.Second, func() bool { return newWirePackets(openBase, wan.directCounts(t)) > 0 })
 		if !ok || wan.sample(t).closedDirect != 0 || f.peerEgress(ctx, routingRemote) != egressDirect {
 			t.Fatal("runner loss did not distinguish closed and open WAN egress")
 		}
@@ -598,10 +600,11 @@ func (f *routingLab) checkedRestart(ctx context.Context, t *testing.T, component
 		// both emitters alive through that interval and verify fresh egress.
 		_, restored := poll(ctx, f.proxiedWithin(), time.Second, func() bool { return isRoutingProxy(f.peerEgress(ctx, routingRemote)) })
 		s := wan.sample(t)
-		if !restored || s.closedDirect != 0 || s.unknown != 0 || s.peerDirect <= openBase {
-			trace, _ := os.ReadFile(wan.trace)
-			t.Fatalf("runner recovery proof failed: open_proxy=%t closed_wan=%d unknown=%d open_wan=%d source_proxy=%d source_peer=%d source_veth=%d source_other=%d", restored, s.closedDirect, s.unknown, s.peerDirect-openBase, bytes.Count(trace, []byte("?x")), bytes.Count(trace, []byte("?l")), bytes.Count(trace, []byte("?v")), bytes.Count(trace, []byte("?u")))
+		openSeen := newWirePackets(openBase, wan.directCounts(t))
+		if !restored || s.closedDirect != 0 || s.unknown != 0 || openSeen <= 0 {
+			t.Fatalf("runner recovery proof failed: open_proxy=%t closed_wan=%d unknown=%d open_wan=%d", restored, s.closedDirect, s.unknown, openSeen)
 		}
+		f.checkQuickRunnerRestarts(ctx, t, wan, ssh)
 	}
 }
 
@@ -614,9 +617,65 @@ func (f *routingLab) activeImageSelection(ctx context.Context, t *testing.T) run
 	return a
 }
 
+// A real management client continues issuing commands on its original
+// authenticated connection throughout an image operation. No observer or
+// intentionally short-lived read shares either management connection.
+func watchOwnerManagement(ctx context.Context, t *testing.T, c *routeros.Client, endpoint string) func() {
+	t.Helper()
+	generation := c.Generation()
+	command := func(call context.Context) string {
+		rows, err := c.CommandAt(call, generation, []string{"/system/resource/print", "=.proplist=uptime"})
+		switch {
+		case generation == 0 || c.Generation() != generation || errors.Is(err, routeros.ErrStaleGeneration):
+			return "session changed"
+		case errors.Is(err, context.DeadlineExceeded):
+			return "command timed out"
+		case err != nil:
+			return "command unavailable"
+		case len(rows) != 1 || rows[0]["uptime"] == "":
+			return "missing affirmative reply"
+		}
+		return ""
+	}
+	if reason := command(ctx); reason != "" {
+		t.Fatalf("owner %s API baseline: %s", endpoint, reason)
+	}
+	life, stop := context.WithCancel(ctx)
+	var failure atomic.Value
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(4 * time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-life.Done():
+				return
+			case <-tick.C:
+				if reason := command(life); reason != "" {
+					if life.Err() == nil {
+						failure.Store(reason)
+					}
+					return
+				}
+			}
+		}
+	}()
+	t.Cleanup(func() { stop(); <-done })
+	return func() {
+		t.Helper()
+		if reason := failure.Load(); reason != nil {
+			t.Fatalf("active owner %s API: %s", endpoint, reason)
+		}
+		if reason := command(ctx); reason != "" {
+			t.Fatalf("owner %s API readback: %s", endpoint, reason)
+		}
+	}
+}
+
 func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component string) {
 	t.Helper()
-	var wan *routingWAN
+	var wan *imageWANProof
 	if component == "runner" {
 		wan = f.imageWAN(ctx, t)
 	}
@@ -634,15 +693,8 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	ownerSSH := f.ownerLANSSH(ctx, t)
 	ownerAPI := f.ownerSessionAt(ctx, t, "192.168.88.1:9879")
 	t.Cleanup(func() { ownerAPI.Close() })
-	lanGeneration := ownerAPI.Generation()
-	ownerCommand := func() {
-		t.Helper()
-		rows, err := ownerAPI.CommandAt(ctx, lanGeneration, []string{"/system/resource/print", "=.proplist=uptime"})
-		if err != nil || len(rows) != 1 || rows[0]["uptime"] == "" || ownerAPI.Generation() != lanGeneration {
-			t.Fatal("ordinary owner LAN API session did not survive the image change")
-		}
-	}
-	ownerCommand()
+	ownerCommand := watchOwnerManagement(ctx, t, ownerAPI, "LAN")
+	bridgeCommand := watchOwnerManagement(ctx, t, f.ros, "bridge")
 	const unrelated = "192.168.88.111"
 	if f.Net.Client(ctx, "ip", "addr", "add", unrelated+"/32", "dev", "eth0").Run() != nil {
 		t.Fatal("could not attach an unmanaged LAN address for the unrelated connection")
@@ -670,6 +722,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		t.Helper()
 		ownerSSH()
 		ownerCommand()
+		bridgeCommand()
 		ownerTracking()
 		r, ok := f.containerImage(ctx, other)
 		sameSession := f.ros.Generation() == generation
@@ -751,16 +804,16 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		if s := f.imageStatus(ctx, t, component); s.Active != initial.digest || s.Pending == nil || s.Pending.OperationID != q.OperationID {
 			t.Fatal("a mere ping admitted a runner without its data path")
 		}
-		openBase := wan.sample(t).peerDirect
+		openBase := wan.directCounts(t)
 		_, fallback := poll(ctx, 55*time.Second, time.Second, func() bool {
-			return f.peerEgress(ctx, routingRemote) == egressDirect && wan.sample(t).peerDirect > openBase
+			return f.peerEgress(ctx, routingRemote) == egressDirect && newWirePackets(openBase, wan.directCounts(t)) > 0
 		})
 		if !fallback || wan.sample(t).closedDirect != 0 || wan.sample(t).unknown != 0 {
 			t.Fatal("unverified running runner failed its open WAN or closed leak check")
 		}
 		kept.requireDirect(ctx, t)
 		f.imageDNSFallback(ctx, t)
-		f.imageAlternateGateway(ctx, t)
+		f.imageAlternateGateway(ctx, t, wan)
 		ownerSSH()
 		f.ownerPortForward(ctx, t)
 		if pending, e := f.exists(ctx, imageRequestFile); e != nil || !pending {
@@ -810,25 +863,6 @@ func (f *routingLab) runnerRespondsToPing(ctx context.Context) bool {
 	return ok
 }
 
-// The service's immutable request says what to attempt; RouterOS alone
-// stores the current phase and monotonic time spent checking the candidate.
-func (f *routingLab) imageTrialAge(ctx context.Context, nonce string) (int, bool) {
-	const prefix = "tikray:image-transition "
-	rows, err := f.ros.CommandAt(ctx, f.ros.Generation(), []string{"/system/script/print", "?name=tikray-image-transition", "=.proplist=source,comment"})
-	if err != nil || len(rows) != 1 || rows[0]["source"] != "" {
-		return 0, false
-	}
-	b, ok := strings.CutPrefix(rows[0]["comment"], prefix)
-	var j struct {
-		Nonce, Phase string
-		Age          int
-	}
-	if !ok || len(b) > 4096 || json.Unmarshal([]byte(b), &j) != nil || j.Nonce != nonce || j.Phase != "verify" || j.Age < 0 || j.Age >= 300 {
-		return 0, false
-	}
-	return j.Age, true
-}
-
 func (f *routingLab) checkedImageReboot(ctx context.Context, t *testing.T) {
 	t.Helper()
 	const c = "tikray"
@@ -849,34 +883,12 @@ func (f *routingLab) checkedImageReboot(ctx context.Context, t *testing.T) {
 	if !f.imageMarker(ctx, t, broken, offlineImageVersion) {
 		t.Fatal("power interruption missed the candidate image")
 	}
-	age := 0
-	_, ok := poll(ctx, 3*time.Minute, 500*time.Millisecond, func() bool {
-		n, visible := f.imageTrialAge(ctx, q.OperationID)
-		if visible && n >= 50 && n < 180 {
-			age = n
-			return true
-		}
-		return false
-	})
-	if !ok {
-		t.Fatal("native scheduler did not durably measure candidate time")
-	}
-	// Move wall time past the requested deadline while the candidate is
-	// still unhealthy. One actual subsequent tick must spend only its
-	// elapsed uptime and must not consume the six-hour clock jump.
+	firstTick := f.imageTick(ctx, t, q.OperationID, nil)
+	// Move wall time past the requested deadline. The next positive
+	// scheduler tick must account for exactly its independently observed uptime.
 	wall := time.Now().UTC().Add(6 * time.Hour)
 	f.mustRun(ctx, t, "/system/clock/set date="+wall.Format("2006-01-02")+" time="+wall.Format("15:04:05"))
-	_, ok = poll(ctx, 85*time.Second, 500*time.Millisecond, func() bool {
-		n, visible := f.imageTrialAge(ctx, q.OperationID)
-		if visible && n > age && n <= age+60 {
-			age = n
-			return true
-		}
-		return false
-	})
-	if !ok {
-		t.Fatal("clock change expired or froze a live update")
-	}
+	nextTick := f.imageTick(ctx, t, q.OperationID, &firstTick)
 	// Prove no service on either veth can be responsible for the native
 	// scheduler at the interruption. Never manufacture or edit its journal.
 	f.containerAction(ctx, t, "runner", "stop", "stopped")
@@ -884,14 +896,21 @@ func (f *routingLab) checkedImageReboot(ctx context.Context, t *testing.T) {
 	if pending, e := f.exists(ctx, imageRequestFile); e != nil || !pending {
 		t.Fatal("no durable operation at power cut")
 	}
+	cut, observed := f.imageClock(ctx, q.OperationID)
+	if !observed || cut.phase != "verify" || cut.age < nextTick.age || cut.age >= 300 || cut.seen > cut.upAfter {
+		t.Fatal("native candidate time was not verified immediately before interruption")
+	}
 	f.ros.Close()
 	if f.CHR.PowerCycle(ctx) != nil {
 		t.Fatal("real CHR power cycle failed")
 	}
 	f.ros = f.ownerSession(ctx, t)
-	post, retained := f.imageTrialAge(ctx, q.OperationID)
-	if !retained || post < age || post > age+60 {
-		t.Fatal("reboot reset or prematurely spent the native image budget")
+	post, retained := f.imageClock(ctx, q.OperationID)
+	// Only uptime elapsed since the last pre-cut sample, plus uptime of
+	// the new boot, could legitimately have been spent before this read.
+	if !retained || post.phase != "verify" || post.upAfter >= cut.upBefore || post.age < cut.age || post.age >= 300 ||
+		post.age-cut.age > cut.upAfter-cut.seen+post.upAfter+1 || post.age == cut.age && post.seen != cut.seen {
+		t.Fatalf("reboot budget or real uptime invalid: age=%d->%d uptime=%d->%d", cut.age, post.age, cut.upAfter, post.upAfter)
 	}
 	now := time.Now().UTC()
 	f.mustRun(ctx, t, "/system/clock/set date="+now.Format("2006-01-02")+" time="+now.Format("15:04:05"))
