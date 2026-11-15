@@ -314,6 +314,8 @@ func (s *Service) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	if s.router != nil {
 		wg.Add(1)
+		go func() { defer wg.Done(); s.watchImages(ctx) }()
+		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			s.watchRouter(ctx)

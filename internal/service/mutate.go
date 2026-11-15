@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Arman2122/tikray/internal/artifacts"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -91,6 +92,10 @@ func (s *Service) change(ctx context.Context, rev uint64, fn edit) (store.State,
 		return store.State{}, 0, err
 	}
 	defer s.release()
+	if artifacts.ImagePending(s.data) {
+		return store.State{}, 0, artifacts.ErrImageBusy
+	}
+
 	if err := s.recoverGeo(ctx); err != nil {
 		return store.State{}, 0, err
 	}

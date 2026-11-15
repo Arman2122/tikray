@@ -205,6 +205,21 @@ func (f *fakeBackend) CoreRollback(ctx context.Context) (artifacts.Result, error
 	return f.result, f.err
 }
 
+func (f *fakeBackend) ImageStatus(_ context.Context, c string) (artifacts.ImageStatus, error) {
+	f.rec("ImageStatus", c)
+	return artifacts.ImageStatus{Component: c}, f.err
+}
+func (f *fakeBackend) ImageUpdate(ctx context.Context, c, v string) (artifacts.ImageOperation, error) {
+	f.rec("ImageUpdate", c, v)
+	f.enter(ctx)
+	return artifacts.ImageOperation{Component: c}, f.err
+}
+func (f *fakeBackend) ImageRollback(ctx context.Context, c string) (artifacts.ImageOperation, error) {
+	f.rec("ImageRollback", c)
+	f.enter(ctx)
+	return artifacts.ImageOperation{Component: c}, f.err
+}
+
 func (f *fakeBackend) GeoUpdate(ctx context.Context, profile, version string) (artifacts.Result, error) {
 	f.rec("GeoUpdate", profile, version)
 	f.enter(ctx)

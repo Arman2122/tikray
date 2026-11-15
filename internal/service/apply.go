@@ -137,6 +137,16 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 	}()
 
 	st, rev := s.store.State()
+	if artifacts.ImagePending(s.data) {
+		// Preserve router-only protections without a competing runner trial.
+		if s.router == nil || artifacts.GeoPending(s.data) || s.store.EnsureDurable() != nil {
+			return true
+		}
+		if err := s.prepareRouter(ctx, st, rev); err != nil {
+			return true
+		}
+		return s.finishRouter(ctx, st, rev) != nil
+	}
 	if err := s.prepareRouter(ctx, st, rev); err != nil {
 		return ctx.Err() == nil
 	}
@@ -230,6 +240,10 @@ func (s *Service) ApplyNow(ctx context.Context) (artifacts.Result, error) {
 	}
 	defer s.pokeMonitor()
 	defer s.release()
+	if artifacts.ImagePending(s.data) {
+		return artifacts.Result{}, artifacts.ErrImageBusy
+	}
+
 	defer func() {
 		if artifacts.HotPending(s.data) {
 			s.Kick() // the loop owns retry/backoff once this caller returns
@@ -302,6 +316,10 @@ func (s *Service) coreOp(ctx context.Context, what string, op func(*artifacts.Co
 	}
 	defer s.pokeMonitor()
 	defer s.release()
+	if artifacts.ImagePending(s.data) {
+		return artifacts.Result{}, artifacts.ErrImageBusy
+	}
+
 	st, rev := s.store.State()
 	if err := s.prepareRouter(ctx, st, rev); err != nil {
 		s.Kick()

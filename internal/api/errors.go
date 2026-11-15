@@ -61,6 +61,12 @@ type errorBody struct {
 func classify(err error) (status int, code, detail string) {
 	var refused *service.Refused
 	switch {
+	case errors.Is(err, artifacts.ErrImageBusy):
+		return http.StatusConflict, "image_pending", artifacts.ErrImageBusy.Error()
+	case errors.Is(err, artifacts.ErrImageState):
+		return http.StatusServiceUnavailable, "image_unavailable", artifacts.ErrImageState.Error()
+	case errors.Is(err, artifacts.ErrImagePrevious):
+		return http.StatusConflict, codeConflict, artifacts.ErrImagePrevious.Error()
 	case errors.Is(err, artifacts.ErrGeoPending):
 		return http.StatusServiceUnavailable, "geo_pending", artifacts.ErrGeoPending.Error()
 	case errors.Is(err, service.ErrBootstrapPending):

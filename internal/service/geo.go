@@ -77,6 +77,9 @@ func (s *Service) geoOperation(ctx context.Context, profile, version string, rol
 	}
 	defer s.pokeMonitor()
 	defer s.release()
+	if artifacts.ImagePending(s.data) {
+		return artifacts.Result{}, artifacts.ErrImageBusy
+	}
 	// An interrupted rollback may already have committed. Finishing it
 	// and then executing this request could silently switch right back.
 	// The normal apply loop resolves the old journal before a new request.

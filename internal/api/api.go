@@ -65,6 +65,9 @@ type Backend interface {
 	ApplyNow(ctx context.Context) (artifacts.Result, error)
 	CoreUpdate(ctx context.Context, version string, o artifacts.UpdateOptions) (artifacts.Result, error)
 	CoreRollback(ctx context.Context) (artifacts.Result, error)
+	ImageStatus(context.Context, string) (artifacts.ImageStatus, error)
+	ImageUpdate(context.Context, string, string) (artifacts.ImageOperation, error)
+	ImageRollback(context.Context, string) (artifacts.ImageOperation, error)
 	GeoUpdate(ctx context.Context, profile, version string) (artifacts.Result, error)
 	GeoRollback(ctx context.Context) (artifacts.Result, error)
 	// Redactor returns the function that hides the state's secrets in a text.
@@ -157,6 +160,8 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter, instal
 	mux.HandleFunc("POST /v1/core/update", h.coreUpdate)
 	mux.HandleFunc("POST /v1/core/rollback", h.coreRollback)
 	mux.HandleFunc("GET /v1/core", h.core)
+	mux.HandleFunc("GET /v1/images/{component}", h.imageStatus)
+	mux.HandleFunc("POST /v1/images/{component}/{action}", h.imageChange)
 	mux.HandleFunc("POST /v1/geo/update", h.geoUpdate)
 	mux.HandleFunc("POST /v1/geo/rollback", h.geoRollback)
 

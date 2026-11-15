@@ -188,6 +188,10 @@ serve is not running" without one. --json prints the API's public data in JSON.
 
   apply          render the config from the state for the active core and put
                  it on trial
+  image status <tikray|runner>
+  image update <tikray|runner> <version>
+  image rollback <tikray|runner>
+                 queue a verified component switch using the native watchdog
   geo update <version|latest> [--profile NAME]
                  verify and trial a geo bundle through the running service
   geo rollback   restore the previous geo selection and domestic routes
@@ -279,6 +283,8 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		return c.apply(ctx, args[1:])
 	case "core":
 		return c.core(ctx, args[1:])
+	case "image":
+		return c.imageCommand(ctx, args[1:])
 	case "geo":
 		return c.geoCommand(ctx, args[1:])
 	case "serve":
@@ -903,6 +909,9 @@ func buildUpdater(cfg Config, pub []byte, runner *runnerapi.Client, log io.Write
 	return &artifacts.CoreUpdater{
 		Data: cfg.Data,
 		Arch: cfg.Arch,
+		ImageSource: artifacts.ImageSourceConfig{Upstream: cfg.ImageUpstream, Mirrors: slices.Clone(cfg.ImageMirrors), Proxy: artifacts.HTTPClient(cfg.Socks, 2*time.Minute), ProxyHealthy: func(ctx context.Context) bool {
+			return proxy != nil && proxyHealthy(runner)(ctx) && proxy.Check(ctx) == nil
+		}},
 		GeoSource: artifacts.GeoSourceConfig{
 			CustomURL: cfg.GeoURL, Mirrors: slices.Clone(cfg.GeoMirrors),
 			Proxy: artifacts.HTTPClient(cfg.Socks, 2*time.Minute),

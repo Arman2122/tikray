@@ -210,7 +210,9 @@ func (u *CoreUpdater) locked(res *Result, fn func() error) (Result, error) {
 		defer unlock() // after record, so the history line is written under the lock
 		u.sweepTemp()
 		u.sweepHot()
-		if res.Kind != KindGeo && GeoPending(u.Data) {
+		if ImagePending(u.Data) {
+			err = refuse(res, ErrImageBusy)
+		} else if res.Kind != KindGeo && GeoPending(u.Data) {
 			err = refuse(res, ErrGeoPending)
 		} else {
 			err = fn()

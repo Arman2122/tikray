@@ -10,8 +10,9 @@ const (
 	// KindApply: an apply, by the loop or by ApplyNow, and how it ended.
 	KindApply = "apply"
 	// KindCore: a core update or rollback, and how it ended.
-	KindCore = "core"
-	KindGeo  = "geo"
+	KindCore  = "core"
+	KindGeo   = "geo"
+	KindImage = "image"
 	// KindRefresh: a subscription refresh.
 	KindRefresh = "refresh"
 	// KindDegraded: a server that Open disabled, as this tikray refuses it.
