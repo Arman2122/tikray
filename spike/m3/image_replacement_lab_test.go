@@ -171,6 +171,7 @@ type nativeImageCase struct {
 	isLive        func(map[string]any) bool
 	diagnose      func()
 	buildArchive  func([]byte, string) map[string]any
+	archiveBytes  map[string][]byte
 }
 
 func newNativeImageCase(t *testing.T) *nativeImageCase {
@@ -197,10 +198,12 @@ func newNativeImageCase(t *testing.T) *nativeImageCase {
 		run("/file/add type=directory name=" + p)
 	}
 	const identity = nativeImageIdentity
+	archiveBytes := map[string][]byte{}
 	buildArchive := func(container []byte, configID string) map[string]any {
 		t.Helper()
 		sum := sha256.Sum256(container)
 		id := hex.EncodeToString(sum[:])
+		archiveBytes[id] = container
 		chain := ""
 		for i := 0; i < len(container); i += 16384 {
 			h := sha512.Sum512(container[i:min(i+16384, len(container))])
@@ -248,8 +251,15 @@ func newNativeImageCase(t *testing.T) *nativeImageCase {
 	if e != nil {
 		t.Fatal("missing image machine")
 	}
-	traffic, _ := routerfiles.Sources.ReadFile("watchdog-traffic.rsc")
-	watch = []byte(strings.ReplaceAll(string(watch), "# @TIKRAY_WATCHDOG_TRAFFIC@", string(traffic)))
+	compiled, helper, err := adapters.WatchdogScripts()
+	start, end := strings.Index(compiled, ":local imageTraffic do={"), strings.Index(compiled, ":local grant {")
+	if err != nil || start < 0 || end <= start {
+		t.Fatal("cannot assemble production private helper")
+	}
+	if _, err := r.admin.RunContext(r.ctx, "/system/script/add", "=name=tikray-watchdog-traffic", "=comment=tikray:watchdog-traffic", "=policy=read", "=source="+strings.ReplaceAll(helper, "\n", "\r\n")); err != nil {
+		t.Fatal("cannot stage production private helper")
+	}
+	watch = []byte(strings.Replace(string(watch), "# @TIKRAY_WATCHDOG_TRAFFIC@", compiled[start:end], 1))
 	source := `{
 ` + string(watch) + `
 :local ready do={:return ([:len [/system/script/find where name="m3-stall-health"]]=0)}
@@ -307,7 +317,7 @@ func newNativeImageCase(t *testing.T) *nativeImageCase {
 			t.Log("original image still present", strings.TrimSpace(out) == "true")
 		}
 	}
-	return &nativeImageCase{r: r, data: data, first: first, second: second, run: run, pub: pub, write: write, req: req, tick: tick, isLive: isLive, diagnose: diagnostic, buildArchive: buildArchive}
+	return &nativeImageCase{r: r, data: data, first: first, second: second, run: run, pub: pub, write: write, req: req, tick: tick, isLive: isLive, diagnose: diagnostic, buildArchive: buildArchive, archiveBytes: archiveBytes}
 }
 
 func TestNativeImageRecoveryPhases(t *testing.T) {
@@ -525,16 +535,8 @@ func TestImageUpdateBootWitness(t *testing.T) {
 	}
 }
 
-func TestNativeRunnerImageTrafficFence(t *testing.T) {
-	r := newRig(t)
-	run := func(cmd string) string {
-		t.Helper()
-		s, e := r.chr.RunPrivate(r.ctx, cmd)
-		if e != nil {
-			t.Fatal("private traffic fence fixture rejected")
-		}
-		return strings.TrimSpace(s)
-	}
+func setupRunnerImageRouting(t *testing.T, r *rig, run func(string) string, peer string) (string, string, string) {
+	t.Helper()
 	run(`/interface/list/add name=m3-images-lan; /interface/list/member/add interface=ether2 list=m3-images-lan`)
 	if run(`:put [:len [/ip/route/find where routing-table="main" and dst-address="0.0.0.0/0" and active]]`) == "0" {
 		run(`/ip/route/add dst-address=0.0.0.0/0 gateway=198.51.100.254 comment=wan-fixture`)
@@ -548,14 +550,16 @@ func TestNativeRunnerImageTrafficFence(t *testing.T) {
 	}
 	for _, cl := range []string{"open", "closed"} {
 		run(`/routing/table/add name=tikray-` + cl + ` fib comment="tikray:table-` + cl + `"`)
-		run(`/ip/route/add comment="tikray:route-` + cl + `-runner" dst-address=0.0.0.0/0 gateway=172.31.255.3 check-gateway=ping distance=1 routing-table=tikray-` + cl)
+		run(`/ip/route/add comment="tikray:route-` + cl + `-runner" dst-address=0.0.0.0/0 gateway=` + peer + ` check-gateway=ping distance=1 routing-table=tikray-` + cl)
 		kind := "gateway=" + gw
 		if cl == "closed" {
 			kind = "blackhole"
 		}
 		run(`/ip/route/add comment="tikray:route-` + cl + `-fallback" dst-address=0.0.0.0/0 distance=2 routing-table=tikray-` + cl + " " + kind)
 	}
-	run(`/ip/firewall/mangle/add chain=tikray-pre action=mark-connection new-connection-mark=tikray-open passthrough=yes src-address=192.0.2.1 comment="tikray:conn-full-open"`)
+	run(`/ip/firewall/mangle/add chain=tikray-pre action=return protocol=udp dst-port=53 connection-mark=no-mark comment="tikray:skip-dns-udp"`)
+	run(`/ip/firewall/address-list/add list=tikray-src-full-open address=192.168.88.10 comment="tikray:src-full-open:192.168.88.10/32"; /ip/firewall/mangle/add chain=tikray-pre action=mark-connection connection-state=new connection-mark=no-mark src-address-list=tikray-src-full-open new-connection-mark=tikray-open passthrough=yes comment="tikray:conn-full-open"`)
+	run(`/ip/firewall/mangle/add chain=prerouting action=jump jump-target=tikray-pre in-interface-list=m3-images-lan comment="tikray:jump-pre"`)
 	run(`/ip/firewall/mangle/add chain=tikray-pre action=mark-routing connection-mark=tikray-open new-routing-mark=tikray-open passthrough=no comment="tikray:route-open"`)
 	netScript := func(verb, disabled string) string {
 		var out strings.Builder
@@ -566,16 +570,81 @@ func TestNativeRunnerImageTrafficFence(t *testing.T) {
 	}
 	up, down := netScript("enable", "yes"), netScript("disable", "no")
 	periodic := `:if ($status = "up") do={` + up + `} else={` + down + `}`
-	nw, e := r.admin.RunContext(r.ctx, "/tool/netwatch/add", "=host=172.31.255.3", "=type=simple", "=comment=tikray:runner-watch", "=up-script="+up, "=down-script="+down, "=test-script="+periodic)
+	nw, e := r.admin.RunContext(r.ctx, "/tool/netwatch/add", "=host="+peer, "=type=simple", "=comment=tikray:runner-watch", "=up-script="+up, "=down-script="+down, "=test-script="+periodic)
 	if e != nil || nw.Done == nil {
 		t.Fatal("native Netwatch positive control failed")
 	}
 	netwatchID := nw.Done.Map["ret"]
 	for _, proto := range []string{"tcp", "udp"} {
-		run(`/ip/firewall/filter/add chain=tikray-bridge-fw action=accept connection-nat-state=dstnat in-interface-list=m3-images-lan dst-address=172.31.255.3 protocol=` + proto + ` dst-port=53 comment="tikray:acl-dns-` + proto + `"`)
-		run(`/ip/firewall/nat/add chain=dstnat action=dst-nat in-interface-list=m3-images-lan src-address-list=tikray-src-full-open to-addresses=172.31.255.3 to-ports=53 protocol=` + proto + ` dst-port=53 comment="tikray:dns-full-open-` + proto + `"`)
+		run(`/ip/firewall/filter/add chain=tikray-bridge-fw action=accept connection-nat-state=dstnat in-interface-list=m3-images-lan dst-address=` + peer + ` protocol=` + proto + ` dst-port=53 comment="tikray:acl-dns-` + proto + `"`)
+		run(`/ip/firewall/nat/add chain=dstnat action=dst-nat in-interface-list=m3-images-lan src-address-list=tikray-src-full-open to-addresses=` + peer + ` to-ports=53 protocol=` + proto + ` dst-port=53 comment="tikray:dns-full-open-` + proto + `"`)
 		run(`/ip/firewall/nat/add chain=dstnat action=redirect in-interface-list=m3-images-lan src-address-list=tikray-src-full-open to-ports=53 protocol=` + proto + ` dst-port=53 comment="tikray:dns-router-full-open-` + proto + `"`)
-		run(`/ip/firewall/nat/add chain=dstnat action=dst-nat in-interface-list=m3-images-lan src-address-list=tikray-src-full-closed to-addresses=172.31.255.3 to-ports=53 protocol=` + proto + ` dst-port=53 comment="tikray:dns-full-closed-` + proto + `"`)
+		run(`/ip/firewall/nat/add chain=dstnat action=dst-nat in-interface-list=m3-images-lan src-address-list=tikray-src-full-closed to-addresses=` + peer + ` to-ports=53 protocol=` + proto + ` dst-port=53 comment="tikray:dns-full-closed-` + proto + `"`)
+	}
+	return gw, netwatchID, up
+}
+
+func TestNativeRunnerImageTrafficFence(t *testing.T) {
+	r := newRig(t)
+	run := func(cmd string) string {
+		t.Helper()
+		s, e := r.chr.RunPrivate(r.ctx, cmd)
+		if e != nil {
+			t.Fatal("private traffic fence fixture rejected")
+		}
+		return strings.TrimSpace(s)
+	}
+	gw, netwatchID, up := setupRunnerImageRouting(t, r, run, "172.31.255.3")
+	if r.net.Client(r.ctx, "ip", "addr", "add", "192.168.88.110/32", "dev", "eth0").Run() != nil {
+		t.Fatal("cannot stage independent client")
+	}
+	run(`/ip/firewall/connection/tracking/set enabled=yes udp-timeout=3m`)
+	recv := r.net.Inet(r.ctx, "python3", "-c", `import socket
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(("198.51.100.254",32475))
+while True:s.recvfrom(64)`)
+	if recv.Start() != nil {
+		t.Fatal("cannot start positive UDP sink")
+	}
+	t.Cleanup(func() { _ = recv.Process.Kill(); _ = recv.Wait() })
+	for _, tag := range []string{"tikray:conn-full-open", "tikray:jump-pre", "tikray:route-open"} {
+		if ownerWait(r.ctx, 15*time.Second, func(ctx context.Context) (bool, error) {
+			v, e := r.chr.RunPrivate(ctx, `:put [/ip/firewall/mangle/get [find where comment="`+tag+`"] invalid]`)
+			return strings.TrimSpace(v) == "false", e
+		}) != nil {
+			t.Fatalf("watcher fixture writer is ineffective: %s", tag)
+		}
+	}
+	send := r.net.Client(r.ctx, "python3", "-c", `import socket,time
+clients=[]
+for ip in ("192.168.88.10","192.168.88.110"):
+ s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind((ip,32474));clients.append(s)
+dns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);dns.bind(("192.168.88.10",32476))
+while True:
+ try:dns.sendto(b"dns",("203.0.113.92",53))
+ except OSError:pass
+ for s in clients:
+  try:s.sendto(b"f",("198.51.100.254",32475))
+  except OSError:pass
+ time.sleep(.12)`)
+	if send.Start() != nil {
+		t.Fatal("cannot populate retained flows")
+	}
+	t.Cleanup(func() { _ = send.Process.Kill(); _ = send.Wait() })
+	for _, src := range []string{"192.168.88.10", "192.168.88.110"} {
+		if ownerWait(r.ctx, 10*time.Second, func(ctx context.Context) (bool, error) {
+			v, e := r.chr.RunPrivate(ctx, `:put [:len [/ip/firewall/connection/find where src-address=`+src+` and src-port=32474 and dst-port=32475]]`)
+			return strings.TrimSpace(v) == "1", e
+		}) != nil {
+			t.Fatal("retained data positive control failed")
+		}
+	}
+	previous := run(`{:local all [/ip/firewall/connection/print detail as-value where src-address=192.168.88.10 and src-port=32474 and dst-port=32475]; :local row [:pick $all 0]; :put [:tostr ($row->"connection-mark")]}`)
+	if previous != "tikray-open" {
+		t.Fatal("retained baseline lacks the expected native open mark", previous == "", previous == "no-mark")
+	}
+	ownerID := run(`:put [:tostr [/ip/firewall/connection/find where src-address=192.168.88.110 and src-port=32474 and dst-port=32475]]`)
+	if !regexp.MustCompile(`^\*[0-9A-Fa-f]+$`).MatchString(ownerID) {
+		t.Fatal("unrelated flow identity absent")
 	}
 	compiled, helper, err := adapters.WatchdogScripts()
 	if err != nil {
@@ -602,24 +671,48 @@ func TestNativeRunnerImageTrafficFence(t *testing.T) {
 		t.Fatal("native assignment changed pinned helper bytes")
 	}
 	script := "{\n" + body + `
-	:local lease do={:return true}
-	:local controls [$imageTraffic "read" [:toarray ""] 172.31.255.3 "m3-images-lan" $lease true false]
+	:local lease do={:return true}; :local quota {"staging"={"nonce"="dddddddddddddddddddddddddddddddd"}}
+	:local controls [$imageTraffic "read" [:toarray ""] 172.31.255.3 "m3-images-lan" $lease $quota false]
 	:foreach k in={"tikray:route-open-runner";"tikray:route-closed-runner";"tikray:runner-watch";"tikray:acl-dns-udp";"tikray:acl-dns-tcp";"tikray:dns-full-open-udp";"tikray:dns-full-open-tcp"} do={:if ([:typeof ($controls->$k)]!="bool") do={:put ("bad-role|" . $k . "|end")}}
 	:if ([:len $controls]!=8) do={:error "missing native controls"}
-	:local held [$imageTraffic "hold" $controls 172.31.255.3 "m3-images-lan" $lease true false]
+	:for i from=32 to=61 do={:local member ("192.168.88." . $i); /ip/firewall/address-list/add list=tikray-src-full-open address=$member comment=("tikray:src-full-open:" . $member . "/32")}
+	:local held [$imageTraffic "hold" $controls 172.31.255.3 "m3-images-lan" $lease $quota false]
+	:if (([:typeof $held]!="array") or (($held->"done")!=false) or ([:len [/ip/route/find where comment="tikray:route-open-runner" and !disabled]]!=1)) do={:error "busy traffic hold did not checkpoint before changing live route"}
+	:local ticks 0; :while ((($held->"done")!=true) and ($ticks<8)) do={:set ($quota->"flow") $held; :set held [$imageTraffic "hold" $controls 172.31.255.3 "m3-images-lan" $lease $quota false]; :set ticks ($ticks+1)}
+	:if (($held->"done")!=true) do={:error "busy traffic hold did not resume"}
+	:for i from=32 to=61 do={:local tag ("tikray:src-full-open:192.168.88." . $i . "/32"); /ip/firewall/address-list/remove [find where comment=$tag]}
+	:set ($quota->"flow") $held
+	:local transit "tikray-i-dddddddddddddddddddddddddddddddd"; :local wait 0
+	:while (([:len [/ip/firewall/connection/print detail as-value where src-address=192.168.88.10 and src-port=32474 and dst-port=32475 and connection-mark=$transit]]=0) and ($wait<50)) do={:delay 100ms; :set wait ($wait+1)}
+	:if (($wait=50) or ([:len [/ip/firewall/connection/print detail as-value where src-address=192.168.88.10 and src-port=32474 and dst-port=32475 and connection-mark=tikray-open]]!=0) or ([:len [/ip/firewall/connection/find where src-address=192.168.88.110 and src-port=32474 and dst-port=32475 and .id=[:toid "` + ownerID + `"]]]!=1)) do={:error "retained managed flow or unrelated owner tuple changed incorrectly"}
+
+	:if ([:len [/ip/firewall/mangle/find where comment="tikray:conn-full-open" and new-connection-mark="tikray-i-dddddddddddddddddddddddddddddddd"]]!=1) do={:error "new sessions still use old routing mark"}
+
 	:if (([:len [/ip/route/find where comment~"^tikray:route-(open|closed)-runner" and disabled]]!=2) or ([:len [/ip/firewall/nat/find where comment~"^tikray:dns-full-open" and disabled]]!=2) or ([:len [/ip/firewall/filter/find where comment~"^tikray:acl-dns-" and disabled]]!=2) or ([:len [/tool/netwatch/find where comment="tikray:runner-watch" and disabled]]!=1) or ([:len [/ip/firewall/nat/find where comment~"^tikray:dns-full-closed" and !disabled]]!=2) or ([:len [/ip/firewall/nat/find where comment~"^tikray:dns-router-full-open" and !disabled]]!=2)) do={:error "incorrect native hold"}
+	:local settled [$imageTraffic "hold" $controls 172.31.255.3 "m3-images-lan" $lease $quota false]; :set ($quota->"flow") $settled
+	/ip/firewall/nat/enable [find where comment="tikray:dns-full-open-udp"]
+	:foreach ct in=[/ip/firewall/connection/print detail as-value where src-address=192.168.88.10 and dst-address=203.0.113.92 and src-port=32476 and dst-port=53 and protocol=udp] do={ /ip/firewall/connection/remove ($ct->".id") }
+	:local dnsWait 0; :while (([:len [/ip/firewall/connection/print detail as-value where src-address=192.168.88.10 and src-port=32476 and dst-port=53 and dstnat and reply-src-address=172.31.255.3]]=0) and ($dnsWait<60)) do={:delay 100ms; :set dnsWait ($dnsWait+1)}
+	:if ($dnsWait=60) do={:error "could not establish deliberately drifted open DNS tuple"}
+	:local repaired [$imageTraffic "hold" $controls 172.31.255.3 "m3-images-lan" $lease $quota false]
+	:if ([:len [/ip/firewall/connection/print detail as-value where src-address=192.168.88.10 and src-port=32476 and dst-port=53 and dstnat and reply-src-address=172.31.255.3]]!=0) do={:error "stale late DNS binding survived completed cursor"}
+	:set ($quota->"flow") $repaired
+
 	# A lease can change while Go reconciliation is intentionally suspended. Mutate only the owned test fallback to simulate the old gateway; the active main is still the working packet path.
 	/ip/route/set [find where comment="tikray:route-open-fallback"] gateway=198.51.100.253
-	:local changed [$imageTraffic "hold" $controls 172.31.255.3 "m3-images-lan" $lease true false]
+	:local changed [$imageTraffic "hold" $controls 172.31.255.3 "m3-images-lan" $lease $quota false]
 	:if (([:len [/ip/firewall/mangle/find where comment="tikray:route-open" and disabled]]!=1) or ([:len [/ip/route/find where comment="tikray:route-closed-fallback" and blackhole and !disabled]]!=1)) do={:error "WAN change broke closed protection or open main routing"}
-	:local resumedWAN [$imageTraffic "release" $controls 172.31.255.3 "m3-images-lan" $lease true false]
+	:local resumedWAN [$imageTraffic "release" $controls 172.31.255.3 "m3-images-lan" $lease $quota false]
 	:if ([:len [/ip/firewall/mangle/find where comment="tikray:route-open" and disabled]]!=1) do={:error "stale WAN fallback rearmed"}
 	/ip/route/set [find where comment="tikray:route-open-fallback"] gateway=` + gw + `
-	:local heldAgain [$imageTraffic "hold" $controls 172.31.255.3 "m3-images-lan" $lease true false]
-	:local off [$imageTraffic "release" $controls 172.31.255.3 "m3-images-lan" $lease true true]
+	:local heldAgain [$imageTraffic "hold" $controls 172.31.255.3 "m3-images-lan" $lease $quota false]
+	:local off [$imageTraffic "release" $controls 172.31.255.3 "m3-images-lan" $lease $quota true]
 	:if (([:len [/ip/route/find where comment~"^tikray:route-(open|closed)-runner" and disabled]]!=2) or ([:len [/ip/firewall/filter/find where comment~"^tikray:acl-dns-" and !disabled]]!=2)) do={:error "emergency fence release changed steering"}
-	:local resumed [$imageTraffic "release" $controls 172.31.255.3 "m3-images-lan" $lease true false]
+	:local resumed [$imageTraffic "release" $controls 172.31.255.3 "m3-images-lan" $lease $quota false]
 	:if (([:len [/ip/route/find where comment~"^tikray:route-(open|closed)-runner" and !disabled]]!=2) or ([:len [/tool/netwatch/find where comment="tikray:runner-watch" and !disabled]]!=1) or ([:len [/ip/firewall/nat/find where comment~"^tikray:dns-full-open" and !disabled]]!=2)) do={:error "native fence failed to rearm"}
+	:if ([:len [/ip/firewall/mangle/find where comment="tikray:conn-full-open" and new-connection-mark=tikray-open]]!=1) do={:error "original open classifier was not restored"}
+	:set wait 0; :while (([:len [/ip/firewall/connection/print detail as-value where src-address=192.168.88.10 and src-port=32474 and dst-port=32475 and connection-mark=tikray-open]]=0) and ($wait<50)) do={:delay 100ms; :set wait ($wait+1)}
+	:if (($wait=50) or ([:len [/ip/firewall/connection/print detail as-value where src-address=192.168.88.10 and src-port=32474 and dst-port=32475 and connection-mark=$transit]]!=0) or ([:tostr [/ip/firewall/connection/find where src-address=192.168.88.110 and src-port=32474 and dst-port=32475]]!="` + ownerID + `")) do={:local recent [/ip/firewall/connection/print detail as-value where src-address=192.168.88.10 and src-port=32474 and dst-port=32475]; :local row [:pick $recent 0]; :put ("flow-present=" . ([:len $recent]=1)); :put ("blank-mark=" . ([:len ($row->"connection-mark")]=0)); :put ("normal-by-get=" . ([:tostr ($row->"connection-mark")]="tikray-open")); :put ("temp-by-get=" . ([:tostr ($row->"connection-mark")]=$transit)); :put ("keeper=" . [:len [/ip/firewall/mangle/find where comment~"^tikray:image-mark:"]]); :put ("waited-full=" . ($wait=50)); :put ("owner-kept=" . ([:tostr [/ip/firewall/connection/find where src-address=192.168.88.110 and src-port=32474 and dst-port=32475]]="` + ownerID + `")); :put ("residual=" . [:len [/ip/firewall/connection/print detail as-value where src-address=192.168.88.10 and src-port=32474 and dst-port=32475 and connection-mark=$transit]]); :error "real socket did not reestablish through the restored classifier"}
 	:put "fence-ok" }`
 	p := filepath.Join(t.TempDir(), "fence.rsc")
 	if os.WriteFile(p, []byte(script), 0600) != nil || r.chr.Push(r.ctx, p, "m3-image-fence.rsc") != nil {
@@ -630,7 +723,7 @@ func TestNativeRunnerImageTrafficFence(t *testing.T) {
 		_, b, _ := strings.Cut(out, "m3-why=")
 		m, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(b))
 		cat := "unclassified"
-		for _, re := range regexp.MustCompile(`:error "([^"$]+)"`).FindAllStringSubmatch(script, -1) {
+		for _, re := range regexp.MustCompile(`:error "([^"$]+)"`).FindAllStringSubmatch(script+helper, -1) {
 			if strings.Contains(string(m), re[1]) {
 				cat = re[1]
 			}
@@ -645,14 +738,17 @@ func TestNativeRunnerImageTrafficFence(t *testing.T) {
 				t.Log("missing fixture role", key)
 			}
 		}
+		if cat == "real socket did not reestablish through the restored classifier" {
+			t.Log("flow present", strings.Contains(out, "flow-present=true"), "blank", strings.Contains(out, "blank-mark=true"), "normal/get", strings.Contains(out, "normal-by-get=true"), "temp/get", strings.Contains(out, "temp-by-get=true"), "keeper", strings.Contains(out, "keeper=1"), "waited", strings.Contains(out, "waited-full=true"), "owner kept", strings.Contains(out, "owner-kept=true"), "residual", strings.Contains(out, "residual=1"))
+		}
 		t.Fatal("native runner traffic fence refused", cat, regexp.MustCompile(`line [0-9]+ column [0-9]+`).FindString(string(m)))
 	}
 	run(`/system/script/add name=m3-helper-verdict policy=read source="" comment=waiting`)
 	scheduled := "{\n" + body + `
 	/system/scheduler/disable [find where name="m3-helper-schedule"]
-	:local check do={:return true}
+	:local check do={:return true}; :local quota {"staging"={"nonce"="dddddddddddddddddddddddddddddddd"}}
 	:local verdict "denied"
-	:do { :local q [$imageTraffic "read" [:toarray ""] 172.31.255.3 "m3-images-lan" $check true false]; :if ([:len $q]=8) do={:set verdict "verified"} } on-error={}
+	:do { :local q [$imageTraffic "read" [:toarray ""] 172.31.255.3 "m3-images-lan" $check $quota false]; :if ([:len $q]=8) do={:set verdict "verified"} } on-error={}
 	/system/script/set [find where name="m3-helper-verdict"] comment=$verdict
 }`
 	if _, e := r.admin.RunContext(r.ctx, "/system/script/add", "=name=m3-helper-probe", "=policy=read,write,test,ftp", "=source="+scheduled); e != nil {
@@ -664,6 +760,21 @@ func TestNativeRunnerImageTrafficFence(t *testing.T) {
 		return strings.TrimSpace(v) != "waiting", e
 	}) != nil || run(`:put [/system/script/get [find where name="m3-helper-verdict"] comment]`) != "verified" {
 		t.Fatal("restricted native scheduler could not authenticate and call the installer helper")
+	}
+	run(`/ip/firewall/filter/add chain=owner-private action=accept connection-mark=tikray-open comment="owner:open-mark-consumer"`)
+	out = run(`:onerror why in={ /import file-name=m3-image-fence.rsc } do={:put ([:find [:tostr $why] "image: owner consumes normal open mark"]!=nil)}`)
+	if strings.TrimSpace(out) != "true" || run(`:put [:len [/ip/firewall/filter/find where comment="owner:open-mark-consumer"]]`) != "1" {
+		t.Fatal("owner's normal connection-mark policy was bypassed")
+	}
+	run(`/ip/firewall/filter/remove [find where comment="owner:open-mark-consumer"]`)
+	run(`/ip/firewall/mangle/add chain=owner-private action=mark-connection new-connection-mark=tikray-i-dddddddddddddddddddddddddddddddd comment="owner:reserved-mark" disabled=yes`)
+	out = run(`:onerror why in={ /import file-name=m3-image-fence.rsc } do={:put ([:find [:tostr $why] "image: shared connection mark writer"]!=nil)}`)
+	if strings.TrimSpace(out) != "true" || run(`:put [:len [/ip/firewall/mangle/find where comment="owner:reserved-mark" and disabled]]`) != "1" {
+		t.Fatal("owner's preexisting mark was changed")
+	}
+	run(`/ip/firewall/mangle/remove [find where comment="owner:reserved-mark"]`)
+	if run(`:put [:len [/ip/firewall/mangle/find where comment~"^tikray:image-mark:"]]`) != "0" {
+		t.Fatal("temporary native mark was not retired")
 	}
 	// Keep the target healthy before an update if the owner has edited this
 	// tagged watcher. Its three native programs could act on unrelated rows.

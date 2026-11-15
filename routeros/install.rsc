@@ -34,6 +34,7 @@
     :if (!(($folder = "tikray") or ($folder ~ "^tikray-[A-Za-z0-9_][A-Za-z0-9_-]*\$"))) do={ :error "tikray: select a dedicated tikray data folder" }
     :local base ($disk . "/" . $folder)
     :local data ($base . "/data")
+    :if ([:len [/ip/firewall/mangle/find where comment~"^tikray:image-mark:"]]>0) do={:error "tikray: image flow reference active; retry after watchdog recovery"}
     :foreach legacy in={"image-update.json";"image-probe.json";"image-bootstrap.json";"image-tikray.json";"image-runner.json"} do={:if ([:len [/file/find where name=($data . "/state/" . $legacy)]]>0) do={:error "tikray: inspect legacy image receipts before installing"}}
     :if (([:len [/file/find where name=($data . "/state/image-update.request")]] > 0) or ([:len [/system/script/find where name="tikray-image-transition" or comment~"^tikray:image-transition"]] > 0)) do={ :error "tikray: image transition active; retry after watchdog recovery" }
 

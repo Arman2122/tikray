@@ -159,14 +159,29 @@ func watchdogSource(readSource func(string) ([]byte, error)) (string, string, st
 		}
 		code := string(b)
 		if part.slot == "TRAFFIC" {
+			// The emergency switch already proves both tuple directions and
+			// preserves DNS bindings that might belong to the owner. Reuse
+			// those exact reviewed functions without changing its shipped body.
+			flows, err := readSource("watchdog-flows.rsc")
+			if err != nil {
+				return "", "", "", errors.New("installer: missing image flow handler")
+			}
+			off, err := readSource("emergency-off.rsc")
+			_, tail, ok := strings.Cut(string(off), ":local capture do={")
+			shared, _, end := strings.Cut(tail, ":local checkFlow do={")
+			if err != nil || !ok || !end || strings.Count(string(flows), "# @TIKRAY_FLOW_IDENTITY@") != 1 || strings.Count(code, "# @TIKRAY_IMAGE_FLOWS@") != 1 {
+				return "", "", "", errors.New("installer: missing native flow identity")
+			}
+			flowsBody := strings.Replace(string(flows), "# @TIKRAY_FLOW_IDENTITY@", ":local capture do={"+shared, 1)
+			code = strings.Replace(code, "# @TIKRAY_IMAGE_FLOWS@", flowsBody, 1)
 			trafficSource = compactScript(code + "\n:return [$imageTraffic $1 $2 $3 $4 $5 $6 $7]\n")
 			call, err := readSource("watchdog-traffic-call.rsc")
-			if err != nil || strings.Count(string(call), "@TIKRAY_TRAFFIC_HASH@") != 1 {
+			if err != nil || strings.Count(string(call), "@TIKRAY_TRAFFIC_HASH@") != 1 || strings.Count(string(call), "@TIKRAY_TRAFFIC_SIZE@") != 1 {
 				return "", "", "", errors.New("installer: missing trusted traffic binding")
 			}
 			canonical := strings.ReplaceAll(strings.TrimRight(trafficSource, "\r\n"), "\n", "\r\n")
 			hash := sha512.Sum512([]byte(canonical))
-			code = strings.Replace(string(call), "@TIKRAY_TRAFFIC_HASH@", fmt.Sprintf("%x", hash), 1)
+			code = strings.NewReplacer("@TIKRAY_TRAFFIC_HASH@", fmt.Sprintf("%x", hash), "@TIKRAY_TRAFFIC_SIZE@", fmt.Sprint(len(canonical)+4)).Replace(string(call))
 		}
 		watchBody = strings.Replace(watchBody, key, code, 1)
 		if part.slot == "STATE" {

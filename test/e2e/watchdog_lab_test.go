@@ -446,13 +446,18 @@ with open(sys.argv[1],"wb",buffering=0) as log:
   if len(packet)<42 or packet[12:14]!=b"\x08\x00" or packet[23] not in (6,17):continue
   start=14+4*(packet[14]&15)
   if len(packet)<start+8 or packet[start+2:start+4]!=b"\x00\x35":continue
-  if b"wd-open-lookup" in packet[start+8:]:log.write(b"O")
-  if b"wd-closed-lookup" in packet[start+8:]:log.write(b"C")`, capture)
+  payload=packet[start+8:].lower()
+  if b"wd-open-udp" in payload:log.write(b"U")
+  if b"wd-open-tcp" in payload:log.write(b"T")
+  if b"wd-closed-lookup" in payload:log.write(b"C")`, capture)
 	startRoutingProcess(t, listen)
+	if _, ok := poll(ctx, 5*time.Second, 100*time.Millisecond, func() bool { _, err := os.Stat(capture); return err == nil }); !ok {
+		t.Fatal("WAN DNS observer did not bind before queries")
+	}
 	for _, proto := range []string{"udp", "tcp"} {
 		now := strconv.FormatInt(time.Now().UnixNano(), 10)
 		n := f.packets(ctx, t, "/ip/firewall/nat", "tikray:dns-router-full-open-"+proto)
-		got := f.protocolDNS(ctx, t, true, now+".wd-open-lookup.routing-probe.test.", "A", proto, "203.0.113.53")
+		got := f.protocolDNS(ctx, t, true, now+".wd-open-"+proto+".routing-probe.test.", "A", proto, "203.0.113.53")
 		if !slices.Equal(got, []string{"198.18.54.1"}) || f.packets(ctx, t, "/ip/firewall/nat", "tikray:dns-router-full-open-"+proto) <= n {
 			t.Fatal("open DNS did not reach the owner's resolver through verified redirect", proto)
 		}
@@ -466,9 +471,13 @@ with open(sys.argv[1],"wb",buffering=0) as log:
 		}
 	}
 	read := func() string { b, _ := os.ReadFile(capture); return string(b) }
-	_, positive := poll(ctx, 5*time.Second, 250*time.Millisecond, func() bool { return strings.Count(read(), "O") >= 2 })
+	_, positive := poll(ctx, 5*time.Second, 250*time.Millisecond, func() bool {
+		seen := read()
+		return strings.Contains(seen, "U") && strings.Contains(seen, "T")
+	})
 	if !positive || strings.Contains(read(), "C") {
-		t.Fatal("WAN DNS capture lacked both open controls or observed a direct closed query")
+		seen := read()
+		t.Fatalf("WAN DNS capture: open_udp=%d open_tcp=%d closed=%d", strings.Count(seen, "U"), strings.Count(seen, "T"), strings.Count(seen, "C"))
 	}
 }
 
@@ -598,15 +607,12 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	statePath := dataRoot + "/state/state.v" + strconv.Itoa(store.Current) + ".json"
 	beforeState := sha256.Sum256(f.exactFile(ctx, t, statePath))
 	ownerSSH := f.ownerLANSSH(ctx, t)
-	ownerConnection := func() string {
-		t.Helper()
-		rows := f.readROS(ctx, t, "/ip/firewall/connection", ".id", "?protocol=tcp", "?src-address=192.168.88.201", "?dst-address=192.168.88.1", "?dst-port=22", "?tcp-state=established")
-		if len(rows) != 1 || rows[0][".id"] == "" {
-			t.Fatal("independent owner SSH conntrack row missing or ambiguous")
-		}
-		return rows[0][".id"]
+	const unrelated = "192.168.88.111"
+	if f.Net.Client(ctx, "ip", "addr", "add", unrelated+"/32", "dev", "eth0").Run() != nil {
+		t.Fatal("could not attach an unmanaged LAN address for the unrelated connection")
 	}
-	ownerRow := ownerConnection()
+	t.Cleanup(func() { _ = f.Net.Client(context.Background(), "ip", "addr", "del", unrelated+"/32", "dev", "eth0").Run() })
+	ownerFlow := f.unchangedClientFlow(ctx, t, unrelated, true)
 	generation := f.ros.Generation()
 	other, kind := "runner", "runner"
 	if component == "runner" {
@@ -625,9 +631,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	verifySibling := func() {
 		t.Helper()
 		ownerSSH()
-		if ownerConnection() != ownerRow {
-			t.Fatal("replacement removed the unrelated owner's connection")
-		}
+		ownerFlow()
 		r, ok := f.containerImage(ctx, other)
 		if f.ros.Generation() != generation || !ok || r.id != otherImage.id || r.imageID != otherImage.imageID || f.probe(ctx, t, kind) != otherProcess || f.activeImageSelection(ctx, t) != selection {
 			t.Fatal("replacement changed its sibling, selection or owner session")

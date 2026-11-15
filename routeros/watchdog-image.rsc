@@ -9,6 +9,7 @@
     :local journals [/system/script/find where name=$phaseName or comment~"^tikray:image-transition "]
     :if ([:len [/file/find where name=($data . "/state/image-update.json")]]>0) do={:error "image: legacy transition requires owner inspection"}
     :if (([:len $files]=0) and ([:len $journals]=0)) do={ :return "" }
+    :if (([:len [/ip/firewall/mangle/find where comment~"^tikray:image-mark:"]]>0) and ([:len $journals]!=1)) do={:error "image: orphan native flow reference"}
     :foreach legacy in={"image-update.json";"image-probe.json";"image-bootstrap.json";"image-tikray.json";"image-runner.json"} do={:if ([:len [/file/find where name=($data . "/state/" . $legacy)]]>0) do={:error "image: legacy receipts require owner inspection"}}
     :local hexOK do={
         :return (([:typeof $1]="str") and ([:len $1]=$2) and ($1~"^[0-9a-f]+\$"))
@@ -144,69 +145,16 @@
     :if ($component="runner") do={ :set targetName "tikray-runner"; :set side "runner"; :set ownerTag "tikray:runner"; :set iface "tikray-runner"; :set high 201326592; :set limit 268435456 }
     :local root ($base . "/containers/" . $side)
     :local profile {"component"=$component;"name"=$targetName;"tag"=$ownerTag;"veth"=$iface;"root"=$root;"gateway"=$gateway;"high"=$high;"max"=$limit;"old"=$original;"new"=$candidate;"staging"=$staging;"data"=$data}
-    :local checkRoot do={
-        :local base $1; :local root $2; :local ownID $3
-        # Removing a native row retires its extraction root. Include owner
-        # mounts and ancestors of the target directory on either disk alias.
-        :local disk [:pick $base 0 [:find $base "/"]]; :local volume [/disk/find where mount-point=$disk and fs="ext4"]
-        :if ([:len $volume]!=1) do={:error "image: unknown container disk"}
-        :local slot [:tostr [/disk/get [:pick $volume 0] slot]]; :local slash [:find $root "/"]; :local suffix [:pick $root $slash [:len $root]]
-        :foreach dev in=({$disk;$slot}) do={
-            :local rp ($dev . $suffix); :local expr ("^/?" . $rp . "(/|\$)")
-            :foreach c in=[/container/find where root-dir~$expr] do={:if ($c!=$ownID) do={:error "image: owner shares extraction root"}}
-            :if ([:len [/container/mounts/find where src~$expr]]>0) do={:error "image: owner mounts extraction root"}
-            :local folder [:pick $base ([:find $base "/"]+1) [:len $base]]
-            :foreach parent in=({$dev;($dev . "/" . $folder);($dev . "/" . $folder . "/containers")}) do={
-                :if (([:len [/container/find where root-dir=$parent or root-dir=("/" . $parent) or root-dir=("/" . $parent . "/")]]>0) or ([:len [/container/mounts/find where src=$parent or src=("/" . $parent) or src=("/" . $parent . "/")]]>0)) do={:error "image: owner shares extraction directory"}
-            }
-        }
-        :return true
+    # Container-store children are hidden from /file/find. Native add never
+    # replaces an existing child. An exact read, including the next possible
+    # byte, rejects a foreign file that merely starts with the expected tag.
+    :local imageRootWitness do={
+        :if ($1="create") do={:do {/file/add name=$2 type=file contents=$3} on-error={}}
+        :local value ""
+        :do {:set value ([/file/read file=$2 offset=0 chunk-size=([:len $3]+1) as-value]->"data")} on-error={}
+        :return (([:len $value]=[:len $3]) and ($value=$3))
     }
-    # The Docker config digest identifies the extracted image; a display tag
-    # or an incomplete extracting row cannot authorize a destructive action.
-    :local rowOf do={
-        :local p $1; :local n ($p->"name"); :local c ($p->"tag"); :local v ($p->"veth"); :local rootPath ($p->"root")
-        :local rows [/container/find where name=$n or comment=$c or interface=$v or root-dir=$rootPath or root-dir=("/" . $rootPath)]
-        :if ([:len $rows]=0) do={ :return [:toarray ""] }
-        :if ([:len $rows]!=1) do={ :error "image: conflicting container identities" }
-        :local id [:pick $rows 0]; :local row [/container/get $id]
-        :local path [:tostr ($row->"root-dir")]; :if ([:pick $path 0 1]="/") do={:set path [:pick $path 1 [:len $path]]}
-        :local trace ($p->"staging"); :local claim [:tostr ($row->"comment")]; :local partial false; :local archive
-        :if ($claim=($trace->"candidate")) do={:set partial true; :set archive ($p->"new")}
-        :if ($claim=($trace->"original")) do={:set partial true; :set archive ($p->"old")}
-        :local code [:tostr ($row->"image-id")]
-        :if ([:pick $code ([:len $code]-1) [:len $code]]=" ") do={:set code [:pick $code 0 ([:len $code]-1)]}
-        :if ([:pick $code 0 7]="sha256:") do={:set code [:pick $code 7 [:len $code]]}
-        :local expectedID $code
-        :if ($partial) do={
-            :set expectedID ($archive->"image_id")
-            :local input [:tostr ($row->"file")]; :if ([:pick $input 0 1]="/") do={:set input [:pick $input 1 [:len $input]]}
-            :if (($input!="") and ($input!=(($p->"data") . "/images/" . ($p->"component") . "-" . ($archive->"digest") . ".tar"))) do={:error "image: provisional archive changed"}
-        }
-        :local alternative (($rootPath . "-image-" . $expectedID)=$path)
-        :if ($alternative and (($expectedID!=($p->"old"->"image_id")) and ($expectedID!=($p->"new"->"image_id")))) do={:error "image: foreign recovery root"}
-        :if ((($row->"name")!=$n) or ((!$partial) and ($claim!=$c)) or ([:tostr ($row->"interface")]!=$v) or (($path!=$rootPath) and (!$alternative)) or ([:tostr ($row->"mountlists")]!=$n) or ([:tostr ($row->"envlists")]!=$n) or ([:tostr ($row->"dns")]!=[:tostr ($p->"gateway")]) or ([:len ($row->"entrypoint")]>0) or (($row->"logging")=true) or ([:len ($row->"devices")]>0) or (($row->"privileged")=true)) do={ :error "image: unverified container configuration" }
-        :if (([:len ($row->"cmd")]>0) and ((($p->"component")!="tikray") or ([:tostr ($row->"cmd")]!="serve"))) do={ :error "image: owner command differs" }
-        :if ((($row->"memory-high")!=($p->"high")) or (($row->"memory-max")!=($p->"max")) or ([:tostr ($row->"restart-policy")]!="on-failure") or ((!$partial) and (($row->"start-on-boot")!=true))) do={ :error "image: owner lifecycle settings differ" }
-        :return {"id"=$id;"image_id"=$code;"tag"=$claim;"partial"=$partial;"root"=$path}
-    }
-    :local checkArchive do={
-        :local path ($1 . "/images/" . ($2->"component") . "-" . ($2->"digest") . ".tar")
-        :local ids [/file/find where name=$path]
-        :if ([:len $ids]!=1) do={ :error "image: archive unavailable" }
-        :local id [:pick $ids 0]; :local size ($2->"size")
-        :if (([/file/get $id size]!=$size) or ([/file/get $id type]="directory")) do={:error "image: archive length changed"}
-        :local chain ""
-        :for off from=0 to=($size-1) step=16384 do={
-            :local n 16384; :if (($off+$n)>$size) do={:set n ($size-$off)}
-            :local chunk ([/file/read file=$path offset=$off chunk-size=$n as-value]->"data")
-            :if ([:len $chunk]!=$n) do={:error "image: incomplete archive"}
-            :local h [:convert [:convert $chunk from=raw transform=sha512 to=hex] transform=lc]
-            :set chain [:convert [:convert ($chain . $h) from=raw transform=sha512 to=hex] transform=lc]
-        }
-        :if (($chain!=($2->"chain")) or ([/file/get $id size]!=$size) or ([:len [/file/find where .id=$id and name=$path]]!=1)) do={:error "image: archive content changed"}
-        :return $path
-    }
+    :local witnessPath ("/tikray-import-" . $nonce . ".receipt")
     # Use only time spent on a boot. Repeated manual ticks within one
     # second add nothing. A lower uptime starts a new boot; a greater
     # uptime gives a safe lower bound even if the wall clock was changed.
@@ -236,6 +184,7 @@
         :if (([:typeof $trafficLAN]!="str") or (!($trafficLAN~"^[A-Za-z0-9_][A-Za-z0-9_.-]*\$"))) do={:error "image: unknown managed LAN"}
     }
     :local clockAlive do={
+        :if ([:typeof ($1->"job")]!="str") do={:return false}
         :local id [:toid ($1->"job")]; :if ([:typeof $id]!="id") do={:return false}
         :local found [/system/script/job/find where .id=$id]
         :if ([:len $found]!=1) do={:return false}
@@ -250,17 +199,17 @@
     :local now ([:tonsec [/system/resource/get uptime]]/1000000000)
     :if ([:len $journals]=0) do={
         :if (![$sameRef $installed $original]) do={:error "image: stale previous selection"}
-        :local live [$rowOf $profile]
+        :local live [$imageTraffic "row" $profile]
         :if ((($live->"image_id")!=($original->"image_id")) or ($live->"partial")) do={:error "image: installed bytes differ"}
-        :local a [$checkArchive $data $original]
-        :local firstPhase "replace"
+        :local a [$imageTraffic "archive" $data $original]
+        :local firstPhase "prepare"
         :if ([:len $emergency]>0) do={:set firstPhase "recover"}
-        :do { :local b [$checkArchive $data $candidate] } on-error={ :set firstPhase "recover"; :log warning "tikray: candidate image integrity refused" }
+        :do { :local b [$imageTraffic "archive" $data $candidate] } on-error={ :set firstPhase "recover"; :log warning "tikray: candidate image integrity refused" }
         :local f [$checkGrant $grant]
         :set now ([:tonsec [/system/resource/get uptime]]/1000000000)
         :set j {"v"=1;"install"=$identity;"nonce"=$nonce;"component"=$component;"request"=$requestHash;"phase"=$firstPhase;"age"=0;"seen"=$now;"old"=$oldState;"receipt"=[:tostr $stateFile];"retry"=1;"next"=0}
-        :set ($j->"clock") [$makeClock]; :set ($j->"fenced") false
-        :if (($component="runner") and ($firstPhase="replace")) do={:set ($j->"traffic") [$imageTraffic "read" [:toarray ""] ($gateway+2) $trafficLAN $checkGrant $grant ([:len $emergency]>0)]}
+        :set ($j->"baseline") [:tostr ($live->"id")]; :set ($j->"fenced") false
+        :if (($component="runner") and ($firstPhase="prepare")) do={:set ($j->"traffic") [$imageTraffic "read" [:toarray ""] ($gateway+2) $trafficLAN $checkGrant $grant ([:len $emergency]>0)]}
         /system/script/add name=$phaseName source="" policy=read dont-require-permissions=no comment=($prefix . [:serialize to=json options=json.no-string-conversion value=$j])
         :set journals [/system/script/find where name=$phaseName]
         :if ([:len $journals]!=1) do={:error "image: transition publication failed"}
@@ -281,7 +230,7 @@
         :return $replacement
     }
     :local saved [/system/script/get $jid comment]; :local phase ($j->"phase")
-    :if ([:typeof [:find {"replace";"verify";"restore";"recover";"commit";"committed";"reverted"} $phase]]!="num") do={:error "image: invalid transition phase"}
+    :if ([:typeof [:find {"prepare";"replace";"verify";"restore";"recover";"commit";"committed";"reverted"} $phase]]!="num") do={:error "image: invalid transition phase"}
     :if (([:typeof ($j->"age")]!="num") or (($j->"age")<0) or (($j->"age")>300) or ([:typeof ($j->"seen")]!="num") or (($j->"seen")<0)) do={:error "image: invalid native timer"}
     :if (($phase="replace") or ($phase="verify")) do={
         :local newBoot (![$clockAlive ($j->"clock")])
@@ -295,25 +244,39 @@
     # request, require fresh health again before exposing a terminal result.
     :if ($phase="committed") do={:set phase "commit"}
     :if ($phase="reverted") do={:set phase "recover"}
-    :if (([:len $emergency]>0) and (($phase="replace") or ($phase="verify") or ($phase="commit"))) do={
-        :local current [$rowOf $profile]
+    :if (([:len $emergency]>0) and (($phase="prepare") or ($phase="replace") or ($phase="verify") or ($phase="commit"))) do={
+        :local current [$imageTraffic "row" $profile]
         :if ((($current->"image_id")=($candidate->"image_id")) and ([:len [/container/find where .id=($current->"id") and running]]=1)) do={:set phase "verify"} else={:set phase "restore"}
         :set ($j->"phase") $phase; :set saved [$save $j $jid $prefix $saved]
     }
     :local restoring (($phase="restore") or ($phase="recover") or ($phase="reverted"))
     :local want $candidate; :local other $original
     :if ($restoring) do={:set want $original; :set other $candidate}
+    :if ($phase="prepare") do={
+        :local originalRow [$imageTraffic "row" $profile]
+        :if (([:tostr ($originalRow->"id")]!=($j->"baseline")) or (($originalRow->"image_id")!=($original->"image_id")) or ($originalRow->"partial") or (![$sameRef $installed $original])) do={:error "image: preparing baseline changed"}
+        :if ([:len [/container/find where .id=($originalRow->"id") and running]]!=1) do={:set ($j->"phase") "recover"; :set saved [$save $j $jid $prefix $saved]; :return $targetName}
+    }
     :local healthy false; :local canRestart true
-    :if (($component="runner") and ([:len $emergency]=0) and ($phase="replace") and (($j->"fenced")!=true)) do={:set ($j->"fenced") true; :set saved [$save $j $jid $prefix $saved]}
-    :if ((($j->"fenced")=true) and ([:len $emergency]=0)) do={:local held [$imageTraffic "hold" ($j->"traffic") ($gateway+2) $trafficLAN $checkGrant $grant false]}
-    :if (($phase="replace") or ($phase="restore")) do={
+    :if (($component="runner") and ([:len $emergency]=0) and ($phase="prepare") and (($j->"fenced")!=true)) do={:set ($j->"fenced") true; :set saved [$save $j $jid $prefix $saved]}
+    :set ($grant->"flow") ($j->"flow"); :set ($grant->"budget") 15000000000
+    :local releasing ((($j->"flow"->"dir")="release") and ((($j->"phase")="committed") or (($j->"phase")="reverted")))
+    :if ((($j->"fenced")=true) and (!$releasing) and ([:len $emergency]=0)) do={
+        :local began [:tonsec [/system/resource/get uptime]]
+        :local held [$imageTraffic "hold" ($j->"traffic") ($gateway+2) $trafficLAN $checkGrant $grant false]
+        :local left (15000000000-([:tonsec [/system/resource/get uptime]]-$began)); :if ($left<0) do={:set left 0}
+        :set ($grant->"budget") $left
+        :set ($j->"flow") $held; :set saved [$save $j $jid $prefix $saved]; :set ($grant->"flow") $held
+        :if (($held->"done")!=true) do={:return $targetName}
+    }
+    :if (($phase="prepare") or ($phase="replace") or ($phase="restore")) do={
         :local path ""
-        :do { :set path [$checkArchive $data $want] } on-error={
+        :do { :set path [$imageTraffic "archive" $data $want] } on-error={
             :if ($restoring) do={ :error "image: restoration archive unavailable" }
             :set ($j->"phase") "restore"; :set saved [$save $j $jid $prefix $saved]
             :return $targetName
         }
-        :local live [$rowOf $profile]
+        :local live [$imageTraffic "row" $profile]
         :if (([:len $live]>0) and (($live->"image_id")!=($want->"image_id"))) do={
             :local mine ($live->"partial")
             :local expected ($staging->"candidate"); :if (!$restoring) do={:set expected ($staging->"original")}
@@ -333,33 +296,41 @@
             :if ((!$mine) and (($live->"image_id")!=($other->"image_id"))) do={ :error "image: container content differs" }
             :if (([:len $emergency]>0) and ([:len [/container/find where .id=($live->"id") and running]]=1)) do={:return $targetName}
             # A verified fallback must be available before stopping a working image.
-            :if (!$restoring) do={:local backup [$checkArchive $data $original]}
-            :local rootChecked [$checkRoot $base ($live->"root") ($live->"id")]
+            :if (!$restoring) do={:local backup [$imageTraffic "archive" $data $original]}
+            :local rootChecked [$imageTraffic "root" $base ($live->"root") ($live->"id")]
             :local f [$checkGrant $grant]
-            :local id ($live->"id"); :local oldTag ($live->"tag"); :local oldCode ($live->"image_id"); :set live [$rowOf $profile]
+            :local id ($live->"id"); :local oldTag ($live->"tag"); :local oldCode ($live->"image_id"); :set live [$imageTraffic "row" $profile]
             :if ((($live->"id")!=$id) or (($live->"tag")!=$oldTag) or (($live->"image_id")!=$oldCode)) do={:error "image: target changed before stop"}
+            # Arm only after every preparatory batch and both archive checks.
+            # This write-ahead decision covers the first stop, any cut during
+            # extraction, and the candidate trial across subsequent boots.
+            :if ($phase="prepare") do={
+                :if (([:tostr $id]!=($j->"baseline")) or ($oldCode!=($original->"image_id")) or ([:len [/container/find where .id=$id and running]]!=1)) do={:error "image: preparing baseline changed"}
+                :set phase "replace"; :set ($j->"phase") $phase; :set ($j->"age") 0; :set ($j->"clock") [$makeClock]
+                :set ($j->"seen") ([:tonsec [/system/resource/get uptime]]/1000000000); :set saved [$save $j $jid $prefix $saved]
+                :set f [$checkGrant $grant]
+            }
             :if ([:len [/container/find where .id=$id and running]]=1) do={ /container/stop $id }
             :local wait 0
             :while (([:len [/container/find where .id=$id and stopped]]=0) and ($wait<40)) do={:delay 250ms; :set wait ($wait+1)}
             :if (($wait=40) and (!$mine)) do={ :return $targetName }
-            :set f [$checkGrant $grant]; :set live [$rowOf $profile]
+            :set f [$checkGrant $grant]; :set live [$imageTraffic "row" $profile]
             :if ((($live->"id")!=$id) or (($live->"tag")!=$oldTag) or (($live->"image_id")!=$oldCode)) do={:error "image: target changed before removal"}
-            :set rootChecked [$checkRoot $base ($live->"root") $id]
+            :set rootChecked [$imageTraffic "root" $base ($live->"root") $id]
             # Removing a partial native row can also remove its live root.
             # After a reboot a directory recreated at the same path has no
             # association with the extraction. Require our root canary while
             # this incomplete row still refers to an existing directory.
             :if ($mine and ($oldCode="") and ([:len [/file/find where name=($live->"root")]]>0)) do={
-                :local seal (($live->"root") . "/.tikray-import-" . $nonce)
-                :if ([:len [/file/find where name=$seal and contents=$oldTag]]!=1) do={:error "image: incomplete root ownership unknown"}
+                :if (![$imageRootWitness "read" (($live->"root") . $witnessPath) $oldTag]) do={:error "image: incomplete root ownership unknown"}
             }
             /container/remove $id
-            :set live [$rowOf $profile]
+            :set live [$imageTraffic "row" $profile]
         }
         :if ([:len $live]=0) do={
             # Re-read the selected bytes immediately before import, including
             # when the router restarted after removing the old native row.
-            :set path [$checkArchive $data $want]
+            :set path [$imageTraffic "archive" $data $want]
             :local wait 0
             :while (([:len [/file/find where name=$root]]>0) and ($wait<16)) do={:delay 250ms; :set wait ($wait+1)}
             :if ([:len [/file/find where name=$root]]>0) do={
@@ -370,23 +341,26 @@
                 :if ([:len [/file/find where name=$root]]>0) do={:error "image: both extraction roots occupied"}
             }
             :local f [$checkGrant $grant]
-            :if ([:len [$rowOf $profile]]!=0) do={:error "image: slot acquired another container"}
-            :local rootChecked [$checkRoot $base $root ""]
+            :if ([:len [$imageTraffic "row" $profile]]!=0) do={:error "image: slot acquired another container"}
+            :local rootChecked [$imageTraffic "root" $base $root ""]
             :local importing ($staging->"candidate"); :if ($restoring) do={:set importing ($staging->"original")}
             :set ($j->"added") ([:tonsec [/system/resource/get uptime]]/1000000000)
             :set saved [$save $j $jid $prefix $saved]
             /container/add name=$targetName comment=$importing interface=$iface file=$path root-dir=$root mountlists=$targetName envlists=$targetName dns=$gateway memory-high=$high memory-max=$limit restart-policy=on-failure logging=no start-on-boot=no
             # A crash before this witness exists cannot authorize deletion of
             # an ambiguous surviving directory. An absent root is safe.
-            :local canary ($root . "/.tikray-import-" . $nonce)
             :local n 0; :while (([:len [/file/find where name=$root]]=0) and ($n<20)) do={:delay 100ms; :set n ($n+1)}
-            :if (([:len [/file/find where name=$root and type="directory"]]=1) and ([:len [/file/find where name=$canary]]=0)) do={/file/add name=$canary type=file contents=$importing}
+            :if ([:len [/file/find where name=$root]]=1) do={
+                :local claim [$imageTraffic "row" $profile]
+                :if ((($claim->"tag")!=$importing) or (($claim->"root")!=$root)) do={:error "image: import identity changed"}
+                :if (![$imageRootWitness "create" ($root . $witnessPath) $importing]) do={:error "image: incomplete root ownership unknown"}
+            }
             :set wait 0
             # Extraction is neither running nor stopped. Query the two
             # independent flags just as the installer does.
             :while (([:len [/container/find where name=$targetName and comment=$importing and running]]=0) and ([:len [/container/find where name=$targetName and comment=$importing and stopped]]=0) and ($wait<120)) do={:delay 500ms; :set wait ($wait+1)}
             :if ($wait=120) do={ :return $targetName }
-            :set live [$rowOf $profile]
+            :set live [$imageTraffic "row" $profile]
         }
         :if (($live->"image_id")!=($want->"image_id")) do={:error "image: import did not produce expected config ID"}
         :local id ($live->"id"); :local f [$checkGrant $grant]
@@ -402,7 +376,7 @@
         :return $targetName
     }
     :if (($phase="verify") or ($phase="recover") or ($phase="commit")) do={
-        :local live [$rowOf $profile]
+        :local live [$imageTraffic "row" $profile]
         :if (([:len $live]=0) and ($phase="recover")) do={
             # A reboot can interrupt extraction or remove a row before it
             # becomes usable. Retry from the original verified tar; never
@@ -442,6 +416,14 @@
             }
         }
         :if (!$healthy) do={
+            # A partially rearmed image has lost positive health. Restore the
+            # native cutoff before doing any further rollback or restart work.
+            :if ($releasing and ([:len $emergency]=0)) do={
+                :set ($j->"phase") "restore"; :set ($j->"flow") [:toarray ""]
+                :set saved [$save $j $jid $prefix $saved]; :set ($grant->"flow") ($j->"flow")
+                :local held [$imageTraffic "hold" ($j->"traffic") ($gateway+2) $trafficLAN $checkGrant $grant false]
+                :set ($j->"flow") $held; :set saved [$save $j $jid $prefix $saved]; :return $targetName
+            }
             :if ($phase="commit") do={:set ($j->"phase") "restore"; :set saved [$save $j $jid $prefix $saved]}
             # A previously verified image can also fail. Keep both archives
             # and the request, backing off between attempts on this one row.
@@ -453,12 +435,12 @@
                 :local f [$checkGrant $grant]; :local id ($live->"id")
                 :if ([:len [/container/find where .id=$id and running]]=1) do={/container/stop $id}
                 :local waited 0; :while (([:len [/container/find where .id=$id and stopped]]=0) and ($waited<40)) do={ :delay 250ms; :set waited ($waited+1) }
-                :set f [$checkGrant $grant]; :local retryRow [$rowOf $profile]
+                :set f [$checkGrant $grant]; :local retryRow [$imageTraffic "row" $profile]
                 :if ((($retryRow->"id")=$id) and (($retryRow->"image_id")=($want->"image_id")) and ([:len [/container/find where .id=$id and stopped]]=1)) do={/container/start $id}
             }
             :return $targetName
         }
-        :local again [$rowOf $profile]; :local f [$checkGrant $grant]
+        :local again [$imageTraffic "row" $profile]; :local f [$checkGrant $grant]
         :if ((($live->"id")!=($again->"id")) or (($again->"image_id")!=($want->"image_id")) or ([:len [/container/find where .id=($again->"id") and running]]!=1)) do={:error "image: trial identity changed"}
         :if ($again->"partial") do={
             # While suspended the owner explicitly started this verified row.
@@ -478,7 +460,7 @@
         :set ($j->"phase") "committed"; :set saved [$save $j $jid $prefix $saved]; :set phase "committed"
     }
     :if (($phase="committed") or ($phase="reverted")) do={
-        :local live [$rowOf $profile]
+        :local live [$imageTraffic "row" $profile]
         :if (($live->"image_id")!=($want->"image_id")) do={:error "image: completion identity changed"}
         :local f [$checkGrant $grant]
         :if (($phase="reverted") and ($oldState!=($j->"old"))) do={
@@ -486,7 +468,10 @@
             /file/set $stateFile contents=($j->"old")
             :if ([/file/get $stateFile contents]!=($j->"old")) do={:error "image: cannot verify restored lineage"}
         }
-        :if (($j->"fenced")=true) do={:local released [$imageTraffic "release" ($j->"traffic") ($gateway+2) $trafficLAN $checkGrant $grant ([:len $emergency]>0)]}
+        :if (($j->"fenced")=true) do={:local released [$imageTraffic "release" ($j->"traffic") ($gateway+2) $trafficLAN $checkGrant $grant ([:len $emergency]>0)]
+            :set ($j->"flow") $released; :set saved [$save $j $jid $prefix $saved]
+            :if (($released->"done")!=true) do={:return $targetName}
+        }
         :foreach item in={"image-probe.request";"image-proved"} do={
             :local proofPath ($data . "/state/" . $item); :local proofID [/file/find where name=$proofPath]
             :if ([:len $proofID]=1) do={

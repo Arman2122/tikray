@@ -7,7 +7,7 @@
     :foreach p in=[/system/script/get $id policy] do={:if ([:pick $p 0 1]!="!") do={:if ($p!="read") do={:error "image: traffic helper privileges changed"}; :set count ($count+1)}}
     :if ($count!=1) do={:error "image: traffic helper privileges changed"}
     :local body [/system/script/get $id source]; :local n [:len $body]
-    :if (($n=0) or ($n>20000)) do={:error "image: traffic helper content changed"}
+    :if (($n=0) or ($n>@TIKRAY_TRAFFIC_SIZE@)) do={:error "image: traffic helper content changed"}
     :while (($n>0) and (([:pick $body ($n-1) $n]="\r") or ([:pick $body ($n-1) $n]="\n"))) do={:set n ($n-1)}
     :set body [:pick $body 0 $n]
     :if ([:convert [:convert $body from=raw transform=sha512 to=hex] transform=lc]!="@TIKRAY_TRAFFIC_HASH@") do={:error "image: traffic helper content changed"}

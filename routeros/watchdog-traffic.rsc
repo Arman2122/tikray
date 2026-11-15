@@ -2,8 +2,73 @@
 # ping before its xray or DNS is usable, so native check-gateway alone is
 # insufficient during a replacement.
 :local imageTraffic do={
+    :if ($1="root") do={
+        :local base $2; :local root $3; :local ownID $4
+        # Removing a native row retires its extraction root. Include owner
+        # mounts and ancestors of the target directory on either disk alias.
+        :local disk [:pick $base 0 [:find $base "/"]]; :local volume [/disk/find where mount-point=$disk and fs="ext4"]
+        :if ([:len $volume]!=1) do={:error "image: unknown container disk"}
+        :local slot [:tostr [/disk/get [:pick $volume 0] slot]]; :local slash [:find $root "/"]; :local suffix [:pick $root $slash [:len $root]]
+        :foreach dev in=({$disk;$slot}) do={
+            :local rp ($dev . $suffix); :local expr ("^/?" . $rp . "(/|\$)")
+            :foreach c in=[/container/find where root-dir~$expr] do={:if ($c!=$ownID) do={:error "image: owner shares extraction root"}}
+            :if ([:len [/container/mounts/find where src~$expr]]>0) do={:error "image: owner mounts extraction root"}
+            :local folder [:pick $base ([:find $base "/"]+1) [:len $base]]
+            :foreach parent in=({$dev;($dev . "/" . $folder);($dev . "/" . $folder . "/containers")}) do={
+                :if (([:len [/container/find where root-dir=$parent or root-dir=("/" . $parent) or root-dir=("/" . $parent . "/")]]>0) or ([:len [/container/mounts/find where src=$parent or src=("/" . $parent) or src=("/" . $parent . "/")]]>0)) do={:error "image: owner shares extraction directory"}
+            }
+        }
+        :return true
+    }
+    :if ($1="archive") do={
+        :local data $2; :local ref $3
+        :local path ($data . "/images/" . ($ref->"component") . "-" . ($ref->"digest") . ".tar")
+        :local ids [/file/find where name=$path]
+        :if ([:len $ids]!=1) do={ :error "image: archive unavailable" }
+        :local id [:pick $ids 0]; :local size ($ref->"size")
+        :if (([/file/get $id size]!=$size) or ([/file/get $id type]="directory")) do={:error "image: archive length changed"}
+        :local chain ""
+        :for off from=0 to=($size-1) step=16384 do={
+            :local n 16384; :if (($off+$n)>$size) do={:set n ($size-$off)}
+            :local chunk ([/file/read file=$path offset=$off chunk-size=$n as-value]->"data")
+            :if ([:len $chunk]!=$n) do={:error "image: incomplete archive"}
+            :local h [:convert [:convert $chunk from=raw transform=sha512 to=hex] transform=lc]
+            :set chain [:convert [:convert ($chain . $h) from=raw transform=sha512 to=hex] transform=lc]
+        }
+        :if (($chain!=($ref->"chain")) or ([/file/get $id size]!=$size) or ([:len [/file/find where .id=$id and name=$path]]!=1)) do={:error "image: archive content changed"}
+        :return $path
+    }
+    # The Docker config digest identifies the extracted image; a display tag
+    # or an incomplete extracting row cannot authorize a destructive action.
+    :if ($1="row") do={
+        :local p $2; :local n ($p->"name"); :local c ($p->"tag"); :local v ($p->"veth"); :local rootPath ($p->"root")
+        :local rows [/container/find where name=$n or comment=$c or interface=$v or root-dir=$rootPath or root-dir=("/" . $rootPath)]
+        :if ([:len $rows]=0) do={ :return [:toarray ""] }
+        :if ([:len $rows]!=1) do={ :error "image: conflicting container identities" }
+        :local id [:pick $rows 0]; :local row [/container/get $id]
+        :local path [:tostr ($row->"root-dir")]; :if ([:pick $path 0 1]="/") do={:set path [:pick $path 1 [:len $path]]}
+        :local trace ($p->"staging"); :local claim [:tostr ($row->"comment")]; :local partial false; :local archive
+        :if ($claim=($trace->"candidate")) do={:set partial true; :set archive ($p->"new")}
+        :if ($claim=($trace->"original")) do={:set partial true; :set archive ($p->"old")}
+        :local code [:tostr ($row->"image-id")]
+        :if ([:pick $code ([:len $code]-1) [:len $code]]=" ") do={:set code [:pick $code 0 ([:len $code]-1)]}
+        :if ([:pick $code 0 7]="sha256:") do={:set code [:pick $code 7 [:len $code]]}
+        :local expectedID $code
+        :if ($partial) do={
+            :set expectedID ($archive->"image_id")
+            :local input [:tostr ($row->"file")]; :if ([:pick $input 0 1]="/") do={:set input [:pick $input 1 [:len $input]]}
+            :if (($input!="") and ($input!=(($p->"data") . "/images/" . ($p->"component") . "-" . ($archive->"digest") . ".tar"))) do={:error "image: provisional archive changed"}
+        }
+        :local alternative (($rootPath . "-image-" . $expectedID)=$path)
+        :if ($alternative and (($expectedID!=($p->"old"->"image_id")) and ($expectedID!=($p->"new"->"image_id")))) do={:error "image: foreign recovery root"}
+        :if ((($row->"name")!=$n) or ((!$partial) and ($claim!=$c)) or ([:tostr ($row->"interface")]!=$v) or (($path!=$rootPath) and (!$alternative)) or ([:tostr ($row->"mountlists")]!=$n) or ([:tostr ($row->"envlists")]!=$n) or ([:tostr ($row->"dns")]!=[:tostr ($p->"gateway")]) or ([:len ($row->"entrypoint")]>0) or (($row->"logging")=true) or ([:len ($row->"devices")]>0) or (($row->"privileged")=true)) do={ :error "image: unverified container configuration" }
+        :if (([:len ($row->"cmd")]>0) and ((($p->"component")!="tikray") or ([:tostr ($row->"cmd")]!="serve"))) do={ :error "image: owner command differs" }
+        :if ((($row->"memory-high")!=($p->"high")) or (($row->"memory-max")!=($p->"max")) or ([:tostr ($row->"restart-policy")]!="on-failure") or ((!$partial) and (($row->"start-on-boot")!=true))) do={ :error "image: owner lifecycle settings differ" }
+        :return {"id"=$id;"image_id"=$code;"tag"=$claim;"partial"=$partial;"root"=$path}
+    }
     :local operation $1; :local prior $2; :local peer $3; :local lan $4
     :local checkOwner $5; :local grant $6; :local emergency $7
+    # @TIKRAY_IMAGE_FLOWS@
     :local collect do={
         :local runIP $1; :local lanList $2; :local off $3; :local op $4; :local rows [:toarray ""]
         :local tableCount [:len [/routing/table/find where name="tikray-open" or name="tikray-closed" or comment="tikray:table-open" or comment="tikray:table-closed"]]
@@ -103,6 +168,7 @@
         :return $rows
     }
     :local live [$collect $peer $lan $emergency $operation]
+    :if ([:len $live]>0) do={:local checked [$openFlows "check" $live $peer $grant $checkOwner $operation $emergency]}
     :if ($operation="read") do={
         :local saved [:toarray ""]
         :foreach key,row in=$live do={ :set ($saved->$key) ($row->"disabled") }
@@ -110,9 +176,11 @@
     }
     :if ([:len $prior]!=[:len $live]) do={:error "image: native policy changed during trial"}
     :foreach key,row in=$live do={:if ([:typeof ($prior->$key)]!="bool") do={:error "image: unknown native policy row"}}
-    :local release ($operation="release"); :local order {"watch";"open";"routes";"dns";"acl"}
-    :if ($release) do={:set order {"acl";"dns";"routes";"open";"watch"}}
+    :local release ($operation="release"); :local order {"watch";"dns";"handoff";"open";"routes";"acl"}
+    :if ($release) do={:set order {"acl";"dns";"routes";"open";"watch";"handoff"}}
+    :local result {"dir"=$operation;"done"=true}
     :foreach group in=$order do={
+        :if (($group="handoff") and ([:len $live]>0)) do={:set result [$openFlows $operation $live $peer $grant $checkOwner $operation $emergency]; :if (($result->"done")!=true) do={:return $result}}
         :foreach key,row in=$live do={
             :local menu ($row->"menu"); :local want true; :if ($release) do={:set want ($prior->$key)}
             :local apply ((($group="watch") and ($menu="/tool/netwatch")) or (($group="open") and ($menu="/ip/firewall/mangle")) or (($group="routes") and ($menu="/ip/route")) or (($group="dns") and ($menu="/ip/firewall/nat")) or (($group="acl") and ($menu="/ip/firewall/filter")))
@@ -132,5 +200,5 @@
         }
         :if (($group="watch") and (!$release) and ([:len $live]>0)) do={:delay 1s; :set live [$collect $peer $lan $emergency $operation]}
     }
-    :return true
+    :return $result
 }

@@ -7,12 +7,26 @@ import (
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/hex"
+	"fmt"
 	"io/fs"
 	"strings"
 	"testing"
 
 	routerosfiles "github.com/Arman2122/tikray/routeros"
 )
+
+// Source readback may carry one extra native line ending. A compiled helper
+// must always fit both the installer and its restricted caller's exact bound.
+func TestWatchdogHelperBindsActualSourceLength(t *testing.T) {
+	body, helper, err := WatchdogScripts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := strings.ReplaceAll(strings.TrimRight(helper, "\r\n"), "\n", "\r\n")
+	if !strings.Contains(body, fmt.Sprintf("($n>%d)", len(canonical)+4)) {
+		t.Fatal("native source bound differs from the installed helper")
+	}
+}
 
 func TestInstallerBindsComponentArchitectureAndChunks(t *testing.T) {
 	p, _ := Installed("7.25", "x86_64", "CHR")
