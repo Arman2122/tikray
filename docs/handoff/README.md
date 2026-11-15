@@ -1,6 +1,6 @@
 # tikray handoff
 
-M3a merged into main in [PR #7](https://github.com/Arman2122/tikray/pull/7) at `acf1dab`. M3b Task 5 (geo) is in progress on `m3b-routeros`. The final M3a CHR runs used
+M3a merged into main in [PR #7](https://github.com/Arman2122/tikray/pull/7) at `acf1dab`. M3b Task 5 (geo) passed its three-target CHR checks on `m3b-routeros`. The final M3a CHR runs used
 the signed images and test harness from clean commit `57d40cb`. Start with
 the [M3 ledger](m3/ledger.md) for results and decisions, the
 [approved plan](../superpowers/plans/2026-11-06-m3-routeros.md) for the
@@ -29,9 +29,24 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M2b: the service (`tikray serve`, HTTPS API, health, subscriptions) | Done, merged (PR #5) | |
 | M2c: human sign-in and hot server changes | Done, merged (PR #6) | |
 | M3a: RouterOS integration | Merged in PR #7. All three targets passed installer 6/6, routing 9/9 and uninstall 4/4. | [Ledger and image hashes](m3/ledger.md), [CHR results](../../test/e2e/results/) |
-| M3b: geo, image updates and CHR CI | Task 5 started from the M3a merge. The read-only geo slot loader and config preview are implemented. Geo update, rollback and recovery are pending. Image update/rollback, outage/watchdog suites and CHR CI follow. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
+| M3b: geo, image updates and CHR CI | Task 5 implements verified geo updates, guarded native diffs, rollback and restart recovery. Task 6b image update/rollback, the outage/watchdog suites and CHR CI follow. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
 | M4: web UI | Not started | |
 | M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
+
+## M3b geo operations
+
+Use `tikray geo update latest --profile iran` to verify and trial an Iran
+bundle through the running service. `tikray geo rollback` trials the previous
+selection, including a first installation's return to no geo. The equivalent
+authenticated endpoints are `POST /v1/geo/update` and
+`POST /v1/geo/rollback`. Existing source/interface ownership checks apply.
+A rejected or pending operation leaves the last verified list or its
+transition guards in place. The service resolves pending evidence against
+the runner after restart.
+
+Publisher checksums, custom/offline layouts and the UTC update window are
+documented in [Geo publishers](m3/geo-publishers.md). The [Task 5 acceptance record](m3/ledger.md#task-5-geo-acceptance) identifies the reviewed source, three-target results and control-interruption proof. The historical nine-case M3a routing results use their
+recorded M3a revision. M3b adds `geo_diff_and_rollback` as its tenth case.
 
 ## M2c handoff
 
@@ -110,7 +125,7 @@ The runner has a 30-second HTTP read timeout. Store validation rejects device
 overlap with the private bridge, loopback or multicast and checks the bridge
 subnet against reserved ranges.
 
-- **M3b:** Follow the remaining scope in the approved M3 plan after M3a merges.
+- **M3b:** Continue with Task 6b from the geo checkpoint on `m3b-routeros`, then the dedicated outage/watchdog suites and CHR CI.
 - **M4:**
   - Events need a boot id, because `Seq` restarts at 1 after a restart.
   - The UI signs in with M2c's cookie and CSRF scheme.
@@ -184,7 +199,7 @@ The owner's Windows checkout is `C:\Users\Arman\Desktop\hakir\Projects\tikray`. 
 | Images | `make images` | Docker with the **classic** image store (`{"features":{"containerd-snapshotter":false}}`); RouterOS can't import containerd archives |
 | Lab, end to end on RouterOS CHR | `make lab-deps`, then e.g. `TIKRAY_LAB_CHANNEL=stable go test -tags lab -p 1 -count=1 -v -timeout 240m -run 'TestService' ./test/e2e/` | Linux host or WSL2 Ubuntu, root, QEMU, Docker. No KVM: CHR runs under QEMU's TCG emulation, x86_64 in minutes and arm64 slower. `TIKRAY_LAB_ARCH` picks the architecture. |
 
-For the M3a suites use the three reviewed bundles described in the
+To reproduce M3a, check out its reviewed revision `57d40cb` and use the three bundles described in the
 [M3 ledger](m3/ledger.md#final-m3a-acceptance). Run the wrapper as root in
 Ubuntu with `TIKRAY_LAB_CACHE` pointing to the prepared lab cache.
 This example selects one target's signed archives and packaged scripts.

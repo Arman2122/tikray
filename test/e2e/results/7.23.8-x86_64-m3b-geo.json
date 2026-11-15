@@ -1,0 +1,8 @@
+[
+  {
+    "id": "geo_diff_and_rollback",
+    "pass": true,
+    "detail": "Verified geo trials changed only the affected domestic ranges and LAN paths. Rejected data, owner dependencies and rollback preserved the verified policy.",
+    "seconds": 312.992
+  }
+]

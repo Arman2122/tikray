@@ -459,3 +459,26 @@ Ruling: Clean an unused, managed, newly staged candidate after a pre-journal fai
 The native inventory and CHR acceptance harness were pushed in `7e9d26e`. The new geo routing case first failed against the prior M3a images and then passed on a development image with real xray. The final focused runs below identify their exact reviewed binary revision separately from any later test/evidence changes.
 
 The reviewed product and routing harness were built from `bc2715d2e4348e46adc845971c9fa34881a36ab5`. A separate lab-tagged `TestM3GeoRecovery` exercised an actual control interruption during a live geo trial on 7.25 x86_64 with xray 26.11.9. The old M3a pair failed with HTTP 404. On the reviewed pair the test passed in 361.76 seconds, verifying the candidate's exact deadline and both selectors against the independently running runner's deadline rollback. Both changed domestic rows stayed absent while control was stopped, and the shared row kept its native ID. After restart the service restored the old LAN paths, retired the journal, and accepted a fresh update to the new release. The owner's SSH/API and unrelated TCP stream survived. The bounded wrapper exited zero with no leftover QEMU or lab networking.
+
+### Task 5 geo acceptance
+
+The [reviewed production revision](https://github.com/Arman2122/tikray/commit/bc2715d2e4348e46adc845971c9fa34881a36ab5) passed the unit, compatibility and image [CI checks](https://github.com/Arman2122/tikray/actions/runs/43702759206). The focused routing suite and the images came from that clean revision. The additional control-interruption test was committed in `275182e`. It used the same reviewed stable amd64 images. Task 6b and the rest of M3b remain ahead.
+
+| RouterOS CHR under QEMU TCG | Geo diff, trial refusal and rollback | Xray |
+|---|---|---|
+| 7.25 x86_64 | [passed in 308.349 s](../../../test/e2e/results/7.25-x86_64-m3b-geo.json) | 26.11.9 |
+| 7.23.8 x86_64 | [passed in 312.992 s](../../../test/e2e/results/7.23.8-x86_64-m3b-geo.json) | 26.11.9 |
+| 7.25 arm64 | [passed in 308.676 s](../../../test/e2e/results/7.25-arm64-m3b-geo.json) | 26.11.9 |
+
+Each case drove the authenticated API and real signed containers, with independently trusted offline checksums and real GeoIP/GeoSite protobuf fixtures. Installing A and then B changed the actual LAN egress and WAN-side SYN counts, preserving the shared native row. The complete managed inventory differed only at the changed domestic members. Repeating B retained the runner process and inventory. A foreign member, a bad checksum and a real xray trial rejection all preserved the effective selection. Rolling back restored A and its paths. All three complete focused invocations exited zero. The three fixed-description JSON files were independently validated. The nine-case M3a routing reports still describe their original M3a images.
+
+| Saved archive | SHA-256 |
+|---|---|
+| tikray-amd64.tar | `e49ea4bfd05e80f52be143e62de2ff34355162e4d23e6924a41716a740aa2db8` |
+| tikray-runner-amd64.tar | `ff399e7f09f7097102e21937c9a5fe6bc3b42406ad53b40c693717e7ef7245a4` |
+| tikray-arm64.tar | `3b7be3c9161a9edd57d74893fc4af45dee175b89d9567cec5e5847889246b99a` |
+| tikray-runner-arm64.tar | `077f3d1f3423a4debf2f6775ffb4400c57337992dfc903c6d24473377554825b` |
+
+Both x86 targets used byte-identical archives and signatures. QA verified the embedded clean Go revision, ELF machine, Docker platform/default command, signatures (cosign v2.6.1) and archive digests. QA public key DER SPKI SHA-256 was `23b0575a166eaa052f1a09b371dd44ec8f70fadb843a0b06de0206037510cfe6`. Reviewed bundles are available locally in `out/m3-reviewed/bc2715d2e4348e46adc845971c9fa34881a36ab5/<target>/`.
+
+To repeat the focused routing proof, select the desired bundle as `TIKRAY_LAB_IMAGES`, the prepared CHR cache as `TIKRAY_LAB_CACHE`, and `TIKRAY_LAB_XRAY=v26.11.9`. In Ubuntu as the lab owner, run `scripts/test-m3-chr.sh 7.25 x86_64 '^TestM3Routing$/^geo_diff_and_rollback$'` (substitute the target version/architecture as needed). The wrapper writes a filtered routing report. For the independent process-interruption check, run the lab-tagged `TestM3GeoRecovery` in `./test/e2e` with the same stable x86_64 bundle and an isolated lab namespace. The final checks found no remaining QEMU process or test networking.

@@ -833,7 +833,11 @@ fingerprint and release from use, and preserves reused certificates.
     removes a VLESS server without a PID change, follows LAN traffic to the
     remaining server, verifies a policy change replaces the process, and boots
     the runner from a subsequently adopted config with the control plane stopped;
-  - geo update and address-list diff;
+  - geo update and address-list diff (`TestM3Routing/geo_diff_and_rollback`).
+    Verify the active xray selection and the actual LAN egress, preserve
+    native IDs of retained ranges, and check rejected and rolled-back trials.
+    `TestM3GeoRecovery` interrupts control while the runner is on trial and
+    checks autonomous expiry, policy restoration, and a new update after restart;
   - tikray self-update and watchdog rollback;
   - uninstall leaves zero `tikray:` objects.
 
@@ -846,6 +850,11 @@ route. Emergency off and automatic re-arm passed on each target. The same
 amd64 archives passed `TestService` (8), `TestAuth` (6) and `TestHot` (4)
 on 7.25 x86_64. The [M3 ledger](../../handoff/m3/ledger.md#final-m3a-acceptance)
 identifies the complete results and signed image hashes.
+
+M3b Task 5 passed its focused geo case on all three CHR targets with xray
+26.11.9 and the signed images built from `bc2715d`. The separate real
+control-interruption case passed on 7.25 x86_64. See the
+[geo acceptance record](../../handoff/m3/ledger.md#task-5-geo-acceptance).
 
 ### 8.5 Hardware benchmark
 
@@ -891,7 +900,7 @@ docs/
 | **M0: data-path spike** | **Lab done:** all 22 checks pass on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25) with the newest xray; the real-hardware benchmark is pending. See `docs/superpowers/findings/2026-10-24-m0-data-path.md`. On RouterOS CHR ARM64 and real hardware, prove: xray TUN inbound inside a RouterOS container, mangle routing into it, no source NAT, sniffing with `routeOnly`, UDP, DNS redirect, fallback. Measure throughput and RAM. If something blocks this path, we change the design before building on it. (QUIC sniffing moved to M3: no QUIC fixture in M0.) |
 | **M1: runner + artifacts** | **Done:** the real `tikray-runner` and `tikray` images take xray-core through all nine lifecycle scenarios of `TestCoreLifecycle` (`test/e2e/core_lab_test.go`, §8.4) on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25), with 26.1.18, 26.3.27 and the newest release, 26.10.21. Results: `test/e2e/results/`. Runner with trial protocol; fetch chain, verification, slots; xray update and rollback end to end. |
 | **M2: control-plane core** | **M2a done** (§3.4): the desired state in versioned files (`store`), share links (`sharelink`), the outbound policy of the newest xray (`xraypolicy`), subscriptions without the schedule (`subscription`), the config renderer (`render`, its golden scenarios accepted by xray 26.1.18, 26.3.27, 26.9.30 and 26.10.21, §8.2), and `tikray config render` and `tikray apply`, with core updates and rollbacks rendering for their core. `TestConfigApply` (`test/e2e/config_lab_test.go`, §8.4) passes all eight checks on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25) with the newest xray, 26.10.21, and 26.3.27, after the final fix wave; `TestCoreLifecycle` still passes all nine on rendered configs on the same three (x86_64 long-term 7.23.8 and ARM64 stable 7.25 after the final fix wave, x86_64 stable 7.25 just before it). Results: `test/e2e/results/*-m2a.json` and `*-m1.json`. **M2b done** (§3.4): `tikray serve` as the image's default command, owning the state and keeping xray applied to it (each change tested by the runner's xray where it adds or changes a server, then applied through a trial, with the proxy probe waived when it fails on the active config too); the HTTPS API with a pinned self-signed certificate and a bearer token; the `xray` gRPC client without the gRPC library; the `health` monitor; subscriptions refreshed on schedule; redacted events; and the CLI over the API. `TestService` (`test/e2e/service_lab_test.go`, §8.4) passes all eight checks on CHR x86_64 (stable 7.25, long-term 7.23.8) and ARM64 (stable 7.25) with the newest xray, 26.10.21, and on the same runs RouterOS imports the busybox-based image, `/file/get` gives the PEM whose fingerprint `serve` printed, and `tikray status` runs at `/container/shell`. With the new default command, `TestConfigApply` still passes all eight checks and `TestCoreLifecycle` all nine on x86_64 stable 7.25. Results: `test/e2e/results/*-m2b.json`, and the re-runs in `7.25-x86_64-m2a.json` and `7.25-x86_64-m1.json`. **M2c done** (§3.4, §7): human sign-in, hot changes to server outbounds with trial fallback, and batched validation of servers saved untested. `TestAuth` passed 6/6 and `TestHot` passed 4/4 on CHR 7.25 x86_64, 7.23.8 x86_64 and 7.25 arm64 under WSL2/QEMU TCG. `TestHot` ran xray 26.10.31. The root-bearer `TestService` rerun passed 8/8 on 7.25 x86_64. The matrix was repeated on the reviewed binaries (bf6b119). Results: `test/e2e/results/*-m2c-auth.json`, `*-m2c-hot.json` and `7.25-x86_64-m2b.json`. |
-| **M3: RouterOS** | **M3a merged in PR #7.** Installer, reconciler, version adapters, basic watchdog, emergency off and uninstall passed the three-target CHR matrix (§8.4). M3b follows the approved M3a merge and covers geo sync/rollback, image update/rollback, the outage and watchdog suites and CHR CI. |
+| **M3: RouterOS** | **M3a merged in PR #7.** Installer, reconciler, version adapters, basic watchdog, emergency off and uninstall passed the three-target CHR matrix (§8.4). M3b Task 5 implements geo sync, trial, rollback and recovery (§4.6). The remaining M3b tasks cover image update/rollback, the outage and watchdog suites and CHR CI. |
 | **M4: web UI** | Dashboard, servers and subscriptions, devices and policies, routing, updates (history and rollback), settings, logs. |
 | **M5: v1.0** | Hardening, full e2e matrix, hardware benchmarks, docs, signed release. |
 
