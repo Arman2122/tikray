@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -28,5 +30,35 @@ func TestImageCommandsUseAuthenticatedService(t *testing.T) {
 		if code != 2 || strings.Contains(out+diag, private) || len(f.called("ImageUpdate")) != 1 {
 			t.Fatal("invalid image argument dispatched or echoed")
 		}
+	}
+}
+
+func TestOwnerImageSourceWithoutChangingRouterOSEnvironment(t *testing.T) {
+	data := t.TempDir()
+	dir := filepath.Join(data, "state")
+	if os.Mkdir(dir, 0700) != nil {
+		t.Fatal("fixture")
+	}
+	p := filepath.Join(dir, "image-source.json")
+	cfg := Config{Data: data}
+	if os.WriteFile(p, []byte(`{"version":1,"upstream":"https://release.example/tikray","mirrors":["https://mirror.example/{version}/{file}"],"runner_mode":"manual"}`), 0600) != nil {
+		t.Fatal("fixture")
+	}
+	got, err := ownerImageSource(cfg)
+	if err != nil || got.ImageUpstream != "https://release.example/tikray" || len(got.ImageMirrors) != 1 || got.ImageSchedules == nil {
+		t.Fatal("installed owner source was not available")
+	}
+	if os.WriteFile(p, []byte(`{"version":1,"upstream":"http://private-fixture"}`), 0600) != nil {
+		t.Fatal("fixture")
+	}
+	_, err = ownerImageSource(cfg)
+	if err == nil || strings.Contains(err.Error(), "private-fixture") {
+		t.Fatal("bad source accepted or echoed")
+	}
+	// Environment overrides are a complete configuration, never a blend of two roots.
+	cfg.ImageUpstream = "https://override.example/"
+	got, err = ownerImageSource(cfg)
+	if err != nil || got.ImageUpstream != cfg.ImageUpstream || len(got.ImageMirrors) != 0 {
+		t.Fatal("ambiguous image source precedence")
 	}
 }

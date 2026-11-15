@@ -50,6 +50,11 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 	if err != nil {
 		return c.fail(err)
 	}
+	env, err = ownerImageSource(env)
+	if err != nil {
+		env.imageDisabled = true
+		fmt.Fprintln(c.stderr, "tikray: image updates disabled; check the private image publisher configuration")
+	}
 	if err := prepareDirs(env.Data); err != nil {
 		return c.fail(err)
 	}
@@ -107,20 +112,22 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 		router = managed
 	}
 	svc, err := service.New(service.Config{
-		Store:        s,
-		Updaters:     w.updaters,
-		Runner:       w.runner,
-		Router:       router,
-		GeoProfile:   env.GeoProfile,
-		GeoSchedule:  env.GeoSchedule,
-		GeoReader:    w.geoReader,
-		Bootstrap:    bootstrap,
-		VerifyBridge: install != nil,
-		Monitor:      w.monitor,
-		Data:         env.Data,
-		Socks:        w.cfg.Socks,
-		Log:          c.stderr,
-		LocalBridge:  assignedBridge,
+		Store:          s,
+		Updaters:       w.updaters,
+		Runner:         w.runner,
+		Router:         router,
+		GeoProfile:     env.GeoProfile,
+		ImageSchedules: env.ImageSchedules,
+		ImagesDisabled: env.imageDisabled,
+		GeoSchedule:    env.GeoSchedule,
+		GeoReader:      w.geoReader,
+		Bootstrap:      bootstrap,
+		VerifyBridge:   install != nil,
+		Monitor:        w.monitor,
+		Data:           env.Data,
+		Socks:          w.cfg.Socks,
+		Log:            c.stderr,
+		LocalBridge:    assignedBridge,
 	})
 	if err != nil {
 		return c.fail(err)

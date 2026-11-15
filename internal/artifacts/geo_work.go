@@ -29,27 +29,41 @@ func geoFDPath(fd int) string { return fmt.Sprintf("/proc/self/fd/%d", fd) }
 // before writing a payload or renaming a retired slot. After a power failure
 // an unrecorded lookalike directory can never authorize recursive deletion.
 func recordGeoWork(parent, source int, name string) error {
+	return recordSlotWork(parent, source, name, geoWorkFile)
+}
+func recordSlotWork(parent, source int, name, markerName string) error {
 	var st unix.Stat_t
 	if e := unix.Fstat(source, &st); e != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return errGeoWork
 	}
 	work := geoWork{Name: name, Device: uint64(st.Dev), Inode: st.Ino}
 	b, e := json.Marshal(work)
-	if e != nil || atomicfile.WriteFile(filepath.Join(geoFDPath(parent), geoWorkFile), b, 0600) != nil {
+	if e != nil || atomicfile.WriteFile(filepath.Join(geoFDPath(parent), markerName), b, 0600) != nil {
 		return errGeoWork
 	}
 	return nil
 }
 
 func cleanupGeoWork(parent int) error {
-	marker := filepath.Join(geoFDPath(parent), geoWorkFile)
+	return cleanupSlotWork(parent, geoWorkFile,
+		func(s string) bool { return strings.HasPrefix(s, ".tmp-geo-") || strings.HasPrefix(s, ".old-geo-") },
+		func(s string) bool {
+			switch s {
+			case "geoip.dat", "geosite.dat", "domestic-v4.txt", "meta.json", "geoip.dat.part", "geosite.dat.part", "domestic-v4.txt.part":
+				return true
+			}
+			return false
+		})
+}
+func cleanupSlotWork(parent int, markerName string, workingName, allowedFile func(string) bool) error {
+	marker := filepath.Join(geoFDPath(parent), markerName)
 	b, e := atomicfile.ReadRegular(marker, 2048, 0600)
 	if errors.Is(e, fs.ErrNotExist) {
 		return nil
 	}
 	var work geoWork
 	if e != nil || json.Unmarshal(b, &work) != nil || work.Inode == 0 || len(work.Name) > 96 || work.Name != filepath.Base(work.Name) ||
-		(!strings.HasPrefix(work.Name, ".tmp-geo-") && !strings.HasPrefix(work.Name, ".old-geo-")) {
+		!workingName(work.Name) {
 		return errGeoWork
 	}
 	fd, e := unix.Openat(parent, work.Name, unix.O_CLOEXEC|unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
@@ -68,12 +82,7 @@ func cleanupGeoWork(parent int) error {
 			return errGeoWork
 		}
 		for _, ent := range entries {
-			switch ent.Name() {
-			case "geoip.dat", "geosite.dat", "domestic-v4.txt", "meta.json", "geoip.dat.part", "geosite.dat.part", "domestic-v4.txt.part":
-			default:
-				return errGeoWork
-			}
-			if !ent.Type().IsRegular() {
+			if !allowedFile(ent.Name()) || !ent.Type().IsRegular() {
 				return errGeoWork
 			}
 		}

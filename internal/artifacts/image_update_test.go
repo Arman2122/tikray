@@ -184,3 +184,35 @@ func TestImageReceiptMissingAfterCommitCannotSelectBootstrap(t *testing.T) {
 		t.Fatal("another installation authorized an update")
 	}
 }
+
+func TestStateRetentionUsesBothSignedControlSchemas(t *testing.T) {
+	u, key := seedImageTrust(t)
+	id := strings.Repeat("a", 32)
+	state := filepath.Join(u.Data, "state")
+	os.WriteFile(filepath.Join(state, "install.id"), []byte(id), 0600)
+	stage := func(tag, schema string) ImageRef {
+		t.Helper()
+		raw := imageWithStateLabel(t, "tikray", u.Arch, tag, schema)
+		putInboxImage(t, u, "tikray", tag, raw, signImageFixture(t, key, raw))
+		im, err := u.StageImage(t.Context(), "tikray", tag)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return im.Ref()
+	}
+	prev := stage("v2", "2")
+	current := stage("v3", "3")
+	b, _ := json.Marshal(imageReceipt{1, id, current, prev})
+	os.WriteFile(filepath.Join(state, "image-tikray.json"), b, 0600)
+	active, older, err := RetainedStateSchemas(t.Context(), u.Data)
+	if err != nil || active != 3 || older != 2 {
+		t.Fatal("wrong authenticated schema pair")
+	}
+	path := filepath.Join(u.Data, "images", imageFilename(prev)+".sig")
+	if os.WriteFile(path, []byte("invalid"), 0644) != nil {
+		t.Fatal("fixture")
+	}
+	if _, _, err := RetainedStateSchemas(t.Context(), u.Data); err == nil {
+		t.Fatal("used the schema of an unverified rollback image")
+	}
+}

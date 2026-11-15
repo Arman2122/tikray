@@ -117,9 +117,11 @@ type Config struct {
 	Socks string
 	// GeoProfile is the owner-configured default publisher for daily checks.
 	// An empty value uses the installed slot's profile, if one exists.
-	GeoProfile  string
-	GeoSchedule GeoSchedule
-	GeoReader   *artifacts.GeoReader
+	GeoProfile     string
+	GeoSchedule    GeoSchedule
+	ImageSchedules *ImageSchedules
+	ImagesDisabled bool
+	GeoReader      *artifacts.GeoReader
 	// LocalBridge verifies that the control container has the proposed .2
 	// address and exact prefix. Without it a bridge repair cannot be trusted.
 	LocalBridge func(store.Network) bool
@@ -127,9 +129,11 @@ type Config struct {
 
 // Service owns the desired state and keeps xray applied to it.
 type Service struct {
-	bootstrap   *Bootstrap
-	bootPending atomic.Bool
-	geoDegraded atomic.Bool
+	imageSchedules *ImageSchedules
+	imagesDisabled bool
+	bootstrap      *Bootstrap
+	bootPending    atomic.Bool
+	geoDegraded    atomic.Bool
 	// The runner endpoints cannot be used during this process's lifetime
 	// if they were derived from an unsafe legacy bridge at startup.
 	repairBridge bool
@@ -232,10 +236,12 @@ func New(c Config) (*Service, error) {
 		c.GeoReader = new(artifacts.GeoReader)
 	}
 	s := &Service{
-		geoReader:    c.GeoReader,
-		bootstrap:    c.Bootstrap,
-		repairBridge: repairBridge,
-		localBridge:  c.LocalBridge,
+		imageSchedules: c.ImageSchedules,
+		imagesDisabled: c.ImagesDisabled,
+		geoReader:      c.GeoReader,
+		bootstrap:      c.Bootstrap,
+		repairBridge:   repairBridge,
+		localBridge:    c.LocalBridge,
 
 		store:        c.Store,
 		updaters:     c.Updaters,

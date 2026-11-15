@@ -186,6 +186,10 @@ func read(path string, version, current int, steps map[int]migration) (State, ui
 	if err != nil {
 		return State{}, 0, err
 	}
+	return decodeStateFile(data, version, current, steps)
+}
+
+func decodeStateFile(data []byte, version, current int, steps map[int]migration) (State, uint64, error) {
 	var f file
 	if err := json.Unmarshal(data, &f); err != nil {
 		return State{}, 0, err

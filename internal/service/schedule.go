@@ -44,6 +44,7 @@ func (s *Service) schedule(ctx context.Context) {
 		}
 		s.refreshDue(ctx)
 		s.checkGeoDue(ctx, s.GeoUpdate)
+		s.checkImagesDue(ctx)
 		wait = scheduleEvery
 	}
 }

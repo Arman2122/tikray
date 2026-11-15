@@ -19,10 +19,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
 func testImage(t *testing.T, component, arch, version string) []byte {
+	t.Helper()
+	return imageWithStateLabel(t, component, arch, version, "")
+}
+func imageWithStateLabel(t *testing.T, component, arch, version, schema string) []byte {
 	t.Helper()
 	name := "tikray"
 	entry := "/usr/local/bin/tikray"
@@ -32,7 +37,7 @@ func testImage(t *testing.T, component, arch, version string) []byte {
 	} else {
 		cmd = []string{"serve"}
 	}
-	conf, _ := json.Marshal(map[string]any{"os": "linux", "architecture": arch, "config": map[string]any{"Entrypoint": []string{entry}, "Cmd": cmd, "Labels": map[string]string{"org.opencontainers.image.version": version}}})
+	conf, _ := json.Marshal(map[string]any{"os": "linux", "architecture": arch, "config": map[string]any{"Entrypoint": []string{entry}, "Cmd": cmd, "Labels": map[string]string{"org.opencontainers.image.version": version, "io.tikray.state-version": schema}}})
 	configPath := fmt.Sprintf("blobs/sha256/%x", sha256.Sum256(conf))
 	layer := bytes.Repeat([]byte{0x00, 0xff, 0x41}, 20000)
 	layerPath := fmt.Sprintf("blobs/sha256/%x", sha256.Sum256(layer))
@@ -229,5 +234,201 @@ func TestImageFallbackAndRetention(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(foreign); string(b) != "owner" {
 		t.Fatal("owner file changed")
+	}
+}
+
+func TestImageRetirementPreservesForeignSignaturesAndResumes(t *testing.T) {
+	u, k := seedImageTrust(t)
+	type slot struct {
+		ref      ImageRef
+		tar, sig string
+	}
+	stage := func(v string, preexistingSig bool) slot {
+		raw := testImage(t, "runner", "amd64", v)
+		sig := signImageFixture(t, k, raw)
+		path := filepath.Join(u.Data, "images", fmt.Sprintf("runner-%x.tar", sha256.Sum256(raw)))
+		if preexistingSig {
+			if os.MkdirAll(filepath.Dir(path), 0700) != nil || os.WriteFile(path+".sig", []byte(sig), 0600) != nil {
+				t.Fatal("could not create unrelated signature")
+			}
+		}
+		putInboxImage(t, u, "runner", v, raw, sig)
+		got, err := u.StageImage(t.Context(), "runner", v)
+		if err != nil {
+			t.Fatal("signed slot fixture failed", err)
+		}
+		return slot{got.Ref(), path, path + ".sig"}
+	}
+	active := stage("r1", false)
+	interrupted := stage("r2", false)
+	foreign := stage("r3", true)
+	if err := os.Remove(interrupted.tar); err != nil {
+		t.Fatal("could not simulate interrupted retirement")
+	}
+	if e := PruneImages(t.Context(), u.Data, u.Arch, []ImageRef{active.ref}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := os.Lstat(foreign.sig); e != nil {
+		t.Fatal("unrelated valid signature was removed")
+	}
+	for _, p := range []string{interrupted.sig, interrupted.tar + ".owned", foreign.tar, foreign.tar + ".owned"} {
+		if _, e := os.Lstat(p); !os.IsNotExist(e) {
+			t.Fatal("interrupted retirement did not converge")
+		}
+	}
+	if VerifyImageRef(t.Context(), u.Data, active.ref, u.Arch) != nil {
+		t.Fatal("active data lost")
+	}
+	stage("r2", false)
+}
+
+func TestImageTrustRequiresPrivateHandoff(t *testing.T) {
+	u, _ := seedImageTrust(t)
+	if err := os.Chmod(filepath.Join(u.Data, "state"), 0777); err != nil {
+		t.Fatal("permission fixture")
+	}
+	if _, e := ReadImageBootstrap(u.Data); e == nil {
+		t.Fatal("trust in a writable shared directory was accepted")
+	}
+}
+
+func TestImageSelectorLimitsAndPinnedNotify(t *testing.T) {
+	u, k := seedImageTrust(t)
+	for _, invalid := range []string{"", "latest", "../private-marker", "two..dots", "bad name", "sha256-abc", strings.Repeat("a", 65)} {
+		if ValidImageVersion(invalid) {
+			t.Fatal("unsafe selector accepted")
+		}
+	}
+	raw := testImage(t, "tikray", "amd64", "v1")
+	putInboxImage(t, u, "tikray", "v1", raw, signImageFixture(t, k, raw))
+	img, err := u.StageImage(t.Context(), "tikray", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag := "v1"
+	hits := 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/latest" {
+			t.Error("notify fetched an archive")
+		}
+		hits++
+		fmt.Fprint(w, tag)
+	}))
+	defer srv.Close()
+	u.ImageSource = ImageSourceConfig{Upstream: srv.URL, Direct: srv.Client()}
+	for _, want := range []bool{false, true} {
+		if want {
+			tag = "v2"
+		}
+		got, e := u.ImageReleaseAvailable(t.Context(), "tikray", img.Ref())
+		if e != nil || got != want {
+			t.Fatal("notify release identity mismatch")
+		}
+	}
+	if hits != 2 {
+		t.Fatal("notify did not read trusted latest twice")
+	}
+}
+
+func TestStageImageOnlyReclaimsProvenInterruptedWork(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		u, key := seedImageTrust(t)
+		dir := filepath.Join(u.Data, "images")
+		work := filepath.Join(dir, ".image-stage-interrupted")
+		if os.MkdirAll(work, 0700) != nil {
+			t.Fatal("work dir fixture")
+		}
+		st, e := os.Stat(work)
+		if e != nil {
+			t.Fatal("stat fixture")
+		}
+		sys := st.Sys().(*syscall.Stat_t)
+		marker, _ := json.Marshal(geoWork{Name: filepath.Base(work), Device: uint64(sys.Dev), Inode: sys.Ino})
+		if os.WriteFile(filepath.Join(dir, ".tikray-image-work.json"), marker, 0600) != nil || os.WriteFile(filepath.Join(work, "archive.part"), []byte("unfinished"), 0600) != nil {
+			t.Fatal("stage crash fixture")
+		}
+		if foreign {
+			if os.WriteFile(filepath.Join(work, "owner-file"), []byte("keep"), 0600) != nil {
+				t.Fatal("mixed fixture")
+			}
+		}
+		raw := testImage(t, "runner", "amd64", "v1")
+		putInboxImage(t, u, "runner", "v1", raw, signImageFixture(t, key, raw))
+		_, e = u.StageImage(t.Context(), "runner", "v1")
+		if foreign {
+			if e == nil {
+				t.Fatal("accepted a mixed working directory")
+			}
+			if b, e := os.ReadFile(filepath.Join(work, "owner-file")); e != nil || string(b) != "keep" {
+				t.Fatal("unrelated work lost")
+			}
+		} else if e != nil {
+			t.Fatal("proven interrupted stage could not resume", e)
+		} else if _, e := os.Stat(work); !os.IsNotExist(e) {
+			t.Fatal("known incomplete archive survived successful restaging")
+		}
+	}
+}
+
+func TestImageRetentionKeepsDigestOnDisputedReceipt(t *testing.T) {
+	u, k := seedImageTrust(t)
+	raw := testImage(t, "runner", u.Arch, "a")
+	putInboxImage(t, u, "runner", "a", raw, signImageFixture(t, k, raw))
+	img, e := u.StageImage(t.Context(), "runner", "a")
+	if e != nil {
+		t.Fatal(e)
+	}
+	keep := img.Ref()
+	keep.Chain = strings.Repeat("f", 128)
+	_ = PruneImages(t.Context(), u.Data, u.Arch, []ImageRef{keep})
+	if VerifyImageRef(t.Context(), u.Data, img.Ref(), u.Arch) != nil {
+		t.Fatal("disputed receipt permitted deletion of active archive")
+	}
+}
+
+func TestImageRejectsContradictoryArchiveEnd(t *testing.T) {
+	u, k := seedImageTrust(t)
+	a := testImage(t, "tikray", "amd64", "r4")
+	joined := append(a, testImage(t, "runner", "amd64", "r4")...)
+	putInboxImage(t, u, "tikray", "r4", joined, signImageFixture(t, k, joined))
+	if _, e := u.StageImage(t.Context(), "tikray", "r4"); e == nil {
+		t.Fatal("multiple tar archive bodies accepted as one image")
+	}
+}
+
+func TestImageOnlyUsesHealthyProxyAndRechecksSealedSignature(t *testing.T) {
+	u, k := seedImageTrust(t)
+	raw := testImage(t, "runner", "amd64", "r5")
+	sig := signImageFixture(t, k, raw)
+	proxyReads := 0
+	proxy := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyReads++
+		switch r.URL.Path {
+		case "/r5/tikray-runner-amd64.tar.sig":
+			fmt.Fprint(w, sig)
+		case "/r5/tikray-runner-amd64.tar":
+			w.Write(raw)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer proxy.Close()
+	const marker = "private-configured-source"
+	bad := &http.Client{Transport: geoTransportFunc(func(*http.Request) (*http.Response, error) { return nil, fmt.Errorf("offline %s", marker) })}
+	healthy := false
+	u.ImageSource = ImageSourceConfig{Upstream: proxy.URL, Direct: bad, Proxy: proxy.Client(), ProxyHealthy: func(context.Context) bool { return healthy }}
+	if _, err := u.StageImage(t.Context(), "runner", "r5"); err == nil || strings.Contains(err.Error(), marker) || proxyReads != 0 {
+		t.Fatal("unhealthy proxy used or remote diagnostic disclosed")
+	}
+	healthy = true
+	img, err := u.StageImage(t.Context(), "runner", "r5")
+	if err != nil || proxyReads != 2 {
+		t.Fatal("verified healthy proxy did not supply archive and signature")
+	}
+	if os.WriteFile(filepath.Join(u.Data, "images", imageFilename(img.Ref())+".sig"), []byte(marker), 0600) != nil {
+		t.Fatal("could not alter local signature")
+	}
+	if _, err = u.StageImage(t.Context(), "runner", "r5"); err == nil || strings.Contains(err.Error(), marker) {
+		t.Fatal("published altered local signature accepted or disclosed")
 	}
 }

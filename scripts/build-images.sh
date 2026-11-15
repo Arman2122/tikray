@@ -49,6 +49,19 @@ outdir=$(cd "$outdir" && pwd)
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
+# Bind a named update request to the signed config, including archives fetched
+# from untrusted mirrors or the offline inbox. Without an explicit publisher
+# tag, the revision identifies a development build.
+image_version=${TIKRAY_IMAGE_VERSION:-$(git rev-parse HEAD 2>/dev/null || true)}
+release_labels=()
+if [[ -n $image_version ]]; then
+  if [[ ! $image_version =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ || $image_version == *..* || $image_version == latest || $image_version == sha256-* ]]; then
+    echo "build-images.sh: invalid image release selector" >&2
+    exit 1
+  fi
+  release_labels=(--label "org.opencontainers.image.version=$image_version")
+fi
+
 for spec in "${images[@]}"; do
   read -r name dockerfile <<<"$spec"
   ctx=$(mktemp -d)
@@ -58,7 +71,15 @@ for spec in "${images[@]}"; do
   tag="tikray/$name:$arch"
   # Buildx resolves the pinned BusyBox index for this platform. The legacy
   # builder can reuse the host base and still report a successful arm64 build.
-  docker buildx build --load -q --platform "linux/$arch" -f "deploy/$dockerfile" -t "$tag" "$ctx" >/dev/null
+  labels=("${release_labels[@]}")
+  if [[ $name == tikray ]]; then
+    # Use the schema actually compiled by this checkout. A legacy image with
+    # no declaration remains installable and preserves its older state files.
+    schema=$(sed -nE 's/^const Current = ([1-9][0-9]*)$/\1/p' internal/store/store.go)
+    [[ $schema =~ ^[1-9][0-9]{0,4}$ ]] || { echo "Cannot determine control state version" >&2; exit 1; }
+    labels+=(--label "io.tikray.state-version=$schema")
+  fi
+  docker buildx build --load -q "${labels[@]}" --platform "linux/$arch" -f "deploy/$dockerfile" -t "$tag" "$ctx" >/dev/null
   platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$tag")
   if [[ $platform != "linux/$arch" ]]; then
     echo "build-images.sh: $tag is $platform, expected linux/$arch; refusing to export it" >&2

@@ -14,6 +14,7 @@ import (
 	"path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -69,11 +70,18 @@ type config struct {
 	}
 }
 
+// Metadata comes from the Docker config bound to ImageID. Zero StateSchema
+// means the publisher made no claim about which state file it writes.
+type Metadata struct {
+	Version     string
+	StateSchema int
+}
+
 // Inspect binds the full file, ordered binary chunks and Docker config ID to
 // the same opened archive. Version is empty only for authenticated originals.
-func Inspect(ctx context.Context, r io.ReaderAt, size int64, component, arch, version string) (Ref, string, error) {
+func Inspect(ctx context.Context, r io.ReaderAt, size int64, component, arch, version string) (Ref, Metadata, error) {
 	if !Component(component) || (arch != "amd64" && arch != "arm64") || (version != "" && !Version(version)) || size <= 0 || size > MaxSize {
-		return Ref{}, "", errInvalid
+		return Ref{}, Metadata{}, errInvalid
 	}
 	ref := Ref{Component: component, Size: size}
 	raw := io.NewSectionReader(r, 0, size)
@@ -81,11 +89,11 @@ func Inspect(ctx context.Context, r io.ReaderAt, size int64, component, arch, ve
 	var block [ChunkSize]byte
 	for offset := int64(0); offset < size; offset += ChunkSize {
 		if err := ctx.Err(); err != nil {
-			return Ref{}, "", err
+			return Ref{}, Metadata{}, err
 		}
 		part := block[:min(int64(len(block)), size-offset)]
 		if _, err := io.ReadFull(raw, part); err != nil {
-			return Ref{}, "", errInvalid
+			return Ref{}, Metadata{}, errInvalid
 		}
 		sum.Write(part)
 		h := sha512.Sum512(part)
@@ -99,30 +107,49 @@ func Inspect(ctx context.Context, r io.ReaderAt, size int64, component, arch, ve
 	reader := tar.NewReader(view)
 	for {
 		if err := ctx.Err(); err != nil {
-			return Ref{}, "", err
+			return Ref{}, Metadata{}, err
 		}
 		h, err := reader.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return Ref{}, "", errInvalid
+			return Ref{}, Metadata{}, errInvalid
 		}
 		name := strings.TrimSuffix(h.Name, "/")
 		if !safePath(name) || (h.Typeflag != tar.TypeDir && h.Typeflag != tar.TypeReg) || len(files) >= 4096 {
-			return Ref{}, "", errInvalid
+			return Ref{}, Metadata{}, errInvalid
 		}
 		if _, duplicate := files[name]; duplicate {
-			return Ref{}, "", errInvalid
+			return Ref{}, Metadata{}, errInvalid
 		}
 		at, err := view.Seek(0, io.SeekCurrent)
 		if err != nil || h.Size < 0 || h.Size > size-at {
-			return Ref{}, "", errInvalid
+			return Ref{}, Metadata{}, errInvalid
 		}
 		if h.Typeflag == tar.TypeDir {
 			files[name] = entry{size: -1}
 		} else {
 			files[name] = entry{at, h.Size}
+		}
+	}
+	// Some Docker writers pad beyond tar's end marker. A second archive or
+	// nonzero tail could cause two consumers to choose different manifests.
+	if size%512 != 0 {
+		return Ref{}, Metadata{}, errInvalid
+	}
+	for {
+		n, err := view.Read(block[:])
+		for _, v := range block[:n] {
+			if v != 0 {
+				return Ref{}, Metadata{}, errInvalid
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil || n == 0 {
+			return Ref{}, Metadata{}, errInvalid
 		}
 	}
 	readJSON := func(name string, dst any) ([]byte, error) {
@@ -138,39 +165,47 @@ func Inspect(ctx context.Context, r io.ReaderAt, size int64, component, arch, ve
 	}
 	var list []archiveManifest
 	if _, err := readJSON("manifest.json", &list); err != nil || len(list) != 1 {
-		return Ref{}, "", errInvalid
+		return Ref{}, Metadata{}, errInvalid
 	}
 	m := list[0]
 	if !slices.Equal(m.RepoTags, []string{"tikray/" + ReleaseName(component) + ":" + arch}) || len(m.Layers) == 0 {
-		return Ref{}, "", errInvalid
+		return Ref{}, Metadata{}, errInvalid
 	}
 	for _, l := range m.Layers {
 		if f, ok := files[l]; !ok || f.size <= 0 || l == m.Config || l == "manifest.json" {
-			return Ref{}, "", errInvalid
+			return Ref{}, Metadata{}, errInvalid
 		}
 	}
 	var c config
 	data, err := readJSON(m.Config, &c)
 	if err != nil || c.OS != "linux" || c.Architecture != arch {
-		return Ref{}, "", errInvalid
+		return Ref{}, Metadata{}, errInvalid
 	}
 	cfgHash := sha256.Sum256(data)
 	ref.ImageID = hex.EncodeToString(cfgHash[:])
 	if m.Config != "blobs/sha256/"+ref.ImageID && m.Config != ref.ImageID+".json" {
-		return Ref{}, "", errInvalid
+		return Ref{}, Metadata{}, errInvalid
 	}
 	if component == "tikray" {
 		if !slices.Equal(c.Config.Entrypoint, []string{"/usr/local/bin/tikray"}) || !slices.Equal(c.Config.Cmd, []string{"serve"}) {
-			return Ref{}, "", errInvalid
+			return Ref{}, Metadata{}, errInvalid
 		}
 	} else if !slices.Equal(c.Config.Entrypoint, []string{"/tikray-runner"}) || len(c.Config.Cmd) != 0 {
-		return Ref{}, "", errInvalid
+		return Ref{}, Metadata{}, errInvalid
 	}
 	label := c.Config.Labels[versionLabel]
 	if version != "" && version != "sha256-"+ref.Digest && (version != label || strings.HasPrefix(version, "sha256-")) {
-		return Ref{}, "", errInvalid
+		return Ref{}, Metadata{}, errInvalid
 	}
-	return ref, label, nil
+	metadata := Metadata{Version: label}
+	if v := c.Config.Labels["io.tikray.state-version"]; component == "tikray" && v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != v {
+			return Ref{}, Metadata{}, errInvalid
+		}
+		metadata.StateSchema = n
+	}
+	return ref, metadata, nil
 }
 
 func safePath(s string) bool {

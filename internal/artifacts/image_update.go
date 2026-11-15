@@ -16,6 +16,7 @@ import (
 
 	"github.com/Arman2122/tikray/internal/atomicfile"
 	"github.com/Arman2122/tikray/internal/runnerapi"
+	"golang.org/x/sys/unix"
 )
 
 const imageRequestFile = "image-update.json"
@@ -411,4 +412,42 @@ func PruneInstalledImages(ctx context.Context, data string) error {
 		return ErrImageBusy
 	}
 	return PruneImages(ctx, data, boot.Arch, keep)
+}
+
+// RetainedStateSchemas verifies the two retained control archives rather than
+// guessing schema support from a release name or current program version.
+func RetainedStateSchemas(ctx context.Context, data string) (int, int, error) {
+	if ImagePending(data) {
+		return 0, 0, ErrImageBusy
+	}
+	b, err := ReadImageBootstrap(data)
+	if err != nil {
+		return 0, 0, ErrImageState
+	}
+	id, err := readImageID(data)
+	if err != nil {
+		return 0, 0, err
+	}
+	r, err := imageVersions(data, id, "tikray", b)
+	if err != nil || !r.Previous.Valid() {
+		return 0, 0, err
+	}
+	key, err := imageKey(b.Publisher)
+	if err != nil {
+		return 0, 0, ErrImageState
+	}
+	dir, err := openGeoDir(data, false, "images")
+	if err != nil {
+		return 0, 0, ErrImageState
+	}
+	defer unix.Close(dir)
+	a, err := verifySlot(ctx, dir, key, b.Arch, r.Active)
+	if err != nil {
+		return 0, 0, err
+	}
+	p, err := verifySlot(ctx, dir, key, b.Arch, r.Previous)
+	if err != nil {
+		return 0, 0, err
+	}
+	return a.StateSchema, p.StateSchema, nil
 }

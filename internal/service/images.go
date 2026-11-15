@@ -7,6 +7,7 @@ import (
 
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/runnerapi"
+	"github.com/Arman2122/tikray/internal/store"
 )
 
 func (s *Service) ImageStatus(_ context.Context, component string) (artifacts.ImageStatus, error) {
@@ -34,7 +35,7 @@ func (s *Service) ImageRollback(ctx context.Context, component string) (artifact
 }
 func (s *Service) imageChange(ctx context.Context, component, version string) (artifacts.ImageOperation, error) {
 	var none artifacts.ImageOperation
-	if s.router == nil || s.repairBridge {
+	if s.router == nil || s.repairBridge || (version != "" && s.imagesDisabled) {
 		return none, artifacts.ErrImageState
 	}
 	if s.bootPending.Load() {
@@ -140,6 +141,10 @@ func (s *Service) watchImages(ctx context.Context) {
 		}
 		if !artifacts.ImagePending(s.data) {
 			prune = artifacts.PruneInstalledImages(ctx, s.data) != nil
+			if !prune && store.Current > 1 {
+				a, p, e := artifacts.RetainedStateSchemas(ctx, s.data)
+				prune = e != nil || s.store.PruneImageState(a, p) != nil
+			}
 			nextClean = time.Now().Add(time.Minute)
 		}
 		s.release()

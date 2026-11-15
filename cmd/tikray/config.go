@@ -24,10 +24,13 @@ import (
 // Config is what the CLI runs with: the environment, and the state for the
 // runner's address (see withState).
 type Config struct {
-	ImageUpstream string
-	ImageMirrors  []string
-	Data          string // the data root (TIKRAY_DATA)
-	Arch          string // GOARCH of the cores to fetch (TIKRAY_ARCH)
+	imageEnv       bool
+	imageDisabled  bool
+	ImageUpstream  string
+	ImageSchedules *service.ImageSchedules
+	ImageMirrors   []string
+	Data           string // the data root (TIKRAY_DATA)
+	Arch           string // GOARCH of the cores to fetch (TIKRAY_ARCH)
 	// Listen is where tikray serve listens (TIKRAY_LISTEN).
 	Listen string
 	// API is the address of tikray serve's API, for the commands that talk to
@@ -193,13 +196,8 @@ func configFromEnv(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.GeoSchedule = policy
-	if cfg.ImageUpstream != "" && !geoHTTPS(cfg.ImageUpstream) {
-		return Config{}, errors.New("TIKRAY_IMAGE_UPSTREAM: want an HTTPS publisher")
-	}
-	for _, m := range cfg.ImageMirrors {
-		if !geoHTTPS(m) || !strings.Contains(m, "{file}") {
-			return Config{}, errors.New("TIKRAY_IMAGE_MIRRORS: want HTTPS templates with {file}")
-		}
+	if err := cfg.setImageSource(getenv("TIKRAY_IMAGE_CONTROL_MODE"), getenv("TIKRAY_IMAGE_CONTROL_WINDOW"), getenv("TIKRAY_IMAGE_RUNNER_MODE"), getenv("TIKRAY_IMAGE_RUNNER_WINDOW")); err != nil {
+		return Config{}, err
 	}
 	if cfg.GeoProfile != "" && !artifacts.ValidGeoProfile(cfg.GeoProfile) {
 		return Config{}, errors.New("TIKRAY_GEO_PROFILE: unknown publisher")
