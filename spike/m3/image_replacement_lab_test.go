@@ -557,7 +557,20 @@ func TestNativeRunnerImageTrafficFence(t *testing.T) {
 	}
 	run(`/ip/firewall/mangle/add chain=tikray-pre action=mark-connection new-connection-mark=tikray-open passthrough=yes src-address=192.0.2.1 comment="tikray:conn-full-open"`)
 	run(`/ip/firewall/mangle/add chain=tikray-pre action=mark-routing connection-mark=tikray-open new-routing-mark=tikray-open passthrough=no comment="tikray:route-open"`)
-	run(`/tool/netwatch/add host=172.31.255.3 type=simple comment="tikray:runner-watch"`)
+	netScript := func(verb, disabled string) string {
+		var out strings.Builder
+		for _, proto := range []string{"tcp", "udp"} {
+			fmt.Fprintf(&out, `:foreach id in=[/ip/firewall/nat/find where comment="tikray:dns-full-open-%s" and disabled=%s] do={/ip/firewall/nat/%s $id};`, proto, disabled, verb)
+		}
+		return out.String()
+	}
+	up, down := netScript("enable", "yes"), netScript("disable", "no")
+	periodic := `:if ($status = "up") do={` + up + `} else={` + down + `}`
+	nw, e := r.admin.RunContext(r.ctx, "/tool/netwatch/add", "=host=172.31.255.3", "=type=simple", "=comment=tikray:runner-watch", "=up-script="+up, "=down-script="+down, "=test-script="+periodic)
+	if e != nil || nw.Done == nil {
+		t.Fatal("native Netwatch positive control failed")
+	}
+	netwatchID := nw.Done.Map["ret"]
 	for _, proto := range []string{"tcp", "udp"} {
 		run(`/ip/firewall/filter/add chain=tikray-bridge-fw action=accept connection-nat-state=dstnat in-interface-list=m3-images-lan dst-address=172.31.255.3 protocol=` + proto + ` dst-port=53 comment="tikray:acl-dns-` + proto + `"`)
 		run(`/ip/firewall/nat/add chain=dstnat action=dst-nat in-interface-list=m3-images-lan src-address-list=tikray-src-full-open to-addresses=172.31.255.3 to-ports=53 protocol=` + proto + ` dst-port=53 comment="tikray:dns-full-open-` + proto + `"`)
@@ -651,6 +664,18 @@ func TestNativeRunnerImageTrafficFence(t *testing.T) {
 		return strings.TrimSpace(v) != "waiting", e
 	}) != nil || run(`:put [/system/script/get [find where name="m3-helper-verdict"] comment]`) != "verified" {
 		t.Fatal("restricted native scheduler could not authenticate and call the installer helper")
+	}
+	// Keep the target healthy before an update if the owner has edited this
+	// tagged watcher. Its three native programs could act on unrelated rows.
+	if _, e := r.admin.RunContext(r.ctx, "/tool/netwatch/set", "=.id="+netwatchID, "=up-script=:return true"); e != nil {
+		t.Fatal("cannot set native watcher drift fixture")
+	}
+	out = run(`:onerror why in={ /import file-name=m3-image-fence.rsc } do={ :put ([:find [:tostr $why] "image: open DNS watcher changed"]!=nil) }`)
+	if strings.TrimSpace(out) != "true" || run(`:put [:len [/ip/route/find where comment="tikray:route-open-runner" and !disabled]]`) != "1" {
+		t.Fatal("unverified Netwatch executable authorized a fence")
+	}
+	if _, e := r.admin.RunContext(r.ctx, "/tool/netwatch/set", "=.id="+netwatchID, "=up-script="+up); e != nil {
+		t.Fatal("cannot restore disposable native watcher")
 	}
 	// The installer supplied source is a separate read-only object. A changed
 	// body must never be executed under the native scheduler's authority.

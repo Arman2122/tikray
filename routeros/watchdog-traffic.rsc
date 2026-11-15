@@ -85,6 +85,21 @@
                 }
             }
         }
+        # The row can be re-enabled only if every program consists of the
+        # exact, compiler-owned open DNS actions in native policy order.
+        :local enable ""; :local disable ""
+        :foreach mode in={"smart";"full"} do={
+            :foreach proto in={"tcp";"udp"} do={
+                :local role ("tikray:dns-" . $mode . "-open-" . $proto)
+                :if ([:typeof ($rows->$role)]="array") do={
+                    :local first (":foreach id in=[/ip/firewall/nat/find where comment=\"" . $role . "\" and disabled=")
+                    :set enable ($enable . $first . "yes] do={/ip/firewall/nat/enable \$id};")
+                    :set disable ($disable . $first . "no] do={/ip/firewall/nat/disable \$id};")
+                }
+            }
+        }
+        :local watcher [:pick $watches 0]
+        :if (([:tostr [/tool/netwatch/get $watcher up-script]]!=$enable) or ([:tostr [/tool/netwatch/get $watcher down-script]]!=$disable) or ([:tostr [/tool/netwatch/get $watcher test-script]]!=(":if (\$status = \"up\") do={" . $enable . "} else={" . $disable . "}"))) do={:error "image: open DNS watcher changed"}
         :return $rows
     }
     :local live [$collect $peer $lan $emergency $operation]
