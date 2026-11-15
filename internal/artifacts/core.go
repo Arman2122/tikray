@@ -75,6 +75,8 @@ type CoreUpdater struct {
 	Fetch Chain
 	// GeoSource configures trusted publisher access and payload fallbacks.
 	GeoSource GeoSourceConfig
+	// ImageSource supplies remote tar and detached blob signatures.
+	ImageSource ImageSourceConfig
 	// Verify finds the SHA-256 a zip must have. Its Upstream must hold only
 	// Direct and Proxy sources, never a mirror or the inbox, so that the
 	// .dgst always comes from upstream (§4.3).
