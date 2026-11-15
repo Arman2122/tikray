@@ -200,12 +200,18 @@ func bindingOff(v string) bool { return v == "no" || v == "false" }
 // recreate or repair only after a complete observation of both peers. Never
 // replay a write after a reconnect. On the next sweep we observe the result.
 func ReconcileBindings(ctx context.Context, c Native, subnet netip.Prefix, repair bool) error {
+	return reconcileInstalledRows(ctx, c, repair, 12, func(o observation) (bindingPlan, error) { return observeBindings(o, subnet) })
+}
+
+// Pin ownership and operation to two matching observations on one live API
+// generation. A lost acknowledgement is resolved by the next independent pass.
+func reconcileInstalledRows(ctx context.Context, c Native, repair bool, steps int, inspect func(observation) (bindingPlan, error)) error {
 	o := observation{ctx: ctx, c: c, gen: c.Generation()}
 	if o.gen == 0 {
 		return ErrUnavailable
 	}
-	for range 12 {
-		plan, err := observeBindings(o, subnet)
+	for range steps {
+		plan, err := inspect(o)
 		if err != nil {
 			return err
 		}
@@ -215,7 +221,7 @@ func ReconcileBindings(ctx context.Context, c Native, subnet netip.Prefix, repai
 		if !repair {
 			return ErrPolicyConflict
 		}
-		next, err := observeBindings(o, subnet)
+		next, err := inspect(o)
 		if err != nil {
 			return err
 		}

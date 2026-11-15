@@ -306,10 +306,8 @@ func (e *Engine) prepare(ctx context.Context, t Target) (*pass, error) {
 		t.Geo = p.j.Geo
 		p.target.Geo = t.Geo
 	}
-	if e.managedBindings {
-		if err = ReconcileBindings(ctx, e.c, e.scope.Subnet, true); err != nil {
-			return nil, err
-		}
+	if err = e.reconcilePrivateNetwork(ctx, &t.Policy, p.j.Policy, true); err != nil {
+		return nil, err
 	}
 	p.a, err = e.Snapshot(ctx)
 	if err != nil {
