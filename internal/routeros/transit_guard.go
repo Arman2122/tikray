@@ -2,7 +2,6 @@ package routeros
 
 import (
 	"context"
-	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -13,7 +12,7 @@ import (
 const (
 	transitTag     = "tikray:acl-runner-transit"
 	transitDestTag = "tikray:acl-runner-transit-dst"
-	transitList    = "tikray-transit-lans"
+	transitChain   = "tikray-transit"
 	transitMember  = "tikray:acl-transit-lan:"
 )
 
@@ -50,7 +49,7 @@ func ReconcileTransitGuard(ctx context.Context, c Native, scope InstallScope, re
 	if !interfaceName(scope.LANList) || store.ValidateRouterNetwork(store.Network{Subnet: scope.Subnet}, nil) != nil {
 		return ErrPolicyConflict
 	}
-	return reconcileInstalledRows(ctx, c, repair, len(scope.LANs)+8, func(o observation) (bindingPlan, error) {
+	return reconcileInstalledRows(ctx, c, repair, 2*len(scope.LANs)+12, func(o observation) (bindingPlan, error) {
 		return observeTransitGuard(o, scope, unconfigured)
 	})
 }
@@ -58,7 +57,7 @@ func ReconcileTransitGuard(ctx context.Context, c Native, scope InstallScope, re
 // RouterOS acknowledges an add before an interface matcher becomes valid.
 // Wait only for the same positively identified row on the same generation.
 func readTransitGuard(o observation, tag string) (Row, error) {
-	const fields = ".id,comment,chain,action,dynamic,disabled,invalid,log," + allowedPredicates
+	const fields = transitFields
 	var settling string
 	for {
 		rows, err := o.read(firewallFilter, fields, "?comment="+tag)
@@ -88,48 +87,50 @@ func readTransitGuard(o observation, tag string) (Row, error) {
 	}
 }
 
-type transitDrop struct {
-	tag, field, value string
-	row               Row
-	seen              bool
+const transitFields = ".id,comment,chain,action,jump-target,dynamic,disabled,invalid,log," + allowedPredicates
+
+type transitHead struct {
+	tag, action, field, value string
+	row                       Row
+	seen                      bool
+	op                        []string
+}
+
+func correctTransitShape(r Row, chain, action string, want map[string]string) bool {
+	if !bindingID(r[".id"]) || r["chain"] != chain || r["action"] != action || onBit(r["dynamic"]) || onBit(r["log"]) || r["jump-target"] != want["jump-target"] {
+		return false
+	}
+	for _, k := range strings.Split(allowedPredicates, ",") {
+		if normalized(firewallFilter, k, r[k]) != normalized(firewallFilter, k, want[k]) {
+			return false
+		}
+	}
+	return true
 }
 
 func observeTransitGuard(o observation, scope InstallScope, unconfigured bool) (bindingPlan, error) {
 	var p bindingPlan
-	drops := []transitDrop{{tag: transitTag, field: "out-interface-list", value: "!" + scope.LANList}, {tag: transitDestTag, field: "dst-address-list", value: "!" + transitList}}
+	heads := []transitHead{{tag: transitTag, action: "drop", field: "out-interface-list", value: "!" + scope.LANList}, {tag: transitDestTag, action: "jump", field: "jump-target", value: transitChain}}
 	source := "!" + scope.Subnet.String()
-	for i := range drops {
-		d := &drops[i]
-		row, err := readTransitGuard(o, d.tag)
+	for i := range heads {
+		h := &heads[i]
+		row, err := readTransitGuard(o, h.tag)
 		if err != nil {
 			return p, err
 		}
-		d.row = row
+		h.row = row
 		if row == nil {
 			continue
 		}
-		if row["comment"] != d.tag || row["chain"] != "forward" || row["action"] != "drop" || onBit(row["dynamic"]) || onBit(row["log"]) {
-			return p, ErrPolicyConflict
-		}
-		want := map[string]string{"in-interface": "tikray", "src-address": source, d.field: d.value}
-		for _, k := range strings.Split(allowedPredicates, ",") {
-			if row[k] != want[k] {
-				return p, ErrPolicyConflict
-			}
-		}
-		q := append([]string{"?comment=" + d.tag}, predicatesPresent(unsupportedPredicates)...)
-		n, err := o.count(firewallFilter, q...)
-		if err != nil {
-			return p, err
-		}
-		if n != 0 {
+		want := map[string]string{"in-interface": "tikray", "src-address": source, h.field: h.value}
+		if row["comment"] != h.tag || !correctTransitShape(row, "forward", h.action, want) {
 			return p, ErrPolicyConflict
 		}
 		p.identities = append(p.identities, row[".id"])
 	}
-	if drops[0].row == nil && drops[1].row == nil && unconfigured {
-		// A historical owner installer may bootstrap an all-direct service
-		// before either rule exists. No managed packet can enter the runner.
+	if heads[0].row == nil && heads[1].row == nil && unconfigured {
+		// A legacy direct-only bootstrap may complete under its owner's
+		// install lock. Neither saved nor newly requested policy can steer.
 		locks, err := o.read("/system/script", ".id,comment", "?name=tikray-install-lock")
 		if err != nil {
 			return p, err
@@ -141,24 +142,26 @@ func observeTransitGuard(o observation, scope InstallScope, unconfigured bool) (
 			return p, nil
 		}
 	}
-	if err := observeTransitMembers(o, scope, &p, drops[1].row[".id"]); err != nil {
+	chain, err := observeTransitChain(o, scope, heads[1].row[".id"])
+	if err != nil {
 		return p, err
 	}
+	p.identities = append(p.identities, chain.identities...)
 	order, err := o.order(firewallFilter, "forward")
 	if err != nil {
 		return p, err
 	}
 	before := ""
 	for _, r := range order {
-		i := slices.IndexFunc(drops, func(d transitDrop) bool { return d.tag == r.Comment })
+		i := slices.IndexFunc(heads, func(h transitHead) bool { return h.tag == r.Comment })
 		if i >= 0 {
-			d := &drops[i]
-			if d.row == nil || d.row[".id"] != r.ID || d.seen {
+			h := &heads[i]
+			if h.row == nil || h.row[".id"] != r.ID || h.seen {
 				return p, errDrift
 			}
-			d.seen = true
+			h.seen = true
 			if before != "" {
-				p.change(firewallFilter+"/move", "=numbers="+r.ID, "=destination="+before)
+				h.op = []string{firewallFilter + "/move", "=numbers=" + r.ID, "=destination=" + before}
 			}
 			continue
 		}
@@ -181,87 +184,25 @@ func observeTransitGuard(o observation, scope InstallScope, unconfigured bool) (
 		}
 		before = r.ID
 	}
-	for _, d := range drops {
-		if d.row == nil {
-			words := []string{firewallFilter + "/add", "=chain=forward", "=action=drop", "=comment=" + d.tag, "=in-interface=tikray", "=src-address=" + source, "=" + d.field + "=" + d.value}
+	for i := range heads {
+		h := &heads[i]
+		if h.row == nil {
+			h.op = []string{firewallFilter + "/add", "=chain=forward", "=action=" + h.action, "=comment=" + h.tag, "=in-interface=tikray", "=src-address=" + source, "=" + h.field + "=" + h.value}
 			if before != "" {
-				words = append(words, "=place-before="+before)
+				h.op = append(h.op, "=place-before="+before)
 			}
-			p.change(words...)
-		} else if !d.seen {
+		} else if !h.seen {
 			return p, errDrift
-		} else if onBit(d.row["disabled"]) {
-			p.change(firewallFilter+"/set", "=.id="+d.row[".id"], "=disabled=no")
+		} else if len(h.op) == 0 && onBit(h.row["disabled"]) {
+			h.op = []string{firewallFilter + "/set", "=.id=" + h.row[".id"], "=disabled=no"}
 		}
 	}
+	// Keep exterior egress closed, then build the complete restrictive
+	// chain before making its jump live. Never move an owner's rule.
+	p.change(heads[0].op...)
+	p.change(chain.first...)
+	p.change(heads[1].op...)
 	return p, nil
-}
-
-func observeTransitMembers(o observation, scope InstallScope, p *bindingPlan, destID string) error {
-	if len(scope.LANs) == 0 || len(scope.LANs) > 128 {
-		return ErrPolicyConflict
-	}
-	wanted := make(map[string]bool, len(scope.LANs))
-	for _, lan := range scope.LANs {
-		n := lan.Prefix
-		if !n.IsValid() || !n.Addr().Is4() || n.Bits() == 0 || n != n.Masked() || n.Overlaps(scope.Subnet) {
-			return ErrPolicyConflict
-		}
-		wanted[n.String()] = false
-	}
-	// A writer or consumer outside this exact rule makes the list shared.
-	// Match the references on the router; never read an owner's other rules.
-	q := anyQuery(valuesQuery("src-address-list", transitList, "!"+transitList), valuesQuery("dst-address-list", transitList, "!"+transitList), []string{"?address-list=" + transitList})
-	for _, m := range []string{firewallFilter, firewallNAT, firewallMangle, "/ip/firewall/raw"} {
-		refs, err := o.read(m, ".id,comment,address-list", q...)
-		if err != nil {
-			return err
-		}
-		for _, r := range refs {
-			if m != firewallFilter || destID == "" || r[".id"] != destID || r["comment"] != transitDestTag || r["address-list"] != "" {
-				return ErrPolicyConflict
-			}
-		}
-	}
-	filter := anyQuery([]string{"?list=" + transitList}, prefixQuery("comment", transitMember))
-	n, err := o.count(addressListMenu, filter...)
-	if err != nil {
-		return err
-	}
-	if n > len(wanted) {
-		return ErrPolicyConflict
-	}
-	rows, err := o.read(addressListMenu, ".id,list,address,comment,disabled,dynamic,timeout", filter...)
-	if err != nil {
-		return err
-	}
-	if len(rows) != n {
-		return errDrift
-	}
-	for _, r := range rows {
-		addr := r["address"]
-		if ip, e := netip.ParseAddr(addr); e == nil && ip.Is4() {
-			addr = netip.PrefixFrom(ip, 32).String()
-		}
-		seen, ok := wanted[addr]
-		if !ok || seen || r["list"] != transitList || r["comment"] != transitMember+addr || !bindingID(r[".id"]) || onBit(r["dynamic"]) || (r["timeout"] != "" && r["timeout"] != "none-static") {
-			return ErrPolicyConflict
-		}
-		wanted[addr] = true
-		p.identities = append(p.identities, r[".id"])
-		if onBit(r["disabled"]) {
-			p.change(addressListMenu+"/set", "=.id="+r[".id"], "=disabled=no")
-		}
-	}
-	// Deterministic even when the scope repeats a network on two interfaces.
-	for _, lan := range scope.LANs {
-		addr := lan.Prefix.String()
-		if !wanted[addr] {
-			p.change(addressListMenu+"/add", "=list="+transitList, "=address="+addr, "=comment="+transitMember+addr)
-			break
-		}
-	}
-	return nil
 }
 
 func restrictiveEgress(o observation, id string) (bool, error) {

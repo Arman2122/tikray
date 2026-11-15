@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -109,12 +110,12 @@ func TestTransitGuardBindsReturnDestinations(t *testing.T) {
 	}
 	for _, lan := range scope.LANs {
 		row := f.tag("tikray:acl-transit-lan:" + lan.Prefix.String())
-		if row == nil || row.Props["list"] != "tikray-transit-lans" || row.Props["address"] != lan.Prefix.String() {
+		if row == nil || row.Menu != firewallFilter || row.Props["chain"] != "tikray-transit" || row.Props["action"] != "return" || row.Props["out-interface-list"] != scope.LANList || row.Props["dst-address"] != lan.Prefix.String() {
 			t.Fatal("missing enrolled LAN destination")
 		}
 	}
 	dest := f.tag("tikray:acl-runner-transit-dst")
-	if dest == nil || dest.Props["dst-address-list"] != "!tikray-transit-lans" || dest.Props["src-address"] != "!"+scope.Subnet.String() || dest.Props["in-interface"] != "tikray" {
+	if dest == nil || dest.Props["action"] != "jump" || dest.Props["jump-target"] != "tikray-transit" || dest.Props["src-address"] != "!"+scope.Subnet.String() || dest.Props["in-interface"] != "tikray" {
 		t.Fatal("WAN/LAN list overlap opens returned packets")
 	}
 	n := len(f.writes)
@@ -128,18 +129,93 @@ func TestTransitGuardBindsReturnDestinations(t *testing.T) {
 		t.Fatal("exact disabled enrolled destination was not restored in place")
 	}
 	n = len(f.writes)
-	f.insert(addressListMenu, "owner:permitted", map[string]string{"list": "tikray-transit-lans", "address": "0.0.0.0/0"})
+	f.insert(firewallFilter, "owner:permitted", map[string]string{"chain": "tikray-transit", "action": "accept"})
 	if !errors.Is(check(), ErrPolicyConflict) || len(f.writes) != n {
 		t.Fatal("foreign network expanded return destinations")
 	}
 }
 
-func TestTransitListNotAdoptedFromOwner(t *testing.T) {
-	for _, m := range []string{firewallFilter, firewallNAT, firewallMangle, "/ip/firewall/raw"} {
-		f := newDiffRouter()
-		f.insert(m, "owner:other", map[string]string{"src-address-list": "!tikray-transit-lans"})
-		if err := ReconcileTransitGuard(t.Context(), f, testTransitScope(), true, false); !errors.Is(err, ErrPolicyConflict) || len(f.writes) != 0 {
-			t.Fatal("changed a list consumed by an owner rule", m)
+func TestTransitChainLeavesGlobalOwnerListsAlone(t *testing.T) {
+	f := newDiffRouter()
+	f.insert(addressListMenu, "owner:route", map[string]string{"list": "tikray-transit-lans", "address": "203.0.113.0/24"})
+	f.insert("/routing/bgp/template", "owner:template", map[string]string{"output.network": "tikray-transit-lans"})
+	if err := ReconcileTransitGuard(t.Context(), f, testTransitScope(), true, false); err != nil {
+		t.Fatal(err)
+	}
+	n := len(f.writes)
+	for _, cmd := range f.writes {
+		if !strings.HasPrefix(cmd[0], firewallFilter+"/") {
+			t.Fatal("changed an object outside IPv4 filter")
 		}
+	}
+	f.insert(firewallFilter, "owner:uses-chain", map[string]string{"chain": "input", "action": "jump", "jump-target": "tikray-transit"})
+	if err := ReconcileTransitGuard(t.Context(), f, testTransitScope(), true, false); !errors.Is(err, ErrPolicyConflict) || len(f.writes) != n {
+		t.Fatal("changed a private chain referenced by owner traffic")
+	}
+}
+
+func TestMissingTransitDenyLeavesIndependentTerminal(t *testing.T) {
+	f := newDiffRouter()
+	scope := testTransitScope()
+	verify := func(repair bool) error { return ReconcileTransitGuard(t.Context(), f, scope, repair, false) }
+	if err := verify(true); err != nil {
+		t.Fatal(err)
+	}
+	const prefix = "tikray:acl-transit-"
+	primary, backup := f.tag(prefix+"deny"), f.tag(prefix+"deny-backup")
+	if primary == nil || backup == nil || primary.Props["action"] != "drop" || backup.Props["action"] != "drop" {
+		t.Fatal("missing independent scoped terminal drops")
+	}
+	backupID := backup.ID
+	if _, err := f.CommandAt(t.Context(), f.gen, []string{firewallFilter + "/remove", "=.id=" + primary.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(verify(false), ErrPolicyConflict) || verify(true) != nil || f.tag(prefix+"deny-backup").ID != backupID {
+		t.Fatal("did not restore first deny without changing backup")
+	}
+	ret := f.tag(prefix + "lan:192.168.88.0/24")
+	if _, err := f.CommandAt(t.Context(), f.gen, []string{firewallFilter + "/move", "=numbers=" + ret.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(verify(false), ErrPolicyConflict) || verify(true) != nil {
+		t.Fatal("failed to repair a displaced positive LAN return")
+	}
+	for _, row := range f.rows {
+		if row.Props["chain"] == "tikray-transit" {
+			if row.ID != ret.ID {
+				t.Fatal("terminal precedes the enrolled return")
+			}
+			break
+		}
+	}
+}
+
+func TestTransitRepairKeepsVerifiedRepliesDuringTerminalReorder(t *testing.T) {
+	f := newDiffRouter()
+	scope := testTransitScope()
+	verify := func() error { return ReconcileTransitGuard(t.Context(), f, scope, true, false) }
+	if err := verify(); err != nil {
+		t.Fatal(err)
+	}
+	primary := f.tag(transitDeny)
+	firstReturn := f.tag(transitMember + "192.168.88.0/24")
+	primary.Props["disabled"] = "true"
+	if _, e := f.CommandAt(t.Context(), f.gen, []string{firewallFilter + "/move", "=numbers=" + primary.ID, "=destination=" + firstReturn.ID}); e != nil {
+		t.Fatal(e)
+	}
+	start := len(f.writes)
+	if err := verify(); err != nil {
+		t.Fatal(err)
+	}
+	if f.writes[start][0] != firewallFilter+"/move" {
+		t.Fatal("enabled misplaced drop before repairing a working return")
+	}
+}
+
+func TestTransitChainPreservesExperimentalListMember(t *testing.T) {
+	f := newDiffRouter()
+	id := f.insert(addressListMenu, transitMember+"192.168.88.0/24", map[string]string{"list": "tikray-transit-lans", "address": "192.168.88.0/24"})
+	if err := ReconcileTransitGuard(t.Context(), f, testTransitScope(), true, false); !errors.Is(err, ErrPolicyConflict) || len(f.writes) != 0 || f.rows[0].ID != id {
+		t.Fatal("mixed ownership generations were adopted")
 	}
 }

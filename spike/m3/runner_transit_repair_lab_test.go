@@ -79,27 +79,32 @@ func TestRestrictedRunnerTransitRepair(t *testing.T) {
 		t.Fatal("unexpected native guard shape")
 	}
 	dest := get("tikray:acl-runner-transit-dst")
-	got, e := r.admin.RunContext(r.ctx, menu+"/print", "?.id="+dest[".id"], "=.proplist=dst-address-list")
-	if e != nil || len(got.Re) != 1 || got.Re[0].Map["dst-address-list"] != "!tikray-transit-lans" {
-		t.Fatal("unverified returned destination aperture")
+	got, e := r.admin.RunContext(r.ctx, menu+"/print", "?.id="+dest[".id"], "=.proplist=jump-target")
+	if e != nil || len(got.Re) != 1 || got.Re[0].Map["jump-target"] != "tikray-transit" {
+		t.Fatal("unverified bridge dispatch")
 	}
-	lanRows := func() string {
+	const member = "tikray:acl-transit-lan:192.168.88.0/24"
+	lanID := func() string {
 		t.Helper()
-		q, e := r.admin.RunContext(r.ctx, "/ip/firewall/address-list/print", "?list=tikray-transit-lans", "=.proplist=.id,comment,address")
-		if e != nil || len(q.Re) != 1 || q.Re[0].Map["comment"] != "tikray:acl-transit-lan:192.168.88.0/24" || q.Re[0].Map["address"] != "192.168.88.0/24" {
-			t.Fatal("return list differs from installed LAN scope")
+		q, e := r.admin.RunContext(r.ctx, menu+"/print", "?chain=tikray-transit", "?comment="+member, "=.proplist=.id,dst-address,out-interface-list,action")
+		if e != nil || len(q.Re) != 1 || q.Re[0].Map["action"] != "return" || q.Re[0].Map["dst-address"] != "192.168.88.0/24" || q.Re[0].Map["out-interface-list"] != "m3-transit-lan" {
+			t.Fatal("return differs from installed LAN scope")
 		}
 		return q.Re[0].Map[".id"]
 	}
-	firstLAN := lanRows()
-	add("/ip/firewall/address-list/remove", "=.id="+firstLAN)
-	if !errors.Is(verify(false), routeros.ErrPolicyConflict) || verify(true) != nil || lanRows() == "" {
-		t.Fatal("missing enrolled LAN did not recover")
+	add(menu+"/remove", "=.id="+lanID())
+	if !errors.Is(verify(false), routeros.ErrPolicyConflict) || verify(true) != nil || lanID() == "" {
+		t.Fatal("missing enrolled return did not recover")
 	}
-	add(menu+"/add", "=chain=m3-owner-private", "=action=drop", "=src-address-list=tikray-transit-lans", "=comment=owner:uses-transit")
+	backup := get("tikray:acl-transit-deny-backup")[".id"]
+	add(menu+"/remove", "=.id="+get("tikray:acl-transit-deny")[".id"])
+	if !errors.Is(verify(false), routeros.ErrPolicyConflict) || verify(true) != nil || get("tikray:acl-transit-deny-backup")[".id"] != backup {
+		t.Fatal("independent terminal guard changed during repair")
+	}
+	add(menu+"/add", "=chain=m3-owner-private", "=action=jump", "=jump-target=tikray-transit", "=comment=owner:uses-transit")
 	beforeConflict := client.writes
 	if !errors.Is(verify(true), routeros.ErrPolicyConflict) || beforeConflict != client.writes {
-		t.Fatal("shared destination list was claimed")
+		t.Fatal("shared chain was claimed")
 	}
 	add(menu+"/remove", "=.id="+get("owner:uses-transit")[".id"])
 	n := client.writes
