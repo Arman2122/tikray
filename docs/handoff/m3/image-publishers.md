@@ -56,8 +56,24 @@ tikray image status runner
 tikray image rollback runner
 ```
 
-Wait for one operation to settle before requesting the next. An accepted update or rollback returns the operation ID and the source and target archive digests. The corresponding HTTP mutations return 202. Poll the component's status until `pending` disappears, then check `active` against the requested digest. A successful change reports the replaced image under `previous`. A rejected candidate leaves the original image active once the watchdog verifies its recovery. The control API is unavailable while its own container restarts. The runner may keep forwarding throughout a control replacement. A runner replacement interrupts proxied connections.
+Wait for one operation to settle before requesting the next. An accepted update or rollback returns the operation ID and the source and target archive digests. The corresponding HTTP mutations return 202. Poll the component's status until `pending` disappears, then check `active` against the requested digest. A successful change reports the replaced image under `previous`. A rejected candidate leaves the original image active once the watchdog verifies its recovery. The control API is unavailable while its own container restarts. The runner may keep forwarding throughout a control replacement. A runner replacement interrupts proxied connections. When a control update migrates the state format, the older release reads its preserved state file on rollback. Changes saved only in the newer state file will no longer be active.
 
 ## Initial rollback material
 
 The installer verifies the original pair under the installation's `images/` directory for container import. It then checks the exact tagged live container config IDs and copies the verified tars by native file ID into the separate, control-only `data/images/` directory. It binds the two current-image receipts to the installation ID and writes the publisher bootstrap record last. A missing receipt on an established installation stops reimport for inspection. Retain the original installation archives for reimport.
+
+## First upgrade from M3a
+
+The M3a control binary predates the image API. For the first upgrade, schedule a maintenance interval for both containers. The keep-and-reinstall procedure returns the LAN to the owner's routing during the gap, including devices normally assigned to the kill switch.
+
+1. Obtain the new signed installer and both matching image archives through the authenticated release channel. Have the original M3a packaged uninstaller available and note the installed disk, directory and subnet.
+2. Run the original uninstaller with its default **keep** choice. Save the public installation ID printed on success.
+3. Stage the new matching pair at the installer's archive paths and upload its `install.rsc`. Select the same disk, directory and subnet. Set the retained public installation ID immediately before the import:
+
+   ```routeros
+   :global tikrayReuseID "<previous-public-installation-id>"; /import file-name=install.rsc
+   ```
+
+4. Check the reported TLS fingerprint, sign in with the existing owner account, and check `tikray image status tikray` and `tikray image status runner`. Both active digests should match the new delivered archives. Keep preserves the desired policy, xray selection and management TLS identity. Reinstall establishes a new installation ID and fresh RouterOS credentials.
+
+Subsequent releases can use the component update commands above.
