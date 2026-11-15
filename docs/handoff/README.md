@@ -29,9 +29,15 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M2b: the service (`tikray serve`, HTTPS API, health, subscriptions) | Done, merged (PR #5) | |
 | M2c: human sign-in and hot server changes | Done, merged (PR #6) | |
 | M3a: RouterOS integration | Merged in PR #7. All three targets passed installer 6/6, routing 9/9 and uninstall 4/4. | [Ledger and image hashes](m3/ledger.md), [CHR results](../../test/e2e/results/) |
-| M3b: geo, image updates and CHR CI | Task 5 implements verified geo updates, guarded native diffs, rollback and restart recovery. Task 6b image update/rollback, the outage/watchdog suites and CHR CI follow. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
+| M3b: geo, image updates and CHR CI | Task 5 implements verified geo updates, guarded native diffs, rollback and restart recovery. Task 6b implements signed control and runner image updates, explicit rollback and reboot recovery. The watchdog acceptance matrix is in progress. Outage coverage and CHR CI follow. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
 | M4: web UI | Not started | |
 | M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
+
+## M3b image operations
+
+Use `tikray image status|rollback <tikray|runner>` and `tikray image update <tikray|runner> <release>`. Status reports the active and previous archive digests and any pending operation. The owner instructions cover publisher verification, offline staging, UTC schedules and the one-time upgrade from M3a. [Image releases and recovery](m3/image-publishers.md)
+
+The five-case CHR suite is `TestM3Watchdog`. Build the baseline and both signed trial releases from a clean checkout with `scripts/build-watchdog-lab.sh <new-output-directory> both`. Select the resulting target bundle in `TIKRAY_LAB_IMAGES` and run `scripts/test-m3-chr.sh VERSION ARCH '^TestM3Watchdog$'` in the isolated Linux lab described below. [Tested image and package hashes](m3/ledger.md)
 
 ## M3b geo operations
 
@@ -125,7 +131,7 @@ The runner has a 30-second HTTP read timeout. Store validation rejects device
 overlap with the private bridge, loopback or multicast and checks the bridge
 subnet against reserved ranges.
 
-- **M3b:** Continue with Task 6b from the geo checkpoint on `m3b-routeros`, then the dedicated outage/watchdog suites and CHR CI.
+- **M3b:** Finish the `TestM3Watchdog` signed-image matrix on `m3b-routeros`, then complete the outage suite and CHR CI. The outage work must cover the cached NAT decision of an established open UDP flow on an unsolicited runner failure.
 - **M4:**
   - Events need a boot id, because `Seq` restarts at 1 after a restart.
   - The UI signs in with M2c's cookie and CSRF scheme.

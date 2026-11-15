@@ -566,3 +566,20 @@ Ruling: Refuse unsupported explicit native container overrides before starting a
 Ruling: Authenticate every distinct bootstrap, active and previous archive for both components under the artifact lock before any image or schema collection. Preserve all files if a receipt's formerly valid digest points to a missing or changed signed slot — a single altered hex digit had been enough to make the genuine last good image appear disposable — cost if wrong: an ambiguous install retains extra disk usage. Startup, declined update and schema-retirement tests reproduced the corruption and then passed, along with positive reclamation, complete Go race tests and `make test`.
 
 Hardened keep ownership and bounded preparation tests were pushed in `da58b22`. The full signed keep-and-reinstall owner test also passed with the hardened closure and `11394d7` installers/images on 7.25 and 7.23.8 x86_64 in 393.92 s and 394.40 s respectively.
+
+The signed watchdog acceptance binaries and native packages come from clean product revision `00b4f5aef7ceef00adb4235417b13fa9cb73b4f8`. Both target architectures use the same public key (SHA-256 of `cosign.pub`: `3c2783e43dde6fe5015f31905f54987a98f4cabb0cbe04a21f1d0c6bd5c2e8b1`). Each target's `SHA256SUMS` was verified in WSL. Local public bundles are under `out/m3-reviewed/00b4f5aef7ceef00adb4235417b13fa9cb73b4f8/<target>/`. The release fixture's private signing key is discarded.
+
+| Target | SHA-256 of the public manifest |
+| --- | --- |
+| 7.25-x86_64 | `2c46c7258bedf9be82bdaa1f3fb86fdf1e9ffe4cc23120f2e5232f599cc4bff6` |
+| 7.23.8-x86_64 | `c38df68d0620463ea36f014bed71d6cd5c4a2449f7b8891f765959f2f1280899` |
+| 7.25-arm64 | `a5f26222558f8c723fc46ce3b69bdab66a6bef56c081b3a831dd5e52fffb8379` |
+
+| Architecture / signed role | Original tar SHA-256 | Healthy trial `6.0.1` | Unhealthy trial `6.0.2` |
+| --- | --- | --- | --- |
+| amd64 / tikray | `fb3d383d729c778dfe8694cfa080083b6eb4421147816eb72a09dcbba873e838` | `797daf91c6ce2e5914a89d6ec9a91f897d7dcf3afd7a68b6cc8545f0f6e20793` | `c16015ac1370a11e38e040d5d6689f474ea21aac8bb3dd04c7243e9d6ed43333` |
+| amd64 / tikray-runner | `d39ea3beaee68c988913e9141d47338bb5edb55f76c122fe3d544b0d058a9895` | `a474e241c00905efcbab1d666ed45b3e40e81d089d09b0033f9abd47ee2f5fea` | `1d6ba10e3c93b9f1abc62c676aa6bf80bf36aff0772fdd0ac81e1ac49089af6e` |
+| arm64 / tikray | `1b88519a5a89c1747c02fcf13ccf0dc9979e59ea7ceb47e397b1b79e61d660bd` | `4a013a594c16197eba3c43117a7faf10defdafe4be82213f72ee385abce961b6` | `1f44bee08514fbc3f70a745b860e98f5e1ea598e80903f2ff8f685316c7d4a69` |
+| arm64 / tikray-runner | `af52836e625b30c1e4e386cfab930566473def988b2415613e2837cfaad88402` | `8986e6e24aa1af88716a87490b49b8665499fcf31f57f2d68886e0244a660b18` | `180b0e3afaf666c23dda8239a5b0ee8d261465967afe424c5473e8cfb0b7cd3a` |
+
+Independent closing review of the committed stopped-runner consent, execution override refusal, retained archive verification and interrupted keep ownership reported no remaining blocker in those paths. The test-only native profile fixtures now exercise a real custom hostname and restricted UID, explicit limits and CPU selection.

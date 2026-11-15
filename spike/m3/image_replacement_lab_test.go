@@ -277,7 +277,7 @@ func newNativeImageCase(t *testing.T) *nativeImageCase {
 		}
 		_, txt, _ := strings.Cut(out, "m3-why=")
 		msg, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(txt))
-		for _, m := range regexp.MustCompile(`:error "(image:[^"]+)"`).FindAllStringSubmatch(string(watch), -1) {
+		for _, m := range regexp.MustCompile(`:error "(image:[^"]+)"`).FindAllStringSubmatch(string(watch)+helper, -1) {
 			if strings.Contains(string(msg), m[1]) {
 				return m[1]
 			}
