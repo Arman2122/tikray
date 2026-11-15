@@ -679,7 +679,7 @@ func stateRenderer(data string, st store.State, cache *artifacts.GeoReader) arti
 		if slot != "" {
 			geo, _, err := load(data, slot)
 			if err != nil {
-				return nil, err
+				return nil, artifacts.ErrGeoSlot
 			}
 			input.Geo = &geo
 		}

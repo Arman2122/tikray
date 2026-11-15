@@ -1171,6 +1171,10 @@ func TestConfigRenderUsesVerifiedActiveGeo(t *testing.T) {
 	}
 	requireRefusal()
 
+	if _, err := stateRenderer(data, st, nil)(core, version); !errors.Is(err, artifacts.ErrGeoSlot) {
+		t.Fatal("unreadable selected geo slot did not return a fixed classified error")
+	}
+
 	// The runner's reply is an input, too. A malformed selection may
 	// contain data that must not be repeated in the command's diagnostic.
 	selection.Geo = "../" + marker

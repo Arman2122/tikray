@@ -5,15 +5,18 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/runnerapi"
+	"github.com/Arman2122/tikray/internal/store"
 	"github.com/Arman2122/tikray/internal/xrayver"
 )
 
@@ -24,7 +27,19 @@ func TestActiveGeoSurvivesSweepsAndAttestation(t *testing.T) {
 	e.inSync()
 	installCore(t, e.data, testCore)
 	r := &attestationRouter{}
-	e.s = e.newService(Config{Router: r})
+	e.s = e.newService(Config{Router: r, Updaters: func(st store.State, rev uint64) *artifacts.CoreUpdater {
+		u := e.updaters(st, rev)
+		render := u.Render
+		u.Render = func(v xrayver.Version, slot string) ([]byte, error) {
+			if slot != "" {
+				if _, _, err := artifacts.LoadGeo(e.data, slot); err != nil {
+					return nil, artifacts.ErrGeoSlot
+				}
+			}
+			return render(v, slot)
+		}
+		return u
+	}})
 	st, rev := e.s.State()
 	const name = "fixture-release"
 	prefix := netip.MustParsePrefix("192.0.2.0/24")
@@ -68,8 +83,31 @@ func TestActiveGeoSurvivesSweepsAndAttestation(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "domestic-v4.txt")); err != nil {
 		t.Fatal(err)
 	}
+	// Both the public status path and the regular sweep try to render before
+	// normal router verification. They must identify this as geo degradation.
+	status := e.s.Status(t.Context())
+	if !status.GeoDegraded || status.Applied || status.Router.Degraded != "geo" {
+		t.Fatal("status hid active geo corruption")
+	}
+	if !e.s.pass(t.Context(), time.Second) || len(r.verified) != 1 || e.s.routerStatus.Degraded != "geo" {
+		t.Fatal("sweep changed native geo or misclassified the failure")
+	}
 	if err := e.s.finishRouter(t.Context(), st, rev); err == nil || len(r.verified) != 1 || e.s.routerStatus.Degraded != "geo" {
 		t.Fatal("unreadable bundle was not reported, or overwrote the verified list")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "domestic-v4.txt"), []byte(prefix.String()+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if e.s.pass(t.Context(), time.Second) {
+		t.Fatal("valid repaired slot did not converge")
+	}
+	status = e.s.Status(t.Context())
+	if !status.Applied || status.GeoDegraded || status.Router.Pending {
+		t.Fatal("verified geo repair did not clear degraded status")
+	}
+	e.failRender(errors.New("unrelated config failure"))
+	if e.s.Status(t.Context()).GeoDegraded {
+		t.Fatal("unrelated renderer error marked the geo slot degraded")
 	}
 }
 
@@ -122,5 +160,26 @@ func TestManagedEditWaitsForGeoRecovery(t *testing.T) {
 	}
 	if _, err := e.s.SetDefaultPolicy(t.Context(), rev, st.DefaultPolicy); err != nil {
 		t.Fatal("verified recovery did not unblock later edits")
+	}
+}
+
+func TestGeoRequestDoesNotReplayAnUndecidedRollback(t *testing.T) {
+	e := newEnv(t)
+	e.inSync()
+	r := &testRouter{}
+	e.s = e.newService(Config{Router: r})
+	st, _ := e.s.State()
+	v, _ := xrayver.Parse(testCore)
+	config, _ := renderFor(st, v, "")
+	now := runnerapi.Selection{Core: testCore, Config: artifacts.ConfigName(config)}
+	previous := now
+	previous.Geo = "candidate-slot"
+	journal, _ := json.Marshal(map[string]any{"version": 1, "from": now, "to": previous})
+	if os.MkdirAll(filepath.Join(e.data, "geo"), 0755) != nil || os.WriteFile(filepath.Join(e.data, "state", "geo-pending.json"), journal, 0600) != nil {
+		t.Fatal("could not set the interrupted operation")
+	}
+	_, err := e.s.GeoRollback(t.Context())
+	if !errors.Is(err, artifacts.ErrGeoPending) || !artifacts.GeoPending(e.data) || r.count() != 0 || len(e.runner.gotTrials()) != 0 {
+		t.Fatal("a new rollback processed the previous journal and attempted a second operation")
 	}
 }

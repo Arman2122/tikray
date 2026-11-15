@@ -437,6 +437,12 @@ func (s *Service) Status(ctx context.Context) Status {
 		out.CoreTested = render.IsTested(v)
 	}
 	name, err := configName(s.updater(st, rev), rs.Active)
+	if errors.Is(err, artifacts.ErrGeoSlot) {
+		out.GeoDegraded = true
+		if out.Router != nil {
+			out.Router.Degraded = "geo"
+		}
+	}
 	s.noteRender(rev, err, false)
 	out.Applied = err == nil && name == rs.Active.Config && !artifacts.HotPending(s.data) && !geoPending
 	if out.Router != nil {

@@ -467,3 +467,148 @@ func TestGeoRecoveryAfterVersionReceiptDurable(t *testing.T) {
 		})
 	}
 }
+
+// These names use the on-disk identity of a managed slot, so a test can
+// distinguish a real retirement from intentionally preserving foreign data.
+func ownedGeoFixture(t *testing.T, data, tag string) string {
+	t.Helper()
+	id := shaOf(tag)
+	name := "g-" + id[:62]
+	seededGeo(t, data, name, "192.0.2.0/24")
+	path := filepath.Join(data, "geo", name, "meta.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal("missing managed test slot")
+	}
+	var m geoMeta
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal("invalid test slot")
+	}
+	m.Profile, m.ReleaseID = "custom", id
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, path, string(b))
+	return name
+}
+
+func TestGeoPreJournalFailuresRetainOnlyCommittedPair(t *testing.T) {
+	e := newGeoTrialEnv(t)
+	if err := os.MkdirAll(filepath.Join(e.data, "state"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	active, previous := e.runner.activeSelection(), e.runner.activeSelection()
+	active.Geo = ownedGeoFixture(t, e.data, "active")
+	previous.Geo = ownedGeoFixture(t, e.data, "previous")
+	e.runner.script(func(f *fakeRunner) { f.st.Active = &active })
+	if err := writeGeoState(e.data, geoVersionsFile, geoTransition{Version: 1, From: previous, To: active}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(e.data, "geo", "owner"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	e.u.Render = func(xrayver.Version, string) ([]byte, error) { return nil, errors.New("fixture render refused") }
+	var orphan string
+	for _, release := range []string{"r2", "r3", "cancelled"} {
+		ctx, cancel := context.WithCancel(t.Context())
+		e.geo.Stage = func(_ context.Context, _, tag string) (string, error) {
+			orphan = ownedGeoFixture(t, e.data, tag)
+			if tag == "cancelled" {
+				cancel()
+				return "", context.Canceled
+			}
+			return orphan, nil
+		}
+		_, err := e.geo.Update(ctx, "custom", release)
+		cancel()
+		if err == nil || GeoPending(e.data) || e.prepares != 0 || len(e.runner.candidates()) != 0 {
+			t.Fatal("preparation failure changed active state")
+		}
+		if _, err := os.Stat(filepath.Join(e.data, "geo", orphan)); !os.IsNotExist(err) {
+			t.Fatal("rejected stage accumulated a managed slot")
+		}
+		for _, name := range []string{active.Geo, previous.Geo, "owner"} {
+			if _, err := os.Stat(filepath.Join(e.data, "geo", name)); err != nil {
+				t.Fatal("cleanup retired a protected slot")
+			}
+		}
+	}
+}
+
+func TestGeoNoopCannotRetireAnUnresolvedCandidate(t *testing.T) {
+	for _, when := range []string{"before-stage", "during-stage", "pending-journal"} {
+		t.Run(when, func(t *testing.T) {
+			e := newGeoTrialEnv(t)
+			if err := os.MkdirAll(filepath.Join(e.data, "state"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			old := e.runner.activeSelection()
+			target := old
+			target.Geo = ownedGeoFixture(t, e.data, "unresolved")
+			mark := func() {
+				if when == "pending-journal" {
+					if err := writeGeoState(e.data, geoPendingFile, geoTransition{Version: 1, From: old, To: target}); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := writeJSONAtomic(e.u.candidatePath(), runnerapi.Candidate{Selection: target, Deadline: e.u.now().Add(time.Minute)}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if when != "during-stage" {
+				mark()
+			}
+			calls := 0
+			e.geo.Stage = func(context.Context, string, string) (string, error) {
+				calls++
+				if when == "during-stage" {
+					mark()
+				}
+				return old.Geo, nil
+			}
+			if res, err := e.geo.Update(t.Context(), "custom", "r1"); err == nil || res.Outcome == OutcomeNoop {
+				t.Fatal("unresolved candidate authorized an idle result")
+			}
+			if when != "during-stage" && calls != 0 {
+				t.Fatal("fetched release while an existing runner intent was unresolved")
+			}
+			if _, _, err := LoadGeo(e.data, target.Geo); err != nil {
+				t.Fatal("orphan cleanup removed a possibly selected slot")
+			}
+			if when != "pending-journal" {
+				if _, err := os.Stat(e.u.candidatePath()); err != nil {
+					t.Fatal("changed unrelated candidate file")
+				}
+			} else if !GeoPending(e.data) {
+				t.Fatal("lost recovery intent")
+			}
+		})
+	}
+}
+
+func TestGeoCancelAfterStagingDoesNotDeleteChangedRunnerSelection(t *testing.T) {
+	e := newGeoTrialEnv(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	old := e.runner.activeSelection()
+	var staged string
+	e.geo.Stage = func(context.Context, string, string) (string, error) {
+		staged = ownedGeoFixture(t, e.data, "arrived")
+		next := old
+		next.Geo = staged
+		e.runner.script(func(f *fakeRunner) { f.st.Active = &next })
+		cancel()
+		return "", context.Canceled
+	}
+	if _, err := e.geo.Update(ctx, "custom", "r2"); err == nil {
+		t.Fatal("interrupted staging succeeded")
+	}
+	if _, _, err := LoadGeo(e.data, staged); err != nil {
+		t.Fatal("failure cleanup retired the live runner's slot")
+	}
+	if e.prepares != 0 || GeoPending(e.data) {
+		t.Fatal("interrupted publication changed router policy")
+	}
+}

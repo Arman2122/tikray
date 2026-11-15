@@ -27,6 +27,10 @@ const (
 	maxGeoPrefixes = 16384
 )
 
+// ErrGeoSlot is the public renderer classification for an unreadable or
+// unverified selected slot. It carries no path or publisher input.
+var ErrGeoSlot = errors.New("artifacts: geo slot unavailable")
+
 type geoMeta struct {
 	Profile   string            `json:"profile,omitempty"`
 	ReleaseID string            `json:"release_id,omitempty"`

@@ -85,6 +85,16 @@ func (g *GeoUpdater) valid() bool {
 	return g.Core != nil && g.Core.Data != "" && g.Core.Runner != nil && (g.Prepare == nil) == (g.Finish == nil)
 }
 
+func (g *GeoUpdater) requireNoRunnerIntent() error {
+	if GeoPending(g.Core.Data) || HotPending(g.Core.Data) {
+		return ErrGeoPending
+	}
+	if _, err := os.Lstat(g.Core.candidatePath()); !errors.Is(err, fs.ErrNotExist) {
+		return errors.New("artifacts: unresolved runner candidate file")
+	}
+	return nil
+}
+
 func (g *GeoUpdater) Update(ctx context.Context, profile, version string) (Result, error) {
 	return g.change(ctx, profile, version, false)
 }
@@ -124,6 +134,33 @@ func (g *GeoUpdater) change(ctx context.Context, profile, version string, rollba
 		if prior != nil && prior.To.Geo != old.Geo {
 			return refuse(&res, errors.New("artifacts: geo rollback record differs from active selection"))
 		}
+		if err := g.requireNoRunnerIntent(); err != nil {
+			return refuse(&res, err)
+		}
+		if err := g.verifyConfig(ctx, old.Config); err != nil {
+			return refuse(&res, err)
+		}
+
+		// A candidate is unclaimed until the journal is durable. A failed
+		// render or cancellation after publication must not fill the disk
+		// with rejected slots. Recovery owns retirement after that boundary.
+		unclaimed := !rollback
+		defer func() {
+			if !unclaimed {
+				return
+			}
+			verify, cancel := cleanupContext(ctx)
+			defer cancel()
+			if live, err := g.live(verify); err != nil || live != old || g.requireNoRunnerIntent() != nil {
+				return
+			}
+			if _, err := os.Lstat(filepath.Join(g.Core.Data, "geo")); errors.Is(err, fs.ErrNotExist) {
+				return
+			}
+			if err := g.prune(old.Geo, prior); err != nil {
+				g.Core.logf("geo: could not retire unclaimed staging")
+			}
+		}()
 		next := old
 		if rollback {
 			if prior == nil {
@@ -151,18 +188,19 @@ func (g *GeoUpdater) change(ctx context.Context, profile, version string, rollba
 		res.From = old.Geo
 		if equal {
 			res.To, res.Outcome = old.Geo, OutcomeNoop
+			if active, err := g.live(ctx); err != nil || active != old {
+				return refuse(&res, ErrGeoPending)
+			}
+			if err := g.requireNoRunnerIntent(); err != nil {
+				return refuse(&res, err)
+			}
+			unclaimed = false
 			if err := g.prune(old.Geo, prior); err != nil {
 				return refuse(&res, err)
 			}
 			return nil
 		}
 		res.To = next.Geo
-		if _, err := os.Lstat(g.Core.candidatePath()); !errors.Is(err, fs.ErrNotExist) {
-			return refuse(&res, errors.New("artifacts: unresolved runner candidate file"))
-		}
-		if err := g.verifyConfig(ctx, old.Config); err != nil {
-			return refuse(&res, err)
-		}
 		core, _ := xrayver.Parse(old.Core) // live validated the canonical core.
 		// A release can legitimately change the default render's bytes. Check
 		// the previous render before replacing a selection made via --config.
@@ -188,10 +226,17 @@ func (g *GeoUpdater) change(ctx context.Context, profile, version string, rollba
 		if err != nil {
 			return refuse(&res, err)
 		}
+		if active, err := g.live(ctx); err != nil || active != old {
+			return refuse(&res, ErrGeoPending)
+		}
+		if err := g.requireNoRunnerIntent(); err != nil {
+			return refuse(&res, err)
+		}
 		p := geoTransition{Version: 1, From: old, To: next}
 		if err := writeGeoState(g.Core.Data, geoPendingFile, p); err != nil {
 			return refuse(&res, err)
 		}
+		unclaimed = false
 		if g.Prepare != nil {
 			if err := g.Prepare(ctx, old, next, before, after); err != nil {
 				// No runner write has been attempted. Even a partial native

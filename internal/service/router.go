@@ -123,6 +123,13 @@ func (s *Service) finishRouter(ctx context.Context, st store.State, rev uint64) 
 	return s.finishRouterFor(ctx, st, rev, *rs.Active, ranges)
 }
 
+func renderFailureReason(err error) string {
+	if errors.Is(err, artifacts.ErrGeoSlot) {
+		return "geo"
+	}
+	return "runner"
+}
+
 func (s *Service) activeGeoRanges(slot string, fresh bool) ([]netip.Prefix, error) {
 	if slot == "" {
 		return nil, nil
@@ -133,7 +140,6 @@ func (s *Service) activeGeoRanges(slot string, fresh bool) ([]netip.Prefix, erro
 	}
 	_, prefixes, err := load(s.data, slot)
 	if err != nil {
-		s.geoDegraded.Store(true)
 		s.routerPending("geo")
 		return nil, ErrRouterUnavailable
 	}
@@ -145,7 +151,7 @@ func (s *Service) activeGeoRanges(slot string, fresh bool) ([]netip.Prefix, erro
 func (s *Service) finishRouterFor(ctx context.Context, st store.State, rev uint64, selection runnerapi.Selection, ranges []netip.Prefix) error {
 	name, err := configName(s.updater(st, rev), &selection)
 	if err != nil || name != selection.Config {
-		s.routerPending("runner")
+		s.routerPending(renderFailureReason(err))
 		return ErrRouterUnavailable
 	}
 	if _, cur := s.store.State(); cur != rev {

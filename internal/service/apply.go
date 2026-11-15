@@ -163,9 +163,10 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 		name, err := configName(u, rs.Active)
 		switch {
 		case err != nil:
-			// Apply would refuse with the same error.
+			// Render can discover an unreadable active geo slot before
+			// the normal native reconciliation gets its chance to check it.
 			if s.router != nil {
-				s.routerPending("runner")
+				s.routerPending(renderFailureReason(err))
 			}
 			s.noteRender(rev, err, true)
 			return s.router != nil
