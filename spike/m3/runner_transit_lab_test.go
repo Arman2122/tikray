@@ -211,9 +211,19 @@ for i in range(14):
 	backupBefore := run(`:put [/ip/firewall/filter/get [find where comment="tikray:acl-transit-deny-backup"] packets]`)
 	run(`/ip/firewall/filter/remove [find where comment="tikray:acl-transit-deny"]; /ip/firewall/address-list/add list=tikray-transit-lans address=0.0.0.0/0 comment="owner:independent-list"; /interface/list/member/add list=transit-lan interface=ether1 comment="owner:wan-added"`)
 	emit("C", 34800)
-	if strings.Contains(read(wan), "C") || run(`:put [/ip/firewall/filter/get [find where comment="tikray:acl-transit-deny-backup"] packets]`) == backupBefore || !strings.Contains(guard("repair"), "verified") || run(`:put [:len [/ip/firewall/filter/find where comment="tikray:acl-transit-deny" and !disabled]]`) != "1" || run(`:put [:len [/ip/firewall/address-list/find where comment="owner:independent-list"]]`) != "1" {
-		t.Fatal("lost one terminal or unrelated list compromised the return guard")
+	until("surviving terminal never positively caught the new fixtures", func() bool {
+		return run(`:put [/ip/firewall/filter/get [find where comment="tikray:acl-transit-deny-backup"] packets]`) != backupBefore
+	})
+	if strings.Contains(read(wan), "C") {
+		t.Fatal("outside-source WAN packet escaped after one terminal was removed")
 	}
+	if got := guard("repair"); !strings.Contains(got, "verified") {
+		t.Fatal("surviving terminal did not permit owned repair", got)
+	}
+	if run(`:put [:len [/ip/firewall/filter/find where comment="tikray:acl-transit-deny" and !disabled]]`) != "1" || run(`:put [:len [/ip/firewall/address-list/find where comment="owner:independent-list"]]`) != "1" {
+		t.Fatal("terminal was not restored or independent owner list changed")
+	}
+
 	run(`/interface/list/member/remove [find where comment="owner:wan-added"]`)
 	run(`/ip/firewall/filter/disable [find where comment="tikray:acl-runner-transit"]`)
 	run(`/ip/firewall/filter/move [find where comment="owner:transit-control"] destination=[find where comment="tikray:acl-runner-transit"]`)
@@ -234,9 +244,21 @@ for i in range(14):
 	}
 	emit("L", 35100)
 	until("enrolled LAN reply lost in partial terminal repair", func() bool { return strings.Contains(read(lan), "L") })
-	if !strings.Contains(guard("repair"), "verified") || run(`:put [/ip/firewall/filter/get [find where comment="tikray:acl-transit-deny"] disabled]`) != "false" {
+	complete := false
+	for range 8 {
+		result := guard("repair")
+		if strings.Contains(result, "verified") {
+			complete = true
+			break
+		}
+		if !strings.Contains(result, "runner return LAN repair pending") {
+			t.Fatal("unexpected partial return repair", result)
+		}
+	}
+	if !complete || run(`:put [/ip/firewall/filter/get [find where comment="tikray:acl-transit-deny"] disabled]`) != "false" {
 		t.Fatal("both terminal drops did not recover after LAN returns")
 	}
+
 	run(`/ip/firewall/filter/set [find where comment="tikray:acl-runner-transit"] protocol=tcp`)
 	if !strings.Contains(guard("check"), "extra runner transit condition") || run(fmt.Sprintf(`:put [:tostr [/ip/firewall/filter/get [:toid "%s"] protocol]]`, id)) == "" {
 		t.Fatal("changed guard was silently adopted")

@@ -623,3 +623,22 @@ The final private-chain controller passed its restricted x86 checks again after 
 Ruling: The installer constructs both tagged bridge guards before importing or starting the runner. The restricted watchdog independently verifies the enrolled scope's version and installation ID, the existing caller and all private-chain rows immediately before runner add/start/restart or enabling boot. Missing or misplaced positively owned protection is repaired; ambiguous rows leave the runner stopped. Return rules are placed before either terminal; repair of a disabled terminal cannot cut off an already working enrolled return during a bounded batch — the pre-fix scheduler started a runner with no guard on both CHRs while control remained down — cost if wrong: outside-source traffic without a verified LAN return is denied, and conflicting native ownership can delay recovery. Native execution and admission use filter rules only and leave the owner's global routing/address lists alone.
 
 The private-chain Go checkpoint was `65d6b0f`. Actual independent guarded-start and packet tests passed on both firmware versions, including a positive pre-guard WAN packet, verified drops after protection, ordinary transport and owner controls, a missing terminal, a WAN interface also in LAN, a displaced guard, and explicit offline rollback. A 24-prefix repair that would have activated a misplaced disabled terminal prematurely was red, then green on the corrected native order (82.36 s / 86.36 s). An outdated scope with the wrong installation ID was also refused before it could authorize a new LAN. The signed three-target matrix must be recorded using the combined startup/RouterOS fix.
+
+## Combined Task 6b qualification kit
+
+Both container revisions and the packaged RouterOS scripts come from `8b91d54bea691f744b1e022768f46a5f1459181d`. All six Docker-save subjects per target passed detached signature verification and all per-target entries passed SHA-256 verification in WSL. The public signing key file SHA-256 is `e22ecdd07e2c3b50d3a432104292bd77c58b5af298c8252f2483349aa0fadf4c`. The matching bundles are under `out/m3-reviewed/8b91d54bea691f744b1e022768f46a5f1459181d/<target>/`, with identical `SOURCE_COMMIT` and `NATIVE_COMMIT`. Earlier lists and manifests above document the regression history.
+
+| Target | SHA256SUMS digest | Packaged install.rsc SHA-256 |
+| --- | --- | --- |
+| 7.25-x86_64 | `9ff92280399013c3326dab7554465f448345de87c177204c688c4708838d7f7e` | `228b4554ccc0210eb247977d76bab08bd330820c526df6f213456f5d49791617` |
+| 7.23.8-x86_64 | `e29f08761810d9612367ab385cd91a14b1fb9dc59fe869b91d348a7d283f76a5` | `97426d1150ddcad20e93d01b201cc94b0f92e5565aca47d10bb94e7a8e80ff1e` |
+| 7.25-arm64 | `72c21d96704c51fb3abdcac17f90baa2347b8de8420e586b03d8ddf8f17ca42c` | `dc2439e23223cd229a16ece4c33469fa3004406ccd3a835f32332f499af3eeed` |
+
+| Architecture and component | Original archive | Healthy trial 6.0.1 | Unhealthy trial 6.0.2 |
+| --- | --- | --- | --- |
+| amd64 / tikray | `2afd40bdad522ddd4a3697ac278524b8eb9e4a0c745c7d12820cb1197ff1522d` | `b8cfc5b1a03e54385aaa92cc0857796bb4c0c8286d9270bacd1bc54eb116ce99` | `5fa337d31c67a25cc3fb2fdb4342e5c80ffe4e110690c036fceed4cacb3b39e8` |
+| amd64 / tikray-runner | `886730e88cd924aa5af5c15911aea4cf9d1e37e1638bbd1b22ec1c415a806aa3` | `f3044cc281ab27e46896a8aa22768cc18a7b9a82c816041d45cb4dd5bf71a9bc` | `16f332faf99bc8f95a0193780f573846a9263d1cb27abcd42994e1460fe67d50` |
+| arm64 / tikray | `c5665df6255b20211449419de448af624f993def24bcc3bafefdfc730a008ee4` | `5a691333315a1e7ee140f3ae41ca21b496611d45820ff5507464967672bfd7b6` | `335ff17e31cc4ca0266334aa9711cdbb8b89c7097d6d141dedcc294e02f4069f` |
+| arm64 / tikray-runner | `0b16ada74b5af0037fbd53c6dd2629f733905cd697e797c73a2a0bcbd618c0da` | `f1346a5c64fc2723871526a6f6d12bb57ced374069a453346ee429b7d5671390` | `76bcf7259da5235d941298f92b076994b7e212240b7fb921d63e285604e67279` |
+
+The three full `TestM3Watchdog` runs started concurrently at 18:20 UTC on 2026-11-15. This single-revision kit includes the runner startup fix, the native installer and watchdog guard, and the restricted reconciler. It supersedes the earlier mixed-source kit. The final native wan-facing packet check independently observed the backup terminal catch real returned traffic during repair in 73.32 s and 73.94 s.
