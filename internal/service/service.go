@@ -117,8 +117,9 @@ type Config struct {
 	Socks string
 	// GeoProfile is the owner-configured default publisher for daily checks.
 	// An empty value uses the installed slot's profile, if one exists.
-	GeoProfile string
-	GeoReader  *artifacts.GeoReader
+	GeoProfile  string
+	GeoSchedule GeoSchedule
+	GeoReader   *artifacts.GeoReader
 	// LocalBridge verifies that the control container has the proposed .2
 	// address and exact prefix. Without it a bridge repair cannot be trusted.
 	LocalBridge func(store.Network) bool
@@ -145,6 +146,7 @@ type Service struct {
 	// routerReady closes after this process verifies its first effective router policy.
 	routerReady   chan struct{}
 	geoProfile    string
+	geoSchedule   GeoSchedule
 	geoReader     *artifacts.GeoReader
 	geoScheduleMu sync.Mutex // serializes reservations in geo-check.json
 	data          string
@@ -244,6 +246,7 @@ func New(c Config) (*Service, error) {
 		routerStatus: RouterStatus{Pending: c.Router != nil},
 		monitor:      c.Monitor,
 		geoProfile:   c.GeoProfile,
+		geoSchedule:  c.GeoSchedule,
 		data:         c.Data,
 		debounce:     orDefault(c.Debounce, defaultDebounce),
 		retry:        orDefault(c.Retry, defaultRetry),

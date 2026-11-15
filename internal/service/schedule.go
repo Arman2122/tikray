@@ -87,19 +87,31 @@ func (s *Service) due(sub store.Subscription, now time.Time) bool {
 // selectedGeoProfile takes the current owner configuration or the profile of
 // the verified active slot. An unusable slot cannot select a different source.
 func (s *Service) selectedGeoProfile(ctx context.Context) (string, error) {
+	active, err := s.geoScheduleSelection(ctx)
+	if err != nil {
+		return "", err
+	}
+	return s.profileForSlot(active.Geo)
+}
+
+func (s *Service) geoScheduleSelection(ctx context.Context) (runnerapi.Selection, error) {
 	if s.repairBridge || s.bootPending.Load() {
-		return "", ErrBootstrapPending
+		return runnerapi.Selection{}, ErrBootstrapPending
 	}
 	query, cancel := context.WithTimeout(ctx, statusTimeout)
 	defer cancel()
 	status, err := s.runner.Status(query)
 	if err != nil {
-		return "", ErrRunnerUnavailable
+		return runnerapi.Selection{}, ErrRunnerUnavailable
 	}
 	if status.Active == nil || status.State != runnerapi.StateRunning || status.Candidate != nil {
-		return "", ErrBootstrapPending
+		return runnerapi.Selection{}, ErrBootstrapPending
 	}
-	installed, err := artifacts.GeoSlotProfile(s.data, status.Active.Geo)
+	return *status.Active, nil
+}
+
+func (s *Service) profileForSlot(slot string) (string, error) {
+	installed, err := artifacts.GeoSlotProfile(s.data, slot)
 	if err != nil {
 		return "", &Refused{Reason: "could not verify active geo profile"}
 	}
@@ -123,6 +135,12 @@ func (s *Service) checkGeoDue(ctx context.Context, update func(context.Context, 
 		return
 	}
 	if due {
+		if s.geoSchedule.mode == "notify" {
+			if err := s.notifyGeo(ctx); err != nil && ctx.Err() == nil {
+				s.record(KindError, "could not check for a geo release")
+			}
+			return
+		}
 		// Resolve the profile again under the service's writer lock. The
 		// manual update or rollback that acquired it first may have changed it.
 		_, _ = update(ctx, "", "latest")
@@ -132,16 +150,19 @@ func (s *Service) checkGeoDue(ctx context.Context, update func(context.Context, 
 func (s *Service) reserveGeoCheck(ctx context.Context) (bool, error) {
 	s.geoScheduleMu.Lock()
 	defer s.geoScheduleMu.Unlock()
+	now := s.now().UTC()
+	if !s.geoSchedule.due(now, time.Time{}) {
+		return false, nil
+	}
 	path := filepath.Join(s.data, "state", "geo-check.json")
 	raw, err := atomicfile.ReadRegular(path, 256, 0600)
-	now := s.now().UTC()
 	switch {
 	case err == nil:
 		var last time.Time
 		if json.Unmarshal(raw, &last) != nil || last.IsZero() {
 			return false, errors.New("service: invalid geo check receipt")
 		}
-		if now.Before(last.Add(24 * time.Hour)) {
+		if !s.geoSchedule.due(now, last) {
 			return false, nil
 		}
 	case !errors.Is(err, os.ErrNotExist):

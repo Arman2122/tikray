@@ -48,6 +48,27 @@ meta.json
 
 The text file holds one canonical IPv4 CIDR per line. Empty lines and lines starting with `#` are allowed. A verified empty text file intentionally specifies no bundle CIDRs. Both data files must be valid protobuf lists with the referenced codes present. Xray checks the candidate's runtime behavior during its trial.
 
+## Scheduling
+
+`TIKRAY_GEO_MODE` accepts `auto`, `notify` and `manual`. The default is
+`auto`. It activates a verified update through the same runner trial and
+RouterOS transaction as a manual request. `notify` compares the trusted
+publisher's latest release identity with the committed slot. A different
+release produces a geo availability event. Payload verification and activation
+take place when the owner requests the update. `manual` disables scheduled
+publisher checks. Explicit update and rollback commands work in every mode.
+
+`TIKRAY_GEO_WINDOW` can limit scheduled checks to a UTC interval in
+`HH:MM-HH:MM` form. For example, `22:00-02:00` opens at 22:00 UTC and ends
+at 02:00 UTC the following day. The closing minute is excluded. A check
+started in the window can finish after it closes. Use an empty value for
+an unrestricted schedule.
+
+A private receipt reserves the check before the publisher is contacted.
+Restarting the service or a failed fetch cannot repeat it in that window.
+With a configured window the opening UTC date identifies the daily check.
+Without a window the minimum interval is 24 hours.
+
 ## Offline updates
 
 Use a concrete release selector for an offline update. Place an independently obtained publisher manifest at `/data/state/geo-trust/<profile>/<selector>/meta.json` on the private control volume. Its `version` must equal the requested selector. Custom uses the manifest shown above. For built-ins the checksum map must include `geoip.dat` and `geosite.dat` (the latter holds the digest of upstream `dlc.dat` for v2fly). Built-in matchers and domestic ranges are determined by the profile and its verified binary.

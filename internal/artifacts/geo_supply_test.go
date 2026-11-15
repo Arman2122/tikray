@@ -396,3 +396,23 @@ func TestGeoPayloadsReadableThroughRunnerMount(t *testing.T) {
 		}
 	}
 }
+
+func TestGeoRedirectDoesNotDisclosePublisherRequest(t *testing.T) {
+	const private = "private-fixture-only"
+	var calls int
+	c := geoClient(&http.Client{Transport: geoTransportFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return &http.Response{StatusCode: 302, Header: http.Header{"Location": []string{"https://cdn.example/asset"}}, Body: http.NoBody, Request: r}, nil
+		}
+		if r.Referer() != "" {
+			t.Error("a redirect disclosed the previous publisher URL")
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: http.NoBody, Request: r}, nil
+	})})
+	resp, err := c.Get("https://publisher.example/asset?key=" + private)
+	if err != nil || calls != 2 {
+		t.Fatal("approved HTTPS redirect not exercised")
+	}
+	resp.Body.Close()
+}

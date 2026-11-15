@@ -112,6 +112,7 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 		Runner:       w.runner,
 		Router:       router,
 		GeoProfile:   env.GeoProfile,
+		GeoSchedule:  env.GeoSchedule,
 		GeoReader:    w.geoReader,
 		Bootstrap:    bootstrap,
 		VerifyBridge: install != nil,

@@ -17,6 +17,7 @@ import (
 	"github.com/Arman2122/tikray/internal/apiclient"
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/render"
+	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 )
 
@@ -52,6 +53,7 @@ type Config struct {
 	// Mirrors are download URL templates with {version}, {arch} and {file}
 	// (TIKRAY_MIRRORS, comma-separated).
 	Mirrors            []string
+	GeoSchedule        service.GeoSchedule
 	GeoProfile, GeoURL string
 	GeoMirrors         []string
 	// IndexURLs locate the signed hash index (TIKRAY_INDEX_URLS,
@@ -182,6 +184,11 @@ func configFromEnv(getenv func(string) string) (Config, error) {
 		APIToken:        strings.TrimSpace(getenv("TIKRAY_API_TOKEN")),
 		Hot:             getenv("TIKRAY_HOT") != "off",
 	}
+	policy, err := service.ParseGeoSchedule(getenv("TIKRAY_GEO_MODE"), getenv("TIKRAY_GEO_WINDOW"))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.GeoSchedule = policy
 	if cfg.GeoProfile != "" && !artifacts.ValidGeoProfile(cfg.GeoProfile) {
 		return Config{}, errors.New("TIKRAY_GEO_PROFILE: unknown publisher")
 	}

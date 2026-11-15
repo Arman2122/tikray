@@ -125,6 +125,9 @@ func geoClient(h *http.Client) *http.Client {
 		if req.URL.Scheme != "https" || req.URL.User != nil || len(via) >= 10 {
 			return errGeoSource
 		}
+		// A publisher or release CDN may put credentials in a download
+		// query. The next hop needs the asset URL, not our previous URL.
+		req.Header.Del("Referer")
 		if check != nil {
 			return check(req, via)
 		}
