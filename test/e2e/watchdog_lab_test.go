@@ -240,6 +240,16 @@ func (f *routingLab) requireImage(ctx context.Context, t *testing.T, c string, w
 	return row
 }
 
+func (f *routingLab) imageMarker(ctx context.Context, t *testing.T, row containerWitness, want string) bool {
+	t.Helper()
+	// RouterOS hides files inside an extracted container root from /file/find.
+	// A bounded direct read still returns the exact signed marker bytes.
+	path := rosEscape(row.root + "/m3-qa-image-version")
+	command := `{:do { :local b ([/file/read file="` + path + `" offset=0 chunk-size=32 as-value]->"data"); :if ($b="` + want + `\n") do={:put "m3-runtime-marker-ok"} } on-error={}}`
+	out, err := f.CHR.RunPrivate(ctx, command)
+	return err == nil && strings.TrimSpace(out) == "m3-runtime-marker-ok"
+}
+
 func (f *routingLab) scheduler(ctx context.Context, t *testing.T, enabled bool) {
 	t.Helper()
 	id := f.taggedID(ctx, t, "/system/scheduler", "tikray:watchdog-scheduler")
@@ -588,6 +598,15 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	statePath := dataRoot + "/state/state.v" + strconv.Itoa(store.Current) + ".json"
 	beforeState := sha256.Sum256(f.exactFile(ctx, t, statePath))
 	ownerSSH := f.ownerLANSSH(ctx, t)
+	ownerConnection := func() string {
+		t.Helper()
+		rows := f.readROS(ctx, t, "/ip/firewall/connection", ".id", "?protocol=tcp", "?src-address=192.168.88.201", "?dst-address=192.168.88.1", "?dst-port=22", "?tcp-state=established")
+		if len(rows) != 1 || rows[0][".id"] == "" {
+			t.Fatal("independent owner SSH conntrack row missing or ambiguous")
+		}
+		return rows[0][".id"]
+	}
+	ownerRow := ownerConnection()
 	generation := f.ros.Generation()
 	other, kind := "runner", "runner"
 	if component == "runner" {
@@ -606,6 +625,9 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	verifySibling := func() {
 		t.Helper()
 		ownerSSH()
+		if ownerConnection() != ownerRow {
+			t.Fatal("replacement removed the unrelated owner's connection")
+		}
 		r, ok := f.containerImage(ctx, other)
 		if f.ros.Generation() != generation || !ok || r.id != otherImage.id || r.imageID != otherImage.imageID || f.probe(ctx, t, kind) != otherProcess || f.activeImageSelection(ctx, t) != selection {
 			t.Fatal("replacement changed its sibling, selection or owner session")
@@ -631,7 +653,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	f.imageOperation(ctx, t, component, "update", healthyImageVersion, initial.digest, valid.digest)
 	f.waitImageCompletion(ctx, t, component, valid, initial.digest, base)
 	updated := f.requireImage(ctx, t, component, valid)
-	if f.probe(ctx, t, changedProbe) == priorProcess || f.file(ctx, t, updated.root+"/m3-qa-image-version") != healthyImageVersion {
+	if f.probe(ctx, t, changedProbe) == priorProcess || !f.imageMarker(ctx, t, updated, healthyImageVersion) {
 		t.Fatal("candidate bytes were not imported and run")
 	}
 	f.expectPath(ctx, t, routingRemote, true)
@@ -656,6 +678,10 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	f.imageOperation(ctx, t, component, "rollback", "", valid.digest, initial.digest)
 	f.waitImageCompletion(ctx, t, component, initial, valid.digest, base)
 	verifySibling()
+	var kept *imagePeerFlow
+	if component == "runner" {
+		kept = f.keepImagePeerFlow(ctx, t)
+	}
 	start := time.Now()
 	q := f.imageOperation(ctx, t, component, "update", offlineImageVersion, initial.digest, bad.digest)
 	trial := f.requireImage(ctx, t, component, bad)
@@ -663,7 +689,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		t.Fatal("signed negative control never actually started")
 	}
 	t.Logf("%s: signed unhealthy candidate actually running", component)
-	if f.file(ctx, t, trial.root+"/m3-qa-image-version") != offlineImageVersion {
+	if !f.imageMarker(ctx, t, trial, offlineImageVersion) {
 		t.Fatal("unhealthy candidate not positively installed")
 	}
 	pending, e := f.exists(ctx, imageRequestFile)
@@ -671,7 +697,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		t.Fatal("unhealthy candidate cleared the request")
 	}
 	if component == "runner" {
-		if f.mustRun(ctx, t, `:put ([/ping 172.30.252.3 count=3 interval=500ms]>0)`) != "true" {
+		if !f.runnerRespondsToPing(ctx) {
 			t.Fatal("unhealthy runner positive ping control missing")
 		}
 		if s := f.imageStatus(ctx, t, component); s.Active != initial.digest || s.Pending == nil || s.Pending.OperationID != q.OperationID {
@@ -684,6 +710,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		if !fallback || wan.sample(t).closedDirect != 0 || wan.sample(t).unknown != 0 {
 			t.Fatal("unverified running runner failed its open WAN or closed leak check")
 		}
+		kept.requireDirect(ctx, t)
 		f.imageDNSFallback(ctx, t)
 		f.imageAlternateGateway(ctx, t)
 		ownerSSH()
@@ -721,7 +748,18 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		if !ok || wan.sample(t).closedDirect != 0 || wan.sample(t).unknown != 0 {
 			t.Fatal("runner update or restore leaked from a closed client or lost the recovered open path")
 		}
+		kept.requireProxy(ctx, t)
 	}
+}
+
+func (f *routingLab) runnerRespondsToPing(ctx context.Context) bool {
+	// RouterOS can print its packet table even when /ping is evaluated
+	// inside another expression. Only the explicit positive frame counts.
+	_, ok := poll(ctx, 15*time.Second, 500*time.Millisecond, func() bool {
+		out, err := f.CHR.RunPrivate(ctx, `{:local replies [/ping 172.30.252.3 src-address=172.30.252.1 count=2 interval=400ms]; :if ($replies>0) do={:put "m3-runner-ping-ok"}}`)
+		return err == nil && slices.Contains(strings.Fields(out), "m3-runner-ping-ok")
+	})
+	return ok
 }
 
 // The service's immutable request says what to attempt; RouterOS alone
@@ -760,7 +798,7 @@ func (f *routingLab) checkedImageReboot(ctx context.Context, t *testing.T) {
 	if f.waitForContainer(ctx, imageContainer(c), "running") != nil {
 		t.Fatal("reboot candidate never ran")
 	}
-	if f.file(ctx, t, broken.root+"/m3-qa-image-version") != offlineImageVersion {
+	if !f.imageMarker(ctx, t, broken, offlineImageVersion) {
 		t.Fatal("power interruption missed the candidate image")
 	}
 	age := 0
