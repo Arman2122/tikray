@@ -1,0 +1,57 @@
+# Geo publishers and release selection
+
+An update fetches a complete geo release into a new slot. The runner trials the selected data and rendered configuration, and the service verifies the associated RouterOS domestic list. The CLI can select an explicit profile or use the configured profile.
+
+```sh
+tikray geo update latest --profile iran
+tikray geo rollback
+```
+
+`TIKRAY_GEO_PROFILE` selects the publisher used when the profile is omitted. Without an explicit default, the service uses the managed profile from the active geo slot. A fresh installation with neither selection has no daily geo download. `TIKRAY_GEO_URL` is the trusted HTTPS root for the custom profile. `TIKRAY_GEO_MIRRORS` is a comma-separated list of HTTPS payload templates containing `{file}`, with optional `{version}` and `{arch}`.
+
+| Profile | Release selector | Payloads and domestic matchers |
+|---|---|---|
+| `iran` | Numeric release tag, or `latest` | `geoip.dat` and `geosite.dat` from [Chocolate4U/Iran-v2ray-rules](https://github.com/Chocolate4U/Iran-v2ray-rules/releases). Uses `geoip:ir` and `geosite:category-ir`. |
+| `loyalsoldier` | Numeric release tag, or `latest` | Both data files from [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat/releases). Uses `geoip:cn` and `geosite:cn`. |
+| `v2fly` | `<geoip-tag>+<domain-list-tag>`, or `latest` | The two independent publishers release on different schedules. Uses `geoip.dat` from [v2fly/geoip](https://github.com/v2fly/geoip/releases) and `dlc.dat` from [v2fly/domain-list-community](https://github.com/v2fly/domain-list-community/releases), installed as `geosite.dat`. Uses `geoip:cn` and `geosite:cn`. |
+| `custom` | A publisher tag, or `latest` | A three-file bundle and its publisher manifest from the configured HTTPS root. The manifest supplies the matchers. |
+
+A numeric tag has 8–20 decimal digits. A custom tag has 1–64 ASCII letters, digits, periods, underscores or hyphens, starts with a letter or digit and contains no `..`. For pinned v2fly updates supply **both** tags, for example `202611080027+20261115005626`. The mirror's `{version}` is the tag of the individual upstream asset.
+
+For built-in profiles tikray obtains each asset's published `.sha256sum` over HTTPS, directly or through a healthy proxy. It decodes the selected country's IPv4 prefixes from that verified GeoIP file, then records the SHA-256 of the generated domestic text. For every payload the fallback order is publisher, publisher over the healthy proxy, configured mirrors, then the local inbox.
+
+## Custom publisher layout
+
+Serve `latest` as a small text file containing the current tag. Under `<root>/<tag>/` serve these four files:
+
+```text
+geoip.dat
+geosite.dat
+domestic-v4.txt
+meta.json
+```
+
+`meta.json` contains the tag, arrays of geosite and geoip matchers, and the lowercase SHA-256 of **each exact payload**. Replace the three placeholders below with real 64-digit digests.
+
+```json
+{
+  "version": "regional-20261115",
+  "site": ["geosite:category-ir"],
+  "ip": ["geoip:ir"],
+  "sha256": {
+    "geoip.dat": "<geoip digest>",
+    "geosite.dat": "<geosite digest>",
+    "domestic-v4.txt": "<domestic list digest>"
+  }
+}
+```
+
+The text file holds one canonical IPv4 CIDR per line. Empty lines and lines starting with `#` are allowed. A verified empty text file intentionally specifies no bundle CIDRs. Both data files must be valid protobuf lists with the referenced codes present. Xray checks the candidate's runtime behavior during its trial.
+
+## Offline updates
+
+Use a concrete release selector for an offline update. Place an independently obtained publisher manifest at `/data/state/geo-trust/<profile>/<selector>/meta.json` on the private control volume. Its `version` must equal the requested selector. Custom uses the manifest shown above. For built-ins the checksum map must include `geoip.dat` and `geosite.dat` (the latter holds the digest of upstream `dlc.dat` for v2fly). Built-in matchers and domestic ranges are determined by the profile and its verified binary.
+
+Put payloads in `/data/inbox/geo/<profile>/<selector>/` under their upstream filenames. For v2fly this means `geoip.dat` and `dlc.dat`. For custom include the domestic text. An optional private `/data/state/geo-trust/<profile>/latest` text file names the desired verified selector when the publisher's latest lookup is unavailable. The owner must authenticate the manifest before putting it in the private trust directory. Copying checksums into the payload inbox does not establish trust.
+
+A managed slot has a bounded directory name derived from the publisher, tag and configured custom origin. Raw URLs and owner-supplied strings stay out of result and failure text. The metadata records the profile and release identity, with each payload's digest. `GeoSlotProfile` reads this identity for scheduling. `SameGeo` rechecks local payload integrity before comparing payloads and matchers; corruption prevents a no-op verdict even when both names are identical.

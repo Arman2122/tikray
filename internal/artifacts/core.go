@@ -208,7 +208,11 @@ func (u *CoreUpdater) locked(res *Result, fn func() error) (Result, error) {
 		defer unlock() // after record, so the history line is written under the lock
 		u.sweepTemp()
 		u.sweepHot()
-		err = fn()
+		if res.Kind != KindGeo && GeoPending(u.Data) {
+			err = refuse(res, ErrGeoPending)
+		} else {
+			err = fn()
+		}
 	}
 	return u.record(*res, err)
 }
@@ -637,10 +641,15 @@ func inboxOnly(c Chain) Chain {
 // trial puts sel on trial and drives it to its end. A commit prunes the slots
 // and the configs. proxy, when not nil, must pass as well as Health.
 func (u *CoreUpdater) trial(ctx context.Context, sel runnerapi.Selection, res *Result, proxy HealthChecker) error {
+	cand := runnerapi.Candidate{Selection: sel, Deadline: u.now().Add(u.trialDeadline())}
+	return u.trialCandidate(ctx, cand, res, proxy)
+}
+
+func (u *CoreUpdater) trialCandidate(ctx context.Context, cand runnerapi.Candidate, res *Result, proxy HealthChecker) error {
+	sel := cand.Selection
 	if err := sel.Validate(); err != nil {
 		return refuse(res, err)
 	}
-	cand := runnerapi.Candidate{Selection: sel, Deadline: u.now().Add(u.trialDeadline())}
 	if err := os.MkdirAll(u.runDir(), 0o755); err != nil {
 		return refuse(res, err)
 	}
@@ -650,7 +659,7 @@ func (u *CoreUpdater) trial(ctx context.Context, sel runnerapi.Selection, res *R
 	u.logf("xray-core %s: trial until %s", sel.Core, cand.Deadline.Format(time.RFC3339))
 	var err error
 	res.Outcome, res.Detail, err = u.drive(ctx, cand, proxy)
-	if res.Outcome == runnerapi.OutcomeCommitted {
+	if res.Outcome == runnerapi.OutcomeCommitted && res.Kind != KindGeo {
 		u.prune(res)
 		u.pruneConfigs(ctx, sel, res)
 	}
@@ -928,7 +937,9 @@ func (u *CoreUpdater) record(res Result, cause error) (Result, error) {
 		err = errors.New(res.Outcome)
 	}
 	// logf redacts its lines, so the log gets the Detail as it is, once.
-	if res.Detail != "" {
+	if res.Kind == KindGeo {
+		u.logf("geo: %s", res.Outcome)
+	} else if res.Detail != "" {
 		u.logf("xray-core %s: %s: %s", res.To, res.Outcome, res.Detail)
 	} else {
 		u.logf("xray-core %s: %s", res.To, res.Outcome)

@@ -113,7 +113,11 @@ func readHistory(path string) ([]Result, error) {
 		if len(bytes.TrimSpace(line)) > 0 && json.Unmarshal(line, &r) == nil {
 			// Older refused updates copied an arbitrary target into both
 			// fields. Preserve their public outcome and timestamp on read.
-			if r.To != "" {
+			if r.Kind == KindGeo {
+				if r.From != "" && !runnerapi.ValidGeoName(r.From) || r.To != "" && !runnerapi.ValidGeoName(r.To) {
+					r.From, r.To, r.Detail = "", "", "invalid geo record"
+				}
+			} else if r.To != "" {
 				if _, e := xrayver.UpdateTarget(r.To); e != nil {
 					r.To, r.Detail = "", e.Error()
 				}
@@ -145,7 +149,7 @@ func committedVersions(h []Result) []string {
 		}
 	}
 	for i := len(h) - 1; i >= 0; i-- {
-		if h[i].Outcome == runnerapi.OutcomeCommitted {
+		if h[i].Outcome == runnerapi.OutcomeCommitted && h[i].Kind != KindGeo {
 			add(h[i].To)
 			add(h[i].From)
 		}
