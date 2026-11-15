@@ -436,6 +436,19 @@ func (c *Client) Apply(ctx context.Context) (Response, error) {
 	return c.send(ctx, http.MethodPost, "/v1/apply", nil)
 }
 
+// GeoUpdate trials a verified publisher release and applies its domestic routes.
+func (c *Client) GeoUpdate(ctx context.Context, profile, version string) (Response, error) {
+	return c.send(ctx, http.MethodPost, "/v1/geo/update", struct {
+		Profile string `json:"profile,omitempty"`
+		Version string `json:"version"`
+	}{profile, version})
+}
+
+// GeoRollback restores the previous geo selection and its RouterOS ranges.
+func (c *Client) GeoRollback(ctx context.Context) (Response, error) {
+	return c.send(ctx, http.MethodPost, "/v1/geo/rollback", nil)
+}
+
 // CoreUpdate is POST /v1/core/update: it switches to xray-core version
 // ("latest" or a release). The answer is an artifacts.Result.
 func (c *Client) CoreUpdate(ctx context.Context, version string, allowUnverified bool) (Response, error) {

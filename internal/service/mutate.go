@@ -91,6 +91,9 @@ func (s *Service) change(ctx context.Context, rev uint64, fn edit) (store.State,
 		return store.State{}, 0, err
 	}
 	defer s.release()
+	if err := s.recoverGeo(ctx); err != nil {
+		return store.State{}, 0, err
+	}
 	old, current := s.store.State()
 	if rev != store.AnyRevision && rev != current {
 		return store.State{}, 0, store.ErrConflict

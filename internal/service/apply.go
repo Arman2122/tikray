@@ -92,7 +92,7 @@ func (s *Service) loop(ctx context.Context) {
 // change did not finish (artifacts.HotPending). A matching config can also
 // have untested servers: the pass must check them before going idle.
 func (s *Service) catchUp(ctx context.Context) {
-	if s.router != nil {
+	if s.router != nil || artifacts.GeoPending(s.data) {
 		s.Kick()
 		return
 	}

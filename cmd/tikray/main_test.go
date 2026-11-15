@@ -689,7 +689,7 @@ func TestNewUpdaterRenderer(t *testing.T) {
 
 	st := store.Default()
 	st.DNS.Remote = "9.9.9.9"
-	u, err = newUpdater(cfg, runner, io.Discard, stateRenderer(st), false)
+	u, err = newUpdater(cfg, runner, io.Discard, stateRenderer(cfg.Data, st, nil), false)
 	if err != nil || u.Render == nil {
 		t.Fatalf("with a renderer: %v, Render %v", err, u.Render != nil)
 	}
@@ -1161,6 +1161,10 @@ func TestConfigRenderUsesVerifiedActiveGeo(t *testing.T) {
 	if code != 0 || diagnostic != "" || out != string(want) {
 		t.Error("preview did not render the verified active geo matchers")
 	}
+	got, err := stateRenderer(data, st, nil)(core, version)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatal("apply and preview did not render the same verified geo slot")
+	}
 
 	if err := os.WriteFile(filepath.Join(dir, "domestic-v4.txt"), []byte(marker), 0644); err != nil {
 		t.Fatal(err)
@@ -1245,7 +1249,7 @@ func TestApplyRefused(t *testing.T) {
 	}{
 		{"no active core", nil, func(map[string]string, string) {}, "no active core"},
 		{"missing runner token", &runnerapi.Selection{Core: "26.10.21", Config: testConfigRel}, noToken, "runner.token"},
-		{"a geo bundle", &runnerapi.Selection{Core: "26.10.21", Geo: "ir-2026", Config: testConfigRel}, func(map[string]string, string) {}, "geo bundles are not supported yet"},
+		{"a geo bundle", &runnerapi.Selection{Core: "26.10.21", Geo: "ir-2026", Config: testConfigRel}, func(map[string]string, string) {}, "artifacts: geo slot unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			vars, data, runner := trialEnv(t, tc.active)
@@ -1335,11 +1339,11 @@ func TestCoreRollbackRenders(t *testing.T) {
 	}
 }
 
-func TestCoreUpdateRefusesAGeoBundle(t *testing.T) {
+func TestCoreUpdateRefusesMissingGeoBundle(t *testing.T) {
 	vars, data, runner := trialEnv(t, &runnerapi.Selection{Core: "26.3.27", Geo: "ir-2026", Config: testConfigRel})
 	installSlot(t, data, "26.10.21")
 	code, stdout, stderr := runFast(t, vars, "core", "update", "26.10.21")
-	if code != 1 || !strings.Contains(stderr, "geo bundles are not supported yet") {
+	if code != 1 || !strings.Contains(stderr, "artifacts: geo slot unavailable") {
 		t.Errorf("exit %d, stderr %q; want 1 and the geo refusal", code, stderr)
 	}
 	if res := decodeResult(t, stdout); res.Outcome != artifacts.OutcomeRefused {
@@ -1353,7 +1357,7 @@ func TestCoreUpdateRefusesAGeoBundle(t *testing.T) {
 func TestStateRenderer(t *testing.T) {
 	st := store.Default()
 	withServer(&st)
-	rend := stateRenderer(st)
+	rend := stateRenderer(t.TempDir(), st, nil)
 	core := xrayver.Version{Major: 26, Minor: 10, Patch: 21}
 
 	got, err := rend(core, "")
@@ -1361,8 +1365,8 @@ func TestStateRenderer(t *testing.T) {
 		t.Errorf("no geo: %q, %v; want render.Render's bytes", got, err)
 	}
 	const private = "private-geo-selection"
-	if _, err := rend(core, private); err == nil || !strings.Contains(err.Error(), "geo bundles are not supported yet") || strings.Contains(err.Error(), private) {
-		t.Error("mutating renderer did not safely refuse an unsupported geo selection")
+	if _, err := rend(core, private); err == nil || !strings.Contains(err.Error(), "artifacts: geo slot unavailable") || strings.Contains(err.Error(), private) {
+		t.Error("mutating renderer did not safely refuse a missing geo slot")
 	}
 	if _, err := rend(xrayver.Version{Major: 26, Minor: 1, Patch: 17}, ""); err == nil || !strings.Contains(err.Error(), "26.1.17") {
 		t.Errorf("a core too old: %v, want render's refusal", err)

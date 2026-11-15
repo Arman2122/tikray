@@ -26,6 +26,8 @@
 //	tikray apply
 //	tikray core update <version|latest> [--config FILE] [--allow-unverified]
 //	tikray core rollback
+//	tikray geo update <version|latest> [--profile NAME]
+//	tikray geo rollback
 //	tikray core list [--json]
 //	tikray core status
 //
@@ -186,6 +188,9 @@ serve is not running" without one. --json prints the API's public data in JSON.
 
   apply          render the config from the state for the active core and put
                  it on trial
+  geo update <version|latest> [--profile NAME]
+                 verify and trial a geo bundle through the running service
+  geo rollback   restore the previous geo selection and domestic routes
   core update <version|latest> [--config FILE] [--allow-unverified]
                  switch the runner to another xray-core, on a trial. Without
                  --config the config is rendered from the state for the target
@@ -274,6 +279,8 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		return c.apply(ctx, args[1:])
 	case "core":
 		return c.core(ctx, args[1:])
+	case "geo":
+		return c.geoCommand(ctx, args[1:])
 	case "serve":
 		return c.serve(ctx, args[1:])
 	case "server":
@@ -549,7 +556,7 @@ func (c *cli) runUpdater(ctx context.Context, base artifacts.Result, configFile 
 	var rend artifacts.Renderer
 	socks := true
 	if fromState {
-		rend, socks = stateRenderer(st), render.ProxyAvailable(st)
+		rend, socks = stateRenderer(cfg.Data, st, nil), render.ProxyAvailable(st)
 	}
 	u, err := newUpdater(cfg, runner, c.stderr, rend, socks)
 	if err != nil {
@@ -622,27 +629,19 @@ func (c *cli) configRender(ctx context.Context, args []string) int {
 	if err != nil {
 		return c.fail(err)
 	}
-	input := render.Input{State: st}
-	if core != nil {
-		input.Core = *core
-	} else {
+	var slot string
+	if core == nil {
 		active, err := activeSelection(ctx, cfg)
 		if err != nil {
 			return c.fail(fmt.Errorf("no --core given, and the runner's active core is unknown: %w", err))
 		}
-		input.Core, err = xrayver.Parse(active.Core)
+		v, err := xrayver.Parse(active.Core)
 		if err != nil {
 			return c.fail(err)
 		}
-		if active.Geo != "" {
-			geo, _, err := artifacts.LoadGeo(cfg.Data, active.Geo)
-			if err != nil {
-				return c.fail(err)
-			}
-			input.Geo = &geo
-		}
+		core, slot = &v, active.Geo
 	}
-	out, err := render.Render(input)
+	out, err := stateRenderer(cfg.Data, st, nil)(*core, slot)
 	if err != nil {
 		return c.fail(err)
 	}
@@ -668,19 +667,23 @@ func activeSelection(ctx context.Context, cfg Config) (*runnerapi.Selection, err
 	return st.Active, nil
 }
 
-// renderConfig serves the mutating apply/update path. A geo selection there
-// requires the coordinated runner trial and RouterOS address-list update.
-func renderConfig(st store.State, core xrayver.Version, geo string) ([]byte, error) {
-	if geo != "" {
-		return nil, errors.New("geo bundles are not supported yet for updates")
+// The renderer captures one state revision. Verify a named slot before
+// rendering for a trial just as for an owner's read-only config preview.
+func stateRenderer(data string, st store.State, cache *artifacts.GeoReader) artifacts.Renderer {
+	load := artifacts.LoadGeo
+	if cache != nil {
+		load = cache.Load
 	}
-	return render.Render(render.Input{State: st, Core: core})
-}
-
-// stateRenderer is the Renderer of the state as it was read.
-func stateRenderer(st store.State) artifacts.Renderer {
-	return func(core xrayver.Version, geo string) ([]byte, error) {
-		return renderConfig(st, core, geo)
+	return func(core xrayver.Version, slot string) ([]byte, error) {
+		input := render.Input{State: st, Core: core}
+		if slot != "" {
+			geo, _, err := load(data, slot)
+			if err != nil {
+				return nil, err
+			}
+			input.Geo = &geo
+		}
+		return render.Render(input)
 	}
 }
 
@@ -898,8 +901,15 @@ func buildUpdater(cfg Config, pub []byte, runner *runnerapi.Client, log io.Write
 	// RunnerRun keeps its default, /data/run, the runner image's mount of the
 	// run directory that both containers share.
 	return &artifacts.CoreUpdater{
-		Data:          cfg.Data,
-		Arch:          cfg.Arch,
+		Data: cfg.Data,
+		Arch: cfg.Arch,
+		GeoSource: artifacts.GeoSourceConfig{
+			CustomURL: cfg.GeoURL, Mirrors: slices.Clone(cfg.GeoMirrors),
+			Proxy: artifacts.HTTPClient(cfg.Socks, 2*time.Minute),
+			ProxyHealthy: func(ctx context.Context) bool {
+				return proxy != nil && proxyHealthy(runner)(ctx) && proxy.Check(ctx) == nil
+			},
+		},
 		Fetch:         artifacts.Chain{Sources: fetch},
 		Verify:        artifacts.Verifier{Upstream: artifacts.Chain{Sources: upstream}, IndexURLs: slices.Clone(cfg.IndexURLs), IndexPub: slices.Clone(pub)},
 		Runner:        runner,

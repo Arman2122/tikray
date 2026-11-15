@@ -139,11 +139,16 @@ func TestRouterGuardsSurviveFailedStoreAndRestart(t *testing.T) {
 	e.s.pass(ctx, time.Second)
 	dir := filepath.Join(e.data, "state")
 	blocked := filepath.Join(e.data, "state-held")
-	if err := os.Rename(dir, blocked); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(dir, []byte("test"), 0600); err != nil {
-		t.Fatal(err)
+	// Interrupt this write after admission, not during the earlier check
+	// for unreadable or unfinished geo recovery in the same state directory.
+	r.beforePrepare = func(context.Context) {
+		if err := os.Rename(dir, blocked); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dir, []byte("test"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		r.beforePrepare = nil
 	}
 	_, err := e.s.SetDefaultPolicy(ctx, 0, store.Policy{Mode: store.ModeSmart, KillSwitch: true})
 	if err == nil || r.prepared[len(r.prepared)-1].Revision != 1 {

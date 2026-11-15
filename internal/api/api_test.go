@@ -203,6 +203,18 @@ func (f *fakeBackend) CoreRollback(ctx context.Context) (artifacts.Result, error
 	return f.result, f.err
 }
 
+func (f *fakeBackend) GeoUpdate(ctx context.Context, profile, version string) (artifacts.Result, error) {
+	f.rec("GeoUpdate", 0, profile, version)
+	f.enter("GeoUpdate", ctx)
+	return f.result, f.err
+}
+
+func (f *fakeBackend) GeoRollback(ctx context.Context) (artifacts.Result, error) {
+	f.rec("GeoRollback", 0)
+	f.enter("GeoRollback", ctx)
+	return f.result, f.err
+}
+
 func (f *fakeBackend) AddServer(_ context.Context, rev uint64, n service.NewServer) (store.Server, uint64, error) {
 	r, err := f.change("AddServer", rev, n)
 	return store.Server{ID: "aaaaaaaa", Name: n.Name, Link: n.Link, Outbound: json.RawMessage(`{"protocol":"vless"}`)}, r, err

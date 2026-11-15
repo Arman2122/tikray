@@ -229,6 +229,8 @@ func TestServeEndsTheOperationsItServes(t *testing.T) {
 		{"apply", "/v1/apply", "", "ApplyNow"},
 		{"core update", "/v1/core/update", `{"version":"latest"}`, "CoreUpdate"},
 		{"core rollback", "/v1/core/rollback", "", "CoreRollback"},
+		{"geo update", "/v1/geo/update", `{"profile":"iran","version":"latest"}`, "GeoUpdate"},
+		{"geo rollback", "/v1/geo/rollback", "", "GeoRollback"},
 		{"refresh", "/v1/subscriptions/9be8f7a6/refresh", "", "RefreshSubscription"},
 	} {
 		t.Run(c.name, func(t *testing.T) {

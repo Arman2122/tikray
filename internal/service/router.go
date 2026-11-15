@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"time"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
@@ -70,6 +71,9 @@ func (s *Service) routerFailure(err error) error {
 // prepareRouter also re-observes a transition interrupted before a store
 // write. A failed read or write leaves the journal for the next pass.
 func (s *Service) prepareRouter(ctx context.Context, st store.State, rev uint64) error {
+	if err := s.recoverGeo(ctx); err != nil {
+		return err
+	}
 	if s.router == nil || s.repairBridge {
 		return nil
 	}
@@ -83,7 +87,7 @@ func (s *Service) prepareRouter(ctx context.Context, st store.State, rev uint64)
 		return ErrRouterConflict
 	}
 	s.routerPending("")
-	if err := s.router.Prepare(ctx, routeros.Target{Policy: policy, Revision: rev}); err != nil {
+	if err := s.router.Prepare(ctx, routeros.Target{Policy: policy, Revision: rev, KeepGeo: true}); err != nil {
 		return s.routerFailure(err)
 	}
 	return nil
@@ -112,15 +116,36 @@ func (s *Service) finishRouter(ctx context.Context, st store.State, rev uint64) 
 		s.routerPending("runner")
 		return ErrRouterUnavailable
 	}
-	name, err := configName(s.updater(st, rev), rs.Active)
-	if err != nil || name != rs.Active.Config {
-		s.routerPending("runner")
-		return ErrRouterUnavailable
+	ranges, err := s.activeGeoRanges(rs.Active.Geo, false)
+	if err != nil {
+		return err
 	}
-	// A named geo slot needs a verified matching CIDR list before direct
-	// exemptions can be finalized. An unreadable list must never mean empty.
-	if rs.Active.Geo != "" {
+	return s.finishRouterFor(ctx, st, rev, *rs.Active, ranges)
+}
+
+func (s *Service) activeGeoRanges(slot string, fresh bool) ([]netip.Prefix, error) {
+	if slot == "" {
+		return nil, nil
+	}
+	load := s.geoReader.Load
+	if fresh {
+		load = artifacts.LoadGeo
+	}
+	_, prefixes, err := load(s.data, slot)
+	if err != nil {
+		s.geoDegraded.Store(true)
 		s.routerPending("geo")
+		return nil, ErrRouterUnavailable
+	}
+	return prefixes, nil
+}
+
+// The geo journal supplies a specific committed selection. Never substitute
+// another observation between choosing its ranges and releasing its guards.
+func (s *Service) finishRouterFor(ctx context.Context, st store.State, rev uint64, selection runnerapi.Selection, ranges []netip.Prefix) error {
+	name, err := configName(s.updater(st, rev), &selection)
+	if err != nil || name != selection.Config {
+		s.routerPending("runner")
 		return ErrRouterUnavailable
 	}
 	if _, cur := s.store.State(); cur != rev {
@@ -132,7 +157,6 @@ func (s *Service) finishRouter(ctx context.Context, st store.State, rev uint64) 
 		s.routerPending("policy")
 		return ErrRouterConflict
 	}
-	selection := *rs.Active
 	verify := func(ctx context.Context) error {
 		if _, current := s.store.State(); current != rev {
 			return store.ErrConflict
@@ -143,7 +167,11 @@ func (s *Service) finishRouter(ctx context.Context, st store.State, rev uint64) 
 		}
 		return nil
 	}
-	report, err := s.router.Reconcile(ctx, routeros.Target{Policy: policy, Revision: rev, Selection: selection, Verify: verify})
+	if err := verify(ctx); err != nil {
+		s.routerPending("runner")
+		return err
+	}
+	report, err := s.router.Reconcile(ctx, routeros.Target{Policy: policy, Revision: rev, Selection: selection, Geo: ranges, Verify: verify})
 	if err != nil {
 		return s.routerFailure(err)
 	}
@@ -156,9 +184,9 @@ func (s *Service) finishRouter(ctx context.Context, st store.State, rev uint64) 
 		return err
 	}
 	s.mu.Lock()
-	wasVerified := !s.routerStatus.LastVerified.IsZero() && s.routerStatus.Revision == rev && s.routerSelection == *rs.Active
+	wasVerified := !s.routerStatus.LastVerified.IsZero() && s.routerStatus.Revision == rev && s.routerSelection == selection
 	s.routerStatus = RouterStatus{Revision: rev, LastVerified: s.now().UTC()}
-	s.routerSelection = *rs.Active
+	s.routerSelection = selection
 	select {
 	case <-s.routerReady:
 	default:

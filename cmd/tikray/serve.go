@@ -111,6 +111,8 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 		Updaters:     w.updaters,
 		Runner:       w.runner,
 		Router:       router,
+		GeoProfile:   env.GeoProfile,
+		GeoReader:    w.geoReader,
 		Bootstrap:    bootstrap,
 		VerifyBridge: install != nil,
 		Monitor:      w.monitor,
@@ -225,6 +227,7 @@ func localBridge(n store.Network, addrs []netlink.Addr, routes []netlink.Route) 
 // serveWiring is what the service is made of, for a configuration and the state
 // at start.
 type serveWiring struct {
+	geoReader *artifacts.GeoReader
 	// cfg is the environment's configuration with the runner's addresses of
 	// the state at start. Its ProbeURL is the environment's: empty unless
 	// TIKRAY_PROBE_URL is set.
@@ -253,11 +256,12 @@ func wireService(env Config, st store.State, pub []byte, log io.Writer) serveWir
 	cfg.ProbeURL = env.ProbeURL // withState filled it from st, which would freeze it
 	tok := newRunnerToken(filepath.Join(env.Data, "run", "runner.token"))
 	runner := &runnerapi.Client{BaseURL: cfg.RunnerURL, TokenFunc: tok.get, Unauthorized: tok.drop}
+	reader := new(artifacts.GeoReader)
 	return serveWiring{
-		cfg:      cfg,
+		geoReader: reader, cfg: cfg,
 		token:    tok,
 		runner:   runner,
-		updaters: serveUpdaters(cfg, runner, pub, log),
+		updaters: serveUpdaters(cfg, runner, pub, log, reader),
 		monitor:  serveMonitor(cfg, runner),
 	}
 }
@@ -274,9 +278,9 @@ func wireService(env Config, st store.State, pub []byte, log io.Writer) serveWir
 // restart. The updater has a proxy health check only for a state that has a
 // server to proxy through, and NoState says that the state was never saved:
 // its revision is 0.
-func serveUpdaters(cfg Config, runner *runnerapi.Client, pub []byte, log io.Writer) service.Updaters {
+func serveUpdaters(cfg Config, runner *runnerapi.Client, pub []byte, log io.Writer, reader *artifacts.GeoReader) service.Updaters {
 	return func(st store.State, rev uint64) *artifacts.CoreUpdater {
-		u := buildUpdater(cfg.withState(st), pub, runner, log, stateRenderer(st), render.ProxyAvailable(st))
+		u := buildUpdater(cfg.withState(st), pub, runner, log, stateRenderer(cfg.Data, st, reader), render.ProxyAvailable(st))
 		u.NoState = rev == 0
 		return u
 	}

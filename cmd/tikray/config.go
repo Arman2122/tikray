@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/Arman2122/tikray/internal/apiclient"
+	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/render"
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -50,7 +51,9 @@ type Config struct {
 	Upstream string // the XTLS release server (TIKRAY_UPSTREAM)
 	// Mirrors are download URL templates with {version}, {arch} and {file}
 	// (TIKRAY_MIRRORS, comma-separated).
-	Mirrors []string
+	Mirrors            []string
+	GeoProfile, GeoURL string
+	GeoMirrors         []string
 	// IndexURLs locate the signed hash index (TIKRAY_INDEX_URLS,
 	// comma-separated); IndexPubKeyFile is the PEM key it is signed with
 	// (TIKRAY_INDEX_PUBKEY_FILE).
@@ -168,6 +171,9 @@ func configFromEnv(getenv func(string) string) (Config, error) {
 		XrayAPI:         getenv("TIKRAY_XRAY_API"),
 		Upstream:        str("TIKRAY_UPSTREAM", defaultUpstream),
 		Mirrors:         splitList(getenv("TIKRAY_MIRRORS")),
+		GeoProfile:      getenv("TIKRAY_GEO_PROFILE"),
+		GeoURL:          getenv("TIKRAY_GEO_URL"),
+		GeoMirrors:      splitList(getenv("TIKRAY_GEO_MIRRORS")),
 		IndexURLs:       splitList(getenv("TIKRAY_INDEX_URLS")),
 		IndexPubKeyFile: getenv("TIKRAY_INDEX_PUBKEY_FILE"),
 		ProbeURL:        getenv("TIKRAY_PROBE_URL"),
@@ -175,6 +181,17 @@ func configFromEnv(getenv func(string) string) (Config, error) {
 		API:             getenv("TIKRAY_API"),
 		APIToken:        strings.TrimSpace(getenv("TIKRAY_API_TOKEN")),
 		Hot:             getenv("TIKRAY_HOT") != "off",
+	}
+	if cfg.GeoProfile != "" && !artifacts.ValidGeoProfile(cfg.GeoProfile) {
+		return Config{}, errors.New("TIKRAY_GEO_PROFILE: unknown publisher")
+	}
+	if cfg.GeoURL != "" && !geoHTTPS(cfg.GeoURL) {
+		return Config{}, errors.New("TIKRAY_GEO_URL: want an HTTPS publisher")
+	}
+	for _, template := range cfg.GeoMirrors {
+		if !geoHTTPS(template) || !strings.Contains(template, "{file}") {
+			return Config{}, errors.New("TIKRAY_GEO_MIRRORS: want HTTPS templates with {file}")
+		}
 	}
 	if cfg.API == "" {
 		cfg.API = apiForListen(cfg.Listen)
@@ -201,6 +218,11 @@ func configFromEnv(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("TIKRAY_INDEX_URLS is set but TIKRAY_INDEX_PUBKEY_FILE is not: the hash index cannot be checked without its key")
 	}
 	return cfg, nil
+}
+
+func geoHTTPS(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil && u.Fragment == ""
 }
 
 // splitList splits a comma-separated list, trimming each item and dropping

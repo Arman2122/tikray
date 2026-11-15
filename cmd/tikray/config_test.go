@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/Arman2122/tikray/internal/runnerapi"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -299,4 +301,26 @@ func TestDefaultsFromState(t *testing.T) {
 			t.Errorf("error %v, want one naming the state file", err)
 		}
 	})
+}
+
+func TestGeoPublisherConfig(t *testing.T) {
+	vars := map[string]string{"TIKRAY_GEO_PROFILE": "custom", "TIKRAY_GEO_URL": "https://publisher.example/geo", "TIKRAY_GEO_MIRRORS": "https://mirror.example/{version}/{file}"}
+	cfg, err := configFromEnv(envOf(vars))
+	if err != nil || cfg.GeoProfile != "custom" || cfg.GeoURL != vars["TIKRAY_GEO_URL"] || len(cfg.GeoMirrors) != 1 {
+		t.Fatal("geo publisher configuration was lost")
+	}
+	cfg = cfg.withState(store.Default())
+	u := buildUpdater(cfg, nil, &runnerapi.Client{}, io.Discard, nil, false)
+	if u.GeoSource.CustomURL != vars["TIKRAY_GEO_URL"] || len(u.GeoSource.Mirrors) != 1 || u.GeoSource.Proxy == nil || u.GeoSource.ProxyHealthy == nil {
+		t.Fatal("geo source or healthy proxy fallback missing")
+	}
+	const private = "private-input"
+	for _, key := range []string{"TIKRAY_GEO_PROFILE", "TIKRAY_GEO_URL", "TIKRAY_GEO_MIRRORS"} {
+		old := vars[key]
+		vars[key] = "http://" + private + "/{version}/{file}"
+		if _, err := configFromEnv(envOf(vars)); err == nil || strings.Contains(err.Error(), private) {
+			t.Fatal("untrusted publisher input accepted or exposed")
+		}
+		vars[key] = old
+	}
 }

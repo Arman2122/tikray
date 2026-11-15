@@ -151,16 +151,20 @@ func (s *Service) VerifyInstallation(ctx context.Context) error {
 		return err
 	}
 	defer s.release()
-	if s.bootPending.Load() {
+	if s.bootPending.Load() || artifacts.GeoPending(s.data) {
 		return ErrBootstrapPending
 	}
 	st, rev := s.store.State()
 	rs, err := s.runner.Status(ctx)
-	if err != nil || rs.Active == nil || *rs.Active != active || !s.verifiedInstallSelection(ctx, s.updater(st, rev), rs) || rs.Active.Geo != "" {
+	if err != nil || rs.Active == nil || *rs.Active != active || !s.verifiedInstallSelection(ctx, s.updater(st, rev), rs) {
+		return ErrBootstrapPending
+	}
+	ranges, err := s.activeGeoRanges(active.Geo, true)
+	if err != nil {
 		return ErrBootstrapPending
 	}
 	p, err := routeros.Project(st)
-	if err != nil || s.router.VerifyInstallation(ctx, routeros.Target{Policy: p, Revision: rev, Selection: active}) != nil || !s.stillRunning(ctx, active) {
+	if err != nil || s.router.VerifyInstallation(ctx, routeros.Target{Policy: p, Revision: rev, Selection: active, Geo: ranges}) != nil || !s.stillRunning(ctx, active) {
 		return ErrBootstrapPending
 	}
 	return nil

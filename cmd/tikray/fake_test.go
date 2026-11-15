@@ -205,6 +205,18 @@ func (f *fakeBackend) CoreRollback(ctx context.Context) (artifacts.Result, error
 	return f.result, f.err
 }
 
+func (f *fakeBackend) GeoUpdate(ctx context.Context, profile, version string) (artifacts.Result, error) {
+	f.rec("GeoUpdate", profile, version)
+	f.enter(ctx)
+	return f.result, f.err
+}
+
+func (f *fakeBackend) GeoRollback(ctx context.Context) (artifacts.Result, error) {
+	f.rec("GeoRollback")
+	f.enter(ctx)
+	return f.result, f.err
+}
+
 func (f *fakeBackend) AddServer(_ context.Context, rev uint64, n service.NewServer) (store.Server, uint64, error) {
 	f.rec("AddServer", rev, n)
 	if f.err != nil {

@@ -11,6 +11,7 @@ const (
 	KindApply = "apply"
 	// KindCore: a core update or rollback, and how it ended.
 	KindCore = "core"
+	KindGeo  = "geo"
 	// KindRefresh: a subscription refresh.
 	KindRefresh = "refresh"
 	// KindDegraded: a server that Open disabled, as this tikray refuses it.

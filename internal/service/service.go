@@ -115,6 +115,10 @@ type Config struct {
 	// the default Fetcher takes its second attempt through. Empty means the
 	// default Fetcher goes direct only.
 	Socks string
+	// GeoProfile is the owner-configured default publisher for daily checks.
+	// An empty value uses the installed slot's profile, if one exists.
+	GeoProfile string
+	GeoReader  *artifacts.GeoReader
 	// LocalBridge verifies that the control container has the proposed .2
 	// address and exact prefix. Without it a bridge repair cannot be trusted.
 	LocalBridge func(store.Network) bool
@@ -124,6 +128,7 @@ type Config struct {
 type Service struct {
 	bootstrap   *Bootstrap
 	bootPending atomic.Bool
+	geoDegraded atomic.Bool
 	// The runner endpoints cannot be used during this process's lifetime
 	// if they were derived from an unsafe legacy bridge at startup.
 	repairBridge bool
@@ -138,12 +143,15 @@ type Service struct {
 	routerSweep <-chan time.Time
 	routerHints chan struct{}
 	// routerReady closes after this process verifies its first effective router policy.
-	routerReady chan struct{}
-	data        string
-	debounce    time.Duration
-	retry       time.Duration
-	now         func() time.Time
-	log         io.Writer
+	routerReady   chan struct{}
+	geoProfile    string
+	geoReader     *artifacts.GeoReader
+	geoScheduleMu sync.Mutex // serializes reservations in geo-check.json
+	data          string
+	debounce      time.Duration
+	retry         time.Duration
+	now           func() time.Time
+	log           io.Writer
 
 	// lock is held by the loop's pass, ApplyNow, CoreUpdate and CoreRollback
 	// while each runs: a channel, so that a caller's context can end the
@@ -204,6 +212,8 @@ func New(c Config) (*Service, error) {
 		return nil, errors.New("service: Config.Updaters is not set")
 	case c.Runner == nil:
 		return nil, errors.New("service: Config.Runner is not set")
+	case c.GeoProfile != "" && !artifacts.ValidGeoProfile(c.GeoProfile):
+		return nil, errors.New("service: invalid default geo profile")
 	case c.Data == "":
 		return nil, errors.New("service: Config.Data is not set")
 	}
@@ -216,7 +226,11 @@ func New(c Config) (*Service, error) {
 	if repairBridge {
 		c.Runner, c.Monitor, c.Socks = unavailableBridge{}, nil, ""
 	}
+	if c.GeoReader == nil {
+		c.GeoReader = new(artifacts.GeoReader)
+	}
 	s := &Service{
+		geoReader:    c.GeoReader,
 		bootstrap:    c.Bootstrap,
 		repairBridge: repairBridge,
 		localBridge:  c.LocalBridge,
@@ -229,6 +243,7 @@ func New(c Config) (*Service, error) {
 		routerReady:  make(chan struct{}),
 		routerStatus: RouterStatus{Pending: c.Router != nil},
 		monitor:      c.Monitor,
+		geoProfile:   c.GeoProfile,
 		data:         c.Data,
 		debounce:     orDefault(c.Debounce, defaultDebounce),
 		retry:        orDefault(c.Retry, defaultRetry),
@@ -362,6 +377,8 @@ type Status struct {
 	// Degraded lists the IDs of the servers that are disabled because this
 	// tikray refuses them (store.Server.Invalid), in state order.
 	Degraded []string `json:"degraded"`
+	// GeoDegraded means the last geo operation failed or its journal needs recovery.
+	GeoDegraded bool `json:"geo_degraded,omitempty"`
 }
 
 // Status reports the service's state. It asks the runner for its active
@@ -376,8 +393,10 @@ func (s *Service) Status(ctx context.Context) Status {
 			out.Degraded = append(out.Degraded, srv.ID)
 		}
 	}
+	geoPending := artifacts.GeoPending(s.data)
+	out.GeoDegraded = geoPending || s.geoDegraded.Load()
 	s.mu.Lock()
-	out.Pending = s.kicked != s.served || s.retrying
+	out.Pending = s.kicked != s.served || s.retrying || geoPending
 	verified := s.routerSelection
 	if s.router != nil {
 		router := s.routerStatus
@@ -416,7 +435,7 @@ func (s *Service) Status(ctx context.Context) Status {
 	}
 	name, err := configName(s.updater(st, rev), rs.Active)
 	s.noteRender(rev, err, false)
-	out.Applied = err == nil && name == rs.Active.Config && !artifacts.HotPending(s.data)
+	out.Applied = err == nil && name == rs.Active.Config && !artifacts.HotPending(s.data) && !geoPending
 	if out.Router != nil {
 		out.Applied = out.Applied && rs.State == runnerapi.StateRunning && rs.Candidate == nil && verified == *rs.Active && !out.Router.Pending
 		out.Router.Pending = !out.Applied
