@@ -121,6 +121,10 @@ var ownerFlowFrame = regexp.MustCompile(`m3-owner-row[|]([*][0-9A-Fa-f]+)[|]([0-
 // RouterOS can reuse its displayed ID even when a connection is erased.
 func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, address string, echoes func() int) func() {
 	t.Helper()
+	// A timed-out per-flow read may cancel its native observer. Keep the
+	// independently monitored owner's management session out of that path.
+	observer := f.ownerSession(ctx, t)
+	t.Cleanup(func() { observer.Close() })
 	type pair [2]nativeFlowCounters
 	cmd := []string{"/ip/firewall/connection/print", "=.proplist=.id,orig-packets,repl-packets,orig-bytes,repl-bytes,connection-mark,reply-src-address,reply-src-port", "?protocol=udp", "?src-address=" + address, "?src-port=31932", "?dst-address=198.51.100.254", "?dst-port=31931"}
 	sshQuery := `{:local rows [/ip/firewall/connection/find where src-address=[:toip "` + rosEscape(address) + `"] and protocol=udp and src-port=31932 and dst-address=198.51.100.254 and dst-port=31931 and connection-mark!="tikray-open" and connection-mark!="tikray-closed"];:if ([:len $rows]=1) do={:local id [:pick $rows 0];:put ("m3-owner-row|" . [:tostr $id] . "|" . [/ip/firewall/connection/get $id orig-packets] . "|" . [/ip/firewall/connection/get $id repl-packets] . "|" . [/ip/firewall/connection/get $id orig-bytes] . "|" . [/ip/firewall/connection/get $id repl-bytes] . "|end")}}`
@@ -129,7 +133,7 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 		bound, end := context.WithTimeout(c, 7*time.Second)
 		defer end()
 		_, got := poll(bound, 7*time.Second, 200*time.Millisecond, func() bool {
-			rows, err := f.ros.CommandAt(bound, f.ros.Generation(), cmd)
+			rows, err := observer.CommandAt(bound, observer.Generation(), cmd)
 			if err != nil || len(rows) != 1 {
 				return false
 			}

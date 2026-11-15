@@ -36,7 +36,7 @@ On an installed router, put the following JSON in `/data/state/image-source.json
   "version": 1,
   "upstream": "https://publisher.example/releases",
   "control_mode": "notify",
-  "runner_mode": "manual",
+  "runner_mode": "notify",
   "runner_window": "02:00-03:00"
 }
 ```

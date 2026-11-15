@@ -195,8 +195,24 @@ func (f *routingLab) stageImageFixture(ctx context.Context, t *testing.T, compon
 		dst += "/" + part
 		f.mustRun(ctx, t, `:if ([:len [/file/find where name="`+dst+`"]] = 0) do={/file/add type=directory name="`+dst+`"}`)
 	}
-	if f.CHR.Push(ctx, image, dst+"/"+name) != nil || f.CHR.Push(ctx, filepath.Join(dir, name+".sig"), dst+"/"+name+".sig") != nil {
-		t.Fatal("could not stage the public signed image fixture")
+	for _, item := range []struct{ local, remote, kind string }{
+		{image, dst + "/" + name, "archive"},
+		{filepath.Join(dir, name+".sig"), dst + "/" + name + ".sig", "signature"},
+	} {
+		// Push verifies RouterOS's reported length. A repeat publish over
+		// the earlier tamper fixture may briefly read back the old length.
+		var err error
+		for attempt := 0; attempt < 3; attempt++ {
+			transfer, cancel := context.WithTimeout(ctx, time.Minute)
+			err = f.CHR.Push(transfer, item.local, item.remote)
+			cancel()
+			if err == nil || sleep(ctx, time.Second) != nil {
+				break
+			}
+		}
+		if err != nil {
+			t.Fatalf("RouterOS did not verify the staged public %s after bounded transfers", item.kind)
+		}
 	}
 	return ref
 }
@@ -245,9 +261,17 @@ func (f *routingLab) imageMarker(ctx context.Context, t *testing.T, row containe
 	// RouterOS hides files inside an extracted container root from /file/find.
 	// A bounded direct read still returns the exact signed marker bytes.
 	path := rosEscape(row.root + "/m3-qa-image-version")
-	command := `{:do { :local b ([/file/read file="` + path + `" offset=0 chunk-size=32 as-value]->"data"); :if ($b="` + want + `\n") do={:put "m3-runtime-marker-ok"} } on-error={}}`
-	out, err := f.CHR.RunPrivate(ctx, command)
-	return err == nil && strings.TrimSpace(out) == "m3-runtime-marker-ok"
+	command := `{:do { :local b ([/file/read file="` + path + `" offset=0 chunk-size=32 as-value]->"data"); :if ($b="` + want + `\n") do={:put "m3-runtime-marker-ok"} else={:if ([:len $b]>0) do={:put "m3-runtime-marker-different"}} } on-error={}}`
+	read, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	_, ok := poll(read, 8*time.Second, 250*time.Millisecond, func() bool {
+		out, err := f.CHR.RunPrivate(read, command)
+		if err == nil && strings.TrimSpace(out) == "m3-runtime-marker-different" {
+			t.Fatal("the extracted signed release marker positively differed from the requested version")
+		}
+		return err == nil && strings.TrimSpace(out) == "m3-runtime-marker-ok"
+	})
+	return ok
 }
 
 func (f *routingLab) scheduler(ctx context.Context, t *testing.T, enabled bool) {
@@ -608,6 +632,17 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	statePath := dataRoot + "/state/state.v" + strconv.Itoa(store.Current) + ".json"
 	beforeState := sha256.Sum256(f.exactFile(ctx, t, statePath))
 	ownerSSH := f.ownerLANSSH(ctx, t)
+	ownerAPI := f.ownerSessionAt(ctx, t, "192.168.88.1:9879")
+	t.Cleanup(func() { ownerAPI.Close() })
+	lanGeneration := ownerAPI.Generation()
+	ownerCommand := func() {
+		t.Helper()
+		rows, err := ownerAPI.CommandAt(ctx, lanGeneration, []string{"/system/resource/print", "=.proplist=uptime"})
+		if err != nil || len(rows) != 1 || rows[0]["uptime"] == "" || ownerAPI.Generation() != lanGeneration {
+			t.Fatal("ordinary owner LAN API session did not survive the image change")
+		}
+	}
+	ownerCommand()
 	const unrelated = "192.168.88.111"
 	if f.Net.Client(ctx, "ip", "addr", "add", unrelated+"/32", "dev", "eth0").Run() != nil {
 		t.Fatal("could not attach an unmanaged LAN address for the unrelated connection")
@@ -634,10 +669,14 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	verifySibling := func() {
 		t.Helper()
 		ownerSSH()
+		ownerCommand()
 		ownerTracking()
 		r, ok := f.containerImage(ctx, other)
-		if f.ros.Generation() != generation || !ok || r.id != otherImage.id || r.imageID != otherImage.imageID || f.probe(ctx, t, kind) != otherProcess || f.activeImageSelection(ctx, t) != selection {
-			t.Fatal("replacement changed its sibling, selection or owner session")
+		sameSession := f.ros.Generation() == generation
+		sameProcess := f.probe(ctx, t, kind) == otherProcess
+		sameSelection := f.activeImageSelection(ctx, t) == selection
+		if !sameSession || !ok || r.id != otherImage.id || r.imageID != otherImage.imageID || !sameProcess || !sameSelection {
+			t.Fatalf("independent image witness: owner_session=%t native_row=%t row_id=%t image=%t process=%t selection=%t", sameSession, ok, r.id == otherImage.id, r.imageID == otherImage.imageID, sameProcess, sameSelection)
 		}
 		f.checkOwnerRules(ctx, t)
 	}
@@ -660,8 +699,10 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	f.imageOperation(ctx, t, component, "update", healthyImageVersion, initial.digest, valid.digest, false)
 	f.waitImageCompletion(ctx, t, component, valid, initial.digest, base)
 	updated := f.requireImage(ctx, t, component, valid)
-	if f.probe(ctx, t, changedProbe) == priorProcess || !f.imageMarker(ctx, t, updated, healthyImageVersion) {
-		t.Fatal("candidate bytes were not imported and run")
+	freshProcess := f.probe(ctx, t, changedProbe) != priorProcess
+	matchingMarker := f.imageMarker(ctx, t, updated, healthyImageVersion)
+	if !freshProcess || !matchingMarker {
+		t.Fatalf("candidate runtime witness: new_process=%t signed_marker=%t", freshProcess, matchingMarker)
 	}
 	f.expectPath(ctx, t, routingRemote, true)
 	verifySibling()

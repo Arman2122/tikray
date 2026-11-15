@@ -659,13 +659,18 @@ func (f *installLab) auditKnown(ctx context.Context, t *testing.T, events []byte
 // the control account alone cannot establish that earlier grants survived.
 func (f *installLab) ownerSession(ctx context.Context, t *testing.T) *routeros.Client {
 	t.Helper()
+	return f.ownerSessionAt(ctx, t, "172.30.252.1:9879")
+}
+
+func (f *installLab) ownerSessionAt(ctx context.Context, t *testing.T, address string) *routeros.Client {
+	t.Helper()
 	pw, err := os.ReadFile(filepath.Join(lab.CacheDir(), "ready", f.Version, string(f.Arch), "password"))
 	if err != nil {
 		t.Fatal("owner test identity unavailable")
 	}
 	sub, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	c, err := routeros.Dial(sub, routeros.ConnConfig{Address: "172.30.252.1:9879", Username: "admin", Password: string(pw), Fingerprint: f.routerPin(ctx, t)})
+	c, err := routeros.Dial(sub, routeros.ConnConfig{Address: address, Username: "admin", Password: string(pw), Fingerprint: f.routerPin(ctx, t)})
 	if err != nil {
 		t.Fatal("retained LAN owner grant did not allow a pinned API-SSL login")
 	}
