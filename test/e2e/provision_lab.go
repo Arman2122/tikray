@@ -387,6 +387,10 @@ func installOutput(wire string) (string, error) {
 			return "", errors.New(known)
 		}
 	}
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "script") && strings.Contains(lower, "size") && strings.Contains(lower, "maximum") && strings.Contains(lower, "exceeded") {
+		return "", errors.New("routeros: script size limit exceeded")
+	}
 	for _, category := range []string{"not enough permissions", "expected argument of type", "invalid internal item number", "no such item", "input does not match any value", "value of argument", "argument of", "not a valid", "cannot be used", "cannot add", "not enough", "cannot compare", "invalid value for", "expected end of command", "expected command name", "already have", "not a valid value", "not a number", "not allowed by device-mode", "script is too large"} {
 		if strings.Contains(msg, category) {
 			return "", errors.New("routeros: " + category)
