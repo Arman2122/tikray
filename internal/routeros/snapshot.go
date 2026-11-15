@@ -107,7 +107,7 @@ func (o observation) ownedRows(menu string) ([]Observed, error) {
 		q = []string{"?comment=tikray:runner-watch"}
 	}
 	fields := managedFields(menu)
-	rows, e := o.read(menu, ".id,comment,dynamic,"+strings.Join(fields, ","), q...)
+	rows, e := o.inventoryRows(menu, ".id,comment,dynamic,"+strings.Join(fields, ","), q)
 	if e != nil {
 		return nil, e
 	}
@@ -300,17 +300,13 @@ func checkReferences(ctx context.Context, c Native, gen uint64) error {
 	}
 	for _, p := range probes {
 		fields := strings.Fields(p.fields)
-		var alternatives [][]string
-		for _, f := range fields {
-			alternatives = append(alternatives, prefixQuery(f, "tikray-"), prefixQuery(f, "!tikray-"))
-		}
-		query := anyQuery(alternatives...)
+		query := reservedReferenceQuery(fields...)
 		if p.menu == "/queue/simple" {
 			// A simple queue accepts a comma-separated mark set. A reserved mark
 			// may follow another mark, outside either lexicographic prefix range.
 			query = []string{"?packet-marks", "?packet-marks=", "?#!"}
 		}
-		rows, e := o.read(p.menu, "comment,"+strings.Join(fields, ","), query...)
+		rows, e := o.inventoryRows(p.menu, "comment,"+strings.Join(fields, ","), query)
 		if e != nil {
 			return e
 		}
@@ -328,6 +324,13 @@ func checkReferences(ctx context.Context, c Native, gen uint64) error {
 		}
 	}
 	return o.checkHiddenMatchers()
+}
+func reservedReferenceQuery(fields ...string) []string {
+	var alternatives [][]string
+	for _, f := range fields {
+		alternatives = append(alternatives, prefixQuery(f, "tikray-"), prefixQuery(f, "!tikray-"))
+	}
+	return anyQuery(alternatives...)
 }
 func reservedPolicyName(name string) bool {
 	switch name {

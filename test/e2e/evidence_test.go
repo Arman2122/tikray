@@ -20,7 +20,7 @@ func TestEvidenceRejectsPrivateOrMissingResults(t *testing.T) {
 		return writeM3Evidence(dir, "7.25", lab.ArchX86, suite, observations, partial)
 	}
 	var full []m3Observation
-	for _, id := range strings.Fields("policy_paths source_and_fasttrack policy_mid_connection failover dns_paths ipv6_guard quic_sniff drift_repair emergency_off") {
+	for _, id := range strings.Fields("policy_paths source_and_fasttrack policy_mid_connection failover dns_paths ipv6_guard quic_sniff drift_repair emergency_off geo_diff_and_rollback") {
 		full = append(full, m3Observation{id, true, time.Second})
 	}
 	if err := write(full, false); err != nil {

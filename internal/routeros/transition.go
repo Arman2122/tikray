@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"maps"
+	"math/bits"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -188,7 +189,7 @@ func bypassDestinations(v policyView, mode store.Mode) []netip.Prefix {
 
 // Keep the same negated-list guard shape as all other data holds. Only the
 // destinations in exactly one bypass set need protection during this edge.
-func unchangedBypass(old, next []netip.Prefix) ([]netip.Prefix, bool) {
+func unchangedBypass(old, next []netip.Prefix) ([]addrRange, bool) {
 	a, b := prefixRanges(old), prefixRanges(next)
 	if slices.Equal(a, b) {
 		return nil, false
@@ -201,16 +202,21 @@ func unchangedBypass(old, next []netip.Prefix) ([]netip.Prefix, bool) {
 	}
 	slices.Sort(cuts)
 	cuts = slices.Compact(cuts)
-	var prefixes []netip.Prefix
+	var unchanged []addrRange
 	start := uint64(0)
 	for i := 1; i < len(cuts); i++ {
 		lo := cuts[i-1]
 		if rangeContains(a, lo) != rangeContains(b, lo) {
-			prefixes = appendCIDRs(prefixes, addrRange{start, lo})
+			if start < lo {
+				unchanged = append(unchanged, addrRange{start, lo})
+			}
 			start = cuts[i]
 		}
 	}
-	return appendCIDRs(prefixes, addrRange{start, 1 << 32}), true
+	if start < 1<<32 {
+		unchanged = append(unchanged, addrRange{start, 1 << 32})
+	}
+	return unchanged, true
 }
 
 type holdExclusions struct {
@@ -218,10 +224,51 @@ type holdExclusions struct {
 	deps []string
 }
 
+// Small transitions retain the M3a list names, rows and negated selector.
+// Large sparse changes can have tens of thousands of CIDRs in their
+// complement. One native inclusive interval represents each contiguous run.
+const compactHoldThreshold = 128
+
+func stageUnchanged(have map[string]Object, intervals []addrRange) holdExclusions {
+	var ps []netip.Prefix
+	for _, r := range intervals {
+		ps = appendCIDRs(ps, r)
+		if len(ps) > compactHoldThreshold {
+			return stageIntervals(have, intervals)
+		}
+	}
+	return stageExclusions(have, ps)
+}
+
+func stageIntervals(have map[string]Object, intervals []addrRange) holdExclusions {
+	members := make([]string, 0, len(intervals))
+	for _, r := range intervals {
+		n := r.hi - r.lo
+		if n&(n-1) == 0 && r.lo&(n-1) == 0 {
+			// RouterOS normalizes aligned ranges to a single prefix.
+			members = append(members, netip.PrefixFrom(ipv4Number(r.lo), 32-bits.TrailingZeros64(n)).String())
+		} else {
+			members = append(members, ipv4Number(r.lo).String()+"-"+ipv4Number(r.hi-1).String())
+		}
+	}
+	return stageHoldMembers(have, members)
+}
+
 func stageExclusions(have map[string]Object, ps []netip.Prefix) holdExclusions {
-	e := holdExclusions{list: "tikray-h" + digest(ps)}
+	if len(ps) > compactHoldThreshold {
+		return stageIntervals(have, prefixRanges(ps))
+	}
+	var members []string
 	for _, p := range ps {
-		r := holdObject(addressListMenu, map[string]string{"list": e.list, "address": p.String()})
+		members = append(members, p.String())
+	}
+	return stageHoldMembers(have, members)
+}
+
+func stageHoldMembers(have map[string]Object, members []string) holdExclusions {
+	e := holdExclusions{list: "tikray-h" + digest(members)}
+	for _, address := range members {
+		r := holdObject(addressListMenu, map[string]string{"list": e.list, "address": address})
 		have[r.Comment] = r
 		e.deps = append(e.deps, r.Comment)
 	}
@@ -255,9 +302,9 @@ func holdsFor(views []policyView) []Object {
 					modes := [2]store.Mode{ch.From.Mode, ch.To.Mode}
 					exclusions, ok := bypassLists[modes]
 					if !ok {
-						ps, changed := unchangedBypass(bypassDestinations(old, ch.From.Mode), bypassDestinations(next, ch.To.Mode))
+						intervals, changed := unchangedBypass(bypassDestinations(old, ch.From.Mode), bypassDestinations(next, ch.To.Mode))
 						if changed {
-							exclusions = stageExclusions(have, ps)
+							exclusions = stageUnchanged(have, intervals)
 						}
 						bypassLists[modes] = exclusions
 					}

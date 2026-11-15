@@ -108,7 +108,7 @@ python3 - "$TIKRAY_LAB_RESULTS" "$results" "$1-$2" "$partial" "${tests[@]}" <<'P
 import json, os, pathlib, sys, tempfile
 src, dst = map(pathlib.Path, sys.argv[1:3])
 prefix, partial = sys.argv[3:5]
-suites = {"TestM3Install": ("m3-install", 6), "TestM3Routing": ("m3-routing", 9),
+suites = {"TestM3Install": ("m3-install", 6), "TestM3Routing": ("m3-routing", 10),
           "TestM3Uninstall": ("m3-uninstall", 4), "TestService": ("m2b", 8),
           "TestAuth": ("m2c-auth", 6), "TestHot": ("m2c-hot", 4)}
 ready = {}

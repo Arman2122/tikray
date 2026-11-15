@@ -30,6 +30,7 @@ func TestM3Routing(t *testing.T) {
 		{"quic_sniff", (*routingLab).quicSniff},
 		{"drift_repair", (*routingLab).checkDriftRepair},
 		{"emergency_off", (*routingLab).checkEmergencyOff},
+		{"geo_diff_and_rollback", (*routingLab).geoDiffAndRollback},
 	} {
 		check(tc.id, func(st *testing.T) {
 			if f == nil {

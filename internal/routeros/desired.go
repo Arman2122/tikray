@@ -252,6 +252,12 @@ func installInterface(name string) bool {
 	}
 	return false
 }
+func ipv4Number(n uint64) netip.Addr {
+	var raw [4]byte
+	binary.BigEndian.PutUint32(raw[:], uint32(n))
+	return netip.AddrFrom4(raw)
+}
+
 func number(a netip.Addr) uint64 { b := a.As4(); return uint64(binary.BigEndian.Uint32(b[:])) }
 func span(p netip.Prefix) (uint64, uint64) {
 	lo := number(p.Addr())
@@ -344,9 +350,7 @@ func effectiveSources(in PolicyInput, obs Topology) (map[store.Policy][]netip.Pr
 func appendCIDRs(out []netip.Prefix, r addrRange) []netip.Prefix {
 	for r.lo < r.hi {
 		shift := min(bits.TrailingZeros32(uint32(r.lo)), bits.Len64(r.hi-r.lo)-1)
-		var raw [4]byte
-		binary.BigEndian.PutUint32(raw[:], uint32(r.lo))
-		out = append(out, netip.PrefixFrom(netip.AddrFrom4(raw), 32-shift))
+		out = append(out, netip.PrefixFrom(ipv4Number(r.lo), 32-shift))
 		r.lo += uint64(1) << uint(shift)
 	}
 	return out

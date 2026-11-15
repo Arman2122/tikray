@@ -388,6 +388,12 @@ func (e *Engine) prepare(ctx context.Context, t Target) (*pass, error) {
 			changed = true
 		}
 	}
+	if len(p.j.Pending) > 0 {
+		p.holds = holdsFor(p.j.Pending)
+	}
+	if err = p.checkAddressCapacity(ctx); err != nil {
+		return nil, err
+	}
 	if changed {
 		if len(p.j.Pending) > 64 {
 			return nil, ErrPolicyConflict
@@ -408,7 +414,6 @@ func (e *Engine) prepare(ctx context.Context, t Target) (*pass, error) {
 		}
 		return p, nil
 	}
-	p.holds = holdsFor(p.j.Pending)
 	wrote, err := e.sync(ctx, p, true, p.holds)
 	if err != nil {
 		return nil, err

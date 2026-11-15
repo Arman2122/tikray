@@ -40,6 +40,7 @@ var m3Cases = map[string][]evidenceCase{
 		{"quic_sniff", "Real QUIC Initial packets distinguished name-based routing at the same destination address."},
 		{"drift_repair", "The service repaired owned drift. The WAN-side witness saw no closed-client leak during route loss."},
 		{"emergency_off", "Two owner commands restored ordinary routing with both containers stopped. Service recovery restored steering and protection."},
+		{"geo_diff_and_rollback", "Verified geo trials changed only the affected domestic ranges and LAN paths. Rejected data, owner dependencies and rollback preserved the verified policy."},
 	},
 	"m3-uninstall": {
 		{"keep_data", "Default keep restored routing and API access. Reinstall preserved the claimed admin, settings, UI identity and core."},
