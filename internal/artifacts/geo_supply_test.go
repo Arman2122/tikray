@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -286,5 +287,112 @@ func TestGeoRejectsMalformedPayloadBeforePublication(t *testing.T) {
 				t.Fatal("failed stage left data in slot root")
 			}
 		})
+	}
+}
+
+func TestGeoCrashCleanupRequiresOriginalDirectory(t *testing.T) {
+	for _, tc := range []string{"stage", "retire", "replaced", "foreign child", "foreign scratch"} {
+		t.Run(tc, func(t *testing.T) {
+			data := t.TempDir()
+			fd, e := openGeoDir(data, true, "geo")
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer syscall.Close(fd)
+			root := filepath.Join(data, "geo")
+			temp := filepath.Join(root, ".tmp-geo-private-test")
+			if e := os.Mkdir(temp, 0700); e != nil {
+				t.Fatal(e)
+			}
+			child := filepath.Join(temp, "geoip.dat.part")
+			if e := os.WriteFile(child, []byte("old data"), 0600); e != nil {
+				t.Fatal(e)
+			}
+			if tc != "foreign scratch" {
+				dest := filepath.Base(temp)
+				if tc == "retire" {
+					dest = ".old-geo-private-test"
+				}
+				sub, e := os.Open(temp)
+				if e != nil {
+					t.Fatal(e)
+				}
+				e = recordGeoWork(fd, int(sub.Fd()), dest)
+				sub.Close()
+				if e != nil {
+					t.Fatal(e)
+				}
+				if tc == "retire" {
+					if e := os.Rename(temp, filepath.Join(root, dest)); e != nil {
+						t.Fatal(e)
+					}
+					temp = filepath.Join(root, dest)
+				}
+			}
+			if tc == "replaced" {
+				if e := os.Rename(temp, temp+"-saved"); e != nil {
+					t.Fatal(e)
+				}
+				if e := os.Mkdir(temp, 0700); e != nil {
+					t.Fatal(e)
+				}
+			}
+			if tc == "foreign child" {
+				if e := os.WriteFile(filepath.Join(temp, "owner.cfg"), []byte("keep"), 0600); e != nil {
+					t.Fatal(e)
+				}
+			}
+			e = PruneGeo(data, nil)
+			switch tc {
+			case "retire", "stage":
+				if e != nil {
+					t.Fatal(e)
+				}
+				if _, e := os.Lstat(temp); !os.IsNotExist(e) {
+					t.Fatal("orphaned owned geo payload")
+				}
+			case "replaced", "foreign child":
+				if e == nil {
+					t.Fatal("accepted replaced or mixed-use scratch directory")
+				}
+				if _, e := os.Stat(temp); e != nil {
+					t.Fatal("removed unverified directory")
+				}
+			default:
+				if e != nil {
+					t.Fatal(e)
+				}
+				if _, e := os.Stat(child); e != nil {
+					t.Fatal("removed unrecorded lookalike")
+				}
+			}
+		})
+	}
+}
+
+func TestGeoPayloadsReadableThroughRunnerMount(t *testing.T) {
+	// A service may deliberately use a private umask for the state volume.
+	old := syscall.Umask(0077)
+	defer syscall.Umask(old)
+	files := geoTestFiles("r1")
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s, ok := files[filepath.Base(r.URL.Path)]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, s)
+	}))
+	defer server.Close()
+	u := CoreUpdater{Data: t.TempDir(), GeoSource: GeoSourceConfig{CustomURL: server.URL, Direct: server.Client()}}
+	slot, e := u.StageGeo(t.Context(), "custom", "r1")
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, name := range []string{"geoip.dat", "geosite.dat"} {
+		st, e := os.Stat(filepath.Join(u.Data, "geo", slot, name))
+		if e != nil || st.Mode().Perm() != 0644 {
+			t.Fatal("verified payload is not readable by a separate runner user")
+		}
 	}
 }

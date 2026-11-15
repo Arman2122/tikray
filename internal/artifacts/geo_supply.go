@@ -3,6 +3,7 @@ package artifacts
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -421,6 +422,9 @@ func (u *CoreUpdater) StageGeo(ctx context.Context, profile, version string) (st
 		return "", e
 	}
 	defer unix.Close(fd)
+	if e := cleanupGeoWork(fd); e != nil {
+		return "", e
+	}
 	return u.stageGeo(ctx, r, fd)
 }
 
@@ -428,10 +432,15 @@ func (u *CoreUpdater) stageGeo(ctx context.Context, r geoRelease, fd int) (strin
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	base := fmt.Sprintf("/proc/self/fd/%d", fd)
+	base := geoFDPath(fd)
 	final := filepath.Join(base, r.slot)
 	if _, e := os.Lstat(final); e == nil {
-		m, _, e := verifiedGeo(u.Data, r.slot)
+		sub, e := unix.Openat(fd, r.slot, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if e != nil {
+			return "", errGeoConflict
+		}
+		defer unix.Close(sub)
+		m, _, e := verifyGeoFD(sub, r.slot)
 		if e != nil || m.ReleaseID != r.id || m.Profile != r.profile {
 			return "", errGeoConflict
 		}
@@ -449,10 +458,37 @@ func (u *CoreUpdater) stageGeo(ctx context.Context, r geoRelease, fd int) (strin
 	if e != nil {
 		return "", errGeoInstall
 	}
-	defer os.RemoveAll(staged)
+	tmpName := filepath.Base(staged)
+	stagedFD, e := unix.Openat(fd, tmpName, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if e != nil {
+		return "", errGeoInstall
+	}
+	defer unix.Close(stagedFD)
+	if e := recordGeoWork(fd, stagedFD, tmpName); e != nil {
+		os.Remove(staged)
+		return "", e
+	}
+	// Stage relative to the open directory, even if a path changes while a
+	// download is in flight.
+	staged = geoFDPath(stagedFD)
+	defer cleanupGeoWork(fd)
 	for _, a := range assets {
-		if e := u.fetchGeo(ctx, r, a, filepath.Join(staged, a.local), m.SHA256[a.local]); e != nil {
+		payload := filepath.Join(staged, a.local)
+		if e := u.fetchGeo(ctx, r, a, payload, m.SHA256[a.local]); e != nil {
 			return "", e
+		}
+		// The runner can have another UID. Persist its read permission even
+		// when the control process creates its temporary files under umask 077.
+		f, e := os.Open(payload)
+		if e != nil {
+			return "", errGeoInstall
+		}
+		if f.Chmod(0644) != nil || f.Sync() != nil {
+			f.Close()
+			return "", errGeoInstall
+		}
+		if f.Close() != nil {
+			return "", errGeoInstall
 		}
 	}
 	if r.profile != "custom" {
@@ -491,11 +527,6 @@ func (u *CoreUpdater) stageGeo(ctx context.Context, r geoRelease, fd int) (strin
 	if e != nil || writeSynced(filepath.Join(staged, metaFile), 0644, func(w io.Writer) error { _, e := w.Write(b); return e }) != nil {
 		return "", errGeoInstall
 	}
-	stagedFD, e := unix.Open(staged, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if e != nil {
-		return "", errGeoInstall
-	}
-	defer unix.Close(stagedFD)
 	if _, _, e := verifyGeoFD(stagedFD, r.slot); e != nil {
 		return "", e
 	}
@@ -505,7 +536,7 @@ func (u *CoreUpdater) stageGeo(ctx context.Context, r geoRelease, fd int) (strin
 	if unix.Fchmod(stagedFD, 0755) != nil || unix.Fsync(stagedFD) != nil {
 		return "", errGeoInstall
 	}
-	if e := unix.Renameat2(fd, filepath.Base(staged), fd, r.slot, unix.RENAME_NOREPLACE); e != nil {
+	if e := unix.Renameat2(fd, tmpName, fd, r.slot, unix.RENAME_NOREPLACE); e != nil {
 		return "", errGeoInstall
 	}
 	if unix.Fsync(fd) != nil {
@@ -586,6 +617,9 @@ func PruneGeo(data string, keep []string) error {
 	}
 	dir := os.NewFile(uintptr(fd), "geo")
 	defer dir.Close()
+	if e := cleanupGeoWork(fd); e != nil {
+		return e
+	}
 	ents, e := dir.ReadDir(-1)
 	if e != nil {
 		return errGeoInstall
@@ -595,40 +629,38 @@ func PruneGeo(data string, keep []string) error {
 		if !ent.IsDir() || !strings.HasPrefix(name, "g-") || len(name) != 64 || slices.Contains(keep, name) {
 			continue
 		}
-		m, _, e := verifiedGeo(data, name)
-		if e != nil || !managedGeo(m) {
-			continue
-		}
 		sub, e := unix.Openat(fd, name, unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_RDONLY|unix.O_CLOEXEC, 0)
 		if e != nil {
 			return errGeoInstall
 		}
 		f := os.NewFile(uintptr(sub), name)
-		names, e := f.Readdirnames(-1)
-		f.Close()
-		if e != nil {
+		m, _, valid := verifyGeoFD(sub, name)
+		names, e := f.Readdirnames(5)
+		if e != nil && e != io.EOF {
+			f.Close()
 			return errGeoInstall
 		}
-		if len(names) != 4 {
+		if valid != nil || !managedGeo(m) || len(names) != 4 {
+			f.Close()
 			continue
 		}
-		// Rename the sealed slot out of the selection namespace before retiring
-		// its four files. No active/pending/previous slot may reach this point.
-		base := fmt.Sprintf("/proc/self/fd/%d", fd)
-		garbage, e := os.MkdirTemp(base, ".old-geo-")
+
+		// Make the old slot unselectable before unlinking any payload. A
+		// surviving receipt lets the next operation finish an interrupted purge.
+		trash := ".old-geo-" + rand.Text()
+		e = recordGeoWork(fd, sub, trash)
+		f.Close()
 		if e != nil {
-			return errGeoInstall
+			return e
 		}
-		dest := filepath.Join(garbage, "slot")
-		if os.Rename(filepath.Join(base, name), dest) != nil {
-			os.Remove(garbage)
+		if unix.Renameat2(fd, name, fd, trash, unix.RENAME_NOREPLACE) != nil {
 			return errGeoInstall
 		}
 		if unix.Fsync(fd) != nil {
 			return errGeoInstall
 		}
-		if os.RemoveAll(garbage) != nil {
-			return errGeoInstall
+		if e := cleanupGeoWork(fd); e != nil {
+			return e
 		}
 	}
 	if unix.Fsync(fd) != nil {

@@ -63,17 +63,26 @@ func openGeoDir(data string, create bool, names ...string) (int, error) {
 		return -1, errors.New("artifacts: geo data directory unavailable")
 	}
 	for _, name := range names {
+		created := false
 		if create {
-			if e := unix.Mkdirat(fd, name, 0755); e != nil && e != unix.EEXIST {
+			e := unix.Mkdirat(fd, name, 0755)
+			if e != nil && e != unix.EEXIST {
 				unix.Close(fd)
 				return -1, errors.New("artifacts: cannot create geo directory")
 			}
+			created = e == nil
 		}
 		next, e := unix.Openat(fd, name, flags, 0)
-		unix.Close(fd)
 		if e != nil {
+			unix.Close(fd)
 			return -1, errors.New("artifacts: geo slot unavailable")
 		}
+		if created && (unix.Fchmod(next, 0755) != nil || unix.Fsync(next) != nil || unix.Fsync(fd) != nil) {
+			unix.Close(next)
+			unix.Close(fd)
+			return -1, errors.New("artifacts: cannot publish geo directory")
+		}
+		unix.Close(fd)
 		fd = next
 	}
 	return fd, nil
