@@ -73,6 +73,8 @@ type CoreUpdater struct {
 	Arch string // GOARCH of the cores to fetch; empty means runtime.GOARCH
 	// Fetch is where release zips come from.
 	Fetch Chain
+	// GeoSource configures trusted publisher access and payload fallbacks.
+	GeoSource GeoSourceConfig
 	// Verify finds the SHA-256 a zip must have. Its Upstream must hold only
 	// Direct and Proxy sources, never a mirror or the inbox, so that the
 	// .dgst always comes from upstream (§4.3).

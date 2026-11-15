@@ -28,55 +28,92 @@ const (
 )
 
 type geoMeta struct {
-	Version string            `json:"version"`
-	Site    []string          `json:"site"`
-	IP      []string          `json:"ip"`
-	SHA256  map[string]string `json:"sha256"`
+	Profile   string            `json:"profile,omitempty"`
+	ReleaseID string            `json:"release_id,omitempty"`
+	Version   string            `json:"version"`
+	Site      []string          `json:"site"`
+	IP        []string          `json:"ip"`
+	SHA256    map[string]string `json:"sha256"`
 }
 
 // LoadGeo verifies the three installed payloads against the slot metadata.
 // Publisher authentication takes place when installing the immutable slot.
 // No matcher or range is returned until all three digests have been checked.
 func LoadGeo(data, version string) (render.Geo, []netip.Prefix, error) {
+	meta, ranges, err := verifiedGeo(data, version)
+	if err != nil {
+		return render.Geo{}, nil, err
+	}
+	return render.Geo{Version: meta.Version, Site: meta.Site, IP: meta.IP}, ranges, nil
+}
+
+func openGeoSlot(data, version string) (int, error) {
 	if !runnerapi.ValidGeoName(version) {
-		return render.Geo{}, nil, errors.New("artifacts: invalid geo slot name")
+		return -1, errors.New("artifacts: invalid geo slot name")
 	}
-	// Hold each directory open while resolving its child. Checking a path
-	// and then reopening it would allow a replaced directory to redirect us.
-	flags := unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC | unix.O_DIRECTORY
-	root, err := unix.Open(data, flags, 0)
+	return openGeoDir(data, false, "geo", version)
+}
+
+// Hold each ancestor open while resolving its child. A renamed directory or
+// a replaced symlink must never redirect a subsequent open to another volume.
+func openGeoDir(data string, create bool, names ...string) (int, error) {
+	flags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW
+	fd, err := unix.Open(data, flags, 0)
 	if err != nil {
-		return render.Geo{}, nil, errors.New("artifacts: geo data directory unavailable")
+		return -1, errors.New("artifacts: geo data directory unavailable")
 	}
-	defer unix.Close(root)
-	geo, err := unix.Openat(root, "geo", flags, 0)
-	if err != nil {
-		return render.Geo{}, nil, errors.New("artifacts: geo directory unavailable")
+	for _, name := range names {
+		if create {
+			if e := unix.Mkdirat(fd, name, 0755); e != nil && e != unix.EEXIST {
+				unix.Close(fd)
+				return -1, errors.New("artifacts: cannot create geo directory")
+			}
+		}
+		next, e := unix.Openat(fd, name, flags, 0)
+		unix.Close(fd)
+		if e != nil {
+			return -1, errors.New("artifacts: geo slot unavailable")
+		}
+		fd = next
 	}
-	defer unix.Close(geo)
-	slot, err := unix.Openat(geo, version, flags, 0)
+	return fd, nil
+}
+
+func verifiedGeo(data, version string) (geoMeta, []netip.Prefix, error) {
+	slot, err := openGeoSlot(data, version)
 	if err != nil {
-		return render.Geo{}, nil, errors.New("artifacts: geo slot unavailable")
+		return geoMeta{}, nil, err
 	}
 	defer unix.Close(slot)
+	return verifyGeoFD(slot, version)
+}
 
+func readGeoMeta(slot int, version string) (geoMeta, error) {
 	var metaBytes bytes.Buffer
 	if err := readGeoFile(slot, metaFile, maxGeoMeta, &metaBytes); err != nil {
-		return render.Geo{}, nil, err
+		return geoMeta{}, err
 	}
 	var meta geoMeta
 	if json.Unmarshal(metaBytes.Bytes(), &meta) != nil || meta.Version != version || len(meta.SHA256) != 3 {
-		return render.Geo{}, nil, errors.New("artifacts: invalid geo metadata")
+		return geoMeta{}, errors.New("artifacts: invalid geo metadata")
 	}
 	matchers := render.Geo{Version: version, Site: meta.Site, IP: meta.IP}
 	if matchers.Validate() != nil {
-		return render.Geo{}, nil, errors.New("artifacts: invalid domestic geo matcher")
+		return geoMeta{}, errors.New("artifacts: invalid domestic geo matcher")
+	}
+	return meta, nil
+}
+
+func verifyGeoFD(slot int, version string) (geoMeta, []netip.Prefix, error) {
+	meta, err := readGeoMeta(slot, version)
+	if err != nil {
+		return geoMeta{}, nil, err
 	}
 	var cidrs bytes.Buffer
 	for _, name := range []string{"geoip.dat", "geosite.dat", "domestic-v4.txt"} {
 		want := meta.SHA256[name]
 		if !isSHA256Hex(want) {
-			return render.Geo{}, nil, errors.New("artifacts: invalid geo checksum")
+			return geoMeta{}, nil, errors.New("artifacts: invalid geo checksum")
 		}
 		digest := sha256.New()
 		var dst io.Writer = digest
@@ -86,17 +123,17 @@ func LoadGeo(data, version string) (render.Geo, []netip.Prefix, error) {
 			limit = maxGeoRanges
 		}
 		if err := readGeoFile(slot, name, limit, dst); err != nil {
-			return render.Geo{}, nil, err
+			return geoMeta{}, nil, err
 		}
 		if hex.EncodeToString(digest.Sum(nil)) != want {
-			return render.Geo{}, nil, errors.New("artifacts: installed geo checksum mismatch")
+			return geoMeta{}, nil, errors.New("artifacts: installed geo checksum mismatch")
 		}
 	}
 	ranges, err := domesticIPv4(&cidrs)
 	if err != nil {
-		return render.Geo{}, nil, err
+		return geoMeta{}, nil, err
 	}
-	return matchers, ranges, nil
+	return meta, ranges, nil
 }
 
 func readGeoFile(slot int, name string, limit int64, dst io.Writer) error {
