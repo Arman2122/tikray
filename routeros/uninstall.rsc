@@ -18,7 +18,8 @@
         :return $p
     }
     :local imageIdle do={
-        :if (([:len [/system/script/find where name="tikray-image-transition" or comment~"^tikray:image-transition "]]>0) or (($1!="") and ([:len [/file/find where name=($1 . "/state/image-update.json")]]>0))) do={ :error "tikray: shared_reference_refuses; image transition active; wait for verified recovery" }
+        :if ($1!="") do={:foreach legacy in={"image-update.json";"image-probe.json";"image-bootstrap.json";"image-tikray.json";"image-runner.json"} do={:if ([:len [/file/find where name=($1 . "/state/" . $legacy)]]>0) do={:error "tikray: shared_reference_refuses; inspect legacy image receipt"}}}
+        :if (([:len [/system/script/find where name="tikray-image-transition" or comment~"^tikray:image-transition "]]>0) or (($1!="") and ([:len [/file/find where name=($1 . "/state/image-update.request")]]>0))) do={ :error "tikray: shared_reference_refuses; image transition active; wait for verified recovery" }
         :return true
     }
     :local noImage [$imageIdle ""]
@@ -27,7 +28,7 @@
         :if ([:pick $tagValue 0 7] != "tikray:") do={ :return false }
         :local roleName [:pick $tagValue 7 [:len $tagValue]]
         :if ($menu = "/system/script") do={
-            :return (($roleName ~ "^(watchdog-script|emergency-off|emergency-state|api-mode (unchanged|created|access))\$") or ([:pick $roleName 0 15] = "watchdog-state ") or ([:pick $roleName 0 12] = "api-receipt ") or ([:pick $roleName 0 11] = "api-access "))
+            :return (($roleName ~ "^(watchdog-script|watchdog-traffic|emergency-off|emergency-state|api-mode (unchanged|created|access))\$") or ([:pick $roleName 0 15] = "watchdog-state ") or ([:pick $roleName 0 12] = "api-receipt ") or ([:pick $roleName 0 11] = "api-access "))
         }
         :if ($menu = "/system/scheduler") do={ :return ($roleName = "watchdog-scheduler") }
         :if ($menu = "/container") do={ :return (($roleName = "runner") or ($roleName = "tikray")) }

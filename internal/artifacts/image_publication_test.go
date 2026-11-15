@@ -107,7 +107,7 @@ func TestImageRefusalRetiresOnlyUnselectedCandidate(t *testing.T) {
 			if condition == "damaged lineage" {
 				receipt = []byte("broken")
 			}
-			if os.WriteFile(filepath.Join(state, "install.id"), []byte(id), 0600) != nil || os.WriteFile(filepath.Join(state, "image-runner.json"), receipt, 0600) != nil {
+			if os.WriteFile(filepath.Join(state, "install.id"), []byte(id), 0600) != nil || os.WriteFile(filepath.Join(state, "image-runner.receipt"), receipt, 0600) != nil {
 				t.Fatal("fixture lineage")
 			}
 			if condition == "pending" && os.WriteFile(filepath.Join(state, imageRequestFile), []byte("ambiguous"), 0600) != nil {

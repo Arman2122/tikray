@@ -42,8 +42,8 @@ func TestImageInstallerValidatesExistingLineage(t *testing.T) {
 	run(t, "/file/add type=directory name="+data)
 	run(t, "/file/add type=directory name="+data+"/state")
 	run(t, "/file/add type=file name="+state+"install.id contents="+strconv.Quote(id))
-	run(t, "/file/add type=file name="+state+"image-bootstrap.json contents="+strconv.Quote(string(bootstrap)))
-	run(t, "/file/add type=file name="+state+"image-tikray.json")
+	run(t, "/file/add type=file name="+state+"image-bootstrap.receipt contents="+strconv.Quote(string(bootstrap)))
+	run(t, "/file/add type=file name="+state+"image-tikray.receipt")
 	cmd := "{\n" + pre + `
 	:onerror e in={ :local ok [$imageBaseline false "` + data + `" "disk1" "amd64"]; :put "unexpected" } do={
 	    :local msg [:tostr $e]
@@ -76,7 +76,7 @@ func TestImageInstallerValidatesExistingLineage(t *testing.T) {
 				delete(row, "previous")
 			}
 			b, _ := json.Marshal(row)
-			run(t, "/file/set [find where name="+strconv.Quote(state+"image-tikray.json")+"] contents="+strconv.Quote(string(b)))
+			run(t, "/file/set [find where name="+strconv.Quote(state+"image-tikray.receipt")+"] contents="+strconv.Quote(string(b)))
 			if got := run(t, "/system/script/run m3-lineage-test"); got != tc.want {
 				t.Fatal("installer preflight did not enforce component lineage")
 			}

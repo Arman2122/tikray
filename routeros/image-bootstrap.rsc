@@ -3,10 +3,15 @@
     :local imageBaseline do={
         :local publish [:tobool $1]; :local data $2; :local base $3; :local arch $4; :local verify $5; :local checkLease $6; :local lease $7
         # @TIKRAY_IMAGE_CONSTANTS@
-        :if (([:len [/file/find where name=($data . "/state/image-update.json")]]>0) or ([:len [/system/script/find where name="tikray-image-transition" or comment~"^tikray:image-transition"]] > 0)) do={ :error "tikray: image transition active; retry after watchdog recovery" }
+        :if (([:len [/file/find where name=($data . "/state/image-update.request")]]>0) or ([:len [/system/script/find where name="tikray-image-transition" or comment~"^tikray:image-transition"]] > 0)) do={ :error "tikray: image transition active; retry after watchdog recovery" }
         :local bundle [:deserialize from=json options=json.no-string-conversion value=$bootstrap]
         :local state ($data . "/state/")
-        :local pinned [/file/find where name=($state . "image-bootstrap.json")]
+        # Earlier development builds used protected JSON inputs. Leave any
+        # such proof intact for the owner and refuse mixed image lineages.
+        :foreach legacy in={"image-update.json";"image-bootstrap.json";"image-tikray.json";"image-runner.json";"image-probe.json"} do={
+            :if ([:len [/file/find where name=($state . $legacy)]]>0) do={:error "tikray: prior image handoff present; inspect before retry"}
+        }
+        :local pinned [/file/find where name=($state . "image-bootstrap.receipt")]
         :if ([:len $pinned]>0) do={
             :if (([:len $pinned]!=1) or ([/file/get $pinned size]!=[:len $bootstrap]) or ([/file/get $pinned contents]!=$bootstrap)) do={ :error "tikray: installed image publisher or baseline differs" }
         }
@@ -33,7 +38,7 @@
         :foreach role in={"tikray";"runner"} do={
             :local componentName "tikray"; :if ($role="runner") do={ :set componentName "tikray-runner" }
             :local ref ($bundle->$role)
-            :local current ($state . "image-" . $role . ".json")
+            :local current ($state . "image-" . $role . ".receipt")
             :local records [/file/find where name=$current]
             :local expectedID ($ref->"image_id")
             # Store a compact JSON string. RouterOS may serialize its native
@@ -95,8 +100,8 @@
         }
         :if ($publish and ([:len $pinned]=0)) do={
             $checkLease $lease
-            /file/add name=($state . "image-bootstrap.json") type=file contents=$bootstrap
-            :if ([/file/get [find where name=($state . "image-bootstrap.json")] contents]!=$bootstrap) do={ :error "tikray: image trust could not be verified" }
+            /file/add name=($state . "image-bootstrap.receipt") type=file contents=$bootstrap
+            :if ([/file/get [find where name=($state . "image-bootstrap.receipt")] contents]!=$bootstrap) do={ :error "tikray: image trust could not be verified" }
         }
         :return true
     }

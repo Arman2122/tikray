@@ -57,8 +57,13 @@ with open(sys.argv[2],"wb",buffering=0) as log:
    _,port,size,_=struct.unpack_from("!4H",frame,start)
    p=frame[start+8:start+size]
    if port!=31947 or p not in (b"C",b"D",b"F"):continue
-   if p==b"D" and frame[26:30]!=socket.inet_aton(sys.argv[3]):p=b"?"
-   log.write(p)`, routingRemote, w.trace, egressDirect, serverEgress["a"], serverEgress["b"])
+   if p==b"D" and frame[26:30]!=socket.inet_aton(sys.argv[3]):
+    src=socket.inet_ntoa(frame[26:30])
+    if src in sys.argv[4:6]:p=b"?x"
+    elif src==sys.argv[6]:p=b"?l"
+    elif src.startswith("172.30.252."):p=b"?v"
+    else:p=b"?u"
+   log.write(p)`, routingRemote, w.trace, egressDirect, serverEgress["a"], serverEgress["b"], routingPeer)
 	startRoutingProcess(t, serve)
 	return w
 }

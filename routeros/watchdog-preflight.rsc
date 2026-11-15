@@ -10,7 +10,7 @@
     }
     :local provisionWatch do={
         :local apply [:tobool $1]
-        :local body $2
+        :local body $2; :local traffic $3
         # Migration is restricted to the shipped M3a/Task 5 source with its
         # original exact rights. Never overwrite a modified owner script.
         :local legacyBody do={
@@ -29,6 +29,13 @@
             :if (($count=3) and (!$ftp)) do={ :return "prior" }
             :if (($count=4) and $ftp) do={ :return "current" }
             :error "tikray: watchdog permissions conflict"
+        }
+        :local helpers [/system/script/find where name="tikray-watchdog-traffic" or comment="tikray:watchdog-traffic"]
+        :if ([:len $helpers]>0) do={
+            :if (([:len $helpers]!=1) or ([:len [/system/script/find where name="tikray-watchdog-traffic" and comment="tikray:watchdog-traffic" and !dont-require-permissions]]!=1)) do={:error "tikray: watchdog helper ownership conflict"}
+            :local helperID [:pick $helpers 0]; :local sourceText [/system/script/get $helperID source]; :local count 0
+            :foreach perm in=[/system/script/get $helperID policy] do={:if ([:pick $perm 0 1]!="!") do={:if ($perm!="read") do={:error "tikray: watchdog helper privileges conflict"}; :set count ($count+1)}}
+            :if (($count!=1) or (($sourceText!=$traffic) and ($sourceText!=($traffic . "\n")) and ($sourceText!=($traffic . "\r\n")))) do={:error "tikray: watchdog helper has changed"}
         }
         :local migrate false; :local oldSchedule false
         :local scripts [/system/script/find where name="tikray-watchdog" or comment="tikray:watchdog-script"]
@@ -49,6 +56,7 @@
             :if ($oldSchedule and ([:len $scripts]!=1)) do={ :error "tikray: orphan watchdog permissions conflict" }
         }
         :if ($apply) do={
+            :if ([:len $helpers]=0) do={ /system/script/add name=tikray-watchdog-traffic comment="tikray:watchdog-traffic" policy=read dont-require-permissions=no source=$traffic }
             :if ($migrate) do={ /system/script/set [:pick $scripts 0] policy=read,write,test,ftp source=$body }
             :if ($oldSchedule) do={ /system/scheduler/set [:pick $ticks 0] policy=read,write,test,ftp }
             :if ([:len $scripts] = 0) do={ /system/script/add name=tikray-watchdog comment="tikray:watchdog-script" policy=read,write,test,ftp dont-require-permissions=no source=$body }
@@ -58,5 +66,5 @@
         }
         :return true
     }
-    :local watchOK [$provisionWatch false $watchBody]
+    :local watchOK [$provisionWatch false $watchBody $trafficBody]
     :if ($watchOK != true) do={ :error "tikray: watchdog preflight failed" }

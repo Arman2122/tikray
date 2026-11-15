@@ -87,7 +87,7 @@ func seedImageTrust(t *testing.T) (*CoreUpdater, *ecdsa.PrivateKey) {
 	boot := ImageBootstrap{Version: 1, Arch: "amd64", Publisher: base64.StdEncoding.EncodeToString(der), Tikray: ref, Runner: ref}
 	boot.Runner.Component = "runner"
 	b, _ := json.Marshal(boot)
-	if os.WriteFile(filepath.Join(state, "image-bootstrap.json"), b, 0600) != nil {
+	if os.WriteFile(filepath.Join(state, "image-bootstrap.receipt"), b, 0600) != nil {
 		t.Fatal("cannot write bootstrap")
 	}
 	return &CoreUpdater{Data: root, Arch: "amd64"}, key

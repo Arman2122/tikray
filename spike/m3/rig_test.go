@@ -135,7 +135,8 @@ func newRig(t *testing.T) *rig {
 		t.Fatal("invalid ephemeral account setup")
 	}
 	r.api = dialPinned(t, r, "m3-cap-user", password, cert)
-	r.admin = dialPinned(t, r, "admin", string(pw), cert)
+	r.admin = openPinned(t, r, "admin", string(pw), cert, "172.31.255.2")
+	t.Cleanup(func() { r.admin.Close() })
 	r.auditCanary(t, password)
 	t.Logf("CHR %s x86_64; native TLS pinned; source restricted to control IP; verified group read,write,api", v)
 	return r
@@ -189,6 +190,21 @@ func dialPinned(t *testing.T, r *rig, user, pw string, cert *x509.Certificate) *
 
 func dialPinnedFrom(t *testing.T, r *rig, user, pw string, cert *x509.Certificate, source string) *ros.Client {
 	t.Helper()
+	cl := openPinned(t, r, user, pw, cert, source)
+	t.Cleanup(func() { cl.Close() })
+	return cl
+}
+
+// A reboot closes the old TLS connection. The rig already closes the final
+// admin session after the diagnostic canary check.
+func (r *rig) reopenAudit(t *testing.T, pw string, cert *x509.Certificate) {
+	t.Helper()
+	r.admin.Close()
+	r.admin = openPinned(t, r, "admin", pw, cert, "172.31.255.2")
+}
+
+func openPinned(t *testing.T, r *rig, user, pw string, cert *x509.Certificate, source string) *ros.Client {
+	t.Helper()
 	root := x509.NewCertPool()
 	root.AddCert(cert)
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: root, ServerName: "172.31.255.1", VerifyConnection: func(s tls.ConnectionState) error {
@@ -211,9 +227,9 @@ func dialPinnedFrom(t *testing.T, r *rig, user, pw string, cert *x509.Certificat
 		conn.Close()
 		t.Fatal("fixture: native API client failed")
 	}
-	t.Cleanup(func() { cl.Close() })
 	cl.SetLogHandler(slog.NewTextHandler(io.Discard, nil))
 	if cl.LoginContext(ctx, user, pw) != nil {
+		cl.Close()
 		t.Fatal("fixture: native API login failed")
 	}
 	_ = conn.SetDeadline(time.Time{})

@@ -17,11 +17,11 @@
         :if (([:len $original]=0) and ([:len $retained]=0)) do={ :error "tikray: shared_reference_refuses; missing retained-data proof" }
         # The two current-image receipts bind the initial publisher
         # handoff to this installation. Refuse unrelated or conflicting files.
-        :local bootName ($prefix . "state/image-bootstrap.json")
+        :local bootName ($prefix . "state/image-bootstrap.receipt")
         :local boots [/file/find where name=$bootName]
         :local receipts [:toarray ""]
         :foreach side in={"tikray";"runner"} do={
-            :local name ($prefix . "state/image-" . $side . ".json"); :local files [/file/find where name=$name]
+            :local name ($prefix . "state/image-" . $side . ".receipt"); :local files [/file/find where name=$name]
             :if ([:len $files]>0) do={
                 :if (([:len $files]!=1) or ([/file/get $files type]="directory") or ([/file/get $files size]>4096)) do={:error "tikray: shared_reference_refuses; image receipt conflict"}
                 :local receipt [:deserialize from=json options=json.no-string-conversion value=[/file/get $files contents]]

@@ -53,7 +53,7 @@ func TestInstallerBindsComponentArchitectureAndChunks(t *testing.T) {
 	const witness = "test-only health body"
 	source := func(name string) ([]byte, error) {
 		if name == health {
-			return []byte("# " + witness), nil
+			return []byte(`:local proof "` + witness + `"`), nil
 		}
 		return routerosfiles.Sources.ReadFile(name)
 	}
@@ -63,6 +63,9 @@ func TestInstallerBindsComponentArchitectureAndChunks(t *testing.T) {
 	body := out.String()
 	if !strings.Contains(body, witness) {
 		t.Fatal("health body missing from assembled installer")
+	}
+	if !strings.Contains(body, "tikray:watchdog-traffic") || !strings.Contains(body, "image: traffic helper content changed") {
+		t.Fatal("installer omitted the independently pinned traffic helper")
 	}
 	var off int
 	for pos := 0; pos < len(b); pos += installerChunkSize {
@@ -113,7 +116,7 @@ func TestUpdateBootstrapBindsVerifiedPublisherAndLiveImages(t *testing.T) {
 	if e := BuildInstaller(p, images, &out); e != nil {
 		t.Fatal("signed pair refused", e)
 	}
-	for _, visible := range []string{"image-bootstrap.json", images[0].publisher, images[1].ref.Chain, images[1].ref.Digest, images[1].ref.ImageID, "live image differs from verified archive", "/file/copy"} {
+	for _, visible := range []string{"image-bootstrap.receipt", images[0].publisher, images[1].ref.Chain, images[1].ref.Digest, images[1].ref.ImageID, "live image differs from verified archive", "/file/copy"} {
 		if !strings.Contains(out.String(), visible) {
 			t.Fatal("bootstrap is missing a trust or initial image witness")
 		}

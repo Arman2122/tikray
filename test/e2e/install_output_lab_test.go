@@ -30,6 +30,7 @@ func TestPrivateImportFailureHidesOutput(t *testing.T) {
 		{"tikray: object conflict at " + hidden, "tikray: object conflict"},
 		{"tikray: peer MAC collides with veth " + hidden, "tikray: peer MAC collides with veth"},
 		{"syntax error (line 51 column 7) " + hidden, "installer syntax at line 51 column 7"},
+		{"maximum script " + hidden + " size exceeded", "routeros: script size limit exceeded"},
 		{"unexpected " + hidden, "installer refused"},
 	} {
 		wire := hidden + "\nm3-import-error=" + base64.StdEncoding.EncodeToString([]byte(tc.diagnostic))

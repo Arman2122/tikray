@@ -68,6 +68,11 @@ func imageKey(derBase64 string) (*ecdsa.PublicKey, error) {
 
 func ReadImageBootstrap(data string) (ImageBootstrap, error) {
 	var b ImageBootstrap
+	for _, legacy := range []string{"image-bootstrap.json", "image-tikray.json", "image-runner.json", "image-probe.json"} {
+		if imageFilePresent(data, legacy) {
+			return b, errImageTrust
+		}
+	}
 	fd, e := openGeoDir(data, false, "state")
 	if e != nil {
 		return b, errImageTrust
@@ -78,7 +83,7 @@ func ReadImageBootstrap(data string) (ImageBootstrap, error) {
 		return b, errImageTrust
 	}
 	var raw bytes.Buffer
-	if e := readGeoFile(fd, "image-bootstrap.json", 4096, &raw); e != nil {
+	if e := readGeoFile(fd, imageBootstrapFile, 4096, &raw); e != nil {
 		return b, errImageTrust
 	}
 	dec := json.NewDecoder(&raw)

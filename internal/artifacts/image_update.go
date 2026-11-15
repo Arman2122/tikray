@@ -20,7 +20,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const imageRequestFile = "image-update.json"
+const imageRequestFile = "image-update.request"
+const legacyImageRequest = "image-update.json"
+const imageBootstrapFile = "image-bootstrap.receipt"
+const imageProbeFile = "image-probe.request"
 const imageWindow = 5 * time.Minute
 
 var (
@@ -132,10 +135,17 @@ func readImageJSON(data, name string, dst any) (bool, error) {
 // A malformed or inaccessible marker still fences mutations. Only the owner
 // watchdog retires a published request, after healthy recovery/readback.
 func ImagePending(data string) bool {
-	_, err := os.Lstat(filepath.Join(data, "state", imageRequestFile))
+	return imageFilePresent(data, imageRequestFile) || imageFilePresent(data, legacyImageRequest)
+}
+
+func imageFilePresent(data, name string) bool {
+	_, err := os.Lstat(filepath.Join(data, "state", name))
 	return !errors.Is(err, fs.ErrNotExist)
 }
 func readImageRequest(data, id string) (*imageRequest, error) {
+	if imageFilePresent(data, legacyImageRequest) {
+		return nil, ErrImageState
+	}
 	var m imageRequest
 	found, err := readImageJSON(data, imageRequestFile, &m)
 	if !found || err != nil {
@@ -152,6 +162,9 @@ func readImageRequest(data, id string) (*imageRequest, error) {
 func publishImageRequest(data string, m imageRequest) error {
 	if !m.valid() {
 		return ErrImageState
+	}
+	if imageFilePresent(data, legacyImageRequest) {
+		return ErrImageBusy
 	}
 	dir := filepath.Join(data, "state")
 	st, err := os.Lstat(dir)
@@ -193,7 +206,7 @@ func imageVersions(data, id, component string, boot ImageBootstrap) (imageReceip
 		Active         ImageRef        `json:"active"`
 		Previous       json.RawMessage `json:"previous"`
 	}
-	found, err := readImageJSON(data, "image-"+component+".json", &wire)
+	found, err := readImageJSON(data, "image-"+component+".receipt", &wire)
 	r := imageReceipt{Version: wire.Version, InstallationID: wire.InstallationID, Active: wire.Active}
 	if err != nil || !found || r.Version != 1 || r.InstallationID != id || !r.Active.Valid() || r.Active.Component != component || len(wire.Previous) == 0 {
 		return imageReceipt{}, ErrImageState
@@ -360,7 +373,7 @@ func proveRunnerImage(ctx context.Context, data, id string, verify func(context.
 		return nil
 	}
 	var p imageProbe
-	found, err := readImageJSON(data, "image-probe.json", &p)
+	found, err := readImageJSON(data, imageProbeFile, &p)
 	if !found || err != nil {
 		return err
 	}
@@ -384,7 +397,7 @@ func proveRunnerImage(ctx context.Context, data, id string, verify func(context.
 		return ErrImageState
 	}
 	var latest imageProbe
-	if ok, err := readImageJSON(data, "image-probe.json", &latest); err != nil || !ok || latest != p {
+	if ok, err := readImageJSON(data, imageProbeFile, &latest); err != nil || !ok || latest != p {
 		return ErrImageState
 	}
 	if atomicfile.WriteFile(path, []byte(want), 0600) != nil {
@@ -414,7 +427,7 @@ func PruneInstalledImages(ctx context.Context, data string) error {
 	if ImagePending(data) {
 		return ErrImageBusy
 	}
-	_, e := os.Lstat(filepath.Join(data, "state", "image-bootstrap.json"))
+	_, e := os.Lstat(filepath.Join(data, "state", imageBootstrapFile))
 	if errors.Is(e, fs.ErrNotExist) {
 		return nil
 	}

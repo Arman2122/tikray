@@ -34,7 +34,8 @@
     :if (!(($folder = "tikray") or ($folder ~ "^tikray-[A-Za-z0-9_][A-Za-z0-9_-]*\$"))) do={ :error "tikray: select a dedicated tikray data folder" }
     :local base ($disk . "/" . $folder)
     :local data ($base . "/data")
-    :if (([:len [/file/find where name=($data . "/state/image-update.json")]] > 0) or ([:len [/system/script/find where name="tikray-image-transition" or comment~"^tikray:image-transition"]] > 0)) do={ :error "tikray: image transition active; retry after watchdog recovery" }
+    :foreach legacy in={"image-update.json";"image-probe.json";"image-bootstrap.json";"image-tikray.json";"image-runner.json"} do={:if ([:len [/file/find where name=($data . "/state/" . $legacy)]]>0) do={:error "tikray: inspect legacy image receipts before installing"}}
+    :if (([:len [/file/find where name=($data . "/state/image-update.request")]] > 0) or ([:len [/system/script/find where name="tikray-image-transition" or comment~"^tikray:image-transition"]] > 0)) do={ :error "tikray: image transition active; retry after watchdog recovery" }
 
     :local arch [/system/resource/get architecture-name]
     :local version [:pick [:tostr [/system/resource/get version]] 0 [:find ([:tostr [/system/resource/get version]] . " ") " "]]
@@ -337,7 +338,18 @@
         :if ([:len $ids] > 0) do={
             :if (([:len $ids] != 1) or ([:len [/container/find where name=$componentName and comment=$ownedTag and interface=$iface]] != 1) or ([:len $seedFiles] = 0)) do={ :error "tikray: object conflict at container; inspect the existing installation" }
             :local item [/container/get $ids]
-            :if (([$normalized ($item->"root-dir")] != $root) or ([:tostr ($item->"mountlists")] != $componentName) or ([:tostr ($item->"envlists")] != $componentName) or ([:tostr ($item->"dns")] != [:tostr $routerIP]) or ([:len ($item->"entrypoint")] > 0)) do={ :error "tikray: object conflict in container executable, mounts or DNS" }
+            :local actualRoot [$normalized ($item->"root-dir")]
+            :if ($actualRoot!=$root) do={
+                :local comp "tikray"; :if ($componentName="tikray-runner") do={:set comp "runner"}
+                :local proofs [/file/find where name=($data . "/state/image-" . $comp . ".receipt")]
+                :local idsFromDisk [/file/find where name=($data . "/state/install.id")]
+                :if (([:len $proofs]!=1) or ([:len $idsFromDisk]!=1) or ([/file/get $proofs size]>4096)) do={:error "tikray: unverified recovery extraction root"}
+                :local proof [:deserialize from=json options=json.no-string-conversion value=[/file/get $proofs contents]]
+                :local imageID ($proof->"active"->"image_id"); :local liveID [:tostr ($item->"image-id")]
+                :if ([:pick $liveID 0 7]="sha256:") do={:set liveID [:pick $liveID 7 [:len $liveID]]}
+                :if ((($proof->"version")!=1) or (($proof->"installation_id")!=[/file/get $idsFromDisk contents]) or (($proof->"active"->"component")!=$comp) or ([:len $imageID]!=64) or (!($imageID~"^[0-9a-f]+\$")) or (($liveID!=$imageID) and ($liveID!=($imageID . " "))) or ($actualRoot!=($root . "-image-" . $imageID))) do={:error "tikray: unverified recovery extraction root"}
+            }
+            :if (([:tostr ($item->"mountlists")] != $componentName) or ([:tostr ($item->"envlists")] != $componentName) or ([:tostr ($item->"dns")] != [:tostr $routerIP]) or ([:len ($item->"entrypoint")] > 0)) do={ :error "tikray: object conflict in container executable, mounts or DNS" }
         } else={
             :if ([:len [/file/find where name=$root]] > 0) do={ :error "tikray: object conflict in container root directory" }
         }

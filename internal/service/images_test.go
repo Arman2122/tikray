@@ -17,7 +17,7 @@ func TestImageReplacementFencesOtherMutations(t *testing.T) {
 	e.inSync()
 	r := &testRouter{}
 	e.s = e.newService(Config{Router: r})
-	path := filepath.Join(e.data, "state", "image-update.json")
+	path := filepath.Join(e.data, "state", "image-update.request")
 	if os.WriteFile(path, []byte("private-fixture"), 0600) != nil {
 		t.Fatal("fixture setup")
 	}
@@ -48,7 +48,7 @@ func TestImagePendingPreservesConfigurationDuringRecovery(t *testing.T) {
 	r := &testRouter{}
 	e.s = e.newService(Config{Router: r})
 	_, rev := e.s.State()
-	if err := os.WriteFile(filepath.Join(e.data, "state", "image-update.json"), []byte("{"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(e.data, "state", "image-update.request"), []byte("{"), 0600); err != nil {
 		t.Fatal("cannot stage interrupted image receipt")
 	}
 	e.s.refreshFailed(t.Context(), sub, "fixture failure")

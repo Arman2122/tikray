@@ -72,7 +72,7 @@ func TestUpdateMarkerCrashRecovery(t *testing.T) {
 	if _, err := readImageRequest(data, strings.Repeat("0", 32)); err == nil {
 		t.Fatal("accepted another installation's request")
 	}
-	path := filepath.Join(dir, "image-update.json")
+	path := filepath.Join(dir, "image-update.request")
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -103,6 +103,43 @@ func TestUpdateMarkerCrashRecovery(t *testing.T) {
 	}
 }
 
+// A pending request produced by a pre-release build must never authorize a
+// second native operation. Do not open the old file to make this decision.
+func TestEarlierImageRequestPreserved(t *testing.T) {
+	data := t.TempDir()
+	state := filepath.Join(data, "state")
+	if os.Mkdir(state, 0700) != nil {
+		t.Fatal("cannot create fixture")
+	}
+	const value = "older request stays"
+	legacy := filepath.Join(state, "image-update.json")
+	if os.WriteFile(legacy, []byte(value), 0600) != nil {
+		t.Fatal("cannot create older request")
+	}
+	id := strings.Repeat("a", 32)
+	sel := runnerapi.Selection{Core: "26.10.31", Config: "config/" + strings.Repeat("b", 64) + ".json"}
+	m, err := newImageRequest(id, updateRef("runner", "c"), updateRef("runner", "d"), sel, time.Now())
+	if err != nil {
+		t.Fatal("invalid request fixture")
+	}
+	if !ImagePending(data) || !HoldsRunnerPolicy(data) {
+		t.Error("older request lost its policy hold")
+	}
+	if _, err := readImageRequest(data, id); err == nil {
+		t.Error("older request was silently ignored")
+	}
+	if !errors.Is(publishImageRequest(data, m), ErrImageBusy) {
+		t.Error("older request allowed publication")
+	}
+	got, e := os.ReadFile(legacy)
+	if e != nil || string(got) != value {
+		t.Error("older request changed")
+	}
+	if _, e := os.Lstat(filepath.Join(state, "image-update.request")); !errors.Is(e, os.ErrNotExist) {
+		t.Error("second operation recorded")
+	}
+}
+
 func TestRunnerImageProofBoundToRequestAndSelection(t *testing.T) {
 	data := t.TempDir()
 	dir := filepath.Join(data, "state")
@@ -116,7 +153,7 @@ func TestRunnerImageProofBoundToRequestAndSelection(t *testing.T) {
 	p := imageProbe{Version: 1, Nonce: m.Nonce, Digest: m.Candidate.Digest, Challenge: strings.Repeat("e", 32)}
 	setProbe := func() {
 		b, _ := json.Marshal(p)
-		if err := os.WriteFile(filepath.Join(dir, "image-probe.json"), b, 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "image-probe.request"), b, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -164,14 +201,14 @@ func TestImageReceiptMissingAfterCommitCannotSelectBootstrap(t *testing.T) {
 	save := func(active ImageRef, previous any, id string) {
 		row := map[string]any{"version": 1, "installation_id": id, "active": active, "previous": previous}
 		b, _ := json.Marshal(row)
-		if os.WriteFile(filepath.Join(dir, "image-tikray.json"), b, 0600) != nil {
+		if os.WriteFile(filepath.Join(dir, "image-tikray.receipt"), b, 0600) != nil {
 			t.Fatal("cannot write receipt")
 		}
 	}
 	for _, previous := range []string{"", `,"previous":{}`} {
 		active, _ := json.Marshal(boot.Tikray)
 		row := `{"version":1,"installation_id":"` + id + `","active":` + string(active) + previous + "}"
-		if err := os.WriteFile(filepath.Join(dir, "image-tikray.json"), []byte(row), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "image-tikray.receipt"), []byte(row), 0600); err != nil {
 			t.Fatal("cannot write incomplete lineage")
 		}
 		if _, err := imageVersions(data, id, "tikray", boot); err == nil {
@@ -218,7 +255,7 @@ func TestStateRetentionUsesBothSignedControlSchemas(t *testing.T) {
 	prev := stage("v2", "2")
 	current := stage("v3", "3")
 	b, _ := json.Marshal(imageReceipt{1, id, current, prev})
-	os.WriteFile(filepath.Join(state, "image-tikray.json"), b, 0600)
+	os.WriteFile(filepath.Join(state, "image-tikray.receipt"), b, 0600)
 	active, older, err := RetainedStateSchemas(t.Context(), u.Data)
 	if err != nil || active != 3 || older != 2 {
 		t.Fatal("wrong authenticated schema pair")
@@ -250,7 +287,7 @@ func TestOfflineRunnerRollbackNeedsCommittedSelection(t *testing.T) {
 	id := strings.Repeat("c", 32)
 	os.WriteFile(filepath.Join(state, "install.id"), []byte(id), 0600)
 	b, _ := json.Marshal(imageReceipt{1, id, current.Ref(), prior.Ref()})
-	os.WriteFile(filepath.Join(state, "image-runner.json"), b, 0600)
+	os.WriteFile(filepath.Join(state, "image-runner.receipt"), b, 0600)
 	httpd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
 	defer httpd.Close()
 	u.Runner = &runnerapi.Client{BaseURL: httpd.URL, Token: "fixture", HTTP: httpd.Client()}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Arman2122/tikray/internal/routeros/adapters"
 	routerosfiles "github.com/Arman2122/tikray/routeros"
 )
 
@@ -87,26 +88,17 @@ func TestWatchdogSchedulerIdentity(t *testing.T) {
 
 func TestWatchdogInactiveExitsCleanly(t *testing.T) {
 	r := newRig(t)
-	body, e := routerosfiles.Sources.ReadFile("watchdog.rsc")
+	source, _, e := adapters.WatchdogScripts()
 	if e != nil {
-		t.Fatal(e)
+		t.Fatal("cannot render watchdog")
 	}
-	source := string(body)
-	for _, part := range []struct{ key, file string }{{"STEP", "watchdog-step.rsc"}, {"STATE", "watchdog-state.rsc"}, {"BINDINGS", "bindings.rsc"}, {"IMAGE", "watchdog-image.rsc"}} {
-		b, e := routerosfiles.Sources.ReadFile(part.file)
-		if e != nil {
-			t.Fatal(e)
-		}
-		source = strings.ReplaceAll(source, "# @TIKRAY_WATCHDOG_"+part.key+"@", string(b))
-	}
-	source = strings.ReplaceAll(source, "# @TIKRAY_WATCHDOG_HEALTH@", `:error "unexpected health probe"`)
-	add, e := r.admin.RunContext(r.ctx, "/system/script/add", "=name=tikray-watchdog", "=policy=read,write,test", "=source="+source)
+	add, e := r.admin.RunContext(r.ctx, "/system/script/add", "=name=tikray-watchdog", "=policy=read,write,test,ftp", "=source="+strings.ReplaceAll(source, "\n", "\r\n"))
 	if e != nil || add.Done == nil {
 		t.Fatal("fixture script add")
 	}
 	run := func() {
 		t.Helper()
-		if _, e := r.admin.RunContext(r.ctx, "/system/script/run", "=.id="+add.Done.Map["ret"]); e != nil {
+		if _, e := r.admin.RunContext(r.ctx, "/system/script/run", "=number=tikray-watchdog"); e != nil {
 			out, _ := r.chr.RunPrivate(r.ctx, `:onerror reason in={ /system/script/run tikray-watchdog } do={ :put ("wd-reason=" . [:convert $reason to=base64]) }`)
 			_, raw, _ := strings.Cut(out, "wd-reason=")
 			msg, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(raw))

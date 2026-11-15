@@ -43,7 +43,16 @@
             :local request [:deserialize from=json options=json.no-string-conversion value=[/file/get $intent contents]]
             :set bindingsOK [$bindPeers "repair" ($request->"scope"->"subnet") $mayBind $suspended]
         } on-error={ :set bindingsOK false }
-        :if (($bindingsOK != true) or ([$suspended "restart"])) do={ :return true }
+        :if ($bindingsOK != true) do={ :return true }
+        :local emergency ""
+        :if ([$suspended "restart"]) do={
+            # Emergency can finish/prepare an already requested rollback;
+            # it cannot authorize a restart, new update, or traffic re-arm.
+            :if ([$suspended "bindings"]) do={:return true}
+            :local marker [/system/script/find where name="tikray-emergency-state" and comment="tikray:emergency-state" and source=""]
+            :if (([:len $marker]!=1) or ([:len [/file/find where name=($data . "/state/image-update.request")]]=0)) do={:return true}
+            :set emergency [:tostr [:pick $marker 0]]
+        }
         :local ready [/file/find where name=($data . "/state/install.ready")]
         :if ([:len $ready] != 1) do={ :return true }
         :local readyStamp [/file/get $ready contents]
@@ -64,11 +73,11 @@
         }
         # @TIKRAY_WATCHDOG_IMAGE@
         :local updating "all"
-        :do { :set updating [$wdImage $data ($savedState->"installation_id") $gateway $controlOK $suspended] } on-error={
+        :do { :set updating [$wdImage $data ($savedState->"installation_id") $gateway $controlOK $suspended $emergency] } on-error={
             # Even when a target archive is missing or its row was retagged,
             # a verified independent sibling can still need a basic restart.
             :do {
-                :local reqs [/file/find where name=($data . "/state/image-update.json")]
+                :local reqs [/file/find where name=($data . "/state/image-update.request")]
                 :if (([:len $reqs]=1) and ([/file/get $reqs size]<=4096)) do={
                     :local req [:deserialize from=json options=json.no-string-conversion value=[/file/get $reqs contents]]
                     :if (($req->"installation_id")=($savedState->"installation_id")) do={
@@ -79,6 +88,7 @@
             } on-error={}
             :log warning "tikray: image operation needs verification"
         }
+        :if ($emergency!="") do={:return true}
         :foreach component in={"tikray-runner";"tikray"} do={
             :if (($component!=$updating) and ($updating!="all")) do={
             :local ownedTag "tikray:tikray"

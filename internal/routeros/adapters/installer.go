@@ -120,6 +120,68 @@ func emergencySource(script string) (body, install string, err error) {
 	return body, left + "policy=read,write,test source=$offBody\n    }\n}" + right, nil
 }
 
+// WatchdogScripts returns the same literal programs placed by the installer.
+func WatchdogScripts() (body, traffic string, err error) {
+	body, _, traffic, err = watchdogSource(routerosfiles.Sources.ReadFile)
+	return
+}
+
+// RouterOS normalizes script source on assignment. Reserve headroom below its
+// native limit. One space per indent preserves legibility and exact bytes:
+// RouterOS expands tabs in script properties to four spaces.
+func compactScript(source string) string {
+	var lines []string
+	for _, line := range strings.Split(source, "\n") {
+		if t := strings.TrimSpace(line); t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		n := (len(line) - len(strings.TrimLeft(line, " "))) / 4
+		lines = append(lines, strings.Repeat(" ", n)+line[n*4:])
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func watchdogSource(readSource func(string) ([]byte, error)) (string, string, string, error) {
+	watch, e := readSource("watchdog.rsc")
+	if e != nil {
+		return "", "", "", errors.New("installer: missing watchdog")
+	}
+	watchBody := string(watch)
+	var stateSource, trafficSource string
+	for _, part := range []struct{ slot, file string }{{"STEP", "watchdog-step.rsc"}, {"STATE", "watchdog-state.rsc"}, {"BINDINGS", "bindings.rsc"}, {"HEALTH", "watchdog-health.rsc"}, {"IMAGE", "watchdog-image.rsc"}, {"TRAFFIC", "watchdog-traffic.rsc"}} {
+		b, err := readSource(part.file)
+		if err != nil {
+			return "", "", "", errors.New("installer: missing watchdog logic")
+		}
+		key := "# @TIKRAY_WATCHDOG_" + part.slot + "@"
+		if strings.Count(watchBody, key) != 1 {
+			return "", "", "", errors.New("installer: invalid watchdog template")
+		}
+		code := string(b)
+		if part.slot == "TRAFFIC" {
+			trafficSource = compactScript(code + "\n:return [$imageTraffic $1 $2 $3 $4 $5 $6 $7]\n")
+			call, err := readSource("watchdog-traffic-call.rsc")
+			if err != nil || strings.Count(string(call), "@TIKRAY_TRAFFIC_HASH@") != 1 {
+				return "", "", "", errors.New("installer: missing trusted traffic binding")
+			}
+			canonical := strings.ReplaceAll(strings.TrimRight(trafficSource, "\r\n"), "\n", "\r\n")
+			hash := sha512.Sum512([]byte(canonical))
+			code = strings.Replace(string(call), "@TIKRAY_TRAFFIC_HASH@", fmt.Sprintf("%x", hash), 1)
+		}
+		watchBody = strings.Replace(watchBody, key, code, 1)
+		if part.slot == "STATE" {
+			stateSource = string(b)
+		}
+	}
+	watchBody = compactScript(watchBody)
+	for _, program := range []string{watchBody, trafficSource} {
+		if len(strings.ReplaceAll(program, "\n", "\r\n")) > 57000 {
+			return "", "", "", errors.New("installer: watchdog source exceeds native limit")
+		}
+	}
+	return watchBody, stateSource, trafficSource, nil
+}
+
 // BuildInstaller emits a single offline-importable RouterOS program.
 func BuildInstaller(p Profile, images []VerifiedArchive, dst io.Writer) error {
 	return buildInstaller(p, images, dst, routerosfiles.Sources.ReadFile)
@@ -177,35 +239,19 @@ func buildInstaller(p Profile, images []VerifiedArchive, dst io.Writer, readSour
 			return err
 		}
 	}
-	watch, e := readSource("watchdog.rsc")
+	watchBody, stateSource, trafficBody, e := watchdogSource(readSource)
 	if e != nil {
-		return errors.New("installer: missing watchdog")
-	}
-	watchBody := string(watch)
-	var stateSource string
-	for _, part := range []struct{ slot, file string }{{"STEP", "watchdog-step.rsc"}, {"STATE", "watchdog-state.rsc"}, {"BINDINGS", "bindings.rsc"}, {"HEALTH", "watchdog-health.rsc"}, {"IMAGE", "watchdog-image.rsc"}} {
-		b, err := readSource(part.file)
-		if err != nil {
-			return errors.New("installer: missing watchdog logic")
-		}
-		key := "# @TIKRAY_WATCHDOG_" + part.slot + "@"
-		if strings.Count(watchBody, key) != 1 {
-			return errors.New("installer: invalid watchdog template")
-		}
-		watchBody = strings.Replace(watchBody, key, string(b), 1)
-		if part.slot == "STATE" {
-			stateSource = string(b)
-		}
+		return e
 	}
 	pre, e := readSource("watchdog-preflight.rsc")
 	if e != nil {
 		return errors.New("installer: missing watchdog preflight")
 	}
-	if e = replace("# @TIKRAY_WATCHDOG_PREFLIGHT@", ":local watchBody "+scriptLiteral(watchBody)+"\n"+stateSource+"\n    :local watchStateCheck [$wdState \"inspect\"]\n"+string(pre)); e != nil {
+	if e = replace("# @TIKRAY_WATCHDOG_PREFLIGHT@", ":local watchBody "+scriptLiteral(watchBody)+"\n    :local trafficBody "+scriptLiteral(trafficBody)+"\n"+stateSource+"\n    :local watchStateCheck [$wdState \"inspect\"]\n"+string(pre)); e != nil {
 		return e
 	}
 	if e = replace("# @TIKRAY_WATCHDOG@", `:local watchStateInit [$wdState "init" [$readWatchID $data]]
-    :if ([$provisionWatch true $watchBody] != true) do={ :error "tikray: watchdog provisioning failed" }`); e != nil {
+    :if ([$provisionWatch true $watchBody $trafficBody] != true) do={ :error "tikray: watchdog provisioning failed" }`); e != nil {
 		return e
 	}
 	platform := fmt.Sprintf(`:if (($arch != "%s") or ([:pick [/system/resource/get version] 0 [:find ([/system/resource/get version] . " ") " "]] != "%s")) do={ :error "tikray: obtain installer matching installed architecture and version" }; :set imageBytes %d`, p.GOARCH(), p.Version(), total)

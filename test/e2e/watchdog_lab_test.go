@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -33,7 +34,7 @@ import (
 const (
 	healthyImageVersion = "6.0.1"
 	offlineImageVersion = "6.0.2"
-	imageRequestFile    = dataRoot + "/state/image-update.json"
+	imageRequestFile    = dataRoot + "/state/image-update.request"
 )
 
 func TestM3Watchdog(t *testing.T) {
@@ -403,10 +404,14 @@ func (f *routingLab) imageWAN(ctx context.Context, t *testing.T) *routingWAN {
 	}
 	wan := newRoutingWAN(ctx, t, f)
 	// Fresh source ports force independent bindings across the loss and return.
-	emit := `import socket,sys,time
-while True:
+	emit := `import errno,socket,sys,time
+for port in range(33000,65001):
  with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as s:
-  s.bind((sys.argv[1],0));s.sendto(sys.argv[2].encode(),(sys.argv[3],31947))
+  try:s.bind((sys.argv[1],port))
+  except OSError as e:
+   if e.errno==errno.EADDRINUSE:continue
+   raise
+  s.sendto(sys.argv[2].encode(),(sys.argv[3],31947))
  time.sleep(.15)`
 	startRoutingProcess(t, f.Net.Client(ctx, "python3", "-c", emit, "192.168.88.10", "C", routingRemote))
 	startRoutingProcess(t, f.peer(ctx, "python3", "-c", emit, routingPeer, "D", routingRemote))
@@ -550,7 +555,8 @@ func (f *routingLab) checkedRestart(ctx context.Context, t *testing.T, component
 		_, restored := poll(ctx, f.proxiedWithin(), time.Second, func() bool { return isRoutingProxy(f.peerEgress(ctx, routingRemote)) })
 		s := wan.sample(t)
 		if !restored || s.closedDirect != 0 || s.unknown != 0 || s.peerDirect <= openBase {
-			t.Fatalf("runner recovery proof failed: open_proxy=%t closed_wan=%d unknown=%d open_wan=%d", restored, s.closedDirect, s.unknown, s.peerDirect-openBase)
+			trace, _ := os.ReadFile(wan.trace)
+			t.Fatalf("runner recovery proof failed: open_proxy=%t closed_wan=%d unknown=%d open_wan=%d source_proxy=%d source_peer=%d source_veth=%d source_other=%d", restored, s.closedDirect, s.unknown, s.peerDirect-openBase, bytes.Count(trace, []byte("?x")), bytes.Count(trace, []byte("?l")), bytes.Count(trace, []byte("?v")), bytes.Count(trace, []byte("?u")))
 		}
 	}
 }
@@ -679,6 +685,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 			t.Fatal("unverified running runner failed its open WAN or closed leak check")
 		}
 		f.imageDNSFallback(ctx, t)
+		f.imageAlternateGateway(ctx, t)
 		ownerSSH()
 		f.ownerPortForward(ctx, t)
 		if pending, e := f.exists(ctx, imageRequestFile); e != nil || !pending {

@@ -69,7 +69,7 @@
     :foreach p in=[/interface/bridge/port/find where comment="tikray:port-ctl" or comment="tikray:port-runner"] do={
         :if ([/interface/bridge/port/get $p bridge]!="tikray") do={ :error "tikray: shared_reference_refuses; tagged port belongs to another bridge" }
     }
-    :foreach component in={"watchdog-script";"emergency-off";"emergency-state"} do={
+    :foreach component in={"watchdog-script";"watchdog-traffic";"emergency-off";"emergency-state"} do={
         :local n ("tikray-" . $component); :if ($component="watchdog-script") do={ :set n "tikray-watchdog" }
         :local v [$unique "/system/script" "name" $n ("tikray:" . $component) $objects]
     }
@@ -213,7 +213,19 @@
             :if (($dataPath!="") and [$sharePath [/container/get $j root-dir] $dataPath $volume $slot $normalize]) do={ :error "tikray: shared_reference_refuses; owner container references installation root" }
         } else={
             :local expected "control"; :if ([/container/get $j comment]="tikray:runner") do={ :set expected "runner" }
-            :if (($dataPath="") or ([$normalize [/container/get $j root-dir]] != ([:pick $dataPath 0 ([:len $dataPath]-5)] . "/containers/" . $expected))) do={ :error "tikray: shared_reference_refuses; container root is not private" }
+            :if ($dataPath="") do={:error "tikray: shared_reference_refuses; container root is not private"}
+            :local root ([:pick $dataPath 0 ([:len $dataPath]-5)] . "/containers/" . $expected)
+            :local liveRoot [$normalize [/container/get $j root-dir]]
+            :if ($liveRoot!=$root) do={
+                :local comp "tikray"; :if ($expected="runner") do={:set comp "runner"}
+                :local proofs [/file/find where name=($dataPath . "/state/image-" . $comp . ".receipt")]
+                :local ids [/file/find where name=($dataPath . "/state/install.id")]
+                :if (([:len $proofs]!=1) or ([:len $ids]!=1) or ([/file/get $proofs size]>4096)) do={:error "tikray: shared_reference_refuses; container root is not private"}
+                :local proof [:deserialize from=json options=json.no-string-conversion value=[/file/get $proofs contents]]
+                :local imageID ($proof->"active"->"image_id"); :local liveID [:tostr [/container/get $j image-id]]
+                :if ([:pick $liveID 0 7]="sha256:") do={:set liveID [:pick $liveID 7 [:len $liveID]]}
+                :if ((($proof->"version")!=1) or (($proof->"installation_id")!=[/file/get $ids contents]) or (($proof->"active"->"component")!=$comp) or ([:len $imageID]!=64) or (!($imageID~"^[0-9a-f]+\$")) or (($liveID!=$imageID) and ($liveID!=($imageID . " "))) or ($liveRoot!=($root . "-image-" . $imageID))) do={:error "tikray: shared_reference_refuses; container root is not private"}
+            }
         }
     }
     :return true
