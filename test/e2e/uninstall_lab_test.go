@@ -299,8 +299,17 @@ while True:
 	return func() {
 		t.Helper()
 		n := count()
-		if _, ok := poll(ctx, 10*time.Second, 200*time.Millisecond, func() bool { return count() > n }); !ok || identity() != id {
-			t.Fatal("unrelated stream or native conntrack binding did not survive uninstall")
+		if _, ok := poll(ctx, 10*time.Second, 200*time.Millisecond, func() bool { return count() > n }); !ok {
+			t.Fatal("unrelated stream stopped returning new replies")
+		}
+		// A private SSH observation can complete with empty output. Retry
+		// an absent readback, but reject a different live ID immediately.
+		var current string
+		if _, ok := poll(ctx, 10*time.Second, 250*time.Millisecond, func() bool { current = identity(); return current != "" }); !ok {
+			t.Fatal("could not read the surviving unrelated stream binding")
+		}
+		if current != id {
+			t.Fatal("the unrelated stream acquired a different native conntrack binding")
 		}
 	}
 }

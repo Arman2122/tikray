@@ -83,3 +83,78 @@ func TestImageInstallerValidatesExistingLineage(t *testing.T) {
 		})
 	}
 }
+
+// A keep must retire only this installation's public handoff files. Rows
+// anywhere else on the disk may have similar names and must survive.
+func TestImageUninstallRetiresOwnedReceipts(t *testing.T) {
+	r := newRig(t)
+	const base = "disk1/tikray-lineage"
+	const data = base + "/data"
+	const state = data + "/state"
+	id := strings.Repeat("a", 32)
+	run := func(cmd string) string {
+		t.Helper()
+		s, err := r.chr.RunPrivate(r.ctx, cmd)
+		if err != nil {
+			t.Fatal("cannot run private removal fixture")
+		}
+		return strings.TrimSpace(s)
+	}
+	for _, dir := range []string{base, data, state} {
+		run("/file/add type=directory name=" + dir)
+	}
+	write := func(name, body string) {
+		t.Helper()
+		run("/file/add type=file name=" + strconv.Quote(name) + " contents=" + strconv.Quote(body))
+	}
+	write(state+"/install.id", id)
+	const outside = "disk1/m3-unowned-image.receipt"
+	write(outside, "owner-file")
+	ref := func(component, digit string) artifacts.ImageRef {
+		return artifacts.ImageRef{Component: component, Digest: strings.Repeat(digit, 64), ImageID: strings.Repeat(digit, 64), Chain: strings.Repeat(digit, 128), Size: 2048}
+	}
+	boot := artifacts.ImageBootstrap{Version: 1, Arch: "amd64", Tikray: ref("tikray", "b"), Runner: ref("runner", "c")}
+	b, _ := json.Marshal(boot)
+	write(state+"/image-bootstrap.receipt", string(b))
+	record := func(active artifacts.ImageRef, identity string) string {
+		b, _ := json.Marshal(map[string]any{"version": 1, "installation_id": identity, "active": active, "previous": nil})
+		return string(b)
+	}
+	write(state+"/image-tikray.receipt", record(boot.Tikray, id))
+	const runner = state + "/image-runner.receipt"
+	write(runner, record(boot.Runner, strings.Repeat("d", 32)))
+	fragment, err := routerfiles.Sources.ReadFile("uninstall-data.rsc")
+	if err != nil {
+		t.Fatal("missing owner data cleanup")
+	}
+	script := `/system/script/add name=m3-check-image-keep source={
+	:global m3ImageKeepMode
+	` + string(fragment) + `
+	:local guard do={:return true}
+	:onerror e in={:local ok [$cleanData $m3ImageKeepMode "keep" "` + data + `" "` + id + `" "files" "172.31.255.0/29" $guard ""]; :if ($ok) do={:put "accepted"}} do={:put "refused"}
+}
+`
+	file := filepath.Join(t.TempDir(), "image-keep.rsc")
+	if os.WriteFile(file, []byte(script), 0600) != nil || r.chr.Push(r.ctx, file, "m3-keep.rsc") != nil {
+		t.Fatal("cannot stage removal test")
+	}
+	run("/import file-name=m3-keep.rsc")
+	try := func(mode string) string {
+		return run(`:global m3ImageKeepMode "` + mode + `"; /system/script/run m3-check-image-keep`)
+	}
+	if try("apply") != "refused" || run(":put [:len [/file/find where name="+state+"/image-bootstrap.receipt]]") != "1" {
+		t.Fatal("foreign component receipt allowed teardown")
+	}
+	run("/file/set [find where name=" + strconv.Quote(runner) + "] contents=" + strconv.Quote(record(boot.Runner, id)))
+	if try("inspect") != "accepted" || try("apply") != "accepted" || try("apply") != "accepted" {
+		t.Fatal("keep refused valid image receipts or could not resume")
+	}
+	for _, side := range []string{"bootstrap", "runner", "tikray"} {
+		if run(":put [:len [/file/find where name="+state+"/image-"+side+".receipt]]") != "0" {
+			t.Fatal("verified image receipt was not retired")
+		}
+	}
+	if run(":put [/file/get [find where name="+outside+"] contents]") != "owner-file" {
+		t.Fatal("changed an unrelated receipt")
+	}
+}

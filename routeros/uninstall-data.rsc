@@ -21,9 +21,9 @@
         :local boots [/file/find where name=$bootName]
         :local receipts [:toarray ""]
         :foreach side in={"tikray";"runner"} do={
-            :local name ($prefix . "state/image-" . $side . ".receipt"); :local files [/file/find where name=$name]
+            :local receiptPath ($prefix . "state/image-" . $side . ".receipt"); :local files [/file/find where name=$receiptPath]
             :if ([:len $files]>0) do={
-                :if (([:len $files]!=1) or ([/file/get $files type]="directory") or ([/file/get $files size]>4096)) do={:error "tikray: shared_reference_refuses; image receipt conflict"}
+                :if (([:len $files]!=1) or ([/file/get $files name]!=$receiptPath) or ([/file/get $files type]="directory") or ([/file/get $files size]>4096)) do={:error "tikray: shared_reference_refuses; image receipt conflict"}
                 :local receipt [:deserialize from=json options=json.no-string-conversion value=[/file/get $files contents]]
                 :if ((($receipt->"version")!=1) or (($receipt->"installation_id")!=$identity) or (($receipt->"active"->"component")!=$side)) do={:error "tikray: shared_reference_refuses; image receipt conflict"}
                 :set ($receipts->$side) [:pick $files 0]
