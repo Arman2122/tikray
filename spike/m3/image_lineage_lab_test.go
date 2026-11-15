@@ -3,6 +3,10 @@
 package m3
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -13,6 +17,15 @@ import (
 	"github.com/Arman2122/tikray/internal/artifacts"
 	routerfiles "github.com/Arman2122/tikray/routeros"
 )
+
+func nativeImageReference(t *testing.T, fragment []byte) string {
+	t.Helper()
+	b, err := routerfiles.Sources.ReadFile("image-reference.rsc")
+	if err != nil {
+		t.Fatal("native image reference check unavailable")
+	}
+	return strings.Replace(string(fragment), "        # @TIKRAY_IMAGE_REFERENCE@\n", string(b), 1)
+}
 
 // Stop the read-only installer preflight at the next ownership check. There
 // are no containers in this fixture, so only a sound lineage may reach it.
@@ -29,7 +42,7 @@ func TestImageInstallerValidatesExistingLineage(t *testing.T) {
 	if err != nil {
 		t.Fatal("installer preflight missing")
 	}
-	pre := strings.Replace(string(fragment), "# @TIKRAY_IMAGE_CONSTANTS@", ":local bootstrap "+strconv.Quote(string(bootstrap))+"\n :local signatureFor do={:return \"fixture\"}", 1)
+	pre := strings.Replace(nativeImageReference(t, fragment), "# @TIKRAY_IMAGE_CONSTANTS@", ":local bootstrap "+strconv.Quote(string(bootstrap))+"\n :local signatureFor do={:return \"fixture\"}", 1)
 	const state = data + "/state/"
 	run := func(t *testing.T, cmd string) string {
 		t.Helper()
@@ -113,7 +126,12 @@ func TestImageUninstallRetiresOwnedReceipts(t *testing.T) {
 	ref := func(component, digit string) artifacts.ImageRef {
 		return artifacts.ImageRef{Component: component, Digest: strings.Repeat(digit, 64), ImageID: strings.Repeat(digit, 64), Chain: strings.Repeat(digit, 128), Size: 2048}
 	}
-	boot := artifacts.ImageBootstrap{Version: 1, Arch: "amd64", Tikray: ref("tikray", "b"), Runner: ref("runner", "c")}
+	curve := elliptic.P256()
+	der, err := x509.MarshalPKIXPublicKey(&ecdsa.PublicKey{Curve: curve, X: curve.Params().Gx, Y: curve.Params().Gy})
+	if err != nil {
+		t.Fatal("fixture public key unavailable")
+	}
+	boot := artifacts.ImageBootstrap{Version: 1, Arch: "amd64", Publisher: base64.StdEncoding.EncodeToString(der), Tikray: ref("tikray", "b"), Runner: ref("runner", "c")}
 	b, _ := json.Marshal(boot)
 	write(state+"/image-bootstrap.receipt", string(b))
 	record := func(active artifacts.ImageRef, identity string) string {
@@ -129,8 +147,12 @@ func TestImageUninstallRetiresOwnedReceipts(t *testing.T) {
 	}
 	script := `/system/script/add name=m3-check-image-keep source={
 	:global m3ImageKeepMode
-	` + string(fragment) + `
-	:local guard do={:return true}
+	` + nativeImageReference(t, fragment) + `
+	:local guard do={
+	    :global m3ImageKeepChange
+	    :if ($m3ImageKeepChange="once") do={:set m3ImageKeepChange ""; /file/set [find where name="` + runner + `"] contents="owner-changed"}
+	    :return true
+	}
 	:onerror e in={:local ok [$cleanData $m3ImageKeepMode "keep" "` + data + `" "` + id + `" "files" "172.31.255.0/29" $guard ""]; :if ($ok) do={:put "accepted"}} do={:put "refused"}
 }
 `
@@ -146,6 +168,35 @@ func TestImageUninstallRetiresOwnedReceipts(t *testing.T) {
 		t.Fatal("foreign component receipt allowed teardown")
 	}
 	run("/file/set [find where name=" + strconv.Quote(runner) + "] contents=" + strconv.Quote(record(boot.Runner, id)))
+	setFile := func(path, value string) {
+		run("/file/set [find where name=" + strconv.Quote(path) + "] contents=" + strconv.Quote(value))
+	}
+	bootPath := state + "/image-bootstrap.receipt"
+	for _, tc := range []struct{ path, good, bad string }{
+		{runner, record(boot.Runner, id), `{"version":1,"installation_id":"` + id + `","active":{"component":"runner"}}`},
+		{bootPath, string(b), `{"version":1,"tikray":{"component":"tikray"},"runner":{"component":"runner"}}`},
+		{runner, record(boot.Runner, id), record(ref("runner", "e"), id)},
+	} {
+		setFile(tc.path, tc.bad)
+		if try("inspect") != "refused" || run(":put [/file/get [find where name="+strconv.Quote(tc.path)+"] contents]") != tc.bad {
+			t.Error("unverified image receipt was accepted or changed")
+		}
+		setFile(tc.path, tc.good)
+	}
+	if try("inspect") != "accepted" {
+		t.Fatal("valid signed bootstrap and component receipts were refused")
+	}
+	run(`:global m3ImageKeepChange "once"`)
+	if try("apply") != "refused" || run(":put [/file/get [find where name="+strconv.Quote(runner)+"] contents]") != "owner-changed" {
+		t.Fatal("keep removed a changed file after preflight")
+	}
+	if run(":put [:len [/file/find where name="+strconv.Quote(bootPath)+"]]") != "1" {
+		t.Fatal("keep lost the bootstrap needed for resumption")
+	}
+	// Model loss of power after retiring the other side but before
+	// retiring this restored, verified record and its bootstrap anchor.
+	setFile(runner, record(boot.Runner, id))
+	run(`:foreach id in=[/file/find where name="` + state + `/image-tikray.receipt"] do={/file/remove $id}`)
 	if try("inspect") != "accepted" || try("apply") != "accepted" || try("apply") != "accepted" {
 		t.Fatal("keep refused valid image receipts or could not resume")
 	}

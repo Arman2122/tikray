@@ -17,28 +17,54 @@
         :if (([:len $original]=0) and ([:len $retained]=0)) do={ :error "tikray: shared_reference_refuses; missing retained-data proof" }
         # The two current-image receipts bind the initial publisher
         # handoff to this installation. Refuse unrelated or conflicting files.
-        :local bootName ($prefix . "state/image-bootstrap.receipt")
-        :local boots [/file/find where name=$bootName]
-        :local receipts [:toarray ""]
-        :foreach side in={"tikray";"runner"} do={
-            :local receiptPath ($prefix . "state/image-" . $side . ".receipt"); :local files [/file/find where name=$receiptPath]
-            :if ([:len $files]>0) do={
-                :if (([:len $files]!=1) or ([/file/get $files name]!=$receiptPath) or ([/file/get $files type]="directory") or ([/file/get $files size]>4096)) do={:error "tikray: shared_reference_refuses; image receipt conflict"}
-                :local receipt [:deserialize from=json options=json.no-string-conversion value=[/file/get $files contents]]
-                :if ((($receipt->"version")!=1) or (($receipt->"installation_id")!=$identity) or (($receipt->"active"->"component")!=$side)) do={:error "tikray: shared_reference_refuses; image receipt conflict"}
-                :set ($receipts->$side) [:pick $files 0]
-            }
+        # @TIKRAY_IMAGE_REFERENCE@
+        :local readRecord do={
+            :local recPath $1; :local found [/file/find where name=$recPath]
+            :if ([:len $found]=0) do={:return [:toarray ""]}
+            :if (([:len $found]!=1) or ([/file/get $found type]="directory") or ([/file/get $found size]>4096) or ([/file/get $found name]!=$recPath)) do={:error "tikray: shared_reference_refuses; image receipt conflict"}
+            :return {"id"=[:pick $found 0];"path"=$recPath;"text"=[/file/get $found contents]}
         }
-        :if ([:len $boots]>0) do={
-            :if (([:len $boots]!=1) or ([:len $receipts]!=2) or ([/file/get $boots type]="directory") or ([/file/get $boots size]>4096)) do={:error "tikray: shared_reference_refuses; image bootstrap conflict"}
-            :local boot [:deserialize from=json options=json.no-string-conversion value=[/file/get $boots contents]]
-            :if ((($boot->"version")!=1) or (($boot->"tikray"->"component")!="tikray") or (($boot->"runner"->"component")!="runner")) do={:error "tikray: shared_reference_refuses; image bootstrap conflict"}
+        :local parseRecord do={
+            :local p; :do {:set p [:deserialize from=json options=json.no-string-conversion value=($1->"text")]} on-error={:error "tikray: shared_reference_refuses; image receipt conflict"}
+            :return $p
+        }
+        :local bootFile [$readRecord ($prefix . "state/image-bootstrap.receipt")]; :local boot
+        :if ([:len $bootFile]>0) do={
+            :set boot [$parseRecord $bootFile]
+            :local arch [/system/resource/get architecture-name]; :if ($arch="x86_64") do={:set arch "amd64"}
+            :local pub ($boot->"publisher"); :local der ""
+            :if (([:typeof $pub]="str") and ([:len $pub]=124)) do={:do {:set der [:convert [:convert $pub from=base64 to=hex] transform=lc]} on-error={}}
+            :if (([:len $boot]!=5) or (($boot->"version")!=1) or (($boot->"arch")!=$arch) or ([:len $der]!=182) or ([:pick $der 0 54]!="3059301306072a8648ce3d020106082a8648ce3d03010703420004") or (![$validRef ($boot->"tikray") "tikray"]) or (![$validRef ($boot->"runner") "runner"])) do={:error "tikray: shared_reference_refuses; image bootstrap conflict"}
+        }
+        :local records [:toarray ""]
+        :local resuming (([:len $retained]=1) and (($phase="files") or ($phase="empty")))
+        :foreach side in={"tikray";"runner"} do={
+            :local file [$readRecord ($prefix . "state/image-" . $side . ".receipt")]
+            :if ([:len $file]>0) do={
+                :local row [$parseRecord $file]; :local active ($row->"active"); :local prior ($row->"previous")
+                :if (([:len $bootFile]=0) or ([:len $row]!=4) or (($row->"version")!=1) or (($row->"installation_id")!=$identity) or (![$validRef $active $side])) do={:error "tikray: shared_reference_refuses; image receipt conflict"}
+                :if (([:typeof $prior]="nil") or ([:typeof $prior]="nothing")) do={
+                    :local seed ($boot->$side)
+                    :foreach key in={"component";"digest";"chain";"size";"image_id"} do={:if (($active->$key)!=($seed->$key)) do={:error "tikray: shared_reference_refuses; image receipt conflict"}}
+                } else={
+                    :if ((![$validRef $prior $side]) or (($prior->"digest")=($active->"digest")) or (($prior->"image_id")=($active->"image_id"))) do={:error "tikray: shared_reference_refuses; image receipt conflict"}
+                }
+                :set ($records->$side) $file
+            } else={:if (([:len $bootFile]>0) and (!$resuming)) do={:error "tikray: shared_reference_refuses; image receipt missing"}}
         }
         :if ($op="apply") do={
             :if ([:len $retained] = 0) do={ $checkLease $lease; /file/add name=$kept type=file contents=$contents }
             :if ([:len [/file/find where name=$kept and contents=$contents]] != 1) do={ :error "tikray: could not verify retention receipt" }
-            :if ([:len $boots]=1) do={ $checkLease $lease; /file/remove [:pick $boots 0] }
-            :foreach side,id in=$receipts do={ $checkLease $lease; /file/remove $id }
+            # Keep the bootstrap anchor until all of its dependent receipts
+            # are retired. A resumed keep can still authenticate either side.
+            :local retire do={
+                :local snap $1; :local check $2; :local id ($snap->"id"); :local recPath ($snap->"path")
+                $check $3
+                :if (([:len [/file/find where name=$recPath and .id=$id]]!=1) or ([/file/get $id size]>4096) or ([/file/get $id contents]!=($snap->"text"))) do={:error "tikray: shared_reference_refuses; image receipt changed"}
+                /file/remove $id
+            }
+            :foreach side,snap in=$records do={$retire $snap $checkLease $lease}
+            :if ([:len $bootFile]>0) do={$retire $bootFile $checkLease $lease}
             # Only installation admission and RouterOS identity are retired;
             # the owner's configuration, account, core and TLS identity remain.
             :foreach rel in={"install.check";"install.json";"state/install.checked";"state/install.attempt";"state/install.ready";"state/router-policy.json";"state/routeros.json";"state/install.request";"state/install.id"} do={

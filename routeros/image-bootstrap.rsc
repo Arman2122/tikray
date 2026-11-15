@@ -25,16 +25,7 @@
             :if ([:len $dirs]=0) do={ $checkLease $lease; /file/add name=$slots type=directory }
             :if ([:len [/file/find where name=$slots and type=directory]]!=1) do={ :error "tikray: image slot directory conflict" }
         }
-        :local validRef do={
-            :local record $1
-            :if (([:typeof $record]!="array") or ([:len $record]!=5) or (($record->"component")!=$2) or ([:typeof ($record->"size")]!="num") or (($record->"size")<1) or (($record->"size")>134217728)) do={:return false}
-            :foreach field in={"image_id";"digest";"chain"} do={
-                :local n 64; :if ($field="chain") do={:set n 128}
-                :local v ($record->$field)
-                :if (([:typeof $v]!="str") or ([:len $v]!=$n) or (!($v~"^[0-9a-f]+\$"))) do={:return false}
-            }
-            :return true
-        }
+        # @TIKRAY_IMAGE_REFERENCE@
         :foreach role in={"tikray";"runner"} do={
             :local componentName "tikray"; :if ($role="runner") do={ :set componentName "tikray-runner" }
             :local ref ($bundle->$role)

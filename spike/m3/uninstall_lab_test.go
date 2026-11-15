@@ -149,7 +149,7 @@ func TestUninstallPreservesReplacementEmptyRoot(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	src := "{\n" + string(data) + `
+	src := "{\n" + nativeImageReference(t, data) + `
 :local u do={ :return true }
 :local v [$cleanData "empty" "purge" "disk1/tikray-empty/data" "11111111111111111111111111111111" "empty" "172.31.255.0/29" $u [:toarray ""]]
 :if ([:len [/file/find where name="disk1/tikray-empty/data/state"]] != 1) do={ :error "removed replacement" }; :put "PRESERVED" }`

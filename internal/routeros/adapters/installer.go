@@ -12,6 +12,16 @@ import (
 	routerosfiles "github.com/Arman2122/tikray/routeros"
 )
 
+// Both native owner scripts use exactly the same bounded archive identity.
+func fillImageReference(fragment string, read func(string) ([]byte, error)) (string, error) {
+	const marker = "        # @TIKRAY_IMAGE_REFERENCE@\n"
+	body, err := read("image-reference.rsc")
+	if err != nil || strings.Count(fragment, marker) != 1 {
+		return "", errors.New("installer: invalid image reference template")
+	}
+	return strings.Replace(fragment, marker, string(body), 1), nil
+}
+
 func archiveVerifier(images []VerifiedArchive) string {
 	var b strings.Builder
 	// Keep each literal well under the RouterOS string limit. The router
@@ -286,7 +296,11 @@ func buildInstaller(p Profile, images []VerifiedArchive, dst io.Writer, readSour
 	if strings.Count(string(baseline), "# @TIKRAY_IMAGE_CONSTANTS@") != 1 {
 		return errors.New("installer: invalid image bootstrap")
 	}
-	if e = replace("# @TIKRAY_IMAGE_BOOTSTRAP@", strings.Replace(string(baseline), "# @TIKRAY_IMAGE_CONSTANTS@", constants, 1)); e != nil {
+	imageBaseline, err := fillImageReference(string(baseline), readSource)
+	if err != nil {
+		return err
+	}
+	if e = replace("# @TIKRAY_IMAGE_BOOTSTRAP@", strings.Replace(imageBaseline, "# @TIKRAY_IMAGE_CONSTANTS@", constants, 1)); e != nil {
 		return e
 	}
 	if e = replace("# @TIKRAY_VERIFIER@", archiveVerifier(images)); e != nil {
