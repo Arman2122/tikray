@@ -86,3 +86,20 @@ func TestMalformedCLIResultOmitsContents(t *testing.T) {
 		t.Fatal("lost valid CLI outcome")
 	}
 }
+
+// A complete watchdog run must exercise both independent restarts, both
+// image transactions, and loss of power during an active replacement.
+func TestWatchdogEvidenceCoversRebootAndBothComponents(t *testing.T) {
+	dir := t.TempDir()
+	ids := []string{"control_restart", "runner_restart", "control_update_and_revert", "runner_update_and_revert", "reboot_mid_update"}
+	var reports []m3Observation
+	for _, id := range ids {
+		reports = append(reports, m3Observation{id: id, passed: true, elapsed: time.Second})
+	}
+	if err := writeM3Evidence(dir, "7.25", lab.ArchX86, "m3-watchdog", reports, false); err != nil {
+		t.Fatal("complete watchdog checks could not be recorded")
+	}
+	if err := writeM3Evidence(dir, "7.25", lab.ArchX86, "m3-watchdog", reports[:4], false); err == nil {
+		t.Fatal("missing reboot proof published as complete")
+	}
+}

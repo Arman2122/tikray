@@ -42,6 +42,13 @@ var m3Cases = map[string][]evidenceCase{
 		{"emergency_off", "Two owner commands restored ordinary routing with both containers stopped. Service recovery restored steering and protection."},
 		{"geo_diff_and_rollback", "Verified geo trials changed only the affected domestic ranges and LAN paths. Rejected data, owner dependencies and rollback preserved the verified policy."},
 	},
+	"m3-watchdog": {
+		{"control_restart", "The scheduler restarted control after three misses, while the same runner continued serving the LAN."},
+		{"runner_restart", "The scheduler restarted the runner after three misses. Control survived and the saved selection returned."},
+		{"control_update_and_revert", "Signed control replacement, explicit rollback and automatic restoration preserved the runner and owner access."},
+		{"runner_update_and_revert", "Signed runner replacement and rollback restored the committed data path while control and the unrelated LAN path survived."},
+		{"reboot_mid_update", "A real CHR reboot during an unresolved image trial resumed the watchdog and restored the previous verified image."},
+	},
 	"m3-uninstall": {
 		{"keep_data", "Default keep restored routing and API access. Reinstall preserved the claimed admin, settings, UI identity and core."},
 		{"purge_owned_data", "Explicit purge removed the verified data root and owned bindings, and preserved the external owner data."},
