@@ -29,7 +29,7 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M2b: the service (`tikray serve`, HTTPS API, health, subscriptions) | Done, merged (PR #5) | |
 | M2c: human sign-in and hot server changes | Done, merged (PR #6) | |
 | M3a: RouterOS integration | Merged in PR #7. All three targets passed installer 6/6, routing 9/9 and uninstall 4/4. | [Ledger and image hashes](m3/ledger.md), [CHR results](../../test/e2e/results/) |
-| M3b: geo, image updates and CHR CI | Task 5 implements verified geo updates, guarded native diffs, rollback and restart recovery. Task 6b implements signed control and runner image updates, explicit rollback and reboot recovery. The previously tested image kit has a confirmed closed-traffic leak on rapid runner restart. The runner and router-side fix require a new signed matrix. Outage coverage and CHR CI follow. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
+| M3b: geo, image updates and CHR CI | Task 5 implements verified geo updates, guarded native diffs, rollback and restart recovery. Task 6b implements signed control and runner image updates, explicit rollback and reboot recovery. The signed runner and router-side restart protection is in `8b91d54`. The owner paused the final three-target watchdog matrix on 2026-11-15. The older stable result is superseded. Outage coverage and CHR CI follow. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
 | M4: web UI | Not started | |
 | M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
 
@@ -131,7 +131,7 @@ The runner has a 30-second HTTP read timeout. Store validation rejects device
 overlap with the private bridge, loopback or multicast and checks the bridge
 subnet against reserved ranges.
 
-- **M3b:** Finish the `TestM3Watchdog` signed-image matrix on `m3b-routeros`, then complete the outage suite and CHR CI. The outage work must cover the cached NAT decision of an established open UDP flow on an unsolicited runner failure.
+- **M3b:** On resumption, rerun the full `TestM3Watchdog` suite on all three targets using the signed `8b91d54` bundles, then commit the three completed results. The [safe-stop checkpoint](m3/ledger.md#owner-requested-safe-stop) records what was verified. The outage suite and CHR CI follow. The outage work must cover the cached NAT decision of an established open UDP flow on an unsolicited runner failure.
 - **M4:**
   - Events need a boot id, because `Seq` restarts at 1 after a restart.
   - The UI signs in with M2c's cookie and CSRF scheme.

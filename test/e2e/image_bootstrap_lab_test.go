@@ -69,7 +69,22 @@ func TestM3ImageBootstrapMigration(t *testing.T) {
 		if !regexp.MustCompile(`^\*[0-9A-Fa-f]+$`).MatchString(id) {
 			t.Fatal("missing unique migrated pre-start guard", role)
 		}
-		rows = append(rows, "/ip/firewall/filter|"+id+"|"+tag)
+		actual := "/ip/firewall/filter|" + id + "|" + tag
+		// This test deliberately uses the same signed binaries on both sides
+		// of the native migration. The control process can already repair
+		// the return path under the old installer. Preserve that row's ID.
+		found := false
+		for _, prior := range strings.Split(original[0], "\n") {
+			if strings.HasPrefix(prior, "/ip/firewall/filter|") && strings.HasSuffix(prior, "|"+tag) {
+				if found || prior != actual {
+					t.Fatal("migration changed an existing return guard", role)
+				}
+				found = true
+			}
+		}
+		if !found {
+			rows = append(rows, actual)
+		}
 	}
 	slices.Sort(rows)
 	original[0] = strings.Join(rows, "\n")
