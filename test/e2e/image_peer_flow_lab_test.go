@@ -7,6 +7,7 @@ import (
 	"context"
 	_ "embed"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -224,5 +225,51 @@ func (s *imagePeerFlow) requireProxy(ctx context.Context, t *testing.T) {
 	})
 	if !ok {
 		t.Fatal("retained open data or DNS socket did not receive fresh proxied answers")
+	}
+}
+
+// UDP can report a delayed ICMP error on the next send during a native
+// routing transition. The observer must keep its original socket alive.
+func TestKeptDNSProbeSurvivesSendFailure(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is required for the CHR probe fixture")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "probe.py")
+	output := filepath.Join(dir, "verdict")
+	if os.WriteFile(source, []byte(keptImageDNS), 0600) != nil {
+		t.Fatal("cannot stage probe")
+	}
+	const driver = `import errno, runpy, socket, struct, sys, time
+path, output = sys.argv[1:]
+class Socket:
+ def __init__(self): self.sent=0; self.query=None
+ def bind(self, addr): pass
+ def settimeout(self, t): pass
+ def sendto(self, query, dest):
+  self.sent += 1
+  if self.sent == 1: raise OSError(errno.ECONNREFUSED, "fixture error")
+  self.query = query
+ def recvfrom(self, bound):
+  ident=struct.unpack_from("!H",self.query)[0]
+  header=struct.pack("!6H",ident,0x8180,1,1,0,0)
+  answer=b"\xc0\x0c"+struct.pack("!HHIH",1,1,0,4)+bytes([198,18,54,1])
+  return header+self.query[12:]+answer,("203.0.113.53",53)
+client=Socket()
+socket.socket=lambda *a,**kw: client
+def delay(_):
+ if client.sent >= 2: raise SystemExit(0)
+time.sleep=delay
+sys.argv=[path,"192.168.88.110",output]
+runpy.run_path(path,run_name="__main__")
+`
+	cmd := exec.CommandContext(t.Context(), python, "-c", driver, source, output)
+	if cmd.Run() != nil {
+		t.Fatal("kept DNS probe exited on a transient send error")
+	}
+	b, e := os.ReadFile(output)
+	if e != nil || string(b) != "D" {
+		t.Fatal("same DNS socket did not verify a reply after retry")
 	}
 }

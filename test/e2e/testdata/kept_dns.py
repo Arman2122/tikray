@@ -44,8 +44,10 @@ with open(filepath, "wb", buffering=0) as output:
         labels = (str(counter) + ".kept-open.foreign.routing-probe.test").split(".")
         name = b"".join(bytes([len(x)]) + x.encode() for x in labels) + b"\0"
         query = struct.pack("!6H", ident, 0x0100, 1, 0, 0, 0) + name + struct.pack("!2H", 1, 1)
-        sock.sendto(query, endpoint)
+        # A routing change may surface an ICMP error on the next send.
+        # Keep the original socket so the next request proves its recovery.
         try:
+            sock.sendto(query, endpoint)
             data, sender = sock.recvfrom(4096)
             addr = answer(data, ident) if sender == endpoint else None
             if addr == "198.18.53.2":
