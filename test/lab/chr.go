@@ -61,6 +61,14 @@ func (c *CHR) logf(format string, args ...any) {
 	}
 }
 
+// Record only call-site constants outside the private VM lifecycle log.
+func (c *CHR) phase(name string) {
+	c.logf("%s", name)
+	if c.opts.Notef != nil {
+		c.opts.Notef("%s", name)
+	}
+}
+
 // BootCHR copies the CHR image into WorkDir, boots it with an empty data disk,
 // sets the admin password and lab addresses over the serial console, and
 // returns once SSH answers.
@@ -132,7 +140,7 @@ func (c *CHR) bootTimeout() time.Duration {
 func (c *CHR) qemuArgs() []string {
 	w := c.opts.WorkDir
 	common := []string{
-		"-m", strconv.Itoa(c.opts.MemoryMB), "-smp", "2", "-nographic",
+		"-accel", "tcg", "-m", strconv.Itoa(c.opts.MemoryMB), "-smp", "2", "-nographic",
 		"-drive", "file=" + filepath.Join(w, "system.qcow2") + ",if=virtio",
 		"-drive", "file=" + filepath.Join(w, "data.qcow2") + ",if=virtio",
 		"-netdev", "tap,id=wan,ifname=" + TapWAN + ",script=no,downscript=no",
@@ -184,6 +192,7 @@ func (c *CHR) start(ctx context.Context) error {
 		return err
 	}
 	c.con = con
+	c.phase("serial connected")
 	return nil
 }
 
@@ -193,7 +202,7 @@ func (c *CHR) provision(ctx context.Context) error {
 	if err := c.con.login(ctx, c.opts.Password); err != nil {
 		return err
 	}
-	c.logf("console login done")
+	c.phase("console login done")
 	for _, line := range []string{
 		// arm64 CHR shows the login prompt before its NICs are registered.
 		":local i 0; :while ([:len [/interface/ethernet/find]] < 2 && $i < 120) do={:delay 1s; :set i ($i + 1)}",
@@ -295,7 +304,7 @@ func (c *CHR) EnableContainers(ctx context.Context) error {
 		if n, err := c.Get(ctx, "[:len [/system/package/find name=container]]"); err != nil || n != "1" {
 			return fmt.Errorf("container package not installed after reboot (%q, %v)", n, err)
 		}
-		c.logf("container package installed")
+		c.phase("container package installed")
 	}
 
 	if mode, err := c.Get(ctx, "/system/device-mode/get container"); err != nil {
@@ -311,7 +320,7 @@ func (c *CHR) EnableContainers(ctx context.Context) error {
 		if mode, err := c.Get(ctx, "/system/device-mode/get container"); err != nil || (mode != "true" && mode != "yes") {
 			return fmt.Errorf("device-mode container is %q after power cycle (%v)", mode, err)
 		}
-		c.logf("device-mode container enabled")
+		c.phase("device-mode container enabled")
 	}
 
 	// The data disk is the only hardware disk CHR lists (the system disk
@@ -335,7 +344,7 @@ func (c *CHR) EnableContainers(ctx context.Context) error {
 		if fs, err := c.Get(ctx, "/disk/get [find slot=disk1] fs"); err != nil || fs != "ext4" {
 			return fmt.Errorf("disk1 file system %q after format (%v)", fs, err)
 		}
-		c.logf("disk1 formatted ext4")
+		c.phase("disk1 formatted ext4")
 	}
 	// Directories made before the disk is mounted would land on internal
 	// flash and shadow the mount point.

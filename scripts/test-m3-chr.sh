@@ -4,7 +4,8 @@ set -euo pipefail
 umask 077
 
 inside() {
-    local binary=$1 pattern=$2 rc=0 pid exe birth link
+    local binary=$1 pattern=$2 mode=$3 rc=0 pid exe birth link
+    local deadline=420m grace=421m
     # Never let SetupNetwork's stale-lab cleanup see another lab's resources.
     [[ $$ == 1 && $(readlink /proc/self/ns/net) != "$lab_parent_net" &&
         $(readlink /proc/self/ns/mnt) != "$lab_parent_mnt" &&
@@ -15,11 +16,15 @@ inside() {
     mount -t tmpfs -o size=4g,mode=1777 tmpfs /tmp
     mount -t sysfs sysfs /sys
     mount --bind "$TIKRAY_LAB_CACHE" "$TIKRAY_LAB_CACHE"
-    mount -o remount,bind,ro "$TIKRAY_LAB_CACHE"
+    if [[ $mode == cache ]]; then
+        deadline=50m grace=51m
+    else
+        mount -o remount,bind,ro "$TIKRAY_LAB_CACHE"
+    fi
     [[ -z $(ip netns list) && ! -e /sys/class/net/tklab-wan ]]
     ip link set lo up
 
-    timeout --kill-after=15s 421m "$binary" -test.v -test.count=1 -test.timeout=420m -test.run "$pattern" || rc=$?
+    timeout --kill-after=15s "$grace" "$binary" -test.v -test.count=1 -test.timeout="$deadline" -test.run "$pattern" || rc=$?
     # On a timeout Go cleanups may not run. Only a verified QEMU in our new
     # PID namespace is eligible; recheck its birth time before escalation.
     for link in /proc/[0-9]*/exe; do
@@ -44,7 +49,11 @@ inside() {
 }
 
 if [[ ${1:-} == --isolated-child ]]; then
-    inside "$2" "$3"
+    inside "$2" "$3" acceptance
+    exit
+fi
+if [[ ${1:-} == --cache-child ]]; then
+    inside "$2" "^TestBootReadyCHR$" cache
     exit
 fi
 if [[ $# -lt 2 || $# -gt 3 || $EUID != 0 ]]; then

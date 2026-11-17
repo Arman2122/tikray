@@ -195,7 +195,7 @@ func (c *CHR) waitSSH(ctx context.Context) error {
 		out, err := c.Run(actx, `:put "up"`)
 		acancel()
 		if err == nil && strings.TrimSpace(out) == "up" {
-			c.logf("ssh up")
+			c.phase("ssh up")
 			return nil
 		}
 		c.logf("ssh not up: %v", err)

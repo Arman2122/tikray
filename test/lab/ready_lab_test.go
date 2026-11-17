@@ -11,6 +11,35 @@ import (
 	"time"
 )
 
+// TestPrepareCHRInputs is the networked half of cold CI preparation.
+func TestPrepareCHRInputs(t *testing.T) {
+	resolved := os.Getenv("TIKRAY_LAB_PREPARED_XRAY")
+	if resolved == "" {
+		t.Skip("no requested CHR core provenance file")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Minute)
+	defer cancel()
+	version, err := ResolveChannel(ctx, "", os.Getenv("TIKRAY_LAB_CHANNEL"))
+	if err != nil {
+		t.Fatal("could not resolve CHR version")
+	}
+	if _, err := FetchCHR(ctx, "", CacheDir(), version, labArch()); err != nil {
+		t.Fatal("could not prepare public CHR downloads")
+	}
+	t.Log("CHR cache phase: CHR downloaded")
+	core, err := ResolveXrayVersion(ctx, LabXrayVersion())
+	if err != nil {
+		t.Fatal("could not resolve the pinned core for CHR")
+	}
+	if _, err := XrayBinaryVersion(ctx, CacheDir(), core, labArch().GOARCH()); err != nil {
+		t.Fatal("could not prepare the pinned core for CHR")
+	}
+	t.Log("CHR cache phase: core built")
+	if os.WriteFile(resolved, []byte(core+"\n"), 0644) != nil {
+		t.Fatal("could not record the tested core release")
+	}
+}
+
 func TestBootReadyCHR(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Minute)
 	defer cancel()
@@ -26,31 +55,21 @@ func TestBootReadyCHR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Log("CHR cache phase: CHR downloaded")
-	if resolved := os.Getenv("TIKRAY_LAB_PREPARED_XRAY"); resolved != "" {
-		core, err := ResolveXrayVersion(ctx, LabXrayVersion())
-		if err != nil {
-			t.Fatal("could not resolve the pinned core for CHR")
-		}
-		if _, err := XrayBinaryVersion(ctx, CacheDir(), core, labArch().GOARCH()); err != nil {
-			t.Fatal("could not prepare the pinned core for CHR")
-		}
-		t.Log("CHR cache phase: core built")
-		// Only the resolved public tag crosses into the isolated run.
-		if os.WriteFile(resolved, []byte(core+"\n"), 0644) != nil {
-			t.Fatal("could not record the tested core release")
-		}
-	}
 	n, err := SetupNetwork(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { n.Teardown() })
 	t.Log("CHR cache phase: lab network ready")
-	note := func(format string, _ ...any) {
+	note := func(format string, args ...any) {
 		// Public CI may report these fixed milestones. Serial, SSH and
 		// router-provided diagnostics stay in the private preparation log.
-		switch format {
+		if format != "%s" || len(args) != 1 {
+			return
+		}
+		switch args[0] {
+		case "serial connected":
+			t.Log("CHR cache phase: serial connected")
 		case "console login done":
 			t.Log("CHR cache phase: serial login")
 		case "ssh up":

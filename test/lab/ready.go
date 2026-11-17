@@ -88,7 +88,7 @@ func buildReady(ctx context.Context, n *Network, opts BootOptions, dir string) e
 // powerOff shuts RouterOS down cleanly and waits for QEMU to exit, so the
 // disks are consistent.
 func (c *CHR) powerOff(ctx context.Context) error {
-	c.logf("power off")
+	c.phase("power off")
 	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	c.Run(sctx, "/system/shutdown")
 	cancel()
