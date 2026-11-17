@@ -391,7 +391,20 @@ func planScope(a Actual, desired []Object, holds bool) ([]Op, error) {
 			}
 			ops = append(ops, op)
 		} else {
-			if f := changes(r, o); len(f) > 0 {
+			f := changes(r, o)
+			if protocol, clear := f["protocol"]; o.Menu == firewallMangle && clear && protocol == "" {
+				// RouterOS refuses an empty protocol on /set. Verify the
+				// intermediate tagged row before changing other selectors.
+				unset := op
+				unset.Kind = "unset"
+				unset.fields = map[string]string{"value-name": "protocol"}
+				unset.placement = nil
+				unset.target.Props = maps.Clone(r.Props)
+				delete(unset.target.Props, "protocol")
+				ops = append(ops, unset)
+				delete(f, "protocol")
+			}
+			if len(f) > 0 {
 				update := op
 				update.Kind = "set"
 				update.fields = f

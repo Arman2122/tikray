@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Arman2122/tikray/internal/apiclient"
 	"github.com/Arman2122/tikray/internal/store"
 )
 
@@ -73,7 +75,7 @@ func TestM3CrossVersionUDPRollback(t *testing.T) {
 	t.Setenv("TIKRAY_LAB_IMAGES", work)
 	t.Setenv("TIKRAY_LAB_INSTALLER", installer)
 
-	f := deployOutage(ctx, t)
+	f := deployOutage(ctx, t, false)
 	original := identifyArchive(t, filepath.Join(work, control))
 	baseline := f.requireImage(ctx, t, "tikray", original)
 	runnerBaseline, present := f.containerImage(ctx, "runner")
@@ -81,19 +83,25 @@ func TestM3CrossVersionUDPRollback(t *testing.T) {
 		t.Fatal("historical baseline did not use its original RouterOS policy")
 	}
 	ssh := f.ownerLANSSH(ctx, t)
+	// Keep the same application socket across both policy generations.
+	// The separate WAN emitter continues to challenge the closed policy.
+	socket := f.keepImagePeerFlow(ctx, t)
 	newRef := f.stageImageFixture(ctx, t, "tikray", version, false)
 	f.imageOperation(ctx, t, "tikray", "update", version, original.digest, candidate.digest, false)
 	f.waitImageCompletion(ctx, t, "tikray", newRef, original.digest, baseline)
-	if _, ok := poll(ctx, 70*time.Second, time.Second, func() bool {
+	if _, ok := poll(ctx, 4*time.Minute, time.Second, func() bool {
 		return f.taggedID(ctx, t, "/tool/netwatch", "tikray:udp-watch") != ""
 	}); !ok {
 		f.checkReady(ctx, t)
-		t.Fatal("current control never armed open UDP recovery")
+		if f.taggedID(ctx, t, "/tool/netwatch", "tikray:udp-watch") == "" {
+			t.Fatal("current control never armed open UDP recovery")
+		}
 	}
-	socket := f.keepImagePeerFlow(ctx, t)
-	if f.retainedUDP(ctx, t) == "" {
+	requireOutageDatagram(ctx, t, socket, 'P')
+	if _, ok := poll(ctx, 30*time.Second, time.Second, func() bool { return f.retainedUDP(ctx, t) != "" }); !ok {
 		t.Fatal("current control never created a path-retained UDP connection")
 	}
+	t.Log("new controller armed path-tracked UDP on the original LAN")
 	newer := f.requireImage(ctx, t, "tikray", newRef)
 	f.scheduler(ctx, t, false)
 	// Keep the native worker stopped while the control process retires the
@@ -101,11 +109,27 @@ func TestM3CrossVersionUDPRollback(t *testing.T) {
 	request, cancelRequest := context.WithTimeout(ctx, 4*time.Minute)
 	response, err := f.api.ImageRollback(request, "tikray")
 	cancelRequest()
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal("control rollback exceeded its bounded request window")
+		}
+		var apiErr *apiclient.Error
+		if errors.As(err, &apiErr) {
+			switch apiErr.Code {
+			case "unavailable", "image_unavailable", "router_conflict":
+				t.Fatalf("control rollback was refused with HTTP %d (%s)", apiErr.Status, apiErr.Code)
+			default:
+				t.Fatalf("control rollback was refused with HTTP %d", apiErr.Status)
+			}
+		}
+		t.Fatal("control rollback transport was interrupted")
+	}
 	var rollback imageAcceptance
-	if err != nil || response.Decode(&rollback) != nil || rollback.From != candidate.digest ||
+	if response.Decode(&rollback) != nil || rollback.From != candidate.digest ||
 		rollback.To != original.digest || !imageNonce.MatchString(rollback.OperationID) {
 		t.Fatal("native UDP migration did not publish the requested rollback")
 	}
+	t.Log("older-control rollback accepted with its compatible native policy")
 	for range 6 {
 		state := f.imageStatus(ctx, t, "tikray")
 		if state.Pending == nil || *state.Pending != rollback || state.Active != candidate.digest ||

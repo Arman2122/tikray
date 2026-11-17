@@ -32,7 +32,7 @@ type outageLab struct {
 	wire *imageWANProof
 }
 
-func deployOutage(ctx context.Context, t *testing.T) *outageLab {
+func deployOutage(ctx context.Context, t *testing.T, emitOpen bool) *outageLab {
 	t.Helper()
 	f := deployRouting(ctx, t, t)
 	if exec.CommandContext(ctx, "ip", "netns", "add", outageOwnerNS).Run() != nil {
@@ -64,7 +64,7 @@ func deployOutage(ctx context.Context, t *testing.T) *outageLab {
 	if outageOwner(ctx, "python3", "-c", routingDHCP, outageOwnerIP).Run() != nil {
 		t.Fatal("independent direct client did not receive DHCP ACK")
 	}
-	c := &outageLab{routingLab: f, wire: f.imageWAN(ctx, t)}
+	c := &outageLab{routingLab: f, wire: f.imageWAN(ctx, t, emitOpen)}
 	c.requireDirectOwner(ctx, t)
 	return c
 }
@@ -237,12 +237,29 @@ func (f *outageLab) requireDoH(ctx context.Context, t *testing.T, witness string
 }
 func (f *outageLab) retainedUDP(ctx context.Context, t *testing.T) string {
 	t.Helper()
-	rows := f.readROS(ctx, t, "/ip/firewall/connection", ".id,connection-mark",
-		"?protocol=udp", "?src-address="+routingPeer, "?src-port=32242", "?dst-address="+routingRemote, "?dst-port=31948")
-	if len(rows) != 1 || rows[0]["connection-mark"] != "tikray-open-runner" {
-		return ""
+	// A tuple can expire during a native read, especially on LTS. Use a
+	// separate observer so the owner's continuity proof stays independent.
+	reader := f.ownerSession(ctx, t)
+	defer reader.Close()
+	bound, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	var id string
+	if _, ok := poll(bound, 8*time.Second, 200*time.Millisecond, func() bool {
+		rows, err := reader.CommandAt(bound, reader.Generation(), []string{
+			"/ip/firewall/connection/print", "=.proplist=.id,connection-mark",
+			"?protocol=udp", "?src-address=" + routingPeer, "?src-port=32242", "?dst-address=" + routingRemote, "?dst-port=31948",
+		})
+		if err != nil || len(rows) > 1 {
+			return false
+		}
+		if len(rows) == 1 && rows[0]["connection-mark"] == "tikray-open-runner" {
+			id = rows[0][".id"]
+		}
+		return true
+	}); !ok {
+		t.Fatal("could not read the exact retained UDP binding")
 	}
-	return rows[0][".id"]
+	return id
 }
 
 func (f *outageLab) udpWatchTests(ctx context.Context, t *testing.T) int {
@@ -276,7 +293,7 @@ func TestM3Outage(t *testing.T) {
 	check := l.recordM3Checks(t, "m3-outage")
 	deploy := func(t *testing.T) *outageLab {
 		t.Helper()
-		f := deployOutage(ctx, t)
+		f := deployOutage(ctx, t, true)
 		l.Version = f.Version
 		return f
 	}

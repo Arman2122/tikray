@@ -155,7 +155,7 @@ func (e *execution) beforeWrite(op Op) error {
 		if err := e.checkListConsumers(op.target.Props["list"]); err != nil {
 			return err
 		}
-	} else if activatingSource || op.Kind == "remove" || op.Kind == "set" || op.Kind == "move" || op.Comment == "tikray:jump-pre" || op.Comment == "tikray:no-fasttrack" {
+	} else if activatingSource || op.Kind == "remove" || op.Kind == "set" || op.Kind == "unset" || op.Kind == "move" || op.Comment == "tikray:jump-pre" || op.Comment == "tikray:no-fasttrack" {
 		if err := checkReferences(e.ctx, e.c, e.gen); err != nil {
 			return err
 		}
@@ -251,7 +251,7 @@ func (e *execution) apply(op Op) error {
 		if anchor != "" {
 			words = append(words, "=destination="+anchor)
 		}
-	case "set", "remove":
+	case "set", "unset", "remove":
 		words = append(words, "=.id="+op.id)
 	default:
 		return ErrRequest
@@ -282,7 +282,7 @@ func (e *execution) apply(op Op) error {
 	key := [2]string{op.Menu, op.target.Props["chain"]}
 	if chain, needed := e.chains[key]; needed {
 		i := slices.IndexFunc(chain, func(r Observed) bool { return r.ID == id })
-		if i >= 0 && op.Kind == "set" {
+		if i >= 0 && (op.Kind == "set" || op.Kind == "unset") {
 			chain[i] = row
 		} else {
 			if i >= 0 {

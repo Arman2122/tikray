@@ -615,3 +615,26 @@ func TestOpenUDPVersionTransitionPurgesOnlyOwnedData(t *testing.T) {
 		t.Fatal("handoff guard intercepted an owner or unmarked connection")
 	}
 }
+
+func TestLegacyUDPClassifierUsesProtocolUnset(t *testing.T) {
+	desired := object(firewallMangle, "conn-full-open", map[string]string{
+		"chain": preChain, "action": "mark-connection", "new-connection-mark": "tikray-open",
+	})
+	observed := Observed{ID: "*A", Menu: desired.Menu, Comment: desired.Comment, Props: map[string]string{
+		"chain": preChain, "action": "mark-connection", "new-connection-mark": "tikray-open",
+		"protocol": "!udp", "log": "yes",
+	}}
+	ops, err := Plan(Actual{Rows: []Observed{observed}}, []Object{desired})
+	if err != nil || len(ops) != 2 || ops[0].Kind != "unset" || ops[0].fields["value-name"] != "protocol" ||
+		ops[0].id != observed.ID || ops[0].target.Props["protocol"] != "" || ops[0].target.Props["log"] != "yes" ||
+		ops[1].Kind != "set" || len(ops[1].fields) != 1 {
+		t.Fatal("optional protocol clearing must preserve identity and use a separate native unset")
+	}
+	router := newDiffRouter()
+	router.rows = []Observed{observed}
+	actual := Actual{Generation: router.Generation(), Rows: []Observed{observed}}
+	if err := Execute(t.Context(), router, actual, ops); err != nil || len(router.rows) != 1 ||
+		router.rows[0].ID != observed.ID || len(changes(router.rows[0], desired)) != 0 {
+		t.Fatal("protocol unset did not converge on the same tagged rule")
+	}
+}

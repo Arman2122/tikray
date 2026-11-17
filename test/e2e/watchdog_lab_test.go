@@ -428,7 +428,7 @@ func (s *proxyStream) requireSince(t *testing.T, before uint64) {
 }
 
 // Exercise simultaneous open and closed clients using fresh UDP tuples.
-func (f *routingLab) imageWAN(ctx context.Context, t *testing.T) *imageWANProof {
+func (f *routingLab) imageWAN(ctx context.Context, t *testing.T, emitOpen bool) *imageWANProof {
 	t.Helper()
 	f.setClientPolicy(ctx, t, store.Policy{Mode: store.ModeFull, KillSwitch: true})
 	if _, err := f.api.SetDevice(ctx, store.Device{Address: netip.MustParsePrefix(routingPeer + "/32"), MAC: f.peerMAC, Policy: fullOpen}); err != nil {
@@ -451,7 +451,9 @@ for port in range(33000,65001):
   s.sendto(prefix+port.to_bytes(2,"big"),(sys.argv[3],31947))
  time.sleep(.04 if os.path.exists(sys.argv[5]) else .15)`
 	startRoutingProcess(t, f.Net.Client(ctx, "python3", "-c", emit, "192.168.88.10", "C", routingRemote, wan.nonce, wan.burst))
-	startRoutingProcess(t, f.peer(ctx, "python3", "-c", emit, routingPeer, "D", routingRemote, wan.nonce, wan.burst))
+	if emitOpen {
+		startRoutingProcess(t, f.peer(ctx, "python3", "-c", emit, routingPeer, "D", routingRemote, wan.nonce, wan.burst))
+	}
 	_, ok := poll(ctx, 20*time.Second, 300*time.Millisecond, func() bool { return wan.sample(t).closedProxy > 0 })
 	if !ok || wan.sample(t).closedDirect != 0 {
 		t.Fatal("missing healthy positive closed-path control")
@@ -524,7 +526,7 @@ func (f *routingLab) checkedRestart(ctx context.Context, t *testing.T, component
 	var openBase [2]int
 	var stream *proxyStream
 	if component == "runner" {
-		wan = f.imageWAN(ctx, t)
+		wan = f.imageWAN(ctx, t, true)
 		active = f.activeImageSelection(ctx, t)
 		openBase = wan.directCounts(t)
 	} else {
@@ -681,7 +683,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	t.Helper()
 	var wan *imageWANProof
 	if component == "runner" {
-		wan = f.imageWAN(ctx, t)
+		wan = f.imageWAN(ctx, t, true)
 	}
 	initial := identifyArchive(t, map[string]string{"tikray": f.controlTar, "runner": f.runnerTar}[component])
 	receipt := f.imageStatus(ctx, t, component)

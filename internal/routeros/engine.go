@@ -192,7 +192,7 @@ func (p *pass) account(ops []Op) {
 		switch op.Kind {
 		case "add":
 			p.report.Added++
-		case "set":
+		case "set", "unset":
 			p.report.Set++
 		case "move":
 			p.report.Moved++

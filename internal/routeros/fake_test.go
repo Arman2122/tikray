@@ -111,6 +111,11 @@ func (f *diffRouter) CommandAt(ctx context.Context, g uint64, words []string) ([
 				f.rows[i].Props[k] = v
 			}
 		}
+	case "unset":
+		if menu != firewallMangle || len(props) != 1 || props["value-name"] != "protocol" {
+			return nil, ErrRejected
+		}
+		delete(f.rows[i].Props, "protocol")
 	case "move":
 	case "remove":
 		f.rows = slices.Delete(f.rows, i, i+1)
