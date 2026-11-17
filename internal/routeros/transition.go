@@ -313,7 +313,11 @@ func holdsFor(views []policyView) []Object {
 			if ch.UDPOnly {
 				base["protocol"], base["dst-port"] = "udp", "!53"
 				oldBypass, newBypass := bypassDestinations(old, ch.From.Mode), bypassDestinations(next, ch.To.Mode)
-				stageDataHold(have, base, stageExclusions(have, uniquePrefixes(slices.Concat(oldBypass, newBypass))))
+				exclusions := stageExclusions(have, uniquePrefixes(slices.Concat(oldBypass, newBypass)))
+				for _, mark := range []string{"tikray-open", openUDP, openRunner, openWAN} {
+					base["connection-mark"] = mark
+					stageDataHold(have, base, exclusions)
+				}
 				continue
 			}
 			if sameProxyClass(ch.From, ch.To) && old.LANList == next.LANList && ch.DNSProtocol == "" {

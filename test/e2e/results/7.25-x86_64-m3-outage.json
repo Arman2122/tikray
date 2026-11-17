@@ -1,0 +1,38 @@
+[
+  {
+    "id": "all_servers_down",
+    "pass": true,
+    "detail": "Open and closed clients followed their fallback policy while the runner gateway remained live.",
+    "seconds": 315.597
+  },
+  {
+    "id": "runner_stopped",
+    "pass": true,
+    "detail": "With both containers down, existing open UDP and fresh traffic reached the WAN while closed traffic stayed blocked.",
+    "seconds": 299.073
+  },
+  {
+    "id": "xray_dead_runner_up",
+    "pass": true,
+    "detail": "A running runner with xray unavailable withdrew its gateway and native fallback protected the LAN.",
+    "seconds": 271.636
+  },
+  {
+    "id": "control_stopped",
+    "pass": true,
+    "detail": "The existing runner continued serving the LAN while the control container was unavailable.",
+    "seconds": 227.924
+  },
+  {
+    "id": "early_reboot",
+    "pass": true,
+    "detail": "WAN observations from before the power cycle proved closed protection until the proxy recovered.",
+    "seconds": 288.445
+  },
+  {
+    "id": "recovery",
+    "pass": true,
+    "detail": "Native recovery restored proxying on the existing open UDP socket and DNS for fresh queries. The existing owner SSH connection survived.",
+    "seconds": 355.116
+  }
+]

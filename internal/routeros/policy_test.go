@@ -600,7 +600,15 @@ func TestOpenUDPVersionTransitionPurgesOnlyOwnedData(t *testing.T) {
 	}
 	guards := holdsFor([]policyView{previous, target})
 	guards = slices.DeleteFunc(guards, func(row Object) bool { return row.Menu != firewallFilter })
-	if len(guards) != 1 || guards[0].Props["protocol"] != "udp" || guards[0].Props["dst-port"] != "!53" || guards[0].Props["src-address"] != prefix.String() {
-		t.Fatal("handoff must temporarily guard only affected UDP data")
+	var guarded []string
+	for _, row := range guards {
+		if row.Props["protocol"] != "udp" || row.Props["dst-port"] != "!53" || row.Props["src-address"] != prefix.String() {
+			t.Fatal("handoff must temporarily guard only affected UDP data")
+		}
+		guarded = append(guarded, row.Props["connection-mark"])
+	}
+	slices.Sort(guarded)
+	if !slices.Equal(guarded, []string{"tikray-open", openRunner, openUDP, openWAN}) {
+		t.Fatal("handoff guard intercepted an owner or unmarked connection")
 	}
 }

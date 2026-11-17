@@ -29,7 +29,7 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M2b: the service (`tikray serve`, HTTPS API, health, subscriptions) | Done, merged (PR #5) | |
 | M2c: human sign-in and hot server changes | Done, merged (PR #6) | |
 | M3a: RouterOS integration | Merged in PR #7. All three targets passed installer 6/6, routing 9/9 and uninstall 4/4. | [Ledger and image hashes](m3/ledger.md), [CHR results](../../test/e2e/results/) |
-| M3b: geo, image updates and CHR CI | Task 5 implements verified geo updates, guarded native diffs, rollback and restart recovery. Task 6b passed all five watchdog cases on each of the three CHR targets using signed `8b91d54`, including rapid restart WAN protection and real reboot recovery. The results were verified on 2026-11-17. Outage coverage, CHR CI and final M3b review follow. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
+| M3b: geo, image updates and CHR CI | Task 5 implements verified geo updates, guarded native diffs, rollback and restart recovery. Task 6b passed all five watchdog cases on each of the three CHR targets using signed `8b91d54`, including rapid restart WAN protection and real reboot recovery. The results were verified on 2026-11-17. Task 8 passed the six outage checks on all three targets with signed revision 5db275c. The control image compatibility follow-up and hosted CHR CI are under verification. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
 | M4: web UI | Not started | |
 | M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
 
@@ -131,7 +131,7 @@ The runner has a 30-second HTTP read timeout. Store validation rejects device
 overlap with the private bridge, loopback or multicast and checks the bridge
 subnet against reserved ranges.
 
-- **M3b:** Task 6b is complete with five passing `TestM3Watchdog` cases on each of the three targets. Continue the approved Task 8 outage coverage and CHR CI, then the final M3b review and full matrix. The [Task 6b completion record](m3/ledger.md#task-6b-completion) identifies the signed kit and results. The outage work must cover the cached NAT decision of an established open UDP flow on an unsolicited runner failure.
+- **M3b:** Task 6b is complete with five passing `TestM3Watchdog` cases on each of the three targets. The three-target Task 8 outage results are recorded. Complete the image compatibility replay and hosted CHR CI before the final M3b review and full matrix. The [Task 6b completion record](m3/ledger.md#task-6b-completion) identifies the signed kit and results. The outage work must cover the cached NAT decision of an established open UDP flow on an unsolicited runner failure.
 - **M4:**
   - Events need a boot id, because `Seq` restarts at 1 after a restart.
   - The UI signs in with M2c's cookie and CSRF scheme.

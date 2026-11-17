@@ -48,12 +48,20 @@ with open(filepath, "wb", buffering=0) as output:
         # Keep the original socket so the next request proves its recovery.
         try:
             sock.sendto(query, endpoint)
-            data, sender = sock.recvfrom(4096)
-            addr = answer(data, ident) if sender == endpoint else None
-            if addr == "198.18.53.2":
-                output.write(b"P")
-            elif addr == "198.18.54.1":
-                output.write(b"D")
+            deadline = time.monotonic() + .4
+            # A late reply can arrive just before the current response.
+            # Drain it without advancing to a new query or extending the deadline.
+            while (remaining := deadline - time.monotonic()) > 0:
+                sock.settimeout(remaining)
+                data, sender = sock.recvfrom(4096)
+                if sender != endpoint or data[:2] != query[:2]:
+                    continue
+                addr = answer(data, ident)
+                if addr == "198.18.53.2":
+                    output.write(b"P")
+                elif addr == "198.18.54.1":
+                    output.write(b"D")
+                break
         except (socket.timeout, OSError, ValueError, struct.error):
             pass
         time.sleep(.12)

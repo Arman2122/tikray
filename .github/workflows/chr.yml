@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [m3b-routeros]
+    paths-ignore:
+      - docs/**
+      - test/e2e/results/**
   schedule:
     - cron: "23 2 * * *"
   workflow_dispatch:
@@ -76,7 +79,7 @@ jobs:
           if ! sudo --preserve-env=PATH,TIKRAY_LAB_CHANNEL,TIKRAY_LAB_ARCH,TIKRAY_LAB_CACHE,lab_parent_net,lab_parent_mnt,lab_parent_pid \
               timeout --kill-after=30s 52m unshare --mount --net --pid --fork --kill-child --mount-proc --propagation private \
               bash scripts/test-m3-chr.sh --cache-child "$RUNNER_TEMP/prepare-chr.test" >"$RUNNER_TEMP/prepare-chr.log" 2>&1; then
-            grep -oE 'CHR cache phase: (lab network ready|serial connected|serial login|SSH ready|container package ready|container mode ready|data disk ready|clean shutdown)' "$RUNNER_TEMP/prepare-chr.log" || true
+            grep -oE 'CHR cache phase: (lab network ready|serial connected|serial login|interfaces available|interface names verified|WAN address configured|LAN address configured|default configured|SSH enabled|SSH ready|container package ready|container mode ready|data disk ready|clean shutdown)' "$RUNNER_TEMP/prepare-chr.log" || true
             echo "::error::CHR cache preparation failed"
             exit 1
           fi

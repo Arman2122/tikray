@@ -228,9 +228,9 @@ func (s *imagePeerFlow) requireProxy(ctx context.Context, t *testing.T) {
 	}
 }
 
-// UDP can report a delayed ICMP error on the next send during a native
-// routing transition. The observer must keep its original socket alive.
-func TestKeptDNSProbeSurvivesSendFailure(t *testing.T) {
+// A late reply or delayed ICMP error must not make the original socket
+// fall one query behind for the remainder of a routing transition.
+func TestKeptDNSProbeSurvivesLateReply(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required for the CHR probe fixture")
@@ -244,7 +244,7 @@ func TestKeptDNSProbeSurvivesSendFailure(t *testing.T) {
 	const driver = `import errno, runpy, socket, struct, sys, time
 path, output = sys.argv[1:]
 class Socket:
- def __init__(self): self.sent=0; self.query=None
+ def __init__(self): self.sent=0; self.received=0; self.query=None
  def bind(self, addr): pass
  def settimeout(self, t): pass
  def sendto(self, query, dest):
@@ -253,6 +253,8 @@ class Socket:
   self.query = query
  def recvfrom(self, bound):
   ident=struct.unpack_from("!H",self.query)[0]
+  self.received += 1
+  if self.received == 1: ident ^= 1
   header=struct.pack("!6H",ident,0x8180,1,1,0,0)
   answer=b"\xc0\x0c"+struct.pack("!HHIH",1,1,0,4)+bytes([198,18,54,1])
   return header+self.query[12:]+answer,("203.0.113.53",53)
@@ -270,6 +272,6 @@ runpy.run_path(path,run_name="__main__")
 	}
 	b, e := os.ReadFile(output)
 	if e != nil || string(b) != "D" {
-		t.Fatal("same DNS socket did not verify a reply after retry")
+		t.Fatal("same DNS socket did not wait for the current reply after an earlier one arrived")
 	}
 }

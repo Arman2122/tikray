@@ -94,7 +94,28 @@ func TestM3CrossVersionUDPRollback(t *testing.T) {
 		t.Fatal("current control never created a path-retained UDP connection")
 	}
 	newer := f.requireImage(ctx, t, "tikray", newRef)
-	f.imageOperation(ctx, t, "tikray", "rollback", "", candidate.digest, original.digest, false)
+	f.scheduler(ctx, t, false)
+	// Keep the native worker stopped while the control process retires the
+	// actual active UDP bindings and while its ordinary apply loop can tick.
+	request, cancelRequest := context.WithTimeout(ctx, 4*time.Minute)
+	response, err := f.api.ImageRollback(request, "tikray")
+	cancelRequest()
+	var rollback imageAcceptance
+	if err != nil || response.Decode(&rollback) != nil || rollback.From != candidate.digest ||
+		rollback.To != original.digest || !imageNonce.MatchString(rollback.OperationID) {
+		t.Fatal("native UDP migration did not publish the requested rollback")
+	}
+	for range 6 {
+		state := f.imageStatus(ctx, t, "tikray")
+		if state.Pending == nil || *state.Pending != rollback || state.Active != candidate.digest ||
+			f.taggedID(ctx, t, "/tool/netwatch", "tikray:udp-watch") != "" {
+			t.Fatal("ordinary control pass changed compatible policy during the queued rollback")
+		}
+		if sleep(ctx, time.Second) != nil {
+			t.Fatal("queued rollback observation cancelled")
+		}
+	}
+	f.scheduler(ctx, t, true)
 	f.waitImageCompletion(ctx, t, "tikray", original, candidate.digest, newer)
 	f.checkReady(ctx, t)
 	if f.taggedID(ctx, t, "/tool/netwatch", "tikray:udp-watch") != "" {

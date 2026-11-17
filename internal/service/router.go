@@ -71,6 +71,10 @@ func (s *Service) routerFailure(err error) error {
 // prepareRouter also re-observes a transition interrupted before a store
 // write. A failed read or write leaves the journal for the next pass.
 func (s *Service) prepareRouter(ctx context.Context, st store.State, rev uint64) error {
+	return s.prepareRouterMode(ctx, st, rev, false)
+}
+
+func (s *Service) prepareRouterMode(ctx context.Context, st store.State, rev uint64, legacyOpenUDP bool) error {
 	if err := s.recoverGeo(ctx); err != nil {
 		return err
 	}
@@ -87,7 +91,7 @@ func (s *Service) prepareRouter(ctx context.Context, st store.State, rev uint64)
 		return ErrRouterConflict
 	}
 	s.routerPending("")
-	if err := s.router.Prepare(ctx, routeros.Target{Policy: policy, Revision: rev, KeepGeo: true}); err != nil {
+	if err := s.router.Prepare(ctx, routeros.Target{Policy: policy, Revision: rev, KeepGeo: true, LegacyOpenUDP: legacyOpenUDP}); err != nil {
 		return s.routerFailure(err)
 	}
 	return nil

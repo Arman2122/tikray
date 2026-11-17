@@ -146,10 +146,13 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 		if s.router == nil || artifacts.GeoPending(s.data) || s.store.EnsureDurable() != nil {
 			return true
 		}
-		if err := s.prepareRouter(ctx, st, rev); err != nil {
+		// Both the outgoing process and a newer candidate must leave rules
+		// the saved controller can reconcile until the watchdog retires
+		// the control request. The runner keeps its committed selection.
+		if err := s.prepareRouterMode(ctx, st, rev, true); err != nil {
 			return true
 		}
-		return s.finishRouter(ctx, st, rev) != nil
+		return s.finishRouterMode(ctx, st, rev, true) != nil
 	}
 	if err := s.prepareRouter(ctx, st, rev); err != nil {
 		return ctx.Err() == nil

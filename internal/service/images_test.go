@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -86,5 +87,38 @@ func TestImageHealthRequiresSameLiveDataPath(t *testing.T) {
 	e.health.fail(errors.New("private-fixture"))
 	if err := e.s.verifyImageDataPath(context.Background(), digest); err == nil || strings.Contains(err.Error(), "private-fixture") {
 		t.Fatal("failed or private runner probe accepted")
+	}
+}
+
+func TestPendingControlImageKeepsLegacyRouterTargets(t *testing.T) {
+	e := newEnv(t)
+	e.inSync()
+	r := &testRouter{}
+	e.s = e.newService(Config{Router: r})
+	dir := filepath.Join(e.data, "state")
+	id := strings.Repeat("1", 32)
+	from := artifacts.ImageRef{Component: "tikray", Digest: strings.Repeat("a", 64), Chain: strings.Repeat("b", 128), ImageID: strings.Repeat("c", 64), Size: 1}
+	to := from
+	to.Digest, to.ImageID = strings.Repeat("d", 64), strings.Repeat("e", 64)
+	wire, err := json.Marshal(map[string]any{
+		"version": 1, "installation_id": id, "component": "tikray", "previous": from,
+		"candidate": to, "selection_digest": strings.Repeat("f", 64), "phase": "requested",
+		"nonce": strings.Repeat("2", 32), "started": 1, "deadline": 301,
+	})
+	pending := filepath.Join(dir, "image-update.request")
+	if err != nil || os.WriteFile(filepath.Join(dir, "install.id"), []byte(id), 0600) != nil ||
+		os.WriteFile(pending, wire, 0600) != nil || artifacts.HoldsRunnerPolicy(e.data) {
+		t.Fatal("verified control-image request fixture unavailable")
+	}
+	e.s.pass(t.Context(), 0)
+	if len(r.prepared) != 1 || len(r.verified) != 1 || !r.prepared[0].LegacyOpenUDP || !r.verified[0].LegacyOpenUDP {
+		t.Fatal("a normal pass could re-arm the new UDP roles before the swap")
+	}
+	if os.Remove(pending) != nil {
+		t.Fatal("could not retire test request")
+	}
+	e.s.pass(t.Context(), 0)
+	if len(r.prepared) != 2 || len(r.verified) != 2 || r.prepared[1].LegacyOpenUDP || r.verified[1].LegacyOpenUDP {
+		t.Fatal("normal mode did not resume after the image request retired")
 	}
 }

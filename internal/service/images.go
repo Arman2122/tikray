@@ -82,6 +82,10 @@ func (s *Service) imageChange(ctx context.Context, component, version string) (a
 		}
 	}
 	if component == "tikray" {
+		if version != "" && (img.Ref().Digest == status.Active || img.Ref().ImageID == status.ActiveImageID) {
+			u.DiscardStagedImage(ctx, img)
+			return none, artifacts.ErrImageState
+		}
 		// Either the candidate or the watchdog's saved image can predate
 		// the path marks. Publish the request only after the common policy
 		// has been verified and all newer live bindings have been retired.

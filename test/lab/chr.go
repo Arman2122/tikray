@@ -203,18 +203,22 @@ func (c *CHR) provision(ctx context.Context) error {
 		return err
 	}
 	c.phase("console login done")
-	for _, line := range []string{
+	// PCI enumeration can differ across emulators. Keep the lab's interface
+	// names tied to its verified TAP MACs before assigning either address.
+	linkNames := fmt.Sprintf(`{:local wan [/interface/ethernet/find where mac-address=%s]; :local lan [/interface/ethernet/find where mac-address=%s]; :if (([:len $wan]!=1) or ([:len $lan]!=1) or ($wan=$lan)) do={:error "lab network interface identity"}; :if (([/interface/ethernet/get $wan name]!="ether1") or ([/interface/ethernet/get $lan name]!="ether2")) do={/interface/ethernet/set $wan name=lab-wan; /interface/ethernet/set $lan name=ether2; /interface/ethernet/set $wan name=ether1}}`, macWAN, macLAN)
+	for _, step := range []struct{ line, phase string }{
 		// arm64 CHR shows the login prompt before its NICs are registered.
-		":local i 0; :while ([:len [/interface/ethernet/find]] < 2 && $i < 120) do={:delay 1s; :set i ($i + 1)}",
-		"/ip/address/add address=198.51.100.2/24 interface=ether1 comment=lab:wan",
-		"/ip/address/add address=192.168.88.1/24 interface=ether2 comment=lab:lan",
-		"/ip/route/add gateway=198.51.100.254 comment=lab:default",
-		"/ip/service/set ssh disabled=no",
+		{":local i 0; :while ([:len [/interface/ethernet/find]] < 2 && $i < 120) do={:delay 1s; :set i ($i + 1)}", "interfaces available"},
+		{linkNames, "interface names verified"},
+		{"/ip/address/add address=198.51.100.2/24 interface=ether1 comment=lab:wan", "WAN address configured"},
+		{"/ip/address/add address=192.168.88.1/24 interface=ether2 comment=lab:lan", "LAN address configured"},
+		{"/ip/route/add gateway=198.51.100.254 comment=lab:default", "default configured"},
+		{"/ip/service/set ssh disabled=no", "SSH enabled"},
 	} {
-		if err := c.con.command(ctx, line); err != nil {
-			return fmt.Errorf("%s: %w", line, err)
+		if err := c.con.command(ctx, step.line); err != nil {
+			return fmt.Errorf("%s: %w", step.phase, err)
 		}
-		c.logf("console: %s", line)
+		c.phase(step.phase)
 	}
 	if err := c.waitSSH(ctx); err != nil {
 		return err

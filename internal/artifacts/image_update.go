@@ -60,10 +60,11 @@ type ImageOperation struct {
 	To          string `json:"to"`
 }
 type ImageStatus struct {
-	Component string          `json:"component"`
-	Active    string          `json:"active"`
-	Previous  string          `json:"previous,omitempty"`
-	Pending   *ImageOperation `json:"pending,omitempty"`
+	ActiveImageID string          `json:"-"`
+	Component     string          `json:"component"`
+	Active        string          `json:"active"`
+	Previous      string          `json:"previous,omitempty"`
+	Pending       *ImageOperation `json:"pending,omitempty"`
 }
 
 func imageNonce(s string) bool {
@@ -252,7 +253,7 @@ func ReadImageStatus(data, component string) (ImageStatus, error) {
 	if err != nil {
 		return ImageStatus{}, err
 	}
-	result := ImageStatus{Component: component, Active: r.Active.Digest, Previous: r.Previous.Digest}
+	result := ImageStatus{Component: component, Active: r.Active.Digest, Previous: r.Previous.Digest, ActiveImageID: r.Active.ImageID}
 	m, err := readImageRequest(data, id)
 	if err != nil {
 		return ImageStatus{}, err
