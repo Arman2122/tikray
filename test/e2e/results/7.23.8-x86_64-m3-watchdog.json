@@ -1,0 +1,32 @@
+[
+  {
+    "id": "control_restart",
+    "pass": true,
+    "detail": "The scheduler restarted control after three misses, while the same runner continued serving the LAN.",
+    "seconds": 317.985
+  },
+  {
+    "id": "runner_restart",
+    "pass": true,
+    "detail": "The scheduler restarted the runner after three misses. Control survived and the saved selection returned.",
+    "seconds": 495.913
+  },
+  {
+    "id": "control_update_and_revert",
+    "pass": true,
+    "detail": "Signed control replacement, explicit rollback and automatic restoration preserved the runner and owner access.",
+    "seconds": 861.424
+  },
+  {
+    "id": "runner_update_and_revert",
+    "pass": true,
+    "detail": "Signed runner replacement and rollback restored the committed data path while control and the unrelated LAN path survived.",
+    "seconds": 1487.589
+  },
+  {
+    "id": "reboot_mid_update",
+    "pass": true,
+    "detail": "A real CHR reboot during an unresolved image trial resumed the watchdog and restored the previous verified image.",
+    "seconds": 641.627
+  }
+]
