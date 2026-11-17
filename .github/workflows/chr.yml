@@ -1,0 +1,89 @@
+name: RouterOS CHR
+
+on:
+  pull_request:
+  push:
+    branches: [m3b-routeros]
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chr-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance:
+    name: CHR ${{ matrix.target.version }} ${{ matrix.target.ros_arch }} / ${{ matrix.group }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '[{"version":"7.25","ros_arch":"arm64","go_arch":"arm64"}]' || '[{"version":"7.25","ros_arch":"x86_64","go_arch":"amd64"},{"version":"7.23.8","ros_arch":"x86_64","go_arch":"amd64"}]') }}
+        group: [install-uninstall, routing-outage, watchdog]
+    env:
+      TIKRAY_LAB_CHANNEL: ${{ matrix.target.version }}
+      TIKRAY_LAB_ARCH: ${{ matrix.target.ros_arch }}
+      TIKRAY_LAB_XRAY: v26.11.9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set private lab paths
+        run: |
+          umask 077
+          mkdir "$RUNNER_TEMP/chr-cache" "$RUNNER_TEMP/chr-results"
+          {
+            echo "TIKRAY_LAB_CACHE=$RUNNER_TEMP/chr-cache"
+            echo "TIKRAY_LAB_IMAGES=$RUNNER_TEMP/chr-images/$TIKRAY_LAB_CHANNEL-$TIKRAY_LAB_ARCH"
+            echo "TIKRAY_LAB_RESULTS=$RUNNER_TEMP/chr-results"
+            echo "GOMODCACHE=$RUNNER_TEMP/go-mod"
+            echo "GOCACHE=$RUNNER_TEMP/go-build"
+          } >>"$GITHUB_ENV"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Set up the TCG lab and classic Docker image store
+        run: |
+          scripts/lab-deps.sh
+          echo '{"features":{"containerd-snapshotter":false}}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
+      - name: Prepare signed images and CHR cache
+        env:
+          IMAGE_ARCH: ${{ matrix.target.go_arch }}
+          TIKRAY_LAB_PREPARE_XRAY: "1"
+        run: |
+          umask 077
+          if ! scripts/build-watchdog-lab.sh "$RUNNER_TEMP/chr-images" "$IMAGE_ARCH" >"$RUNNER_TEMP/build-chr-images.log" 2>&1; then
+            echo "::error::Signed CHR image build or verification failed"
+            exit 1
+          fi
+          go test -c -tags lab -o "$RUNNER_TEMP/prepare-chr.test" ./test/lab
+          if ! sudo --preserve-env=PATH,GOMODCACHE,GOCACHE,TIKRAY_LAB_CHANNEL,TIKRAY_LAB_ARCH,TIKRAY_LAB_XRAY,TIKRAY_LAB_CACHE,TIKRAY_LAB_PREPARE_XRAY \
+              "$RUNNER_TEMP/prepare-chr.test" -test.run '^TestBootReadyCHR$' -test.timeout=25m >"$RUNNER_TEMP/prepare-chr.log" 2>&1; then
+            echo "::error::CHR cache preparation failed"
+            exit 1
+          fi
+      - name: Run isolated CHR acceptance tests
+        env:
+          GROUP: ${{ matrix.group }}
+        run: |
+          case "$GROUP" in
+            install-uninstall) selection='^TestM3(Install|Uninstall)$' ;;
+            routing-outage) selection='^TestM3(Routing|Outage)$' ;;
+            watchdog) selection='^TestM3Watchdog$' ;;
+          esac
+          sudo --preserve-env=PATH,GOMODCACHE,GOCACHE,TIKRAY_LAB_CACHE,TIKRAY_LAB_XRAY,TIKRAY_LAB_IMAGES,TIKRAY_LAB_RESULTS \
+            scripts/test-m3-chr.sh "$TIKRAY_LAB_CHANNEL" "$TIKRAY_LAB_ARCH" "$selection"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chr-${{ matrix.target.version }}-${{ matrix.target.ros_arch }}-${{ matrix.group }}
+          path: ${{ runner.temp }}/chr-results/*.json
+          if-no-files-found: error
+

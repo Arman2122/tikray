@@ -26,6 +26,15 @@ func TestBootReadyCHR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if os.Getenv("TIKRAY_LAB_PREPARE_XRAY") == "1" {
+		core, err := ResolveXrayVersion(ctx, LabXrayVersion())
+		if err != nil {
+			t.Fatal("could not resolve the pinned core for CHR")
+		}
+		if _, err := XrayBinaryVersion(ctx, CacheDir(), core, labArch().GOARCH()); err != nil {
+			t.Fatal("could not prepare the pinned core for CHR")
+		}
+	}
 	n, err := SetupNetwork(ctx)
 	if err != nil {
 		t.Fatal(err)
