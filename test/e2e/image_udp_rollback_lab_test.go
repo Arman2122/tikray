@@ -87,6 +87,7 @@ func TestM3CrossVersionUDPRollback(t *testing.T) {
 	if _, ok := poll(ctx, 70*time.Second, time.Second, func() bool {
 		return f.taggedID(ctx, t, "/tool/netwatch", "tikray:udp-watch") != ""
 	}); !ok {
+		f.checkReady(ctx, t)
 		t.Fatal("current control never armed open UDP recovery")
 	}
 	socket := f.keepImagePeerFlow(ctx, t)

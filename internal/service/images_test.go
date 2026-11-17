@@ -110,7 +110,9 @@ func TestPendingControlImageKeepsLegacyRouterTargets(t *testing.T) {
 		os.WriteFile(pending, wire, 0600) != nil || artifacts.HoldsRunnerPolicy(e.data) {
 		t.Fatal("verified control-image request fixture unavailable")
 	}
-	e.s.pass(t.Context(), 0)
+	if !e.s.pass(t.Context(), 0) {
+		t.Fatal("compatibility pass did not schedule a normal retry after retirement")
+	}
 	if len(r.prepared) != 1 || len(r.verified) != 1 || !r.prepared[0].LegacyOpenUDP || !r.verified[0].LegacyOpenUDP {
 		t.Fatal("a normal pass could re-arm the new UDP roles before the swap")
 	}

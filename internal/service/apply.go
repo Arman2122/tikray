@@ -152,7 +152,10 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 		if err := s.prepareRouterMode(ctx, st, rev, true); err != nil {
 			return true
 		}
-		return s.finishRouterMode(ctx, st, rev, true) != nil
+		_ = s.finishRouterMode(ctx, st, rev, true)
+		// The candidate can start after the last monitoring tick. Poll
+		// until retirement even when this compatibility pass succeeded.
+		return ctx.Err() == nil
 	}
 	if err := s.prepareRouter(ctx, st, rev); err != nil {
 		return ctx.Err() == nil
