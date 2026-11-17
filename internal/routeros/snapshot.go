@@ -537,25 +537,31 @@ func EmergencyState(ctx context.Context, c Native, g uint64) (string, bool, erro
 	if len(teardown) != 0 {
 		return "", true, nil
 	}
-	rows, e := o.read("/system/script", ".id,name,comment,policy,dont-require-permissions", "?name=tikray-emergency-state", "?comment=tikray:emergency-state", "?#|")
+	id, e := o.inertScript("tikray-emergency-state", "tikray:emergency-state")
+	return id, busy, e
+}
+
+func (o observation) inertScript(name, tag string) (string, error) {
+	rows, e := o.read("/system/script", ".id,name,comment,policy,dont-require-permissions", "?name="+name, "?comment="+tag, "?#|")
 	if e != nil {
-		return "", busy, e
+		return "", e
 	}
 	if len(rows) == 0 {
-		return "", busy, nil
+		return "", nil
 	}
-	if len(rows) != 1 || rows[0]["name"] != "tikray-emergency-state" || rows[0]["comment"] != "tikray:emergency-state" || !inertMarkerRights(rows[0]) || !nativeRowID.MatchString(rows[0][".id"]) {
-		return "", busy, errConflict
+	r := rows[0]
+	if len(rows) != 1 || r["name"] != name || r["comment"] != tag || !inertMarkerRights(r) || !nativeRowID.MatchString(r[".id"]) {
+		return "", errConflict
 	}
-	id := rows[0][".id"]
-	rows, e = o.read("/system/script", ".id", "?.id="+id, "?name=tikray-emergency-state", "?comment=tikray:emergency-state", "?source=", "?-source", "?#|", "?source={}", "?#|")
+	id := r[".id"]
+	rows, e = o.read("/system/script", ".id", "?.id="+id, "?name="+name, "?comment="+tag, "?source=", "?-source", "?#|", "?source={}", "?#|")
 	if e != nil {
-		return "", busy, e
+		return "", e
 	}
 	if len(rows) != 1 || rows[0][".id"] != id {
-		return "", busy, errConflict
+		return "", errConflict
 	}
-	return id, busy, nil
+	return id, nil
 }
 
 // The restricted account must be able to inspect a marker's source. An

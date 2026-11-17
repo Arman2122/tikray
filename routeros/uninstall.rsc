@@ -29,7 +29,7 @@
         :if ([:pick $tagValue 0 7] != "tikray:") do={ :return false }
         :local roleName [:pick $tagValue 7 [:len $tagValue]]
         :if ($menu = "/system/script") do={
-            :return (($roleName ~ "^(watchdog-script|watchdog-traffic|emergency-off|emergency-state|api-mode (unchanged|created|access))\$") or ([:pick $roleName 0 15] = "watchdog-state ") or ([:pick $roleName 0 12] = "api-receipt ") or ([:pick $roleName 0 11] = "api-access "))
+            :return (($roleName ~ "^(watchdog-script|watchdog-traffic|emergency-off|emergency-state|udp-native-v1|api-mode (unchanged|created|access))\$") or ([:pick $roleName 0 15] = "watchdog-state ") or ([:pick $roleName 0 12] = "api-receipt ") or ([:pick $roleName 0 11] = "api-access "))
         }
         :if ($menu = "/system/scheduler") do={ :return ($roleName = "watchdog-scheduler") }
         :if ($menu = "/container") do={ :return (($roleName = "runner") or ($roleName = "tikray")) }

@@ -20,15 +20,15 @@ func main() {
 	}
 	address, cert, key, witness, wan := os.Args[1], os.Args[2], os.Args[3], os.Args[4], os.Args[5]
 	proxies := os.Args[6:]
+	listener, err := net.Listen("tcp4", net.JoinHostPort(address, "443"))
+	if err != nil {
+		os.Exit(1)
+	}
 	out, err := os.OpenFile(witness, os.O_WRONLY|os.O_APPEND|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		os.Exit(1)
 	}
 	defer out.Close()
-	listener, err := net.Listen("tcp4", net.JoinHostPort(address, "443"))
-	if err != nil {
-		os.Exit(1)
-	}
 	server := &http.Server{
 		ReadHeaderTimeout: 4 * time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

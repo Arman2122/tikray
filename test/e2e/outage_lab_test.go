@@ -235,6 +235,40 @@ func (f *outageLab) requireDoH(ctx context.Context, t *testing.T, witness string
 		}
 	}
 }
+func (f *outageLab) retainedUDP(ctx context.Context, t *testing.T) string {
+	t.Helper()
+	rows := f.readROS(ctx, t, "/ip/firewall/connection", ".id,connection-mark",
+		"?protocol=udp", "?src-address="+routingPeer, "?src-port=32242", "?dst-address="+routingRemote, "?dst-port=31948")
+	if len(rows) != 1 || rows[0]["connection-mark"] != "tikray-open-runner" {
+		return ""
+	}
+	return rows[0][".id"]
+}
+
+func (f *outageLab) udpWatchTests(ctx context.Context, t *testing.T) int {
+	t.Helper()
+	rows := f.readROS(ctx, t, "/tool/netwatch", "done-tests", "?comment=tikray:udp-watch")
+	if len(rows) != 1 {
+		t.Fatal("open UDP watch identity unavailable")
+	}
+	n, err := strconv.Atoi(rows[0]["done-tests"])
+	if err != nil {
+		t.Fatal("open UDP watch count unavailable")
+	}
+	return n
+}
+
+func requireOutageDatagram(ctx context.Context, t *testing.T, socket *imagePeerFlow, path byte) {
+	t.Helper()
+	start := socket.count(socket.replies, path)
+	if _, ok := poll(ctx, 35*time.Second, 200*time.Millisecond, func() bool {
+		return socket.count(socket.replies, path) >= start+2
+	}); !ok || socket.count(socket.wire, '?') > 0 {
+		t.Fatalf("original open UDP socket failed %c path: replies=%d invalid_wan_sources=%d",
+			path, socket.count(socket.replies, path)-start, socket.count(socket.wire, '?'))
+	}
+}
+
 func TestM3Outage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Minute)
 	defer cancel()
@@ -282,21 +316,32 @@ func TestM3Outage(t *testing.T) {
 		ssh := f.ownerLANSSH(ctx, t)
 		f.scheduler(ctx, t, false)
 		f.containerAction(ctx, t, "tikray", "stop", "stopped")
+		stale := f.retainedUDP(ctx, t)
+		if stale == "" {
+			t.Fatal("could not identify living open UDP binding before outage")
+		}
+		const owner = "lab:outage-shared-mark"
+		f.mustRun(ctx, t, `/ip/firewall/filter/add chain=lab-outage-owner action=return connection-mark=tikray-open-runner comment="lab:outage-shared-mark"`)
+		rows := f.readROS(ctx, t, "/ip/firewall/filter", ".id", "?comment="+owner)
+		if len(rows) != 1 || rows[0][".id"] == "" {
+			t.Fatal("independent owner consumer unavailable")
+		}
 		f.containerAction(ctx, t, "runner", "stop", "stopped")
 		f.requireFallback(ctx, t)
-		start := socket.count(socket.replies, 'D')
-		if _, ok := poll(ctx, 35*time.Second, 200*time.Millisecond, func() bool { return socket.count(socket.replies, 'D') >= start+2 }); !ok || socket.count(socket.wire, '?') > 0 {
-			data, _ := os.ReadFile(socket.wire)
-			t.Fatalf("original open UDP socket did not acquire WAN NAT: replies=%d wire=%d invalid=%d", socket.count(socket.replies, 'D')-start, len(data), socket.count(socket.wire, '?'))
+		scans := f.udpWatchTests(ctx, t)
+		if _, ok := poll(ctx, 23*time.Second, time.Second, func() bool { return f.udpWatchTests(ctx, t) >= scans+2 }); !ok {
+			t.Fatal("native watch did not exercise owner-conflict boundary")
 		}
+		if f.retainedUDP(ctx, t) != stale || socket.count(socket.replies, 'D') != 0 {
+			t.Fatal("native cleanup retired a binding used by an owner rule")
+		}
+		f.routingWrite(ctx, t, "/ip/firewall/filter/remove", "=.id="+rows[0][".id"])
+		requireOutageDatagram(ctx, t, socket, 'D')
 		f.requireDNSMode(ctx, t, true)
 		ssh()
 		f.containerAction(ctx, t, "runner", "start", "running")
 		f.requireProxy(ctx, t)
-		start = socket.count(socket.replies, 'P')
-		if _, ok := poll(ctx, 35*time.Second, 200*time.Millisecond, func() bool { return socket.count(socket.replies, 'P') >= start+2 }); !ok {
-			t.Fatal("original UDP socket did not resume proxy after recovery")
-		}
+		requireOutageDatagram(ctx, t, socket, 'P')
 		f.requireNoLeak(t)
 		ssh()
 	})
@@ -351,6 +396,11 @@ func TestM3Outage(t *testing.T) {
 				t.Fatal("could not defer container startup for the forwarding witness", component)
 			}
 		}
+		// RouterOS can recover a container that was interrupted while
+		// running even when start-on-boot is disabled. Record both as
+		// explicitly stopped before cutting power.
+		f.containerAction(ctx, t, "tikray", "stop", "stopped")
+		f.containerAction(ctx, t, "runner", "stop", "stopped")
 		before := f.wire.directCounts(t)
 		f.ros.Close()
 		if f.CHR.PowerCycle(ctx) != nil {
@@ -365,6 +415,13 @@ func TestM3Outage(t *testing.T) {
 			t.Fatal("external capture missed early router forwarding")
 		}
 		f.requireDNSMode(ctx, t, true)
+		for _, component := range []string{"tikray", "runner"} {
+			row, ok := f.containerImage(ctx, component)
+			if !ok {
+				t.Fatal("could not verify the original container after reboot", component)
+			}
+			f.routingWrite(ctx, t, "/container/set", "=.id="+row.id, "=start-on-boot=yes")
+		}
 		f.containerAction(ctx, t, "runner", "start", "running")
 		f.containerAction(ctx, t, "tikray", "start", "running")
 		f.requireProxy(ctx, t)
@@ -372,15 +429,20 @@ func TestM3Outage(t *testing.T) {
 	})
 	check("recovery", func(t *testing.T) {
 		f := deploy(t)
+		socket := f.keepImagePeerFlow(ctx, t)
+		ssh := f.ownerLANSSH(ctx, t)
 		f.scheduler(ctx, t, false)
 		f.requireDNSMode(ctx, t, false)
 		f.containerAction(ctx, t, "runner", "stop", "stopped")
 		f.requireFallback(ctx, t)
+		requireOutageDatagram(ctx, t, socket, 'D')
 		f.requireDNSMode(ctx, t, true)
 		f.containerAction(ctx, t, "runner", "start", "running")
 		f.requireProxy(ctx, t)
+		requireOutageDatagram(ctx, t, socket, 'P')
 		f.requireDNSMode(ctx, t, false)
 		f.checkReady(ctx, t)
+		ssh()
 		f.requireNoLeak(t)
 	})
 }

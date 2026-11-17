@@ -73,6 +73,10 @@
         :local n ("tikray-" . $component); :if ($component="watchdog-script") do={ :set n "tikray-watchdog" }
         :local v [$unique "/system/script" "name" $n ("tikray:" . $component) $objects]
     }
+    :local udpNative [$unique "/system/script" "name" "tikray-udp-native" "tikray:udp-native-v1" $objects]
+    :foreach j in=[/system/script/find where name="tikray-udp-native" and comment="tikray:udp-native-v1"] do={
+        :if (([/system/script/get $j source]!="") or [/system/script/get $j dont-require-permissions]) do={ :error "tikray: shared_reference_refuses; UDP native receipt changed" }
+    }
     :foreach cls in={"open";"closed"} do={
         :local tab ("tikray-" . $cls)
         :local v [$unique "/routing/table" "name" $tab ("tikray:table-" . $cls) $objects]

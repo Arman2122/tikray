@@ -96,6 +96,7 @@ type RoutingMarkWriter struct {
 }
 type Topology struct {
 	sourceNATConflict bool
+	openUDPNative     bool
 	Subnet            netip.Prefix
 	LANList           string
 	LANs              []LAN

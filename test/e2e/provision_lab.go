@@ -381,7 +381,7 @@ func installOutput(wire string) (string, error) {
 			}
 		}
 	}
-	for _, category := range []string{"enable router DNS", "bridge overlaps", "object conflict", "retry bootstrap", "shared_reference_refuses", "inspect api-ssl", "inspect selected disk", "inspect disk", "select", "inspect", "enable", "choose", "archive", "image archive", "pending", "multiple active", "obtain installer", "unsupported", "unexpected", "invalid", "insufficient", "private handoff"} {
+	for _, category := range []string{"inspect changed emergency script before installing", "enable router DNS", "bridge overlaps", "object conflict", "retry bootstrap", "shared_reference_refuses", "inspect api-ssl", "inspect selected disk", "inspect disk", "select", "inspect", "enable", "choose", "archive", "image archive", "pending", "multiple active", "obtain installer", "unsupported", "unexpected", "invalid", "insufficient", "private handoff"} {
 		known := "tikray: " + category
 		if strings.Contains(msg, known) {
 			return "", errors.New(known)

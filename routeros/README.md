@@ -66,6 +66,12 @@ archives for both components. See the [image publisher and owner
 guide](../docs/handoff/m3/image-publishers.md) for release files, offline
 staging and update commands.
 
+## Upgrading outage handling
+
+Import the matching current installer before deploying the control image that adds open UDP outage recovery. Reuse the current release's image publisher and the exact archives for the active image pair when updating only native scripts. The import upgrades known earlier emergency and watchdog scripts in place and records the verified native version. A source edited by the owner requires inspection before the import can proceed.
+
+Until the native upgrade is verified, an image-only update uses the earlier UDP policy so the installed emergency command remains effective. After the upgrade, RouterOS can rebuild a stale tracked UDP connection on the new path while the LAN application's socket stays open. DNS uses the router's separate fail-open rules. Existing DNS bindings can follow their normal expiry during an unplanned outage.
+
 ## Basic watchdog
 
 On the private bridge, static ARP entries map control and runner addresses to their container-side MACs. Static bridge host entries map those MACs to the two owned veth ports. The bridge uses reply-only ARP. Both ports have MAC learning and unknown-unicast flooding disabled so a stopped or recreated control port cannot send health traffic to the runner. These settings apply only to the tagged tikray bridge and ports.

@@ -48,7 +48,7 @@ var m3Cases = map[string][]evidenceCase{
 		{"xray_dead_runner_up", "A running runner with xray unavailable withdrew its gateway and native fallback protected the LAN."},
 		{"control_stopped", "The existing runner continued serving the LAN while the control container was unavailable."},
 		{"early_reboot", "WAN observations from before the power cycle proved closed protection until the proxy recovered."},
-		{"recovery", "Native recovery restored the proxy and DNS for existing open sockets and fresh traffic without disturbing owner connections."},
+		{"recovery", "Native recovery restored proxying on the existing open UDP socket and DNS for fresh queries. The existing owner SSH connection survived."},
 	},
 	"m3-watchdog": {
 		{"control_restart", "The scheduler restarted control after three misses, while the same runner continued serving the LAN."},

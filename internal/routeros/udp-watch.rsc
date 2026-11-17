@@ -28,11 +28,12 @@
     :if ((($direct->"active")=true) and (($through->"active")!=true)) do={:return "tikray-open-runner"}
     :return ""
 }
-# Marks are private only while every writer is an expected native rule.
-:local ownsWriters do={
+# A shared mark is not authority to destroy a live connection.
+:local ownsMarks do={
     :foreach mark in={"tikray-open";"tikray-open-udp";"tikray-open-runner";"tikray-open-wan"} do={
         :foreach id in=[/ip/firewall/mangle/find where new-connection-mark=$mark] do={
-            :local tag [/ip/firewall/mangle/get $id comment]
+            :local row [/ip/firewall/mangle/get $id]; :local tag ($row->"comment")
+            :local proto [:tostr ($row->"protocol")]
             :local matches
             :if (($mark="tikray-open") or ($mark="tikray-open-udp")) do={
                 :local suffix ""
@@ -42,17 +43,53 @@
                 :if ($tag=("tikray:conn-smart-open" . $suffix)) do={:set mode "smart"}
                 :if ([:typeof $mode]!="str") do={:return false}
                 :local listName ("tikray-src-" . $mode . "-open")
-                :set matches [/ip/firewall/mangle/find where comment=$tag and chain="tikray-pre" and action=mark-connection and new-connection-mark=$mark and src-address-list=$listName and !dynamic]
+                :local dest ""
+                :if ($mode="smart") do={:set dest "!tikray-domestic"}
+                :if (([:tostr ($row->"dst-address-list")]!=$dest) or ([:tostr ($row->"connection-state")]!="new") or ([:tostr ($row->"connection-mark")]!="no-mark")) do={:return false}
+                :if (($mark="tikray-open") and ($proto!="!udp") and ($proto!="!17")) do={:return false}
+                :if (($mark="tikray-open-udp") and ($proto!="udp") and ($proto!="17")) do={:return false}
+                :set matches [/ip/firewall/mangle/find where comment=$tag and chain="tikray-pre" and action=mark-connection and new-connection-mark=$mark and src-address-list=$listName and passthrough and !dynamic]
             } else={
                 :local side [:pick $mark 12 [:len $mark]]
                 :local expected ("tikray:udp-birth-" . $side)
-                :if ($tag!=$expected) do={:return false}
+                :if (($tag!=$expected) or (($proto!="udp") and ($proto!="17"))) do={:return false}
                 :local iface "!tikray"
                 :if ($side="runner") do={:set iface "tikray"}
-                :set matches [/ip/firewall/mangle/find where comment=$tag and chain=forward and action=mark-connection and connection-mark="tikray-open-udp" and new-connection-mark=$mark and in-interface-list="@LAN@" and out-interface=$iface and !dynamic]
+                :set matches [/ip/firewall/mangle/find where comment=$tag and chain=forward and action=mark-connection and connection-mark="tikray-open-udp" and new-connection-mark=$mark and in-interface-list="@LAN@" and out-interface=$iface and passthrough and !dynamic]
             }
             :if (([:len $matches]!=1) or ([:pick $matches 0]!=$id)) do={:return false}
         }
+    }
+    :local reserved "^!?tikray-open(-udp|-runner|-wan)?\$"
+    :foreach id in=[/ip/firewall/filter/find where connection-mark~$reserved] do={
+        :local row [/ip/firewall/filter/get $id]
+        :local tag ($row->"comment"); :local mark [:tostr ($row->"connection-mark")]
+        :local proto [:tostr ($row->"protocol")]; :local out [:tostr ($row->"out-interface")]
+        :local same ((($tag="tikray:udp-guard-legacy") and ($mark="tikray-open") and ($out="")) or (($tag="tikray:udp-guard-pending") and ($mark="tikray-open-udp") and ($out="")) or (($tag="tikray:udp-guard-runner") and ($mark="tikray-open-runner") and ($out="!tikray")) or (($tag="tikray:udp-guard-wan") and ($mark="tikray-open-wan") and ($out="tikray")))
+        :if ((!$same) or (($row->"chain")!="forward") or (($row->"action")!="drop") or ([:tostr ($row->"in-interface-list")]!="@LAN@") or (($proto!="udp") and ($proto!="17"))) do={:return false}
+    }
+    :foreach id in=[/ip/firewall/nat/find where connection-mark~$reserved] do={
+        :local row [/ip/firewall/nat/get $id]; :local tag ($row->"comment"); :local mark [:tostr ($row->"connection-mark")]
+        :local same ((($mark="tikray-open") and (($tag="tikray:preserve-open") or ($tag="tikray:preserve-backup-open"))) or (($mark="tikray-open-runner") and (($tag="tikray:preserve-open-runner") or ($tag="tikray:preserve-backup-open-runner"))))
+        :if ((!$same) or (($row->"chain")!="srcnat") or (($row->"action")!="accept") or ([:tostr ($row->"out-interface")]!="tikray")) do={:return false}
+    }
+    :foreach id in=[/ip/firewall/mangle/find where connection-mark~$reserved] do={
+        :local row [/ip/firewall/mangle/get $id]
+        :local tag ($row->"comment"); :local mark [:tostr ($row->"connection-mark")]
+        :local chain ($row->"chain"); :local action ($row->"action"); :local same false
+        :if (($chain="tikray-pre") and ($action="mark-routing") and ([:tostr ($row->"new-routing-mark")]="tikray-open")) do={
+            :set same ((($tag="tikray:route-open") and ($mark="tikray-open")) or (($tag="tikray:route-udp-pending") and ($mark="tikray-open-udp")) or (($tag="tikray:route-udp-runner") and ($mark="tikray-open-runner")) or (($tag="tikray:route-udp-wan") and ($mark="tikray-open-wan")))
+        }
+        :if (($chain="forward") and ($action="change-mss") and ($tag="tikray:mss-open") and ($mark="tikray-open") and ([:tostr ($row->"new-mss")]="clamp-to-pmtu")) do={:set same true}
+        :if (($chain="forward") and ($action="mark-packet") and ([:tostr ($row->"new-packet-mark")]="tikray-proxied")) do={
+            :set same ((($tag="tikray:packet-open") and ($mark="tikray-open")) or (($tag="tikray:packet-udp-runner") and ($mark="tikray-open-runner")) or (($tag="tikray:packet-udp-wan") and ($mark="tikray-open-wan")))
+        }
+        :if (($chain="forward") and ($action="mark-connection") and ($mark="tikray-open-udp")) do={
+            # The writer check already verified complete birth selectors.
+            :local to [:tostr ($row->"new-connection-mark")]
+            :set same ((($tag="tikray:udp-birth-runner") and ($to="tikray-open-runner")) or (($tag="tikray:udp-birth-wan") and ($to="tikray-open-wan")))
+        }
+        :if (!$same) do={:return false}
     }
     :return true
 }
@@ -64,7 +101,7 @@
     :return $tuple
 }
 :do {
-    :if (([$suspended]) or (![$ownsWriters])) do={:return true}
+    :if (([$suspended]) or (![$ownsMarks])) do={:return true}
     :local stale [$currentPath]
     :if ($stale="") do={:return true}
     :local ids [/ip/firewall/address-list/find where (list="tikray-src-smart-open" or list="tikray-src-full-open") and !dynamic and !disabled]
@@ -96,7 +133,7 @@
             :local mark ($original->"connection-mark")
             :if (([:typeof $id]="id") and ([:typeof $src]="ip") and ([:typeof $dst]="ip") and ([:typeof $sp]="num") and ([:typeof $dp]="num") and ($src in $scope) and ($dp!=53) and (($mark=$stale) or ($mark="tikray-open") or ($mark="tikray-open-udp"))) do={
                 :local candidates [/ip/firewall/connection/find where src-address=$src and dst-address=$dst and protocol=udp and src-port=$sp and dst-port=$dp and connection-mark=$mark and !dstnat]
-                :if (([:len $candidates]=1) and ([:pick $candidates 0]=$id) and (![$suspended]) and ([$ownsWriters]) and ([$currentPath]=$stale) and ([:len [/ip/firewall/address-list/find where .id=$member and list=$listName and comment=$label and !disabled and !dynamic]]=1)) do={
+                :if (([:len $candidates]=1) and ([:pick $candidates 0]=$id) and (![$suspended]) and ([$ownsMarks]) and ([$currentPath]=$stale) and ([:len [/ip/firewall/address-list/find where .id=$member and list=$listName and comment=$label and !disabled and !dynamic]]=1)) do={
                     :local reread [/ip/firewall/connection/print detail as-value where src-address=$src and dst-address=$dst and protocol=udp and src-port=$sp and dst-port=$dp and connection-mark=$mark and !dstnat]
                     :if (([:len $reread]=1) and ([$identity $original]=[$identity [:pick $reread 0]])) do={
                         /ip/firewall/connection/remove $id

@@ -12,7 +12,7 @@ import (
 func trafficFixture() (PolicyInput, Topology, map[store.Policy]bool) {
 	in := PolicyInput{Network: store.Network{Subnet: netip.MustParsePrefix("172.18.64.0/28")}}
 	obs := Topology{
-		LANList: "inside", ForeignRoutingMarks: []string{"owner-route", "main"},
+		LANList: "inside", openUDPNative: true, ForeignRoutingMarks: []string{"owner-route", "main"},
 		WAN: []WANPath{{Interface: "ether1", Gateway: netip.MustParseAddr("192.0.2.9"), Network: netip.MustParsePrefix("192.0.2.0/24")}},
 	}
 	active := map[store.Policy]bool{}
@@ -547,6 +547,24 @@ func TestOpenUDPRecordsOnlyItsFirstRoutedPath(t *testing.T) {
 	for _, side := range []string{"legacy", "pending"} {
 		if r := byTag["tikray:udp-guard-"+side]; r.Props["action"] != "drop" || r.Props["protocol"] != "udp" {
 			t.Fatal("unstamped UDP can escape")
+		}
+	}
+}
+
+func TestOpenUDPUpgradeKeepsLegacyPolicyUntilNativeReady(t *testing.T) {
+	in, obs, active := trafficFixture()
+	obs.openUDPNative = false
+	rows, err := ipv4Policy(in, obs, active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := testPacket{ingress: obs.LANList, sourceList: "tikray-src-full-open", destType: "unicast", protocol: "udp", port: "53211", state: "new", connectionMark: "no-mark"}
+	if mark, route := preroute(t, rows, p); mark != "tikray-open" || route != "tikray-open" {
+		t.Fatal("image-only update enabled UDP marks the old emergency command cannot clear")
+	}
+	for _, row := range rows {
+		if row.Comment == "tikray:udp-watch" || strings.HasPrefix(row.Comment, "tikray:udp-guard-") || (row.Menu == firewallNAT && strings.HasSuffix(row.Comment, "-open-runner")) {
+			t.Fatal("image-only update added an incompatible native rule")
 		}
 	}
 }

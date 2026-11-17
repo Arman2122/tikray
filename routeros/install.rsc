@@ -174,6 +174,21 @@
         :if (($count != 3) or [/system/script/get $emergency dont-require-permissions]) do={ :error "tikray: object conflict in emergency script permissions" }
     }
     # @TIKRAY_EMERGENCY_PROOF@
+    :local udpReady do={
+        :local ids [/system/script/find where name="tikray-udp-native" or comment="tikray:udp-native-v1"]
+        :if ([:len $ids]=0) do={ :return false }
+        :if (([:len $ids]!=1) or ([:len [/system/script/find where name="tikray-udp-native" and comment="tikray:udp-native-v1" and !dont-require-permissions and source=""]]!=1)) do={ :error "tikray: UDP native receipt conflict" }
+        :local count 0
+        :foreach right in=[/system/script/get $ids policy] do={
+            :if ([:pick $right 0 1]!="!") do={
+                :if (($right!="read") and ($right!="write")) do={ :error "tikray: UDP native receipt conflict" }
+                :set count ($count+1)
+            }
+        }
+        :if ($count!=2) do={ :error "tikray: UDP native receipt conflict" }
+        :return true
+    }
+    :local existingUDP [$udpReady]
     # Menu and property names here are installer constants. Values from the
     # environment are arguments to parsed functions, never executable source.
     # @TIKRAY_TRANSIT_GUARD@
@@ -586,6 +601,10 @@
     $requireInstall $lease
     # @TIKRAY_EMERGENCY@
     # @TIKRAY_WATCHDOG@
+    :if ([$provisionWatch false $watchBody $trafficBody]!=true) do={ :error "tikray: watchdog upgrade could not be verified" }
+    $requireInstall $lease
+    :if (![$udpReady]) do={ /system/script/add name=tikray-udp-native comment="tikray:udp-native-v1" policy=read,write dont-require-permissions=no source="" }
+    :if (![$udpReady]) do={ :error "tikray: could not verify UDP native receipt" }
     :set waited 0
     :while (([:len [/file/find where name=$readyPath]] = 0) and ($waited < 300)) do={ :delay 1s; :set waited ($waited + 1) }
     :if ([:len [/file/find where name=$readyPath]] != 1) do={ :error "tikray: retry bootstrap; check the core source and rerun install" }

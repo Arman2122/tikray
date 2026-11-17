@@ -45,7 +45,7 @@ func ipv4Policy(in PolicyInput, obs Topology, active map[store.Policy]bool) ([]O
 	}
 	runner := in.Network.Runner().String()
 	out := policyRoutes(runner, obs.WAN[0].nextHop())
-	out = append(out, preserveSources(runner)...)
+	out = append(out, preserveSources(runner, obs.openUDPNative)...)
 	out = append(out, egressGuard(obs.LANList, policies)...)
 	out = append(out, policyDNS(runner, obs.LANList, policies)...)
 	for _, class := range []string{"open", "closed"} {
@@ -102,7 +102,7 @@ func ipv4Policy(in PolicyInput, obs Topology, active map[store.Policy]bool) ([]O
 		if p.Mode == store.ModeSmart {
 			match["dst-address-list"] = "!tikray-domestic"
 		}
-		if !p.KillSwitch {
+		if !p.KillSwitch && obs.openUDPNative {
 			udp := maps.Clone(match)
 			udp["protocol"] = "udp"
 			udp["new-connection-mark"] = openUDP
@@ -115,7 +115,7 @@ func ipv4Policy(in PolicyInput, obs Topology, active map[store.Policy]bool) ([]O
 		out = append(out, object(firewallMangle, "conn-"+string(p.Mode)+"-"+class, match))
 	}
 	udp := active[store.Policy{Mode: store.ModeSmart}] || active[store.Policy{Mode: store.ModeFull}]
-	if udp {
+	if udp && obs.openUDPNative {
 		out = append(out, openUDPRules(obs.LANList, runner, obs.WAN[0].nextHop(), ft != nil)...)
 	}
 	for _, class := range []string{"open", "closed"} {

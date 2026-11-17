@@ -61,6 +61,11 @@ func TestM3ImageBootstrapMigration(t *testing.T) {
 		t.Fatal("missing new traffic helper identity")
 	}
 	rows := append(strings.Split(original[0], "\n"), "/system/script|"+helperID+"|tikray:watchdog-traffic")
+	udpID := f.mustRun(ctx, t, `:put [:tostr [/system/script/find where name="tikray-udp-native" and comment="tikray:udp-native-v1" and source="" and !dont-require-permissions]]`)
+	if !regexp.MustCompile(`^\*[0-9A-Fa-f]+$`).MatchString(udpID) {
+		t.Fatal("missing exact UDP native receipt")
+	}
+	rows = append(rows, "/system/script|"+udpID+"|tikray:udp-native-v1")
 	// The historical installer predates the pre-PID1 return guard. Permit
 	// its exact newly enrolled filter rows while every old identity survives.
 	for _, role := range []string{"acl-runner-transit", "acl-runner-transit-dst", "acl-transit-deny", "acl-transit-deny-backup", "acl-transit-lan:192.168.88.0/24"} {
@@ -133,5 +138,50 @@ func TestM3ImageBootstrapMigration(t *testing.T) {
 	if exists, e := f.exists(ctx, dataRoot+"/state/image-runner.receipt"); e != nil || exists {
 		t.Fatal("lost receipt was automatically recreated")
 	}
+	f.ownerLogin(ctx, t)
+}
+
+// Both installers refer to the same archived signed 8b91d54 image pair and
+// publisher. No image or policy change may be hidden inside native migration.
+func TestM3NativeUDPUpgrade(t *testing.T) {
+	prior := os.Getenv("TIKRAY_LAB_PRIOR_UDP_INSTALLER")
+	if prior == "" {
+		t.Skip("supply the verified Task 6b installer and its exact archives")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Minute)
+	defer cancel()
+	f := DeployM3(ctx, t)
+	current := f.installer
+	f.installer = prior
+	f.stage(ctx, t, true)
+	f.requireSuccess(ctx, t)
+	f.checkReady(ctx, t)
+	before := f.stability(ctx, t)
+	const receipt = `[/system/script/find where name="tikray-udp-native" or comment="tikray:udp-native-v1"]`
+	if f.mustRun(ctx, t, `:put [:len `+receipt+`]`) != "0" {
+		t.Fatal("historical installer already authorized the new UDP rules")
+	}
+	f.installer = current
+	if f.CHR.Push(ctx, current, "m3-lab-install.rsc") != nil {
+		t.Fatal("could not deliver the new native source for unchanged signed images")
+	}
+	f.mustRun(ctx, t, `/system/script/add name=lab-udp-save source=[/system/script/get [find where name="tikray-emergency-off"] source] policy=read; /system/script/set [find where name="tikray-emergency-off"] source=":return false"`)
+	f.requireRefusal(ctx, t, "tikray: inspect changed emergency script before installing")
+	if f.mustRun(ctx, t, `:put [:len `+receipt+`]`) != "0" {
+		t.Fatal("unverified emergency body authorized the new UDP rules")
+	}
+	f.mustRun(ctx, t, `/system/script/set [find where name="tikray-emergency-off"] source=[/system/script/get [find where name="lab-udp-save"] source]; /system/script/remove [find where name="lab-udp-save"]`)
+	f.requireStable(ctx, t, before, "owner-changed emergency refusal")
+	f.requireSuccess(ctx, t)
+	id := f.mustRun(ctx, t, `:put [:tostr `+receipt+`]`)
+	if !regexp.MustCompile(`^\*[0-9A-Fa-f]+$`).MatchString(id) {
+		t.Fatal("verified native migration did not publish its receipt")
+	}
+	rows := append(strings.Split(before[0], "\n"), "/system/script|"+id+"|tikray:udp-native-v1")
+	slices.Sort(rows)
+	before[0] = strings.Join(rows, "\n")
+	f.requireStable(ctx, t, before, "native upgrade with the original signed images")
+	f.requireSuccess(ctx, t)
+	f.requireStable(ctx, t, before, "repeat install after native upgrade")
 	f.ownerLogin(ctx, t)
 }

@@ -26,7 +26,8 @@ func TestBootReadyCHR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if os.Getenv("TIKRAY_LAB_PREPARE_XRAY") == "1" {
+	t.Log("CHR cache phase: CHR downloaded")
+	if resolved := os.Getenv("TIKRAY_LAB_PREPARED_XRAY"); resolved != "" {
 		core, err := ResolveXrayVersion(ctx, LabXrayVersion())
 		if err != nil {
 			t.Fatal("could not resolve the pinned core for CHR")
@@ -34,16 +35,40 @@ func TestBootReadyCHR(t *testing.T) {
 		if _, err := XrayBinaryVersion(ctx, CacheDir(), core, labArch().GOARCH()); err != nil {
 			t.Fatal("could not prepare the pinned core for CHR")
 		}
+		t.Log("CHR cache phase: core built")
+		// Only the resolved public tag crosses into the isolated run.
+		if os.WriteFile(resolved, []byte(core+"\n"), 0644) != nil {
+			t.Fatal("could not record the tested core release")
+		}
 	}
 	n, err := SetupNetwork(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { n.Teardown() })
+	t.Log("CHR cache phase: lab network ready")
+	note := func(format string, _ ...any) {
+		// Public CI may report these fixed milestones. Serial, SSH and
+		// router-provided diagnostics stay in the private preparation log.
+		switch format {
+		case "console login done":
+			t.Log("CHR cache phase: serial login")
+		case "ssh up":
+			t.Log("CHR cache phase: SSH ready")
+		case "container package installed":
+			t.Log("CHR cache phase: container package ready")
+		case "device-mode container enabled":
+			t.Log("CHR cache phase: container mode ready")
+		case "disk1 formatted ext4":
+			t.Log("CHR cache phase: data disk ready")
+		case "power off":
+			t.Log("CHR cache phase: clean shutdown")
+		}
+	}
 
 	boot := func() (*CHR, string) {
 		wd := workDir(t)
-		c, err := BootReadyCHR(ctx, n, BootOptions{Version: version, Arch: labArch(), Artifacts: art, WorkDir: wd, Password: "tikray-lab"})
+		c, err := BootReadyCHR(ctx, n, BootOptions{Version: version, Arch: labArch(), Artifacts: art, WorkDir: wd, Password: "tikray-lab", Notef: note})
 		if err != nil {
 			t.Fatal(err)
 		}

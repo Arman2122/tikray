@@ -18,8 +18,8 @@ concurrency:
 jobs:
   acceptance:
     name: CHR ${{ matrix.target.version }} ${{ matrix.target.ros_arch }} / ${{ matrix.group }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    runs-on: ubuntu-26.04
+    timeout-minutes: 210
     strategy:
       fail-fast: false
       matrix:
@@ -28,7 +28,6 @@ jobs:
     env:
       TIKRAY_LAB_CHANNEL: ${{ matrix.target.version }}
       TIKRAY_LAB_ARCH: ${{ matrix.target.ros_arch }}
-      TIKRAY_LAB_XRAY: v26.11.9
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,7 +56,7 @@ jobs:
       - name: Prepare signed images and CHR cache
         env:
           IMAGE_ARCH: ${{ matrix.target.go_arch }}
-          TIKRAY_LAB_PREPARE_XRAY: "1"
+          TIKRAY_LAB_PREPARED_XRAY: ${{ runner.temp }}/tested-xray.txt
         run: |
           umask 077
           if ! scripts/build-watchdog-lab.sh "$RUNNER_TEMP/chr-images" "$IMAGE_ARCH" >"$RUNNER_TEMP/build-chr-images.log" 2>&1; then
@@ -65,11 +64,18 @@ jobs:
             exit 1
           fi
           go test -c -tags lab -o "$RUNNER_TEMP/prepare-chr.test" ./test/lab
-          if ! sudo --preserve-env=PATH,GOMODCACHE,GOCACHE,TIKRAY_LAB_CHANNEL,TIKRAY_LAB_ARCH,TIKRAY_LAB_XRAY,TIKRAY_LAB_CACHE,TIKRAY_LAB_PREPARE_XRAY \
-              "$RUNNER_TEMP/prepare-chr.test" -test.run '^TestBootReadyCHR$' -test.timeout=25m >"$RUNNER_TEMP/prepare-chr.log" 2>&1; then
+          if ! sudo --preserve-env=PATH,GOMODCACHE,GOCACHE,TIKRAY_LAB_CHANNEL,TIKRAY_LAB_ARCH,TIKRAY_LAB_CACHE,TIKRAY_LAB_PREPARED_XRAY \
+              "$RUNNER_TEMP/prepare-chr.test" -test.v -test.run '^TestBootReadyCHR$' -test.timeout=50m >"$RUNNER_TEMP/prepare-chr.log" 2>&1; then
+            grep -oE 'CHR cache phase: (CHR downloaded|core built|lab network ready|serial login|SSH ready|container package ready|container mode ready|data disk ready|clean shutdown)' "$RUNNER_TEMP/prepare-chr.log" || true
             echo "::error::CHR cache preparation failed"
             exit 1
           fi
+          read -r core <"$TIKRAY_LAB_PREPARED_XRAY"
+          if [[ ! $core =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+            echo "::error::CHR core release could not be pinned"
+            exit 1
+          fi
+          echo "TIKRAY_LAB_XRAY=$core" >>"$GITHUB_ENV"
       - name: Run isolated CHR acceptance tests
         env:
           GROUP: ${{ matrix.group }}
@@ -84,6 +90,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: chr-${{ matrix.target.version }}-${{ matrix.target.ros_arch }}-${{ matrix.group }}
-          path: ${{ runner.temp }}/chr-results/*.json
+          path: |
+            ${{ runner.temp }}/chr-results/*.json
+            ${{ runner.temp }}/tested-xray.txt
           if-no-files-found: error
 

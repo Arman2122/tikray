@@ -696,3 +696,17 @@ Ruling: Use the runner's authenticated reload with a temporarily moved selection
 The native counter probe reached the owned CIDR connection query after conversion. The six-case outage fixture also uses a separate DHCP client and an independently hosted, certificate-verified DoH responder. The first DoH trial failed against an HTTP/1.1 fixture. The pinned xray core uses an HTTP/2-only DNS transport, so the replacement fixture requires HTTP/2 and reports only a direct or proxied source marker. Live fixture acceptance is still pending.
 
 The lab package race run, tagged lab vet, typed evidence tests and workflow syntax validation passed locally.
+
+The focused signed stable x86 rescan at 3173d53 passed in 278.25 s. The same LAN UDP socket received WAN replies while both containers were down and proxied replies when the runner alone returned. The separate emergency-off check passed in 328.96 s on that kit.
+
+Ruling: Gate new UDP roles on an inert, exact native capability receipt installed only after both emergency and watchdog programs verify — independent review found the old emergency script cannot undo new marks; owner reimport migrates only exact previously shipped sources and retains IDs — cost if wrong: an image-only upgrade stays on the earlier open-UDP behavior until the owner imports compatible native scripts. The uninstalled or modified receipt does not authorize the new rules. The image-only policy regression failed first.
+
+Ruling: Refuse automatic UDP cleanup when a router-filtered mark read finds any foreign writer or consumer — a valid tuple and an enrolled source do not authorize removal of a connection used by an owner rule — cost if wrong: a shared mark delays open recovery until the owner removes the conflicting reference or the tuple expires. The real stable x86 regression failed on the earlier signed kit in 274.21 s when it retired an exact kept binding while the owner still used its mark.
+
+Ruling: Resolve the newest xray tag once per CI job before isolation and pass that exact public tag to the cache and guest tests — the spec follows newest releases and a second resolution can race the read-only cache — cost if wrong: a new upstream tag can fail acceptance immediately. The reviewed local matrix retains the explicitly tested core.
+
+The initial hosted Ubuntu 24.04 trial did not get through CHR cache preparation, though WSL cold preparation with Ubuntu 26.04 and QEMU 10.2.1 passed in 117.72 s. Use explicit Ubuntu 26.04 for the hosted jobs and expose fixed cold-boot milestones to diagnose a failure without publishing raw console, SSH or preparation output. The cause of the hosted failure has not been confirmed.
+
+Ruling: Make the early-reboot fixture explicitly stop both containers after setting start-on-boot to no and before the real power cut — the first complete matrix could not establish a stopped container window with the boot flag alone on any target — cost if wrong: the test still requires positive forwarding observed externally on the new boot before either container is started, and closed packets remain tracked from before the cut. The fixture restores both boot settings and demands healthy proxy recovery.
+
+The stable focused planned-runner image regression reached the signed healthy update, explicit rollback and actual unhealthy image. The original data socket received 178 direct replies with zero untranslated sources. The retained DNS socket got zero fallback replies, so this run failed. Keep the existing DNS check and diagnose the exact retained binding on the next replay.

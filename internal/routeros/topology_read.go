@@ -116,6 +116,13 @@ func (o observation) topology(scope InstallScope) (Topology, []LeaseInfo, error)
 	if len(rows) != 1 || unavailableRow(rows[0]) || rows[0]["interface"] != "tikray" || rows[0]["comment"] != "tikray:addr" || rows[0]["address"] != netip.PrefixFrom(bridgeAddr, scope.Subnet.Bits()).String() {
 		return Topology{}, nil, errTopology
 	}
+	// An image can be replaced without importing the paired native scripts.
+	// Keep the old mark format until the owner has upgraded all native readers.
+	ready, e := o.inertScript("tikray-udp-native", "tikray:udp-native-v1")
+	if e != nil {
+		return Topology{}, nil, e
+	}
+	t.openUDPNative = ready != ""
 	t.RouterIPs = append(t.RouterIPs, bridgeAddr)
 	members, e := o.lanMembers(scope.LANList)
 	if e != nil {

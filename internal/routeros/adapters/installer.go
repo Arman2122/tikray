@@ -253,12 +253,24 @@ func buildInstaller(p Profile, images []VerifiedArchive, dst io.Writer, readSour
 			if err != nil {
 				return err
 			}
-			fragment = install
+			fragment = `:if ($previousOff != "") do={
+        $requireInstall $lease
+        :if (([:len [/system/script/find where name="tikray-emergency-off" and comment="tikray:emergency-off" and !dont-require-permissions]] != 1) or ([/system/script/get $emergency source] != $previousOff)) do={ :error "tikray: emergency source changed during upgrade" }
+        /system/script/set $emergency source=$offBody
+        :local written [/system/script/get $emergency source]
+        :if (($written!=$offBody) and ($written!=($offBody . "\r\n")) and ($written!=($offBody . "\n"))) do={ :error "tikray: emergency script upgrade could not be verified" }
+    }
+    ` + install
 			proof := fmt.Sprintf(`:local offBody %s
+    :local previousOff ""
     :if ([:len $emergency] = 1) do={
         :local saved [/system/script/get $emergency source]
         :local sum [:convert [:convert $saved from=raw transform=sha512 to=hex] transform=lc]
-        :if (($saved != $offBody) and ($saved != ($offBody . "\r\n")) and ($saved != ($offBody . "\n")) and ($sum != "%x") and ($sum != "%x") and ($sum != "%x") and ($sum != "%x")) do={ :error "tikray: inspect changed emergency script before installing" }
+        :if (($saved != $offBody) and ($saved != ($offBody . "\r\n")) and ($saved != ($offBody . "\n")) and ($sum != "%x") and ($sum != "%x") and ($sum != "%x") and ($sum != "%x")) do={
+            # Exact emergency source previously shipped in M3a and Task 6b.
+            :if ([:typeof [:find {"95c0a14cb1ed168ca6e881c80d355f865daaca5d9e334ed76fc9dbe4cc4099553eabba8a7ecf1f5eaa6683088f80d5b99266fb4fcd8b18838a7801704c1dd135";"80ba1d62083fd8810d0b6a87e2ab73b3666686cadc1e9a5f7c4e3e81fef1a9ca6645ca5c0dfd83e734f8a92ab5987f4559c86bcc9f71f1186dd731d8669723e6";"fda6cff2d77fdc89d24ea75034dc90f701ff07071fd9b6d83ffacb533fd83e0aeba3075baa424bbb30d97038c181295f39a8c124b0a37ed715b1bfbaf7b11a1f";"7a38c8d4c9d849521ca842a40189644005816bc33bedca0fc863fe21ed0a47c2ee9af35f5c931040b16aa05c8af2d6d23f40f22f277d9ff25f496a982dff2e7f"} $sum]]!="num") do={ :error "tikray: inspect changed emergency script before installing" }
+            :set previousOff $saved
+        }
     }`, scriptLiteral(body), sha512.Sum512([]byte(body)), sha512.Sum512([]byte(strings.ReplaceAll(body, "\n", "\r\n"))),
 				sha512.Sum512([]byte(body+"\n")), sha512.Sum512([]byte(strings.ReplaceAll(body+"\n", "\n", "\r\n"))))
 			if err = replace("# @TIKRAY_EMERGENCY_PROOF@", proof); err != nil {

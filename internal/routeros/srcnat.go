@@ -13,7 +13,7 @@ import (
 // exceptions specific to packets actually steered into the private bridge.
 // NAT has no connection-nat-state matcher on the supported CHRs. The DNS
 // aperture is an active source list, the runner alone, and TCP/UDP port 53.
-func preserveSources(runner string) []Object {
+func preserveSources(runner string, openUDPNative bool) []Object {
 	var rows []Object
 	add := func(role string, match map[string]string) {
 		match["chain"], match["action"], match["out-interface"] = "srcnat", "accept", "tikray"
@@ -26,7 +26,9 @@ func preserveSources(runner string) []Object {
 			rows = append(rows, r)
 		}
 	}
-	add("open-runner", map[string]string{"connection-mark": openRunner})
+	if openUDPNative {
+		add("open-runner", map[string]string{"connection-mark": openRunner})
+	}
 	for _, closed := range []bool{false, true} {
 		class := policyClass(store.Policy{KillSwitch: closed})
 		add(class, map[string]string{"connection-mark": "tikray-" + class})
@@ -108,7 +110,7 @@ func (o observation) canExitOnPrivateBridge(r Row) (bool, error) {
 }
 
 func (o observation) sourceGuardsBefore(t *Topology, before map[string]string) (bool, error) {
-	wanted := preserveSources((store.Network{Subnet: t.Subnet}).Runner().String())
+	wanted := preserveSources((store.Network{Subnet: t.Subnet}).Runner().String(), t.openUDPNative)
 	if len(before) < len(wanted)/2 {
 		return false, nil
 	}
