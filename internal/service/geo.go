@@ -31,7 +31,7 @@ func (s *Service) geoUpdater(st store.State, rev uint64) *artifacts.GeoUpdater {
 		return nil
 	}
 	g.Finish = func(ctx context.Context, active runnerapi.Selection, ranges []netip.Prefix) error {
-		err := s.finishRouterFor(ctx, st, rev, active, ranges)
+		err := s.finishRouterFor(ctx, st, rev, active, ranges, false)
 		if errors.Is(err, ErrRouterConflict) {
 			return errors.Join(artifacts.ErrGeoPolicyRefused, err)
 		}

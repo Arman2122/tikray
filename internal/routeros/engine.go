@@ -212,7 +212,7 @@ func (e *Engine) verify(ctx context.Context, p *pass) error {
 	if a.Generation != p.a.Generation {
 		return ErrStaleGeneration
 	}
-	rows, err := Desired(p.target.Policy, a.Topology, p.target.Geo)
+	rows, err := Desired(p.target.Policy, p.target.observedTopology(a.Topology), p.target.Geo)
 	if err != nil {
 		return err
 	}
@@ -321,7 +321,7 @@ func (e *Engine) prepare(ctx context.Context, t Target) (*pass, error) {
 		return nil, ErrPolicyConflict
 	}
 	p.fence = emergencyFence{Native: e.c, marker: marker}
-	p.rows, err = Desired(t.Policy, p.a.Topology, t.Geo)
+	p.rows, err = Desired(t.Policy, t.observedTopology(p.a.Topology), t.Geo)
 	if err != nil {
 		return nil, err
 	}
@@ -336,6 +336,13 @@ func (e *Engine) prepare(ctx context.Context, t Target) (*pass, error) {
 	before := policyView{}
 	if p.j.Verified != nil {
 		before = *p.j.Verified
+		if len(p.j.Pending) == 0 && slices.ContainsFunc(p.a.Rows, func(r Observed) bool {
+			return r.Menu == watchMenu && r.Comment == "tikray:udp-watch"
+		}) {
+			// An earlier controller may have saved the same policy without
+			// recording its UDP mark format.
+			before.OpenUDP = true
+		}
 	}
 	current := before
 	if n := len(p.j.Pending); n > 0 {

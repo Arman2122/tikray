@@ -25,6 +25,13 @@ func ownedConnectionMark(mark string) bool {
 	}
 }
 
+func openUDPBinding(mark string, tracked bool) bool {
+	if tracked {
+		return mark == openUDP || mark == openRunner || mark == openWAN
+	}
+	return mark == "tikray-open"
+}
+
 func connectionMatchesPolicy(mark string, policy store.Policy) bool {
 	switch mark {
 	case "tikray-closed":

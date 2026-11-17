@@ -108,6 +108,10 @@ func (s *Service) afterRunner(ctx context.Context, st store.State, rev uint64, e
 // diff. All managed state writes take this lock. Re-read the revision as
 // well, so a stale caller cannot label its result as the current policy.
 func (s *Service) finishRouter(ctx context.Context, st store.State, rev uint64) error {
+	return s.finishRouterMode(ctx, st, rev, false)
+}
+
+func (s *Service) finishRouterMode(ctx context.Context, st store.State, rev uint64, legacyOpenUDP bool) error {
 	if s.router == nil {
 		return nil
 	}
@@ -120,7 +124,7 @@ func (s *Service) finishRouter(ctx context.Context, st store.State, rev uint64) 
 	if err != nil {
 		return err
 	}
-	return s.finishRouterFor(ctx, st, rev, *rs.Active, ranges)
+	return s.finishRouterFor(ctx, st, rev, *rs.Active, ranges, legacyOpenUDP)
 }
 
 func renderFailureReason(err error) string {
@@ -148,7 +152,7 @@ func (s *Service) activeGeoRanges(slot string, fresh bool) ([]netip.Prefix, erro
 
 // The geo journal supplies a specific committed selection. Never substitute
 // another observation between choosing its ranges and releasing its guards.
-func (s *Service) finishRouterFor(ctx context.Context, st store.State, rev uint64, selection runnerapi.Selection, ranges []netip.Prefix) error {
+func (s *Service) finishRouterFor(ctx context.Context, st store.State, rev uint64, selection runnerapi.Selection, ranges []netip.Prefix, legacyOpenUDP bool) error {
 	name, err := configName(s.updater(st, rev), &selection)
 	if err != nil || name != selection.Config {
 		s.routerPending(renderFailureReason(err))
@@ -177,7 +181,7 @@ func (s *Service) finishRouterFor(ctx context.Context, st store.State, rev uint6
 		s.routerPending("runner")
 		return err
 	}
-	report, err := s.router.Reconcile(ctx, routeros.Target{Policy: policy, Revision: rev, Selection: selection, Geo: ranges, Verify: verify})
+	report, err := s.router.Reconcile(ctx, routeros.Target{Policy: policy, Revision: rev, Selection: selection, Geo: ranges, LegacyOpenUDP: legacyOpenUDP, Verify: verify})
 	if err != nil {
 		return s.routerFailure(err)
 	}

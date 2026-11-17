@@ -110,7 +110,15 @@ func (o observation) canExitOnPrivateBridge(r Row) (bool, error) {
 }
 
 func (o observation) sourceGuardsBefore(t *Topology, before map[string]string) (bool, error) {
-	wanted := preserveSources((store.Network{Subnet: t.Subnet}).Runner().String(), t.openUDPNative)
+	tracked := false
+	if t.openUDPNative {
+		writers, err := o.read(firewallMangle, ".id", "?new-connection-mark="+openUDP, "?disabled=true", "?#!")
+		if err != nil {
+			return false, err
+		}
+		tracked = len(writers) > 0
+	}
+	wanted := preserveSources((store.Network{Subnet: t.Subnet}).Runner().String(), tracked)
 	if len(before) < len(wanted)/2 {
 		return false, nil
 	}

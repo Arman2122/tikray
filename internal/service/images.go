@@ -51,8 +51,12 @@ func (s *Service) imageChange(ctx context.Context, component, version string) (a
 	if artifacts.HotPending(s.data) || artifacts.GeoPending(s.data) {
 		return none, artifacts.ErrLocked
 	}
-	if _, err := artifacts.ReadImageStatus(s.data, component); err != nil {
+	status, err := artifacts.ReadImageStatus(s.data, component)
+	if err != nil {
 		return none, artifacts.ErrImageState
+	}
+	if version == "" && status.Previous == "" {
+		return none, artifacts.ErrImagePrevious
 	}
 	st, rev := s.store.State()
 	if version == "" && component == "runner" {
@@ -61,16 +65,14 @@ func (s *Service) imageChange(ctx context.Context, component, version string) (a
 		if err := s.prepareRouter(ctx, st, rev); err != nil {
 			return none, err
 		}
-	} else if err := s.finishRouter(ctx, st, rev); err != nil {
-		return none, err
+	} else if component != "tikray" {
+		if err := s.finishRouter(ctx, st, rev); err != nil {
+			return none, err
+		}
 	}
 	u := s.updater(st, rev)
-	var op artifacts.ImageOperation
-	var err error
-	if version == "" {
-		op, err = u.BeginImageRollback(ctx, component)
-	} else {
-		var img artifacts.VerifiedImage
+	var img artifacts.VerifiedImage
+	if version != "" {
 		img, err = u.StageImage(ctx, component, version)
 		if err != nil {
 			if errors.Is(err, artifacts.ErrLocked) || ctx.Err() != nil {
@@ -78,9 +80,27 @@ func (s *Service) imageChange(ctx context.Context, component, version string) (a
 			}
 			return none, &Refused{Reason: "signed release image could not be verified"}
 		}
+	}
+	if component == "tikray" {
+		// Either the candidate or the watchdog's saved image can predate
+		// the path marks. Publish the request only after the common policy
+		// has been verified and all newer live bindings have been retired.
+		if err := s.finishRouterMode(ctx, st, rev, true); err != nil {
+			u.DiscardStagedImage(ctx, img)
+			s.Kick()
+			return none, err
+		}
+	}
+	var op artifacts.ImageOperation
+	if version == "" {
+		op, err = u.BeginImageRollback(ctx, component)
+	} else {
 		op, err = u.BeginImageUpdate(ctx, img)
 	}
 	if err != nil {
+		if component == "tikray" {
+			s.Kick()
+		}
 		if errors.Is(err, artifacts.ErrImageBusy) || errors.Is(err, artifacts.ErrImagePrevious) || errors.Is(err, artifacts.ErrLocked) {
 			return none, err
 		}

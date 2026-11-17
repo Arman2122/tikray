@@ -47,8 +47,18 @@ type Target struct {
 	// WithdrawGeo stages the candidate policy under holds and removes only
 	// obsolete domestic exemptions. Reconcile adds new ranges after trial.
 	WithdrawGeo bool
-	Verify      func(context.Context) error `json:"-"`
+	// LegacyOpenUDP retires new-only routing roles before a control image swap.
+	LegacyOpenUDP bool
+	Verify        func(context.Context) error `json:"-"`
 }
+
+func (t Target) observedTopology(observed Topology) Topology {
+	if t.LegacyOpenUDP {
+		observed.openUDPNative = false
+	}
+	return observed
+}
+
 type Report struct {
 	Added, Set, Moved, Removed, Invalidated int
 	Revision                                uint64

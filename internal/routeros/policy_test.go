@@ -568,3 +568,39 @@ func TestOpenUDPUpgradeKeepsLegacyPolicyUntilNativeReady(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenUDPVersionTransitionPurgesOnlyOwnedData(t *testing.T) {
+	prefix := netip.MustParsePrefix("192.168.88.110/32")
+	policy := store.Policy{Mode: store.ModeFull}
+	previous := policyView{OpenUDP: true, Sources: []sourceClass{{prefix, policy}}, LANList: "inside"}
+	target := previous
+	target.OpenUDP = false
+	changes := flowChanges(previous, target)
+	if len(changes) != 1 {
+		t.Fatalf("expected one UDP compatibility edge, got %d", len(changes))
+	}
+	change := affectedClass{change: changes[0], old: &previous, next: &target}
+	remote := netip.MustParseAddr("192.0.2.3")
+	for _, tc := range []struct {
+		proto, port, mark string
+		purge             bool
+	}{
+		{"udp", "45111", openRunner, true},
+		{"udp", "45111", openWAN, true},
+		{"udp", "45111", openUDP, true},
+		{"udp", "53", openRunner, false},
+		{"tcp", "45111", "tikray-open", false},
+		{"udp", "45111", "owner-mark", false},
+		{"udp", "45111", "tikray-open", false},
+	} {
+		row := Row{"protocol": tc.proto, "dst-port": tc.port, "connection-mark": tc.mark}
+		if got := change.includes(prefix.Addr(), remote, row); got != tc.purge {
+			t.Errorf("unexpected purge for %s/%s %s", tc.proto, tc.port, tc.mark)
+		}
+	}
+	guards := holdsFor([]policyView{previous, target})
+	guards = slices.DeleteFunc(guards, func(row Object) bool { return row.Menu != firewallFilter })
+	if len(guards) != 1 || guards[0].Props["protocol"] != "udp" || guards[0].Props["dst-port"] != "!53" || guards[0].Props["src-address"] != prefix.String() {
+		t.Fatal("handoff must temporarily guard only affected UDP data")
+	}
+}

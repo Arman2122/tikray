@@ -42,6 +42,11 @@ func (d affectedClass) includes(src, dst netip.Addr, r Row) bool {
 		return false
 	}
 	dns := isDNS(r)
+	if d.change.UDPOnly {
+		mark := r["connection-mark"]
+		return r["protocol"] == "udp" && !dns && !onBit(r["dstnat"]) && openUDPBinding(mark, d.old.OpenUDP) &&
+			affectsFlow(d.change, *d.old, *d.next, dst, false)
+	}
 	if d.change.DataOnly && dns || d.change.DNSProtocol != "" && d.change.DNSProtocol != r["protocol"] {
 		return false
 	}
@@ -236,6 +241,9 @@ func onNewPath(t Topology, dnsRules map[string]Observed, v policyView, r Row, sr
 		}
 		if !p.KillSwitch && !ownedMark && !noConnMark(r) {
 			return true // open mangle leaves existing owner marks alone
+		}
+		if !p.KillSwitch && r["protocol"] == "udp" {
+			return !onBit(r["fasttrack"]) && r["connection-mark"] != openUDP && openUDPBinding(r["connection-mark"], v.OpenUDP)
 		}
 		return !onBit(r["fasttrack"]) && connectionMatchesPolicy(r["connection-mark"], p)
 	}

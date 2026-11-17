@@ -23,6 +23,7 @@ type sourceClass struct {
 type policyView struct {
 	// RepairOnly marks a synthetic baseline for verified policy that drifted.
 	// It is never published as the verified outcome of a transition.
+	OpenUDP         bool         `json:",omitempty"`
 	RepairOnly      bool         `json:",omitempty"`
 	Repairs         []flowChange `json:",omitempty"`
 	Sources         []sourceClass
@@ -34,6 +35,7 @@ type policyView struct {
 type flowChange struct {
 	StraySource bool `json:",omitempty"`
 	DataOnly    bool `json:",omitempty"`
+	UDPOnly     bool `json:",omitempty"`
 	Source      netip.Prefix
 	From, To    store.Policy
 	DNSProtocol string `json:",omitempty"`
@@ -44,6 +46,9 @@ var directPolicy = store.Policy{Mode: store.ModeDirect}
 func viewOf(rows []Object, t Topology) policyView {
 	var v policyView
 	for _, r := range rows {
+		if r.Menu == watchMenu && r.Comment == "tikray:udp-watch" {
+			v.OpenUDP = true
+		}
 		if r.Menu == ipv6Filter {
 			v.V6 = append(v.V6, r)
 			continue
@@ -124,6 +129,11 @@ func flowChanges(old, next policyView) []flowChange {
 	var changes []flowChange
 	for i := 1; i < len(cuts); i++ {
 		a, b := policyAt(old, cuts[i-1]), policyAt(next, cuts[i-1])
+		if old.OpenUDP != next.OpenUDP && !a.KillSwitch && !b.KillSwitch && sameProxyClass(a, b) {
+			for _, p := range appendCIDRs(nil, addrRange{cuts[i-1], cuts[i]}) {
+				changes = append(changes, flowChange{Source: p, From: a, To: b, DataOnly: true, UDPOnly: true})
+			}
+		}
 		if a == b && (a.Mode == store.ModeDirect || (!localChanged && old.LANList == next.LANList && (a.Mode != store.ModeSmart || !domesticChanged))) {
 			continue
 		}
@@ -168,6 +178,9 @@ func affectsFlow(ch flowChange, old, next policyView, dst netip.Addr, dns bool) 
 		return false
 	}
 	a, b := proxyDestination(old, ch.From, dst), proxyDestination(next, ch.To, dst)
+	if ch.UDPOnly {
+		return a || b
+	}
 	return a != b || (a && b && (ch.From.KillSwitch != ch.To.KillSwitch || old.LANList != next.LANList))
 }
 
@@ -297,6 +310,12 @@ func holdsFor(views []policyView) []Object {
 				continue
 			}
 			base := map[string]string{"chain": "forward", "src-address": ch.Source.String(), "in-interface-list": next.LANList, "action": "drop"}
+			if ch.UDPOnly {
+				base["protocol"], base["dst-port"] = "udp", "!53"
+				oldBypass, newBypass := bypassDestinations(old, ch.From.Mode), bypassDestinations(next, ch.To.Mode)
+				stageDataHold(have, base, stageExclusions(have, uniquePrefixes(slices.Concat(oldBypass, newBypass))))
+				continue
+			}
 			if sameProxyClass(ch.From, ch.To) && old.LANList == next.LANList && ch.DNSProtocol == "" {
 				if ch.To.KillSwitch {
 					modes := [2]store.Mode{ch.From.Mode, ch.To.Mode}

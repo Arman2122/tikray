@@ -269,12 +269,22 @@ func (u *CoreUpdater) BeginImageUpdate(ctx context.Context, image VerifiedImage)
 	if err != nil {
 		// A disconnected caller may still have published its request. Only
 		// discard this candidate after checking the live marker and lineage.
-		reclaim, done := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
-		defer done()
-		u.retireRefusedImage(reclaim, image.Ref())
+		u.DiscardStagedImage(ctx, image)
 	}
 	return op, err
 }
+
+// DiscardStagedImage retires a verified candidate that failed before
+// publication, provided it is unreferenced by a live request or receipt.
+func (u *CoreUpdater) DiscardStagedImage(ctx context.Context, image VerifiedImage) {
+	if !image.Ref().Valid() {
+		return
+	}
+	reclaim, done := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer done()
+	u.retireRefusedImage(reclaim, image.Ref())
+}
+
 func (u *CoreUpdater) BeginImageRollback(ctx context.Context, component string) (ImageOperation, error) {
 	return u.beginImageChange(ctx, component, ImageRef{}, true)
 }
