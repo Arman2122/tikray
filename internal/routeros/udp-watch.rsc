@@ -70,7 +70,8 @@
     :local ids [/ip/firewall/address-list/find where (list="tikray-src-smart-open" or list="tikray-src-full-open") and !dynamic and !disabled]
     :local size [:len $ids]
     :if ($size=0) do={:return true}
-    :local count $"done-tests"
+    # Netwatch exposes its test counter as text in the script environment.
+    :local count [:tonum $"done-tests"]
     :if ([:typeof $count]!="num") do={:return true}
     :local deadline ([:tonsec [/system/resource/get uptime]]+1500000000)
     :local removes 0
