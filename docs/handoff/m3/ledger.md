@@ -746,3 +746,17 @@ A later cross-version replay completed the update but did not re-arm the new pol
 The retry reached ordinary policy reconciliation in the replacement controller on both x86 versions. A new unit regression then reproduced the conflict in the planner: temporary UDP guards included a connection mark, but native ownership validation omitted that selector from the immutable tag hash. The corrected planner accepts its own generated guards and retains selector-bound identity.
 
 One later hosted LTS cold boot reached the serial prompt but did not complete its first provisioning command. The lab now requires a fresh, non-secret reply to a harmless serial command before provisioning, with a separate bounded configuration window after login. A fake console first emitted the old prompt without the reply and then returned the actual proof. The real isolated stable and LTS preparations both reached SSH with the new handshake.
+
+### Outage acceptance replay
+
+All 18 outage cases passed again on the signed 285227264d97f605277b24a4d9bf9da3c7e618fd kit with xray v26.11.9. The results below supersede the first set in the working tree. Both historical sets are in Git. The exact signed kits for 5db275c and 2852272 are retained under out/m3-reviewed, with SOURCE_COMMIT, NATIVE_COMMIT and SHA256SUMS beside each target.
+
+| Target | Full suite seconds | Completed UTC | Result SHA-256 |
+| --- | --- | --- | --- |
+| 7.25 x86_64 | 1848.08 | 2026-11-17 22:32:43 | aa3f417f96b3d73fd60041b5bd469040d1e25ec13dbf46d1c0ce11c99683d571 |
+| 7.23.8 x86_64 | 1872.88 | 2026-11-17 22:33:08 | b668027b164a7e605199647e3a3b47651486152cdd76371b30d48964c4a20c22 |
+| 7.25 arm64 | 1842.15 | 2026-11-17 22:32:38 | e9fd3903604825f7d15e6644a60181460ab1fd8533c8a941fa90cf0709d6d37e |
+
+The focused stable x86 planned runner update and rollback passed in 1787.44 s against the signed 5db275c product and the corrected late-DNS witness. It exercised signed healthy and unhealthy candidates, explicit and automatic rollback, actual same-socket UDP and DNS, the alternate WAN route, verified owner access, and zero closed leaks. The result is a focused replay and leaves Task 6b's complete five-case result files as recorded above.
+
+The cold-cache fixture with the fresh console acknowledgement completed both stable and LTS x86 preparations in isolated WSL2 QEMU. Regular unit, compatibility and image CI passed on ac02da0. The hosted CHR workflow and the authentic older-control rollback replay are still in flight.
