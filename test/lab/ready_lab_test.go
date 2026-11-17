@@ -6,6 +6,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -31,8 +33,15 @@ func TestPrepareCHRInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal("could not resolve the pinned core for CHR")
 	}
-	if _, err := XrayBinaryVersion(ctx, CacheDir(), core, labArch().GOARCH()); err != nil {
-		t.Fatal("could not prepare the pinned core for CHR")
+	for _, arch := range slices.Compact([]string{labArch().GOARCH(), runtime.GOARCH}) {
+		if _, err := XrayBinaryVersion(ctx, CacheDir(), core, arch); err != nil {
+			t.Fatal("could not prepare the pinned core for CHR and the fake WAN")
+		}
+	}
+	// The guest and fake WAN both need this release inside a read-only
+	// cache with no network access.
+	if _, err := os.Stat(filepath.Join(CacheDir(), "xray", core, runtime.GOARCH, "xray")); err != nil {
+		t.Fatal("fake WAN host core missing from prepared cache")
 	}
 	t.Log("CHR cache phase: core built")
 	if os.WriteFile(resolved, []byte(core+"\n"), 0644) != nil {
