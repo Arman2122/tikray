@@ -38,6 +38,24 @@
                     $selectOne $candidates $safe "watch"
                     :if ($apply) do={ /tool/netwatch/disable $safe }
                 }
+                :set candidates [/tool/netwatch/find where comment="tikray:udp-watch"]
+                :if ([:len $candidates] > 0) do={
+                    :local safe [/tool/netwatch/find where comment="tikray:udp-watch" and type=simple and host=$runner]
+                    $selectOne $candidates $safe "UDP watch"
+                    :if ($apply) do={ /tool/netwatch/disable $safe }
+                }
+                :foreach side in={"legacy";"pending";"runner";"wan"} do={
+                    :local tag ("tikray:udp-guard-" . $side)
+                    :local mark ("tikray-open-" . $side)
+                    :if ($side="legacy") do={ :set mark "tikray-open" }
+                    :if ($side="pending") do={ :set mark "tikray-open-udp" }
+                    :set candidates [/ip/firewall/filter/find where comment=$tag]
+                    :if ([:len $candidates] > 0) do={
+                        :local safe [/ip/firewall/filter/find where comment=$tag and chain=forward and action=drop and connection-mark=$mark and !dynamic]
+                        $selectOne $candidates $safe "UDP guard"
+                        :if ($apply) do={ /ip/firewall/filter/disable $safe }
+                    }
+                }
                 :set candidates [/ip/firewall/mangle/find where jump-target="tikray-pre" or comment="tikray:jump-pre"]
                 :if ([:len $candidates] > 0) do={
                     :local safe [/ip/firewall/mangle/find where comment="tikray:jump-pre" and chain=prerouting and action=jump and jump-target="tikray-pre" and !dynamic]
@@ -101,6 +119,46 @@
                     :local safe [/ipv6/firewall/filter/find where comment=$tag and chain=forward and action=jump and jump-target=$target and !dynamic]
                     :if (([:len $safe] != 1) or ([:tostr $id] != [:tostr $safe])) do={ :error "tikray: emergency hold ownership conflict" }
                     :if ($apply) do={ /ipv6/firewall/filter/disable $safe }
+                }
+                :foreach kind in={"preserve";"preserve-backup"} do={
+                    :local tag ("tikray:" . $kind . "-open-runner")
+                    :set candidates [/ip/firewall/nat/find where comment=$tag]
+                    :if ([:len $candidates] > 0) do={
+                        :local safe [/ip/firewall/nat/find where comment=$tag and chain=srcnat and action=accept and out-interface="tikray" and connection-mark="tikray-open-runner" and !dynamic]
+                        $selectOne $candidates $safe "UDP source NAT"
+                        :if ($apply) do={ /ip/firewall/nat/disable $safe }
+                    }
+                }
+                :foreach side in={"runner";"wan"} do={
+                    :local mark ("tikray-open-" . $side)
+                    :local tag ("tikray:udp-birth-" . $side)
+                    :set candidates [/ip/firewall/mangle/find where comment=$tag or new-connection-mark=$mark]
+                    :if ([:len $candidates] > 0) do={
+                        :local iface "!tikray"
+                        :if ($side="runner") do={ :set iface "tikray" }
+                        :local safe [/ip/firewall/mangle/find where comment=$tag and chain=forward and action=mark-connection and new-connection-mark=$mark and connection-mark="tikray-open-udp" and out-interface=$iface and !dynamic]
+                        $selectOne $candidates $safe "UDP mark"
+                        :if ($apply) do={ /ip/firewall/mangle/disable $safe }
+                    }
+                    :set tag ("tikray:packet-udp-" . $side)
+                    :set candidates [/ip/firewall/mangle/find where comment=$tag]
+                    :if ([:len $candidates] > 0) do={
+                        :local safe [/ip/firewall/mangle/find where comment=$tag and chain=forward and action=mark-packet and connection-mark=$mark and new-packet-mark="tikray-proxied" and !dynamic]
+                        $selectOne $candidates $safe "UDP packet mark"
+                        :if ($apply) do={ /ip/firewall/mangle/disable $safe }
+                    }
+                }
+                :foreach id in=[/ip/firewall/mangle/find where new-connection-mark="tikray-open-udp"] do={
+                    :local tag [/ip/firewall/mangle/get $id comment]
+                    :local mode ""
+                    :if ($tag="tikray:conn-full-open-udp") do={ :set mode "full" }
+                    :if ($tag="tikray:conn-smart-open-udp") do={ :set mode "smart" }
+                    :if ($mode="") do={ :error "tikray: emergency UDP mark conflict" }
+                    :local listName ("tikray-src-" . $mode . "-open")
+                    :local claimed [/ip/firewall/mangle/find where comment=$tag]
+                    :local safe [/ip/firewall/mangle/find where comment=$tag and chain="tikray-pre" and action=mark-connection and new-connection-mark="tikray-open-udp" and src-address-list=$listName and !dynamic]
+                    $selectOne $claimed $safe "UDP classifier"
+                    :if ([:pick $safe 0]!=$id) do={ :error "tikray: emergency UDP mark identity conflict" }
                 }
                 # Remove the source-NAT bypass as well as the classifiers.
                 :foreach kind in={"preserve";"preserve-backup"} do={
@@ -199,7 +257,7 @@
                     :local rows; :local ok false
                     :onerror queryError in={
                         :if ($kind="marked") do={
-                            :set rows [/ip/firewall/connection/print detail as-value where src-address in $scope and (connection-mark="tikray-open" or connection-mark="tikray-closed")]
+                            :set rows [/ip/firewall/connection/print detail as-value where src-address in $scope and (connection-mark="tikray-open" or connection-mark="tikray-closed" or connection-mark="tikray-open-udp" or connection-mark="tikray-open-runner" or connection-mark="tikray-open-wan")]
                         } else={
                             :if ($kind="dns") do={
                                 :set rows [/ip/firewall/connection/print detail as-value where src-address in $scope and dstnat and dst-port=53 and reply-src-port=53 and (protocol=tcp or protocol=udp)]
@@ -281,7 +339,7 @@
                             :if ((($live->"flow")=($record->"flow")) and (($live->"tuple")=($record->"tuple"))) do={ :set removable true }
                         } else={
                             :local mark [:tostr ($row->"connection-mark")]
-                            :if (($mark="tikray-open") or ($mark="tikray-closed")) do={ :return true }
+                            :if (($mark="tikray-open") or ($mark="tikray-closed") or ($mark="tikray-open-udp") or ($mark="tikray-open-runner") or ($mark="tikray-open-wan")) do={ :return true }
                             :local peer ($row->"reply-src-address")
                             :if ((($live->"port")=53) and (($row->"reply-src-port")=53) and (($row->"dstnat")=true) and (($peer=$runner) or ($peer=($record->"dns-peer")))) do={
                                 :if (![$ownedDNS $live $peer ($peer!=$runner)]) do={ :return true }

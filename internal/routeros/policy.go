@@ -102,7 +102,21 @@ func ipv4Policy(in PolicyInput, obs Topology, active map[store.Policy]bool) ([]O
 		if p.Mode == store.ModeSmart {
 			match["dst-address-list"] = "!tikray-domestic"
 		}
+		if !p.KillSwitch {
+			udp := maps.Clone(match)
+			udp["protocol"] = "udp"
+			udp["new-connection-mark"] = openUDP
+			out = append(out, object(firewallMangle, "conn-"+string(p.Mode)+"-open-udp", udp,
+				"tikray:udp-birth-runner", "tikray:udp-birth-wan", "tikray:udp-guard-legacy", "tikray:udp-guard-pending",
+				"tikray:udp-guard-runner", "tikray:udp-guard-wan",
+				"tikray:preserve-open-runner", "tikray:preserve-backup-open-runner"))
+			match["protocol"] = "!udp"
+		}
 		out = append(out, object(firewallMangle, "conn-"+string(p.Mode)+"-"+class, match))
+	}
+	udp := active[store.Policy{Mode: store.ModeSmart}] || active[store.Policy{Mode: store.ModeFull}]
+	if udp {
+		out = append(out, openUDPRules(obs.LANList, runner, obs.WAN[0].nextHop(), ft != nil)...)
 	}
 	for _, class := range []string{"open", "closed"} {
 		mark := "tikray-" + class
@@ -244,7 +258,7 @@ func fastTrackException(rules []FastTrackRule) (*Object, error) {
 		// A positive owner connection mark (including no-mark) excludes
 		// both of our connection classes, so this rule needs no exception.
 		if cm := r.Match["connection-mark"]; cm != "" {
-			if strings.HasPrefix(cm, "!") || cm == "tikray-open" || cm == "tikray-closed" {
+			if strings.HasPrefix(cm, "!") || ownedConnectionMark(cm) {
 				return nil, errFastTrack
 			}
 			continue

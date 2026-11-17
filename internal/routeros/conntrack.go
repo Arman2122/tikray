@@ -50,10 +50,10 @@ func (d affectedClass) includes(src, dst netip.Addr, r Row) bool {
 	if d.old.RepairOnly && !dns && !onBit(r["fasttrack"]) {
 		mark := r["connection-mark"]
 		if proxyDestination(*d.next, d.change.To, dst) {
-			if mark == "tikray-"+policyClass(d.change.To) {
+			if connectionMatchesPolicy(mark, d.change.To) {
 				return false
 			}
-		} else if mark != "tikray-open" && mark != "tikray-closed" {
+		} else if !ownedConnectionMark(mark) {
 			return false
 		}
 	}
@@ -61,7 +61,7 @@ func (d affectedClass) includes(src, dst netip.Addr, r Row) bool {
 		// A foreign connection mark bypasses open mangle. Closed egress
 		// and DNS still select this source independently of its mark.
 		switch r["connection-mark"] {
-		case "", "no-mark", "tikray-open", "tikray-closed":
+		case "", "no-mark", "tikray-open", "tikray-closed", openUDP, openRunner, openWAN:
 		default:
 			if !dns {
 				return false
@@ -229,7 +229,7 @@ func noConnMark(r Row) bool { return r["connection-mark"] == "" || r["connection
 // rules and tuple. The engine verifies all permanent rules before release.
 func onNewPath(t Topology, dnsRules map[string]Observed, v policyView, r Row, src, dst netip.Addr) bool {
 	p := policyAt(v, number(src))
-	ownedMark := r["connection-mark"] == "tikray-open" || r["connection-mark"] == "tikray-closed"
+	ownedMark := ownedConnectionMark(r["connection-mark"])
 	if !isDNS(r) {
 		if !proxyDestination(v, p, dst) {
 			return !ownedMark
@@ -237,7 +237,7 @@ func onNewPath(t Topology, dnsRules map[string]Observed, v policyView, r Row, sr
 		if !p.KillSwitch && !ownedMark && !noConnMark(r) {
 			return true // open mangle leaves existing owner marks alone
 		}
-		return !onBit(r["fasttrack"]) && r["connection-mark"] == "tikray-"+policyClass(p)
+		return !onBit(r["fasttrack"]) && connectionMatchesPolicy(r["connection-mark"], p)
 	}
 	if ownedMark || r["reply-src-port"] != "53" {
 		return false

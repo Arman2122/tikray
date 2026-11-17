@@ -103,3 +103,18 @@ func TestWatchdogEvidenceCoversRebootAndBothComponents(t *testing.T) {
 		t.Fatal("missing reboot proof published as complete")
 	}
 }
+
+func TestOutageEvidenceRequiresEveryFailureMode(t *testing.T) {
+	ids := []string{"all_servers_down", "runner_stopped", "xray_dead_runner_up", "control_stopped", "early_reboot", "recovery"}
+	reports := make([]m3Observation, len(ids))
+	for i, id := range ids {
+		reports[i] = m3Observation{id: id, passed: true, elapsed: time.Second}
+	}
+	dir := t.TempDir()
+	if err := writeM3Evidence(dir, "7.25", lab.ArchX86, "m3-outage", reports, false); err != nil {
+		t.Fatal("complete outage catalogue unavailable")
+	}
+	if err := writeM3Evidence(dir, "7.25", lab.ArchX86, "m3-outage", reports[:5], false); err == nil {
+		t.Fatal("missing recovery counted as complete")
+	}
+}

@@ -42,6 +42,14 @@ var m3Cases = map[string][]evidenceCase{
 		{"emergency_off", "Two owner commands restored ordinary routing with both containers stopped. Service recovery restored steering and protection."},
 		{"geo_diff_and_rollback", "Verified geo trials changed only the affected domestic ranges and LAN paths. Rejected data, owner dependencies and rollback preserved the verified policy."},
 	},
+	"m3-outage": {
+		{"all_servers_down", "Open and closed clients followed their fallback policy while the runner gateway remained live."},
+		{"runner_stopped", "With both containers down, existing open UDP and fresh traffic reached the WAN while closed traffic stayed blocked."},
+		{"xray_dead_runner_up", "A running runner with xray unavailable withdrew its gateway and native fallback protected the LAN."},
+		{"control_stopped", "The existing runner continued serving the LAN while the control container was unavailable."},
+		{"early_reboot", "WAN observations from before the power cycle proved closed protection until the proxy recovered."},
+		{"recovery", "Native recovery restored the proxy and DNS for existing open sockets and fresh traffic without disturbing owner connections."},
+	},
 	"m3-watchdog": {
 		{"control_restart", "The scheduler restarted control after three misses, while the same runner continued serving the LAN."},
 		{"runner_restart", "The scheduler restarted the runner after three misses. Control survived and the saved selection returned."},

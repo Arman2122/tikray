@@ -53,11 +53,11 @@ with open(sys.argv[2],"wb",buffering=0) as log:
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind((sys.argv[1],32242));s.settimeout(.35)
 with open(sys.argv[3],"wb",buffering=0) as log:
  while True:
-  s.sendto(b"wd-kept",(sys.argv[2],31948))
   try:
+   s.sendto(b"wd-kept",(sys.argv[2],31948))
    data,peer=s.recvfrom(16)
    if peer==(sys.argv[2],31948) and data in (b"direct",b"proxy"):log.write(b"D" if data==b"direct" else b"P")
-  except socket.timeout:pass
+  except OSError:pass
   time.sleep(.1)`, routingPeer, routingRemote, flow.replies)
 	startRoutingProcess(t, client)
 	startRoutingProcess(t, f.peer(ctx, "python3", "-c", keptImageDNS, routingPeer, flow.dns))

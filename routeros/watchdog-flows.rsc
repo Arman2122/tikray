@@ -4,20 +4,27 @@
     :local action $1; :local policy $2; :local runner $3; :local grant $4; :local check $5; :local mode $6; :local emergency $7
     :local nonce ($grant->"staging"->"nonce")
     :if (([:typeof $nonce]!="str") or ([:len $nonce]!=32) or (!($nonce~"^[0-9a-f]+\$"))) do={:error "image: unverified flow operation"}
-    :local transit ("tikray-i-" . $nonce); :local normal "tikray-open"
-    :local sourceRows [:toarray ""]; :local writers [:toarray ""]
+    :local transit ("tikray-i-" . $nonce); :local normal "tikray-open"; :local pending "tikray-open-udp"
+    :local sourceRows [:toarray ""]; :local writers [:toarray ""]; :local expected [:toarray ""]
     :foreach kind in={"smart";"full"} do={
-        :local listName ("tikray-src-" . $kind . "-open"); :local own ("tikray:conn-" . $kind . "-open")
-        :local ids [/ip/firewall/mangle/find where comment=$own]
+        :local listName ("tikray-src-" . $kind . "-open")
         :local enabled ([:typeof ($policy->("tikray:dns-" . $kind . "-open-udp"))]="array")
-        :if (([:len $ids]>0) or $enabled) do={
-            :local configured [/ip/firewall/mangle/find where comment=$own and chain=tikray-pre and action=mark-connection and src-address-list=$listName and passthrough and !dynamic]
-            :if ((!$enabled) or ([:len $ids]!=1) or ([:len $configured]!=1) or ([:pick $ids 0]!=[:pick $configured 0])) do={:error "image: open classifier changed"}
-            :local id [:pick $ids 0]; :local row [/ip/firewall/mangle/get $id]
-            :local current [:tostr ($row->"new-connection-mark")]; :local dest ""
-            :if ($kind="smart") do={:set dest "!tikray-domestic"}
-            :if (([:tostr ($row->"connection-state")]!="new") or ([:tostr ($row->"connection-mark")]!="no-mark") or ([:tostr ($row->"dst-address-list")]!=$dest) or (($current!=$normal) and (($mode="read") or ($current!=$transit)))) do={:error "image: open classifier changed"}
-            :set ($writers->[:tostr $id]) $own
+        :local split ([:len [/ip/firewall/mangle/find where comment=("tikray:conn-" . $kind . "-open-udp")]]>0)
+        :foreach wanted in=({$normal;$pending}) do={
+            :local own ("tikray:conn-" . $kind . "-open"); :local protocol ""
+            :if ($split) do={:set protocol "!udp"}
+            :if ($wanted=$pending) do={:set own ($own . "-udp"); :set protocol "udp"}
+            :local ids [/ip/firewall/mangle/find where comment=$own]
+            :if (([:len $ids]>0) or ($enabled and (($wanted=$normal) or $split))) do={
+                :local configured [/ip/firewall/mangle/find where comment=$own and chain=tikray-pre and action=mark-connection and src-address-list=$listName and passthrough and !dynamic]
+                :if ((!$enabled) or ([:len $ids]!=1) or ([:len $configured]!=1) or ([:pick $ids 0]!=[:pick $configured 0])) do={:error "image: open classifier changed"}
+                :local id [:pick $ids 0]; :local row [/ip/firewall/mangle/get $id]
+                :local current [:tostr ($row->"new-connection-mark")]; :local dest ""
+                :if ($kind="smart") do={:set dest "!tikray-domestic"}
+                :if (([:tostr ($row->"connection-state")]!="new") or ([:tostr ($row->"connection-mark")]!="no-mark") or ([:tostr ($row->"dst-address-list")]!=$dest) or ([:tostr ($row->"protocol")]!=$protocol) or (($current!=$wanted) and (($mode="read") or ($current!=$transit)))) do={:error "image: open classifier changed"}
+                :set ($writers->[:tostr $id]) $own
+                :set ($expected->[:tostr $id]) $wanted
+            }
         }
         :foreach row in=[/ip/firewall/address-list/print as-value proplist=address,comment,dynamic where list=$listName and !disabled] do={
             :local member [:tostr ($row->"address")]
@@ -44,24 +51,43 @@
     :local heldRefs [/ip/firewall/mangle/find where comment~"^tikray:image-mark:"]
     :if (([:len $heldRefs]>0) and (([:len $heldRefs]!=1) or ([:tostr [:pick $heldRefs 0]]!=$pin))) do={:error "image: ambiguous transient mark reference"}
     :if (($mode="read") and ($pin!="")) do={:error "image: transient mark reference already exists"}
-    :foreach stamp in=({$normal;$transit}) do={
+    :foreach stamp in=({$normal;$pending;$transit}) do={
         :foreach id in=[/ip/firewall/mangle/find where new-connection-mark=$stamp] do={:if (([:tostr $id]!=$pin) and ([:typeof ($writers->[:tostr $id])]!="str")) do={:error "image: shared connection mark writer"}}
     }
     # Retagging a managed flow must not bypass an owner's explicit policy
     # on the original connection mark. The only allowed consumers are the
     # routing compiler's own named marks and its two source-NAT exceptions.
-    :local standard "^!?tikray-open\$"
-    :if ([:len [/ip/firewall/filter/find where connection-mark~$standard]]>0) do={:error "image: owner consumes normal open mark"}
+    :local standard "^!?tikray-open(-udp|-runner|-wan)?\$"
+    :foreach id in=[/ip/firewall/filter/find where connection-mark~$standard] do={
+        :local row [/ip/firewall/filter/get $id]; :local role ($row->"comment"); :local mark [:tostr ($row->"connection-mark")]
+        :local ok ((($role="tikray:udp-guard-legacy") and ($mark=$normal)) or (($role="tikray:udp-guard-pending") and ($mark=$pending)) or (($role="tikray:udp-guard-runner") and ($mark="tikray-open-runner") and ([:tostr ($row->"out-interface")]="!tikray")) or (($role="tikray:udp-guard-wan") and ($mark="tikray-open-wan") and ([:tostr ($row->"out-interface")]="tikray")))
+        :if ((!$ok) or (($row->"chain")!="forward") or (($row->"action")!="drop") or ([:tostr ($row->"protocol")]!="udp")) do={:error "image: owner consumes normal open mark"}
+    }
     :foreach id in=[/ip/firewall/nat/find where connection-mark~$standard] do={
-        :local row [/ip/firewall/nat/get $id]
-        :if (([:typeof [:find {"tikray:preserve-open";"tikray:preserve-backup-open"} ($row->"comment")]]!="num") or (($row->"chain")!="srcnat") or (($row->"action")!="accept") or ([:tostr ($row->"out-interface")]!="tikray") or ([:tostr ($row->"connection-mark")]!=$normal)) do={:error "image: owner consumes normal open mark"}
+        :local row [/ip/firewall/nat/get $id]; :local mark [:tostr ($row->"connection-mark")]; :local role ($row->"comment")
+        :local ok ((($mark=$normal) and (($role="tikray:preserve-open") or ($role="tikray:preserve-backup-open"))) or (($mark="tikray-open-runner") and (($role="tikray:preserve-open-runner") or ($role="tikray:preserve-backup-open-runner"))))
+        :if ((!$ok) or (($row->"chain")!="srcnat") or (($row->"action")!="accept") or ([:tostr ($row->"out-interface")]!="tikray")) do={:error "image: owner consumes normal open mark"}
     }
     :foreach id in=[/ip/firewall/mangle/find where connection-mark~$standard] do={
         :local row [/ip/firewall/mangle/get $id]; :local role ($row->"comment"); :local chain ($row->"chain"); :local op ($row->"action")
-        :local owned (($role="tikray:route-open") and ($chain="tikray-pre") and ($op="mark-routing") and ([:tostr ($row->"new-routing-mark")]=$normal))
-        :if (($role="tikray:mss-open") and ($chain="forward") and ($op="change-mss") and ([:tostr ($row->"new-mss")]="clamp-to-pmtu")) do={:set owned true}
-        :if (($role="tikray:packet-open") and ($chain="forward") and ($op="mark-packet") and ([:tostr ($row->"new-packet-mark")]="tikray-proxied")) do={:set owned true}
-        :if ((!$owned) or ([:tostr ($row->"connection-mark")]!=$normal)) do={:error "image: owner consumes normal open mark"}
+        :local mark [:tostr ($row->"connection-mark")]; :local owned false
+        :if (($chain="tikray-pre") and ($op="mark-routing") and ([:tostr ($row->"new-routing-mark")]=$normal)) do={
+            :set owned ((($role="tikray:route-open") and ($mark=$normal)) or (($role="tikray:route-udp-pending") and ($mark=$pending)) or (($role="tikray:route-udp-runner") and ($mark="tikray-open-runner")) or (($role="tikray:route-udp-wan") and ($mark="tikray-open-wan")))
+        }
+        :if (($chain="forward") and ($role="tikray:mss-open") and ($mark=$normal) and ($op="change-mss") and ([:tostr ($row->"new-mss")]="clamp-to-pmtu")) do={:set owned true}
+        :if (($chain="forward") and ($op="mark-packet") and ([:tostr ($row->"new-packet-mark")]="tikray-proxied")) do={
+            :set owned ((($role="tikray:packet-open") and ($mark=$normal)) or (($role="tikray:packet-udp-runner") and ($mark="tikray-open-runner")) or (($role="tikray:packet-udp-wan") and ($mark="tikray-open-wan")))
+        }
+        :if (($chain="forward") and ($op="mark-connection") and ($mark=$pending) and ([:tostr ($row->"protocol")]="udp")) do={
+            :set owned ((($role="tikray:udp-birth-runner") and ([:tostr ($row->"out-interface")]="tikray") and ([:tostr ($row->"new-connection-mark")]="tikray-open-runner")) or (($role="tikray:udp-birth-wan") and ([:tostr ($row->"out-interface")]="!tikray") and ([:tostr ($row->"new-connection-mark")]="tikray-open-wan")))
+        }
+        :if (!$owned) do={:error "image: owner consumes normal open mark"}
+    }
+    :foreach path in={"runner";"wan"} do={
+        :local birth ("tikray:udp-birth-" . $path); :local newMark ("tikray-open-" . $path)
+        :foreach id in=[/ip/firewall/mangle/find where new-connection-mark=$newMark] do={
+            :if ([:len [/ip/firewall/mangle/find where .id=$id and comment=$birth and chain=forward and action=mark-connection and connection-mark=$pending and !dynamic]]!=1) do={:error "image: shared UDP path mark writer"}
+        }
     }
     # No owner may consume the operation-specific mark. The selector is
     # router-filtered and numeric nonce text is the only variable part.
@@ -69,17 +95,19 @@
     :foreach id in=[/ip/firewall/mangle/find where connection-mark~$markPattern] do={:if ([:tostr $id]!=$pin) do={:error "image: shared transient connection mark"}}
     :if (([:len [/ip/firewall/nat/find where connection-mark~$markPattern]]>0) or ([:len [/ip/firewall/filter/find where connection-mark~$markPattern]]>0)) do={:error "image: shared transient connection mark"}
     :if ($action="check") do={:return true}
-    :local from $normal; :local to $transit
-    :if ($action="release") do={:set from $transit; :set to $normal}
+    :local from $normal
+    :if ($action="release") do={:set from $transit}
     :local changed false
     :foreach key,tag in=$writers do={
         :local id [:toid $key]; :local current [:tostr [/ip/firewall/mangle/get $id new-connection-mark]]
-        :if ($current!=$to) do={
+        :local old ($expected->$key); :local new $transit
+        :if ($action="release") do={:set old $transit; :set new ($expected->$key)}
+        :if ($current!=$new) do={
             :local ok [$check $grant]
-            :if (([:len [/ip/firewall/mangle/find where .id=$id and comment=$tag and new-connection-mark=$from]]!=1) or ([:len [/ip/firewall/mangle/find where comment=$tag]]!=1)) do={:error "image: open classifier identity changed"}
+            :if (([:len [/ip/firewall/mangle/find where .id=$id and comment=$tag and new-connection-mark=$old]]!=1) or ([:len [/ip/firewall/mangle/find where comment=$tag]]!=1)) do={:error "image: open classifier identity changed"}
             :set changed true
-            /ip/firewall/mangle/set $id new-connection-mark=$to
-            :if ([:tostr [/ip/firewall/mangle/get $id new-connection-mark]]!=$to) do={:error "image: open classifier write unverified"}
+            /ip/firewall/mangle/set $id new-connection-mark=$new
+            :if ([:tostr [/ip/firewall/mangle/get $id new-connection-mark]]!=$new) do={:error "image: open classifier write unverified"}
         }
     }
     :if (($action="hold") and ([:len $writers]>0) and ($pin="")) do={
@@ -94,7 +122,8 @@
         :delay 1s
         :foreach key,role in=$writers do={
             :local writer [:toid $key]
-            :if (([:tostr [/ip/firewall/mangle/get $writer new-connection-mark]]!=$to) or ([/ip/firewall/mangle/get $writer invalid]=true)) do={:error "image: classifier is not effective"}
+            :local new $transit; :if ($action="release") do={:set new ($expected->$key)}
+            :if (([:tostr [/ip/firewall/mangle/get $writer new-connection-mark]]!=$new) or ([/ip/firewall/mangle/get $writer invalid]=true)) do={:error "image: classifier is not effective"}
         }
     }
     # @TIKRAY_FLOW_IDENTITY@
@@ -103,7 +132,7 @@
         :for n from=1 to=12 do={
             :local rows; :local ready false
             :do {
-                :if ($type="marked") do={:set rows [/ip/firewall/connection/print detail as-value where src-address in $scope and connection-mark=$mark]} else={
+                :if ($type="marked") do={:set rows [/ip/firewall/connection/print detail as-value where src-address in $scope and (connection-mark=$mark or ($mark="tikray-open" and (connection-mark="tikray-open-udp" or connection-mark="tikray-open-runner" or connection-mark="tikray-open-wan")))]} else={
                     :if ($type="dns") do={:set rows [/ip/firewall/connection/print detail as-value where src-address in $scope and dstnat and dst-port=53 and reply-src-port=53 and (protocol=tcp or protocol=udp)]} else={
                         :local dst ($record->"dst"); :local proto ($record->"protocol")
                         :if (($proto="tcp") or ($proto="udp")) do={:local sp ($record->"sport"); :local dp ($record->"port"); :set rows [/ip/firewall/connection/print detail as-value where src-address=$scope and dst-address=$dst and protocol=$proto and src-port=$sp and dst-port=$dp]} else={
@@ -150,7 +179,7 @@
             :foreach type in={"marked";"dns"} do={
                 :foreach row in=[$query $type $prefix $from] do={
                     :local captured [$capture $row]; :local owned false
-                    :if ($type="marked") do={:set owned ([:tostr ($row->"connection-mark")]=$from)} else={
+                    :if ($type="marked") do={:local mark ($row->"connection-mark"); :set owned (($mark=$from) or (($from=$normal) and (($mark=$pending) or ($mark="tikray-open-runner") or ($mark="tikray-open-wan"))))} else={
                         :local primary ("tikray:dns-" . $kind . "-open-" . [:tostr ($row->"protocol")])
                         :if ((!$emergency) and (($action="hold") or ([:len [/ip/firewall/nat/find where comment=$primary and !disabled]]=1))) do={:set owned [$dnsOwned $row $runner ($action="hold") $capture $ownerDNS]}
                     }

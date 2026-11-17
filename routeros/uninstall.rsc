@@ -45,7 +45,7 @@
         :if ($menu = "/user/group") do={ :return ($roleName = "group") }
         :if ($menu = "/routing/table") do={ :return ($roleName ~ "^table-(open|closed)\$") }
         :if ($menu = "/ip/route") do={ :return ($roleName ~ "^route-(open|closed)-(runner|fallback)\$") }
-        :if ($menu = "/tool/netwatch") do={ :return ($roleName = "runner-watch") }
+        :if ($menu = "/tool/netwatch") do={ :return ($roleName = "runner-watch" or $roleName = "udp-watch") }
         :if (($menu="/ip/firewall/filter") and (($roleName~"^acl-transit-lan:[0-9.]+/[0-9]+\$") or ($roleName="acl-transit-deny") or ($roleName="acl-transit-deny-backup"))) do={:return true}
         :if ($menu = "/ip/firewall/raw") do={ :return ($roleName = "acl-runner-direct") }
         :if (($menu = "/ip/firewall/address-list") or ($menu = "/ip/firewall/filter") or ($menu = "/ipv6/firewall/filter")) do={
@@ -54,11 +54,11 @@
         :if ($menu = "/ip/firewall/address-list") do={ :return ($roleName ~ "^(local|domestic|src-(smart|full)-(open|closed)):[0-9.]+/[0-9]+\$") }
         :if ($menu = "/ip/firewall/mangle") do={
             :if (($roleName ~ "^skip-owner-route:[a-f0-9]+\$") and ([:len $roleName] = 49)) do={ :return true }
-            :return ($roleName ~ "^(jump-pre|skip-(router|local|dns-(tcp|udp))|(mss|packet|route)-(open|closed)|conn-(full|smart)-(open|closed))\$")
+            :return ($roleName ~ "^(jump-pre|skip-(router|local|dns-(tcp|udp))|(mss|packet|route)-(open|closed)|conn-(full|smart)-(open(-udp)?|closed)|udp-birth-(runner|wan)|route-udp-(pending|runner|wan)|packet-udp-(runner|wan))\$")
         }
-        :if ($menu = "/ip/firewall/filter") do={ :return ($roleName ~ "^(egress-(guard|skip-local|drop-(marked|smart|full)|dns-(full|smart)-(open|closed)-(tcp|udp))|no-fasttrack|acl-(control-runner|runner-transit(-dst)?|runner-reply|established|lan-https|dns-(tcp|udp)|deny|input-(dns-(tcp|udp)|reply|api|deny|hook)|hook|wan-api))\$") }
+        :if ($menu = "/ip/firewall/filter") do={ :return ($roleName ~ "^(egress-(guard|skip-local|drop-(marked|smart|full)|dns-(full|smart)-(open|closed)-(tcp|udp))|no-fasttrack|udp-guard-(legacy|pending|runner|wan)|acl-(control-runner|runner-transit(-dst)?|runner-reply|established|lan-https|dns-(tcp|udp)|deny|input-(dns-(tcp|udp)|reply|api|deny|hook)|hook|wan-api))\$") }
         :if ($menu = "/ipv6/firewall/filter") do={ :return (($roleName ~ "^(acl-v6-bridge|acl-wan-api6|ipv6:(jump|host:[0-9.]+))\$") or (($roleName ~ "^ipv6:ingress:[0-9a-f]+\$") and ([:len $roleName] = 45))) }
-        :if ($menu = "/ip/firewall/nat") do={ :return ($roleName ~ "^(nat-containers|preserve-(backup-)?(open|closed|dns-(smart|full)-(open|closed)-(tcp|udp))|dns-((smart|full)-(open|closed)|router-(smart|full)-open)-(tcp|udp))\$") }
+        :if ($menu = "/ip/firewall/nat") do={ :return ($roleName ~ "^(nat-containers|preserve-(backup-)?(open(-runner)?|closed|dns-(smart|full)-(open|closed)-(tcp|udp))|dns-((smart|full)-(open|closed)|router-(smart|full)-open)-(tcp|udp))\$") }
         :return false
     }
     :local menus {"/system/scheduler";"/system/script";"/container";"/container/mounts";"/container/envs";"/tool/netwatch";"/ip/firewall/mangle";"/ip/firewall/nat";"/ip/firewall/filter";"/ip/firewall/raw";"/ipv6/firewall/filter";"/ip/firewall/address-list";"/ip/route";"/routing/table";"/ip/arp";"/interface/bridge/host";"/interface/bridge/port";"/ip/address";"/interface/veth";"/interface/bridge";"/user";"/user/group"}

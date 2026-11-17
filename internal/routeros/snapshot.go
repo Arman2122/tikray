@@ -104,7 +104,7 @@ func (o observation) ownedRows(menu string) ([]Observed, error) {
 	case tableMenu:
 		q = valuesQuery("comment", "tikray:table-open", "tikray:table-closed")
 	case watchMenu:
-		q = []string{"?comment=tikray:runner-watch"}
+		q = valuesQuery("comment", "tikray:runner-watch", "tikray:udp-watch")
 	}
 	fields := managedFields(menu)
 	rows, e := o.inventoryRows(menu, ".id,comment,dynamic,"+strings.Join(fields, ","), q)
@@ -334,7 +334,7 @@ func reservedReferenceQuery(fields ...string) []string {
 }
 func reservedPolicyName(name string) bool {
 	switch name {
-	case "tikray-open", "tikray-closed", preChain, egressChain, ipv6Chain, proxyPacket, "tikray-local", "tikray-domestic", "tikray-src-full-open", "tikray-src-full-closed", "tikray-src-smart-open", "tikray-src-smart-closed":
+	case "tikray-open", "tikray-closed", openUDP, openRunner, openWAN, preChain, egressChain, ipv6Chain, proxyPacket, "tikray-local", "tikray-domestic", "tikray-src-full-open", "tikray-src-full-closed", "tikray-src-smart-open", "tikray-src-smart-closed":
 		return true
 	}
 	digest, ok := strings.CutPrefix(name, "tikray-h")

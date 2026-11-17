@@ -465,6 +465,7 @@
             } else={
                 :if ($label = "tikray:acl-hook") do={ :set sawBridge true } else={
                     :local guard (([:pick $label 0 12] = "tikray:hold:") and ((($row->"action") = "drop") or (($row->"action") = "reject")))
+                    :if (($label~"^tikray:udp-guard-(legacy|pending|runner|wan)\$") and (($row->"action")="drop")) do={:set guard true}
                     :if (($label = "tikray:egress-guard") and (($row->"action") = "jump") and (($row->"jump-target") = "tikray-egress") and $onlyRestricts) do={ :set guard true }
                     :if ($guard) do={
                         :if ([:len [:tostr $first]] > 0) do={ :error "tikray: wait for closed policy guard order to be repaired" }

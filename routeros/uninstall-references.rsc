@@ -102,7 +102,7 @@
     }
     :local private do={
         :local value [:tostr $1]; :if ([:pick $value 0 1] = "!") do={ :set value [:pick $value 1 [:len $value]] }
-        :if ([:typeof [:find {"tikray";"tikray-ctl";"tikray-runner";"tikray-open";"tikray-closed";"tikray-pre";"tikray-egress";"tikray-ipv6";"tikray-proxied";"tikray-local";"tikray-domestic";"tikray-src-full-open";"tikray-src-full-closed";"tikray-src-smart-open";"tikray-src-smart-closed";"tikray-bridge-fw";"tikray-bridge-in"} $value]] = "num") do={ :return true }
+        :if ([:typeof [:find {"tikray";"tikray-ctl";"tikray-runner";"tikray-open";"tikray-open-udp";"tikray-open-runner";"tikray-open-wan";"tikray-closed";"tikray-pre";"tikray-egress";"tikray-ipv6";"tikray-proxied";"tikray-local";"tikray-domestic";"tikray-src-full-open";"tikray-src-full-closed";"tikray-src-smart-open";"tikray-src-smart-closed";"tikray-bridge-fw";"tikray-bridge-in"} $value]] = "num") do={ :return true }
         :return (($value ~ "^tikray-h[0-9a-f]+\$") and ([:len $value]=40))
     }
     :local checkFields do={

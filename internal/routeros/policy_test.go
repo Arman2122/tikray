@@ -217,7 +217,7 @@ func TestTablesDNSAndFastTrack(t *testing.T) {
 			if v["chain"] != "forward" {
 				continue
 			}
-			if !slices.Contains([]string{"tikray-open", "tikray-closed"}, v["connection-mark"]) {
+			if !ownedConnectionMark(v["connection-mark"]) {
 				t.Fatal("foreign mark eligibility")
 			}
 			switch v["action"] {
@@ -275,10 +275,12 @@ func TestTablesDNSAndFastTrack(t *testing.T) {
 			redirects++
 		case "/tool/netwatch":
 			watches++
-			watch = r
+			if r.Comment == "tikray:runner-watch" {
+				watch = r
+			}
 		}
 	}
-	if tables != 2 || routes != 4 || primary != 2 || fallbacks != 2 || clamps != 2 || marks != 2 || accepts != 1 || guards == 0 || redirects != 8 || watches != 1 {
+	if tables != 2 || routes != 4 || primary != 2 || fallbacks != 2 || clamps != 2 || marks != 4 || accepts != 1 || guards == 0 || redirects != 8 || watches != 2 {
 		t.Fatalf("unexpected object counts: tables=%d routes=%d primaries=%d fallbacks=%d clamps=%d marks=%d accepts=%d guards=%d redirects=%d watches=%d", tables, routes, primary, fallbacks, clamps, marks, accepts, guards, redirects, watches)
 	}
 	if watch.Comment != "tikray:runner-watch" || watch.Props["host"] != in.Network.Runner().String() || watch.Props["startup-delay"] != "0s" || watch.Props["start-delay"] != "0s" {
@@ -505,6 +507,46 @@ func TestFastTrackCannotBroadenDownstreamVerdict(t *testing.T) {
 		out, err := ipv4Policy(in, obs, active)
 		if (err == nil) != tc.safe || err != nil && len(out) != 0 {
 			t.Errorf("successor %s yielded unsafe decision", tc.label)
+		}
+	}
+}
+
+func TestOpenUDPRecordsOnlyItsFirstRoutedPath(t *testing.T) {
+	in, obs, active := trafficFixture()
+	rows, err := ipv4Policy(in, obs, active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := testPacket{ingress: obs.LANList, sourceList: "tikray-src-full-open", destType: "unicast", protocol: "udp", port: "53211", state: "new", connectionMark: "no-mark"}
+	if mark, route := preroute(t, rows, p); mark != "tikray-open-udp" || route != "tikray-open" {
+		t.Fatal("new UDP lacks a distinct, provisional mark")
+	}
+	// Old generic UDP already has a NAT choice and may be unreplied.
+	p.connectionMark = "tikray-open"
+	if mark, route := preroute(t, rows, p); mark != "tikray-open" || route != "tikray-open" {
+		t.Fatal("legacy UDP can acquire a different first path")
+	}
+	byTag := map[string]Object{}
+	for _, r := range rows {
+		byTag[r.Comment] = r
+	}
+	for _, path := range []struct{ side, mark, egress, wrong string }{{"runner", "tikray-open-runner", "tikray", "!tikray"}, {"wan", "tikray-open-wan", "!tikray", "tikray"}} {
+		p.connectionMark = path.mark
+		if mark, route := preroute(t, rows, p); mark != path.mark || route != "tikray-open" {
+			t.Fatal("path-specific tag lost its route")
+		}
+		birth := byTag["tikray:udp-birth-"+path.side].Props
+		if birth["chain"] != "forward" || birth["protocol"] != "udp" || birth["in-interface-list"] != obs.LANList || birth["out-interface"] != path.egress || birth["connection-mark"] != "tikray-open-udp" || birth["new-connection-mark"] != path.mark {
+			t.Fatal("birth rule could restamp an old NAT binding")
+		}
+		guard := byTag["tikray:udp-guard-"+path.side]
+		if guard.Props["chain"] != "forward" || guard.Props["action"] != "drop" || guard.Props["in-interface-list"] != obs.LANList || guard.Props["protocol"] != "udp" || guard.Props["connection-mark"] != path.mark || guard.Props["out-interface"] != path.wrong {
+			t.Fatal("UDP bound to wrong path can escape")
+		}
+	}
+	for _, side := range []string{"legacy", "pending"} {
+		if r := byTag["tikray:udp-guard-"+side]; r.Props["action"] != "drop" || r.Props["protocol"] != "udp" {
+			t.Fatal("unstamped UDP can escape")
 		}
 	}
 }

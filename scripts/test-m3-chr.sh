@@ -81,7 +81,7 @@ go test -c -tags lab -o "$run/e2e.test" ./test/e2e
 mapfile -t tests < <("$run/e2e.test" -test.list "${pattern%%/*}")
 if [[ ${#tests[@]} == 0 ]]; then echo "No matching acceptance suite" >&2; exit 1; fi
 for name in "${tests[@]}"; do
-    case "$name" in TestM3Install|TestM3Routing|TestM3Watchdog|TestM3Uninstall|TestService|TestAuth|TestHot) ;;
+    case "$name" in TestM3Install|TestM3Routing|TestM3Watchdog|TestM3Outage|TestM3Uninstall|TestService|TestAuth|TestHot) ;;
         *) echo "The selection includes an unrecognized acceptance suite" >&2; exit 2 ;; esac
 done
 lab_parent_net=$(readlink /proc/self/ns/net)
@@ -109,7 +109,7 @@ import json, os, pathlib, sys, tempfile
 src, dst = map(pathlib.Path, sys.argv[1:3])
 prefix, partial = sys.argv[3:5]
 suites = {"TestM3Install": ("m3-install", 6), "TestM3Routing": ("m3-routing", 10),
-          "TestM3Watchdog": ("m3-watchdog", 5), "TestM3Uninstall": ("m3-uninstall", 4), "TestService": ("m2b", 8),
+          "TestM3Watchdog": ("m3-watchdog", 5), "TestM3Outage": ("m3-outage", 6), "TestM3Uninstall": ("m3-uninstall", 4), "TestService": ("m2b", 8),
           "TestAuth": ("m2c-auth", 6), "TestHot": ("m2c-hot", 4)}
 ready = {}
 for name in sys.argv[5:]:

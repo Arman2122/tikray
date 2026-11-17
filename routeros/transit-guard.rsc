@@ -64,6 +64,7 @@
             :if ($id=$own) do={:return $id}
             :local row [/ip/firewall/filter/get $id]; :local tag [:tostr ($row->"comment")]; :local act ($row->"action")
             :local safe (($id=($found->"tikray:acl-runner-transit")) or ($id=($found->"tikray:acl-runner-transit-dst")) or ((($row->"dynamic")=true) and ($act="passthrough")) or (([:pick $tag 0 12]="tikray:hold:") and (($act="drop") or ($act="reject"))))
+            :if (($tag~"^tikray:udp-guard-(legacy|pending|runner|wan)\$") and ($act="drop")) do={:set safe true}
             :if (($tag="tikray:egress-guard") and ($act="jump") and (($row->"jump-target")="tikray-egress") and $restricted) do={:set safe true}
             :if (!$safe) do={:if (($row->"dynamic")=true) do={:error "tikray: cannot protect runner ahead of dynamic forward rule"}; :return $id}
         }

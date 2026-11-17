@@ -26,6 +26,7 @@ func preserveSources(runner string) []Object {
 			rows = append(rows, r)
 		}
 	}
+	add("open-runner", map[string]string{"connection-mark": openRunner})
 	for _, closed := range []bool{false, true} {
 		class := policyClass(store.Policy{KillSwitch: closed})
 		add(class, map[string]string{"connection-mark": "tikray-" + class})

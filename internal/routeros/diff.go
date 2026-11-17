@@ -22,11 +22,11 @@ const (
 var managedMenus = []string{addressListMenu, tableMenu, routeMenu, ipv6Filter, firewallFilter, firewallNAT, firewallMangle, watchMenu}
 
 var rolePatterns = map[string]*regexp.Regexp{
-	firewallFilter: regexp.MustCompile(`^(egress-(guard|skip-local|drop-(marked|smart|full)|dns-(full|smart)-(open|closed)-(tcp|udp))|no-fasttrack)$`),
-	firewallMangle: regexp.MustCompile(`^(jump-pre|skip-(router|local|dns-(tcp|udp)|owner-route:[0-9a-f]{32})|(mss|packet|route)-(open|closed)|conn-(full|smart)-(open|closed))$`),
-	firewallNAT:    regexp.MustCompile(`^(dns-((smart|full)-(closed|open)|router-(smart|full)-open)-(udp|tcp)|preserve-(backup-)?(open|closed|dns-(smart|full)-(open|closed)-(tcp|udp)))$`),
+	firewallFilter: regexp.MustCompile(`^(egress-(guard|skip-local|drop-(marked|smart|full)|dns-(full|smart)-(open|closed)-(tcp|udp))|no-fasttrack|udp-guard-(pending|legacy|runner|wan))$`),
+	firewallMangle: regexp.MustCompile(`^(jump-pre|skip-(router|local|dns-(tcp|udp)|owner-route:[0-9a-f]{32})|(mss|packet|route)-(open|closed)|conn-(full|smart)-(open(-udp)?|closed)|udp-birth-(runner|wan)|route-udp-(pending|runner|wan)|packet-udp-(runner|wan))$`),
+	firewallNAT:    regexp.MustCompile(`^(dns-((smart|full)-(closed|open)|router-(smart|full)-open)-(udp|tcp)|preserve-(backup-)?(open(-runner)?|closed|dns-(smart|full)-(open|closed)-(tcp|udp)))$`),
 	ipv6Filter:     regexp.MustCompile(`^ipv6:(jump|ingress:[a-f0-9]{32})$`),
-	watchMenu:      regexp.MustCompile(`^runner-watch$`),
+	watchMenu:      regexp.MustCompile(`^(runner-watch|udp-watch)$`),
 	routeMenu:      regexp.MustCompile(`^route-(open|closed)-(fallback|runner)$`),
 	tableMenu:      regexp.MustCompile(`^table-(open|closed)$`),
 }
@@ -221,6 +221,8 @@ func checkKind(r Observed) bool {
 		return props["chain"] == ipv6Chain && (props["action"] == "reject" || props["action"] == "return")
 	case firewallFilter:
 		switch role {
+		case "udp-guard-pending", "udp-guard-legacy", "udp-guard-runner", "udp-guard-wan":
+			return props["chain"] == "forward" && props["action"] == "drop" && props["protocol"] == "udp"
 		case "no-fasttrack":
 			return props["chain"] == "forward" && props["action"] == "accept"
 		case "egress-guard":
@@ -241,6 +243,8 @@ func checkKind(r Observed) bool {
 			return props["chain"] == "prerouting" && props["action"] == "jump"
 		case strings.HasPrefix(role, "mss-"):
 			return props["chain"] == "forward" && props["action"] == "change-mss"
+		case strings.HasPrefix(role, "udp-birth-"):
+			return props["chain"] == "forward" && props["action"] == "mark-connection"
 		case strings.HasPrefix(role, "packet-"):
 			return props["chain"] == "forward" && props["action"] == "mark-packet"
 		case strings.HasPrefix(role, "skip-"):

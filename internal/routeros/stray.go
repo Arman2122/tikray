@@ -201,7 +201,7 @@ func (b repairBindings) strayBinding(ch flowChange, r Row, src, dst netip.Addr) 
 		return false
 	}
 	if !isDNS(r) {
-		return !slices.Contains(b.topology.RouterIPs, dst) && (r["connection-mark"] == "tikray-open" || r["connection-mark"] == "tikray-closed")
+		return !slices.Contains(b.topology.RouterIPs, dst) && ownedConnectionMark(r["connection-mark"])
 	}
 	reply, err := netip.ParseAddr(r["reply-src-address"])
 	router := ch.DNSProtocol != ""

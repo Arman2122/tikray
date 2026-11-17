@@ -65,7 +65,7 @@ func TestAppendedOwnerNATCannotHideSource(t *testing.T) {
 		if r.Menu != firewallNAT || r.Props["chain"] != "srcnat" {
 			continue
 		}
-		if r.Props["action"] != "accept" || r.Props["out-interface"] != "tikray" || !(r.Props["connection-mark"] == "tikray-open" || r.Props["connection-mark"] == "tikray-closed" || r.Props["dst-address"] == "172.31.255.3" && r.Props["dst-port"] == "53" && strings.HasPrefix(r.Props["src-address-list"], "tikray-src-")) {
+		if r.Props["action"] != "accept" || r.Props["out-interface"] != "tikray" || !(r.Props["connection-mark"] == "tikray-open" || r.Props["connection-mark"] == "tikray-closed" || r.Props["connection-mark"] == openRunner || r.Props["dst-address"] == "172.31.255.3" && r.Props["dst-port"] == "53" && strings.HasPrefix(r.Props["src-address-list"], "tikray-src-")) {
 			t.Fatal("source preservation can change owner traffic")
 		}
 		row := Row(maps.Clone(r.Props))
