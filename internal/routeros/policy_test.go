@@ -599,6 +599,9 @@ func TestOpenUDPVersionTransitionPurgesOnlyOwnedData(t *testing.T) {
 		}
 	}
 	guards := holdsFor([]policyView{previous, target})
+	if _, err := PlanHolds(Actual{}, guards); err != nil {
+		t.Fatal("the planner cannot install its own mark-scoped guards")
+	}
 	guards = slices.DeleteFunc(guards, func(row Object) bool { return row.Menu != firewallFilter })
 	var guarded []string
 	for _, row := range guards {

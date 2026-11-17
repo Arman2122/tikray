@@ -197,12 +197,22 @@ func (c *CHR) start(ctx context.Context) error {
 }
 
 func (c *CHR) provision(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, c.bootTimeout())
-	defer cancel()
-	if err := c.con.login(ctx, c.opts.Password); err != nil {
+	login, cancelLogin := context.WithTimeout(ctx, c.bootTimeout())
+	err := c.con.login(login, c.opts.Password)
+	cancelLogin()
+	if err != nil {
 		return err
 	}
 	c.phase("console login done")
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Minute)
+	defer cancel()
+	shell, stopShell := context.WithTimeout(ctx, 40*time.Second)
+	err = c.con.syncShell(shell)
+	stopShell()
+	if err != nil {
+		return err
+	}
+	c.phase("shell synchronized")
 	// PCI enumeration can differ across emulators. Keep the lab's interface
 	// names tied to its verified TAP MACs before assigning either address.
 	linkNames := fmt.Sprintf(`{:local wan [/interface/ethernet/find where mac-address=%s]; :local lan [/interface/ethernet/find where mac-address=%s]; :if (([:len $wan]!=1) or ([:len $lan]!=1) or ($wan=$lan)) do={:error "lab network interface identity"}; :if (([/interface/ethernet/get $wan name]!="ether1") or ([/interface/ethernet/get $lan name]!="ether2")) do={/interface/ethernet/set $wan name=lab-wan; /interface/ethernet/set $lan name=ether2; /interface/ethernet/set $wan name=ether1}}`, macWAN, macLAN)

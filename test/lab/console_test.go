@@ -91,3 +91,28 @@ func TestConsoleKeepsPeerOutputPrivate(t *testing.T) {
 		}
 	}
 }
+
+func TestColdConsoleRequiresFreshCommandReply(t *testing.T) {
+	var probeCount int
+	c := fakeShell(t, func(line string) string {
+		probeCount++
+		if probeCount == 1 {
+			return ""
+		}
+		if !strings.Contains(line, ":put") {
+			return "failure: unexpected probe\r\n"
+		}
+		return "m3-shell-ready\r\n"
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+	defer cancel()
+	if err := c.syncShell(ctx); err != nil {
+		t.Fatal("fresh console acknowledgement was not established")
+	}
+	c.mu.Lock()
+	got := strings.Contains(c.pending.String(), "m3-shell-ready\r\n")
+	c.mu.Unlock()
+	if !got {
+		t.Fatal("a stale shell prompt was accepted")
+	}
+}

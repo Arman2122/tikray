@@ -186,7 +186,7 @@ func checkKind(r Observed) bool {
 		// A hold's tag commits to immutable selectors. RouterOS drops /32
 		// in host prints and may add configuration defaults to the row.
 		p := map[string]string{}
-		for _, k := range strings.Fields("list address chain action src-address in-interface-list in-interface dst-address-type dst-address-list protocol dst-port jump-target src-mac-address reject-with") {
+		for _, k := range strings.Fields("list address chain action src-address in-interface-list in-interface dst-address-type dst-address-list protocol dst-port jump-target src-mac-address reject-with connection-mark") {
 			value := props[k]
 			if value == "" {
 				continue

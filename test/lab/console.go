@@ -167,6 +167,33 @@ func (c *console) login(ctx context.Context, password string) error {
 	}
 }
 
+// A prompt can arrive before the freshly logged in shell accepts a whole
+// command. Repeat a read-only probe until its output proves command execution.
+func (c *console) syncShell(ctx context.Context) error {
+	const probe = `:put ("m3-shell-" . "ready")`
+	for ctx.Err() == nil {
+		attempt, cancel := context.WithTimeout(ctx, 4*time.Second)
+		err := c.command(attempt, probe)
+		cancel()
+		if err == nil {
+			c.mu.Lock()
+			matched := bytes.Contains(c.pending.Bytes(), []byte("m3-shell-ready"))
+			c.mu.Unlock()
+			if matched {
+				return nil
+			}
+		}
+		select {
+		case <-c.closed:
+			return fmt.Errorf("console: closed before shell acknowledgement")
+		case <-ctx.Done():
+			return fmt.Errorf("console: shell acknowledgement unavailable")
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("console: shell acknowledgement unavailable")
+}
+
 // command sends one line at the shell prompt, waits for the next prompt and
 // fails if RouterOS printed an error.
 func (c *console) command(ctx context.Context, line string) error {

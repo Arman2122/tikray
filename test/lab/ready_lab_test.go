@@ -81,7 +81,7 @@ func TestBootReadyCHR(t *testing.T) {
 			t.Log("CHR cache phase: serial connected")
 		case "console login done":
 			t.Log("CHR cache phase: serial login")
-		case "interfaces available", "interface names verified", "WAN address configured",
+		case "shell synchronized", "interfaces available", "interface names verified", "WAN address configured",
 			"LAN address configured", "default configured", "SSH enabled":
 			t.Logf("CHR cache phase: %s", args[0])
 		case "ssh up":
