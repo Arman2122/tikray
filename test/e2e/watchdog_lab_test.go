@@ -622,6 +622,10 @@ func (f *routingLab) activeImageSelection(ctx context.Context, t *testing.T) run
 // intentionally short-lived read shares either management connection.
 func watchOwnerManagement(ctx context.Context, t *testing.T, c *routeros.Client, endpoint string) func() {
 	t.Helper()
+	rows, err := c.Command(ctx, []string{"/system/resource/print", "=.proplist=uptime"})
+	if err != nil || len(rows) != 1 || rows[0]["uptime"] == "" {
+		t.Fatalf("owner %s API baseline unavailable", endpoint)
+	}
 	generation := c.Generation()
 	command := func(call context.Context) string {
 		rows, err := c.CommandAt(call, generation, []string{"/system/resource/print", "=.proplist=uptime"})
@@ -684,8 +688,6 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	if receipt.Active != initial.digest || receipt.Pending != nil || receipt.Previous != "" {
 		t.Fatal("installed baseline is not the verified image")
 	}
-	// A fresh installation has no authorized rollback target yet.
-	f.imageRequest(ctx, t, component, "rollback", "", http.StatusConflict)
 	base := f.requireImage(ctx, t, component, initial)
 	selection := f.activeImageSelection(ctx, t)
 	statePath := dataRoot + "/state/state.v" + strconv.Itoa(store.Current) + ".json"
@@ -693,8 +695,6 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	ownerSSH := f.ownerLANSSH(ctx, t)
 	ownerAPI := f.ownerSessionAt(ctx, t, "192.168.88.1:9879")
 	t.Cleanup(func() { ownerAPI.Close() })
-	ownerCommand := watchOwnerManagement(ctx, t, ownerAPI, "LAN")
-	bridgeCommand := watchOwnerManagement(ctx, t, f.ros, "bridge")
 	const unrelated = "192.168.88.111"
 	if f.Net.Client(ctx, "ip", "addr", "add", unrelated+"/32", "dev", "eth0").Run() != nil {
 		t.Fatal("could not attach an unmanaged LAN address for the unrelated connection")
@@ -703,7 +703,6 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		_ = f.Net.Client(context.Background(), "ip", "addr", "del", unrelated+"/32", "dev", "eth0").Run()
 	})
 	ownerTracking := f.monitorForeignFlow(ctx, t, unrelated, f.echoedOwnerPackets(ctx, t, unrelated))
-	generation := f.ros.Generation()
 	other, kind := "runner", "runner"
 	if component == "runner" {
 		other, kind = "tikray", "control-start"
@@ -718,6 +717,13 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		changedProbe = "runner"
 	}
 	priorProcess := f.probe(ctx, t, changedProbe)
+	f.stageImageFixture(ctx, t, component, healthyImageVersion, true)
+	// Finish the lab network, observer logins and initial upload before
+	// taking the management baseline. From the first owner mutation
+	// onward, both clients must retain their original live connection.
+	ownerCommand := watchOwnerManagement(ctx, t, ownerAPI, "LAN")
+	bridgeCommand := watchOwnerManagement(ctx, t, f.ros, "bridge")
+	generation := f.ros.Generation()
 	verifySibling := func() {
 		t.Helper()
 		ownerSSH()
@@ -733,9 +739,10 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		}
 		f.checkOwnerRules(ctx, t)
 	}
+	// A fresh installation has no authorized rollback target yet.
+	f.imageRequest(ctx, t, component, "rollback", "", http.StatusConflict)
 	// Run the authenticated owner operation with a byte changed AFTER
 	// signing. No request, row replacement or slot claim may result.
-	f.stageImageFixture(ctx, t, component, healthyImageVersion, true)
 	f.imageRequest(ctx, t, component, "update", healthyImageVersion, http.StatusUnprocessableEntity)
 	if p, e := f.exists(ctx, imageRequestFile); e != nil || p {
 		t.Fatal("tampered archive created an update marker")
