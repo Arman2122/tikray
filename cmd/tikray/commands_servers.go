@@ -291,9 +291,10 @@ func (c *cli) subRefresh(ctx context.Context, cl *apiclient.Client, id string) i
 
 func (c *cli) deviceCommand(ctx context.Context, args []string) int {
 	return c.subcommands("device", args, map[string]func([]string) int{
-		"set":  func(args []string) int { return c.deviceSet(ctx, args) },
-		"rm":   func(args []string) int { return c.deviceRemove(ctx, args) },
-		"list": func(args []string) int { return c.deviceList(ctx, args) },
+		"set":         func(args []string) int { return c.deviceSet(ctx, args) },
+		"rm":          func(args []string) int { return c.deviceRemove(ctx, args) },
+		"list":        func(args []string) int { return c.deviceList(ctx, args) },
+		"make-static": func(args []string) int { return c.deviceMakeStatic(ctx, args) },
 	})
 }
 
@@ -367,6 +368,34 @@ func (c *cli) deviceRemove(ctx context.Context, args []string) int {
 			return c.failAPI(ctx, err)
 		}
 		return c.say("removed device %s", addr)
+	})
+}
+
+func (c *cli) deviceMakeStatic(ctx context.Context, args []string) int {
+	fs := c.newFlagSet("device make-static", "device make-static <ip>")
+	pos, code, ok := c.parse(fs, args, 1)
+	if !ok {
+		return code
+	}
+	addr, err := netip.ParseAddr(strings.TrimSpace(pos[0]))
+	if err != nil || !addr.Is4() {
+		return c.flagError(fs, "give an IPv4 address such as 192.168.88.10")
+	}
+	return c.withDaemon(ctx, func(cl *apiclient.Client) int {
+		resp, err := cl.MakeStaticLease(ctx, addr)
+		if err != nil {
+			return c.failAPI(ctx, err)
+		}
+		var lease struct {
+			Address string `json:"address"`
+			MAC     string `json:"mac"`
+			Name    string `json:"name"`
+		}
+		_ = resp.Decode(&lease)
+		if lease.MAC != "" {
+			return c.say("made DHCP lease static: %s (%s)", addr, oneWord(lease.MAC))
+		}
+		return c.say("made DHCP lease static: %s", addr)
 	})
 }
 

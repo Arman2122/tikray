@@ -13,6 +13,8 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -125,10 +127,17 @@ type Config struct {
 	// LocalBridge verifies that the control container has the proposed .2
 	// address and exact prefix. Without it a bridge repair cannot be trusted.
 	LocalBridge func(store.Network) bool
+	// Xray, if set, supplies live traffic and runtime metrics for Stats.
+	Xray XrayStats
+	// Version is the control binary's build version, shown in Status.
+	Version string
 }
 
 // Service owns the desired state and keeps xray applied to it.
 type Service struct {
+	bootID         string
+	version        string
+	xray           XrayStats
 	imageSchedules *ImageSchedules
 	imagesDisabled bool
 	bootstrap      *Bootstrap
@@ -235,7 +244,12 @@ func New(c Config) (*Service, error) {
 	if c.GeoReader == nil {
 		c.GeoReader = new(artifacts.GeoReader)
 	}
+	var bootBuf [8]byte
+	_, _ = rand.Read(bootBuf[:])
 	s := &Service{
+		bootID:         hex.EncodeToString(bootBuf[:]),
+		version:        c.Version,
+		xray:           c.Xray,
 		imageSchedules: c.ImageSchedules,
 		imagesDisabled: c.ImagesDisabled,
 		geoReader:      c.GeoReader,
@@ -359,11 +373,17 @@ func (s *Service) Run(ctx context.Context) error {
 	return nil
 }
 
+// BootID returns the random identifier generated for this process lifetime so
+// clients polling /v1/events can tell when seq has restarted from 1.
+func (s *Service) BootID() string { return s.bootID }
+
 // State returns a copy of the state and its revision.
 func (s *Service) State() (store.State, uint64) { return s.store.State() }
 
 // Status is what the service reports of itself.
 type Status struct {
+	BootID   string `json:"boot_id,omitempty"`
+	Version  string `json:"version,omitempty"`
 	Revision uint64 `json:"revision"`
 	// Applied: the render of the current state, for the runner's active core
 	// and geo, is the runner's active config and, when managed, the router
@@ -398,7 +418,7 @@ type Status struct {
 // it changes.
 func (s *Service) Status(ctx context.Context) Status {
 	st, rev := s.store.State()
-	out := Status{Revision: rev, Health: s.health(), Degraded: []string{}}
+	out := Status{BootID: s.bootID, Version: s.version, Revision: rev, Health: s.health(), Degraded: []string{}}
 	for _, srv := range st.Servers {
 		if srv.Invalid != "" {
 			out.Degraded = append(out.Degraded, srv.ID)

@@ -51,6 +51,8 @@ func publicEngineError(err error) error {
 	switch {
 	case err == nil:
 		return nil
+	case errors.Is(err, ErrLeaseNotFound):
+		return ErrLeaseNotFound
 	case errors.Is(err, ErrIPv6FlowScope):
 		return ErrIPv6FlowScope
 	case errors.Is(err, ErrPolicyConflict), errors.Is(err, errConflict), errors.Is(err, errPolicy), errors.Is(err, errTopology), errors.Is(err, errFastTrack), errors.Is(err, errIPv6Guard):

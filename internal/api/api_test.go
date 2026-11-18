@@ -18,6 +18,7 @@ import (
 
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/auth"
+	"github.com/Arman2122/tikray/internal/backup"
 	"github.com/Arman2122/tikray/internal/health"
 	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/runnerapi"
@@ -87,7 +88,58 @@ type fakeBackend struct {
 	gate func(method string, ctx context.Context)
 }
 
+func (f *fakeBackend) BootID() string { return "0123456789abcdef" }
+func (f *fakeBackend) Stats(context.Context) service.Stats {
+	return service.Stats{
+		Available: true,
+		Sys:       &service.SysMetrics{Uptime: 120, NumGoroutine: 24, Alloc: 8 << 20},
+		Outbounds: []service.TrafficCounter{{Tag: "direct", Uplink: 100, Downlink: 200}},
+		Inbounds:  []service.TrafficCounter{{Tag: "tun-in", Uplink: 300, Downlink: 400}},
+	}
+}
+func (f *fakeBackend) Geo(context.Context) (service.GeoInfo, error) {
+	if f.err != nil {
+		return service.GeoInfo{}, f.err
+	}
+	return service.GeoInfo{
+		Active:  "ir-20261119",
+		Profile: "iran",
+		Slots:   []artifacts.GeoSlotInfo{{Slot: "ir-20261119", Profile: "iran", Site: []string{"geosite:category-ir"}, IP: []string{"geoip:ir"}, PrefixCount: 42}},
+		History: []artifacts.Result{{Kind: artifacts.KindGeo, To: "ir-20261119", Outcome: runnerapi.OutcomeCommitted, At: t0}},
+	}, nil
+}
 func (f *fakeBackend) Leases(context.Context) ([]routeros.LeaseInfo, error) { return nil, f.err }
+func (f *fakeBackend) MakeStaticLease(_ context.Context, addr netip.Addr) (routeros.LeaseInfo, error) {
+	f.rec("MakeStaticLease", 0, addr)
+	if f.err != nil {
+		return routeros.LeaseInfo{}, f.err
+	}
+	return routeros.LeaseInfo{Address: addr, MAC: "02:00:00:00:00:17", Name: "printer", Static: true}, nil
+}
+func (f *fakeBackend) ExportBackup(ctx context.Context, passphrase string) (backup.Bundle, error) {
+	f.rec("ExportBackup", 0)
+	if f.err != nil {
+		return backup.Bundle{}, f.err
+	}
+	return backup.Seal(ctx, f.state, passphrase)
+}
+func (f *fakeBackend) RestoreBackup(ctx context.Context, rev uint64, b backup.Bundle, passphrase string) (uint64, error) {
+	f.rec("RestoreBackup", rev)
+	if f.err != nil {
+		return 0, f.err
+	}
+	if _, err := backup.Open(ctx, b, passphrase); err != nil {
+		return 0, err
+	}
+	return f.newRev, nil
+}
+func (f *fakeBackend) UploadInbox(_ context.Context, kind, profile, version, name string, r io.Reader) (int64, error) {
+	f.rec("UploadInbox", 0, kind, profile, version, name)
+	if f.err != nil {
+		return 0, f.err
+	}
+	return io.Copy(io.Discard, r)
+}
 
 func newFake() *fakeBackend {
 	return &fakeBackend{

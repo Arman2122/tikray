@@ -362,3 +362,17 @@ func (m *Managed) Leases(ctx context.Context) ([]LeaseInfo, error) {
 	}
 	return ls, nil
 }
+func (m *Managed) MakeStaticLease(ctx context.Context, addr netip.Addr) (LeaseInfo, error) {
+	e := m.current()
+	if e == nil {
+		return LeaseInfo{}, ErrUnavailable
+	}
+	l, err := e.MakeStaticLease(ctx, addr)
+	if err != nil {
+		return LeaseInfo{}, err
+	}
+	if strings.Contains(l.Name, m.cfg.Password) {
+		l.Name = ""
+	}
+	return l, nil
+}

@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Arman2122/tikray/internal/auth"
+	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 )
@@ -25,31 +26,39 @@ import (
 // Longer identifiers, URLs, dotted paths and arbitrary DHCP data stay local.
 var leaseLabel = regexp.MustCompile(`^[A-Za-z](?:[A-Za-z0-9-]{0,22}[A-Za-z0-9])?$`)
 
+type leaseView struct {
+	Address netip.Addr `json:"address"`
+	MAC     string     `json:"mac"`
+	Name    string     `json:"name,omitempty"`
+	Static  bool       `json:"static,omitempty"`
+}
+
+func (h *handler) visibleLease(l routeros.LeaseInfo, redact func(string) string, session auth.Session) (leaseView, bool) {
+	mac, err := net.ParseMAC(l.MAC)
+	if !l.Address.Is4() || err != nil || len(mac) != 6 {
+		return leaseView{}, false
+	}
+	v := leaseView{Address: l.Address, MAC: mac.String(), Static: l.Static}
+	if leaseLabel.MatchString(l.Name) && redact(l.Name) == l.Name && h.publicName(l.Name, session) == l.Name {
+		v.Name = l.Name
+	}
+	return v, true
+}
+
 func (h *handler) leases(w http.ResponseWriter, r *http.Request) {
 	leases, err := h.b.Leases(r.Context())
 	if err != nil {
 		h.fail(w, err)
 		return
 	}
-	type view struct {
-		Address netip.Addr `json:"address"`
-		MAC     string     `json:"mac"`
-		Name    string     `json:"name,omitempty"`
-	}
 	st, rev := h.b.State()
 	redact := service.RedactorFor(st)
 	session := callerOf(r).session
-	out := make([]view, 0, len(leases))
+	out := make([]leaseView, 0, len(leases))
 	for _, l := range leases {
-		mac, err := net.ParseMAC(l.MAC)
-		if !l.Address.Is4() || err != nil || len(mac) != 6 {
-			continue
+		if v, ok := h.visibleLease(l, redact, session); ok {
+			out = append(out, v)
 		}
-		v := view{Address: l.Address, MAC: mac.String()}
-		if leaseLabel.MatchString(l.Name) && redact(l.Name) == l.Name && h.publicName(l.Name, session) == l.Name {
-			v.Name = l.Name
-		}
-		out = append(out, v)
 	}
 	h.reply(w, http.StatusOK, rev, out)
 }

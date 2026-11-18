@@ -59,6 +59,11 @@ func RedactorWith(st store.State, documents ...json.RawMessage) func(string) str
 	add := func(s string) {
 		if len(s) >= minSecret {
 			set[s] = true
+			// xray normalizes UUIDs to lowercase in diagnostics even when stored uppercase.
+			if isUUIDText(s) {
+				set[strings.ToLower(s)] = true
+				set[strings.ToUpper(s)] = true
+			}
 		}
 	}
 	for _, doc := range documents {
@@ -216,6 +221,29 @@ func (s *Service) Redactor() func(string) string { return s.redact }
 
 // redact applies RedactorFor of the current state to text.
 func (s *Service) redact(text string) string { return s.redactorNow()(text) }
+
+// isUUIDText reports whether s has the canonical 36-byte UUID shape
+// (8-4-4-4-12 hex digits), regardless of case.
+func isUUIDText(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := range 36 {
+		c := s[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+			if !isHex {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // redactorNow is RedactorFor of the current state. The redactor of the last
 // revision it saw is kept, so that the outbounds are parsed once a revision.

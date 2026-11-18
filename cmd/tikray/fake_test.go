@@ -18,6 +18,7 @@ import (
 	"github.com/Arman2122/tikray/internal/api"
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/auth"
+	"github.com/Arman2122/tikray/internal/backup"
 	"github.com/Arman2122/tikray/internal/health"
 	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/service"
@@ -89,7 +90,38 @@ type fakeBackend struct {
 	gate func(ctx context.Context)
 }
 
+func (f *fakeBackend) BootID() string { return "0123456789abcdef" }
+func (f *fakeBackend) Stats(context.Context) service.Stats {
+	return service.Stats{Outbounds: []service.TrafficCounter{}, Inbounds: []service.TrafficCounter{}}
+}
+func (f *fakeBackend) Geo(context.Context) (service.GeoInfo, error) {
+	return service.GeoInfo{Slots: []artifacts.GeoSlotInfo{}, History: []artifacts.Result{}}, f.err
+}
 func (f *fakeBackend) Leases(context.Context) ([]routeros.LeaseInfo, error) { return nil, nil }
+func (f *fakeBackend) MakeStaticLease(_ context.Context, addr netip.Addr) (routeros.LeaseInfo, error) {
+	return routeros.LeaseInfo{Address: addr, MAC: "02:00:00:00:00:10", Static: true}, f.err
+}
+func (f *fakeBackend) ExportBackup(ctx context.Context, passphrase string) (backup.Bundle, error) {
+	if f.err != nil {
+		return backup.Bundle{}, f.err
+	}
+	return backup.Seal(ctx, f.state, passphrase)
+}
+func (f *fakeBackend) RestoreBackup(ctx context.Context, rev uint64, b backup.Bundle, passphrase string) (uint64, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	if _, err := backup.Open(ctx, b, passphrase); err != nil {
+		return 0, err
+	}
+	return rev + 1, nil
+}
+func (f *fakeBackend) UploadInbox(_ context.Context, _, _, _, _ string, r io.Reader) (int64, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	return io.Copy(io.Discard, r)
+}
 
 var _ api.Backend = (*fakeBackend)(nil)
 

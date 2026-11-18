@@ -138,6 +138,9 @@ import (
 	"github.com/Arman2122/tikray/internal/xrayver"
 )
 
+// buildVersion is overridden at release build time with -ldflags "-X main.buildVersion=...".
+var buildVersion = "dev"
+
 const (
 	lastResultName = "last-result.json"
 	// probeTimeout bounds one SOCKS health probe.
@@ -171,13 +174,22 @@ serve is not running" without one. --json prints the API's public data in JSON.
                  set the policy of a device, or of a range of them
   device rm <ip|cidr>
   device list [--json]
+  device make-static <ip>
+                 convert a bound dynamic DHCP lease on RouterOS to static
   policy default <direct|smart|full> [--kill-switch]
                  set the policy of the devices that are not listed
   status [--json]
                  print whether the state is applied, the core, the proxy's
                  health and each server's
+  stats [--json]
+                 print live xray-core uptime, memory and per-tag traffic
   events [--after N]
                  print what the service has done, oldest first
+  backup export --out FILE
+  backup restore --in FILE
+                 export or restore a passphrase-encrypted state backup
+                 (reads passphrase from TIKRAY_BACKUP_PASSPHRASE or stdin)
+  version        print the tikray build version
   token create <name> [--expires 720h]
                  make a named API token for a script, and print it: it is
                  shown only this once, since only a hash of it is kept. It
@@ -192,6 +204,8 @@ serve is not running" without one. --json prints the API's public data in JSON.
   image update <tikray|runner> <version>
   image rollback <tikray|runner>
                  queue a verified component switch using the native watchdog
+  geo status [--json]
+                 print the active geo bundle, installed slots and geo history
   geo update <version|latest> [--profile NAME]
                  verify and trial a geo bundle through the running service
   geo rollback   restore the previous geo selection and domestic routes
@@ -256,6 +270,7 @@ func main() {
 // cli is one invocation: its environment and output.
 type cli struct {
 	getenv         func(string) string
+	stdin          io.Reader
 	stdout, stderr io.Writer
 	// tune, if set, adjusts the CoreUpdater before it runs. Only tests set it,
 	// to shorten the waits of a trial.
@@ -299,8 +314,14 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		return c.policyCommand(ctx, args[1:])
 	case "status":
 		return c.statusCommand(ctx, args[1:])
+	case "stats":
+		return c.statsCommand(ctx, args[1:])
 	case "events":
 		return c.eventsCommand(ctx, args[1:])
+	case "backup":
+		return c.backupCommand(ctx, args[1:])
+	case "version":
+		return c.say("%s", buildVersion)
 	case "setup-code":
 		return c.setupCodeCommand(args[1:])
 	case "admin":

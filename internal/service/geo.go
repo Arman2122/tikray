@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 
 	"github.com/Arman2122/tikray/internal/artifacts"
@@ -10,6 +11,62 @@ import (
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/store"
 )
+
+// GeoInfo summarizes the active geo bundle, installed verified slots, and
+// history of geo bundle updates and rollbacks.
+type GeoInfo struct {
+	Active   string                  `json:"active,omitempty"`
+	Profile  string                  `json:"profile,omitempty"`
+	Degraded bool                    `json:"degraded,omitempty"`
+	Pending  bool                    `json:"pending,omitempty"`
+	Slots    []artifacts.GeoSlotInfo `json:"slots"`
+	History  []artifacts.Result      `json:"history"`
+}
+
+// Geo reports the active geo slot, verified slots on disk, and geo update
+// history. If the runner is temporarily unreachable, Slots and History are
+// still returned with Active empty.
+func (s *Service) Geo(ctx context.Context) (GeoInfo, error) {
+	slots, err := artifacts.ListGeoSlots(s.data)
+	if err != nil {
+		return GeoInfo{}, s.redactError(fmt.Errorf("service: listing geo slots: %w", err))
+	}
+	allHistory, err := artifacts.ReadHistory(s.data)
+	if err != nil {
+		return GeoInfo{}, s.redactError(fmt.Errorf("service: reading geo history: %w", err))
+	}
+	history := make([]artifacts.Result, 0)
+	for _, r := range allHistory {
+		if r.Kind == artifacts.KindGeo {
+			history = append(history, r)
+		}
+	}
+	pending := artifacts.GeoPending(s.data)
+	info := GeoInfo{
+		Profile:  s.geoProfile,
+		Degraded: pending || s.geoDegraded.Load(),
+		Pending:  pending,
+		Slots:    slots,
+		History:  history,
+	}
+	if !s.bootPending.Load() && !s.repairBridge {
+		rctx, cancel := context.WithTimeout(ctx, statusTimeout)
+		rs, rerr := s.runner.Status(rctx)
+		cancel()
+		if rerr == nil && rs.Active != nil {
+			info.Active = rs.Active.Geo
+		}
+	}
+	if info.Active != "" {
+		for _, sl := range slots {
+			if sl.Slot == info.Active && sl.Profile != "" {
+				info.Profile = sl.Profile
+				break
+			}
+		}
+	}
+	return info, nil
+}
 
 func (s *Service) geoUpdater(st store.State, rev uint64) *artifacts.GeoUpdater {
 	g := &artifacts.GeoUpdater{Core: s.updater(st, rev)}

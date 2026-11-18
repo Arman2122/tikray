@@ -357,3 +357,14 @@ func TestRedactorKeepsOrdinaryQueryWords(t *testing.T) {
 	got := red("fetching failed for " + token + " and " + long)
 	wantRedacted(t, got, secret{"the token", token}, secret{"the long value", long})
 }
+
+func TestRedactorCoversCaseNormalizedUUIDs(t *testing.T) {
+	const upper = "5FDC6E8A-4A2B-4A3C-9D8E-1F2A3B4C5D6E"
+	const lower = "5fdc6e8a-4a2b-4a3c-9d8e-1f2a3b4c5d6e"
+	st := store.Default()
+	st.Servers = []store.Server{server("00000001", `{"protocol":"vless","settings":{"vnext":[{"address":"198.51.100.1","port":443,"users":[{"id":"`+upper+`"}]}]}}`)}
+	red := RedactorFor(st)
+	got := red("xray rejected user " + lower + " and " + upper)
+	wantRedacted(t, got, secret{"lower uuid", lower}, secret{"upper uuid", upper})
+	wantText(t, got, "xray rejected user "+redacted+" and "+redacted, secret{"lower uuid", lower}, secret{"upper uuid", upper})
+}

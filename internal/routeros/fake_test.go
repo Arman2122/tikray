@@ -90,6 +90,9 @@ func (f *diffRouter) CommandAt(ctx context.Context, g uint64, words []string) ([
 	if verb == "move" {
 		id, before = props["numbers"], props["destination"]
 	}
+	if verb == "make-static" {
+		id = props["numbers"]
+	}
 	idx := func(id string) int {
 		return slices.IndexFunc(f.rows, func(r Observed) bool { return r.Menu == menu && r.ID == id })
 	}
@@ -117,6 +120,12 @@ func (f *diffRouter) CommandAt(ctx context.Context, g uint64, words []string) ([
 		}
 		delete(f.rows[i].Props, "protocol")
 	case "move":
+	case "make-static":
+		if menu != "/ip/dhcp-server/lease" || len(props) != 1 || props["numbers"] == "" {
+			return nil, ErrRejected
+		}
+		f.rows[i].Dynamic = false
+		f.rows[i].Props["dynamic"] = "false"
 	case "remove":
 		f.rows = slices.Delete(f.rows, i, i+1)
 	default:

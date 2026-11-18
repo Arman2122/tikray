@@ -174,3 +174,65 @@ func TestGeoChecksumsAndUnsafeSlots(t *testing.T) {
 		checkFailure(t, f.data, version)
 	})
 }
+
+func TestListGeoSlots(t *testing.T) {
+	data := t.TempDir()
+	// Empty data root (no geo/ dir yet) returns an empty slice, not an error.
+	got, err := ListGeoSlots(data)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("empty data ListGeoSlots = %+v, %v; want empty slice", got, err)
+	}
+
+	writeSlot := func(slot, profile, ranges string) {
+		t.Helper()
+		dir := filepath.Join(data, "geo", slot)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		files := map[string]string{
+			"geosite.dat":     "site-" + slot,
+			"geoip.dat":       "ip-" + slot,
+			"domestic-v4.txt": ranges,
+		}
+		hashes := map[string]string{}
+		for name, body := range files {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256([]byte(body))
+			hashes[name] = hex.EncodeToString(sum[:])
+		}
+		meta, _ := json.Marshal(map[string]any{
+			"version":    slot,
+			"profile":    profile,
+			"release_id": "20261119",
+			"site":       []string{"geosite:category-ir"},
+			"ip":         []string{"geoip:ir"},
+			"sha256":     hashes,
+		})
+		if err := os.WriteFile(filepath.Join(dir, "meta.json"), meta, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeSlot("ir-20261118", "iran", "192.0.2.0/24\n")
+	writeSlot("ir-20261119", "iran", "192.0.2.0/24\n198.51.100.0/24\n")
+	// Add a corrupt slot and a temp staging dir — both must be ignored.
+	_ = os.MkdirAll(filepath.Join(data, "geo", ".tmp-geo-123"), 0o755)
+	_ = os.MkdirAll(filepath.Join(data, "geo", "broken-slot"), 0o755)
+	_ = os.WriteFile(filepath.Join(data, "geo", "broken-slot", "meta.json"), []byte("{}"), 0o644)
+
+	got, err = ListGeoSlots(data)
+	if err != nil {
+		t.Fatalf("ListGeoSlots: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d slots, want 2: %+v", len(got), got)
+	}
+	if got[0].Slot != "ir-20261119" || got[0].PrefixCount != 2 || got[0].Profile != "iran" {
+		t.Fatalf("slot[0] = %+v", got[0])
+	}
+	if got[1].Slot != "ir-20261118" || got[1].PrefixCount != 1 {
+		t.Fatalf("slot[1] = %+v", got[1])
+	}
+}

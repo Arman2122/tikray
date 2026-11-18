@@ -34,6 +34,7 @@ import (
 
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/auth"
+	"github.com/Arman2122/tikray/internal/backup"
 	"github.com/Arman2122/tikray/internal/store"
 )
 
@@ -512,4 +513,40 @@ func (c *Client) RevokeToken(ctx context.Context, value string) (Response, error
 // makes a new setup code. Only the root token may.
 func (c *Client) ResetAdmin(ctx context.Context) (Response, error) {
 	return c.send(ctx, http.MethodPost, "/v1/auth/reset", nil)
+}
+
+// Stats is GET /v1/stats: live xray runtime metrics and traffic counters.
+func (c *Client) Stats(ctx context.Context) (Response, error) { return c.get(ctx, "/v1/stats") }
+
+// Geo is GET /v1/geo: active geo bundle, installed slots, and geo history.
+func (c *Client) Geo(ctx context.Context) (Response, error) { return c.get(ctx, "/v1/geo") }
+
+// Leases is GET /v1/routeros/leases: active DHCP leases observed on the router.
+func (c *Client) Leases(ctx context.Context) (Response, error) {
+	return c.get(ctx, "/v1/routeros/leases")
+}
+
+// MakeStaticLease is POST /v1/routeros/leases/static: converts a single bound
+// dynamic DHCP lease on the managed router into a static reservation.
+func (c *Client) MakeStaticLease(ctx context.Context, addr netip.Addr) (Response, error) {
+	return c.send(ctx, http.MethodPost, "/v1/routeros/leases/static", struct {
+		Address string `json:"address"`
+	}{addr.String()})
+}
+
+// ExportBackup is POST /v1/backup/export: seals the desired state into an
+// encrypted backup.Bundle.
+func (c *Client) ExportBackup(ctx context.Context, passphrase string) (Response, error) {
+	return c.send(ctx, http.MethodPost, "/v1/backup/export", struct {
+		Passphrase string `json:"passphrase"`
+	}{passphrase})
+}
+
+// RestoreBackup is POST /v1/backup/restore: decrypts and applies a sealed
+// backup.Bundle.
+func (c *Client) RestoreBackup(ctx context.Context, b backup.Bundle, passphrase string) (Response, error) {
+	return c.send(ctx, http.MethodPost, "/v1/backup/restore", struct {
+		Passphrase string        `json:"passphrase"`
+		Bundle     backup.Bundle `json:"bundle"`
+	}{passphrase, b})
 }

@@ -124,6 +124,8 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 		Bootstrap:      bootstrap,
 		VerifyBridge:   install != nil,
 		Monitor:        w.monitor,
+		Xray:           &xray.Client{Addr: w.cfg.XrayAPI},
+		Version:        buildVersion,
 		Data:           env.Data,
 		Socks:          w.cfg.Socks,
 		Log:            c.stderr,

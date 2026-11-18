@@ -71,10 +71,11 @@ func callerOf(r *http.Request) caller {
 // is 403. It checks that the session is there before it looks at the token, so
 // that a request with no session is never a CSRF failure. The body of every
 // request is capped.
-func (h *handler) guard(mux *http.ServeMux, public map[string]bool) http.Handler {
+func (h *handler) guard(mux *http.ServeMux, public map[string]bool, limits map[string]int64) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setSecurityHeaders(w.Header())
-		if _, pattern := mux.Handler(r); public[pattern] {
+		_, pattern := mux.Handler(r)
+		if public[pattern] {
 			r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 			mux.ServeHTTP(w, r)
 			return
@@ -94,7 +95,11 @@ func (h *handler) guard(mux *http.ServeMux, public map[string]bool) http.Handler
 			writeJSON(w, http.StatusForbidden, errorBody{Error: codeCSRF, Detail: "the " + csrfHeader + " header is missing or is not this session's token"})
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+		limit := int64(maxBody)
+		if custom := limits[pattern]; custom > 0 {
+			limit = custom
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey{}, c)))
 	})
 }

@@ -6,6 +6,19 @@ import (
 	"github.com/Arman2122/tikray/internal/artifacts"
 )
 
+func (h *handler) geoStatus(w http.ResponseWriter, r *http.Request) {
+	info, err := h.b.Geo(r.Context())
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	for i := range info.History {
+		info.History[i].Detail = h.redact(info.History[i].Detail)
+	}
+	_, rev := h.b.State()
+	h.reply(w, http.StatusOK, rev, info)
+}
+
 func (h *handler) geoUpdate(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Profile string `json:"profile"`

@@ -20,6 +20,7 @@ type RouterController interface {
 	Reconcile(context.Context, routeros.Target) (routeros.Report, error)
 	Watch(context.Context, func()) error
 	Leases(context.Context) ([]routeros.LeaseInfo, error)
+	MakeStaticLease(context.Context, netip.Addr) (routeros.LeaseInfo, error)
 }
 
 type RouterStatus struct {
@@ -245,4 +246,29 @@ func (s *Service) Leases(ctx context.Context) ([]routeros.LeaseInfo, error) {
 		return nil, publicRouterError(err)
 	}
 	return leases, nil
+}
+
+// MakeStaticLease converts a single bound dynamic DHCP lease on the router to
+// a static reservation so the device keeps a stable IP for routing rules.
+func (s *Service) MakeStaticLease(ctx context.Context, addr netip.Addr) (routeros.LeaseInfo, error) {
+	if s.bootPending.Load() {
+		return routeros.LeaseInfo{}, ErrBootstrapPending
+	}
+	if s.router == nil || s.repairBridge {
+		return routeros.LeaseInfo{}, ErrRouterUnavailable
+	}
+	if !addr.IsValid() || !addr.Is4() {
+		return routeros.LeaseInfo{}, &Refused{Reason: "address must be a valid IPv4 address"}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	lease, err := s.router.MakeStaticLease(ctx, addr)
+	if err != nil {
+		if errors.Is(err, routeros.ErrLeaseNotFound) {
+			return routeros.LeaseInfo{}, ErrNotFound
+		}
+		return routeros.LeaseInfo{}, publicRouterError(err)
+	}
+	s.record(KindRouter, "made DHCP lease static")
+	return lease, nil
 }

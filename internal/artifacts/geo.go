@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -38,6 +39,63 @@ type geoMeta struct {
 	Site      []string          `json:"site"`
 	IP        []string          `json:"ip"`
 	SHA256    map[string]string `json:"sha256"`
+}
+
+// GeoSlotInfo summarizes one verified geo bundle slot under <data>/geo/.
+type GeoSlotInfo struct {
+	Slot        string   `json:"slot"`
+	Profile     string   `json:"profile,omitempty"`
+	ReleaseID   string   `json:"release_id,omitempty"`
+	Site        []string `json:"site"`
+	IP          []string `json:"ip"`
+	PrefixCount int      `json:"prefix_count"`
+}
+
+// ListGeoSlots returns every verified geo slot under <data>/geo/, sorted by
+// slot name descending. Missing geo directories return an empty slice;
+// unverified, symlinked, or temporary directories are ignored.
+func ListGeoSlots(data string) ([]GeoSlotInfo, error) {
+	if _, err := os.Lstat(filepath.Join(data, "geo")); errors.Is(err, os.ErrNotExist) {
+		return []GeoSlotInfo{}, nil
+	}
+	fd, err := openGeoDir(data, false, "geo")
+	if err != nil {
+		return nil, err
+	}
+	dir := os.NewFile(uintptr(fd), "geo")
+	defer dir.Close()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return nil, errors.New("artifacts: geo directory unreadable")
+	}
+	out := make([]GeoSlotInfo, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if !runnerapi.ValidGeoName(name) || !entry.IsDir() {
+			continue
+		}
+		sub, err := unix.Openat(fd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			continue
+		}
+		meta, ranges, verr := verifyGeoFD(sub, name)
+		unix.Close(sub)
+		if verr != nil {
+			continue
+		}
+		out = append(out, GeoSlotInfo{
+			Slot:        meta.Version,
+			Profile:     meta.Profile,
+			ReleaseID:   meta.ReleaseID,
+			Site:        slices.Clone(meta.Site),
+			IP:          slices.Clone(meta.IP),
+			PrefixCount: len(ranges),
+		})
+	}
+	slices.SortFunc(out, func(a, b GeoSlotInfo) int {
+		return cmp.Compare(b.Slot, a.Slot)
+	})
+	return out, nil
 }
 
 // LoadGeo verifies the three installed payloads against the slot metadata.

@@ -46,20 +46,25 @@ import (
 
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/auth"
+	"github.com/Arman2122/tikray/internal/backup"
 	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
 )
 
-// maxBody is the largest request body.
+// maxBody is the largest request body for ordinary JSON endpoints.
 const maxBody = 1 << 20
 
 // Backend is what the handlers call. *service.Service implements it; the
 // tests use a fake.
 type Backend interface {
+	BootID() string
 	State() (store.State, uint64)
 	Status(ctx context.Context) service.Status
+	Stats(ctx context.Context) service.Stats
+	Geo(ctx context.Context) (service.GeoInfo, error)
 	Leases(ctx context.Context) ([]routeros.LeaseInfo, error)
+	MakeStaticLease(ctx context.Context, addr netip.Addr) (routeros.LeaseInfo, error)
 	Events(after uint64) []service.Event
 	Core(ctx context.Context) (service.CoreInfo, error)
 	ApplyNow(ctx context.Context) (artifacts.Result, error)
@@ -70,6 +75,9 @@ type Backend interface {
 	ImageRollback(context.Context, string) (artifacts.ImageOperation, error)
 	GeoUpdate(ctx context.Context, profile, version string) (artifacts.Result, error)
 	GeoRollback(ctx context.Context) (artifacts.Result, error)
+	ExportBackup(ctx context.Context, passphrase string) (backup.Bundle, error)
+	RestoreBackup(ctx context.Context, rev uint64, b backup.Bundle, passphrase string) (uint64, error)
+	UploadInbox(ctx context.Context, kind, profile, version, name string, r io.Reader) (int64, error)
 	// Redactor returns the function that hides the state's secrets in a text.
 	Redactor() func(string) string
 	// Record keeps an event of kind with msg, as the service's own are: the
@@ -130,9 +138,11 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter, instal
 	})
 
 	mux.HandleFunc("GET /v1/status", h.status)
+	mux.HandleFunc("GET /v1/stats", h.stats)
 	mux.HandleFunc("GET /v1/state", h.state)
 	mux.HandleFunc("GET /v1/events", h.events)
 	mux.HandleFunc("GET /v1/routeros/leases", h.leases)
+	mux.HandleFunc("POST /v1/routeros/leases/static", h.makeStaticLease)
 
 	mux.HandleFunc("GET /v1/servers", h.listServers)
 	mux.HandleFunc("POST /v1/servers", h.addServer)
@@ -162,8 +172,13 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter, instal
 	mux.HandleFunc("GET /v1/core", h.core)
 	mux.HandleFunc("GET /v1/images/{component}", h.imageStatus)
 	mux.HandleFunc("POST /v1/images/{component}/{action}", h.imageChange)
+	mux.HandleFunc("GET /v1/geo", h.geoStatus)
 	mux.HandleFunc("POST /v1/geo/update", h.geoUpdate)
 	mux.HandleFunc("POST /v1/geo/rollback", h.geoRollback)
+	mux.HandleFunc("POST /v1/backup/export", h.exportBackup)
+	mux.HandleFunc("POST /v1/backup/restore", h.restoreBackup)
+	mux.HandleFunc("POST /v1/inbox/core/{name}", h.uploadCoreInbox)
+	mux.HandleFunc("POST /v1/inbox/geo/{profile}/{version}/{name}", h.uploadGeoInbox)
 
 	// Who may call them (auth.go). The state of the sign-in, setup and login
 	// are public.
@@ -183,7 +198,12 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter, instal
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		h.writeError(w, http.StatusNotFound, codeNotFound, "no such route")
 	})
-	return h.guard(mux, public)
+	limits := map[string]int64{
+		"POST /v1/backup/restore":                        backup.MaxBundleBytes + (64 << 10),
+		"POST /v1/inbox/core/{name}":                     64<<20 + 1,
+		"POST /v1/inbox/geo/{profile}/{version}/{name}":  64<<20 + 1,
+	}
+	return h.guard(mux, public, limits)
 }
 
 // --- reads
@@ -210,6 +230,9 @@ func (h *handler) events(w http.ResponseWriter, r *http.Request) {
 		after = n
 	}
 	evs := orEmpty(h.b.Events(after))
+	if bootID := h.b.BootID(); bootID != "" {
+		w.Header().Set("X-Tikray-Boot-ID", bootID)
+	}
 	_, rev := h.b.State()
 	h.reply(w, http.StatusOK, rev, evs)
 }

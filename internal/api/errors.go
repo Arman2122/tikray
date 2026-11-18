@@ -7,6 +7,7 @@ import (
 
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/auth"
+	"github.com/Arman2122/tikray/internal/backup"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
@@ -28,6 +29,7 @@ const (
 	codeSetupRequired     = "setup_required"     // 409: there is no admin yet
 	codeTokenLimit        = "token_limit"        // 409: there are 50 tokens
 	codeRefused           = "refused"            // 422
+	codeBadPassphrase     = "bad_passphrase"     // 422: wrong backup passphrase or corrupted bundle
 	codeRateLimited       = "rate_limited"       // 429
 	codeFetchFailed       = "fetch_failed"       // 502
 	codeRunnerUnavailable = "runner_unavailable" // 503
@@ -87,8 +89,10 @@ func classify(err error) (status int, code, detail string) {
 		return http.StatusConflict, codeTokenLimit, err.Error()
 	case errors.Is(err, auth.ErrNoToken):
 		return http.StatusNotFound, codeNotFound, err.Error()
-	case errors.Is(err, auth.ErrInvalid):
+	case errors.Is(err, auth.ErrInvalid), errors.Is(err, backup.ErrInvalid):
 		return http.StatusBadRequest, codeBadRequest, err.Error()
+	case errors.Is(err, backup.ErrDecrypt):
+		return http.StatusUnprocessableEntity, codeBadPassphrase, err.Error()
 	case errors.Is(err, service.ErrNotFound):
 		return http.StatusNotFound, codeNotFound, err.Error()
 	case errors.Is(err, store.ErrConflict):

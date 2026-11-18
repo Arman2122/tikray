@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -66,6 +67,9 @@ func (r *testRouter) Watch(ctx context.Context, hint func()) error {
 	return ctx.Err()
 }
 func (r *testRouter) Leases(context.Context) ([]routeros.LeaseInfo, error) { return nil, nil }
+func (r *testRouter) MakeStaticLease(_ context.Context, addr netip.Addr) (routeros.LeaseInfo, error) {
+	return routeros.LeaseInfo{Address: addr, MAC: "02:00:00:00:00:10", Static: true}, nil
+}
 func (r *testRouter) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

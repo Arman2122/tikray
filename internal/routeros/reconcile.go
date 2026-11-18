@@ -23,6 +23,7 @@ type InstallScope struct {
 type LeaseInfo struct {
 	Address              netip.Addr
 	MAC, Name, Interface string
+	Static               bool
 }
 type Observed struct {
 	Menu, ID, Comment string
@@ -67,4 +68,5 @@ type Report struct {
 var (
 	ErrPolicyConflict = errors.New("routeros: policy or ownership conflict")
 	ErrUnavailable    = errors.New("routeros: verified router state unavailable")
+	ErrLeaseNotFound  = errors.New("routeros: no bound DHCP lease for that address")
 )

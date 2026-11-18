@@ -438,7 +438,7 @@ func (o observation) lanLeases(iface string, lans []LAN, routerIPs []netip.Addr)
 		if !interfaceName(s["name"]) || s["interface"] != iface || s["relay"] != "" && s["relay"] != "0.0.0.0" {
 			return nil, errTopology
 		}
-		rows, e := o.read("/ip/dhcp-server/lease", "active-address,active-mac-address,host-name", "?active-server="+s["name"], "?status=bound")
+		rows, e := o.read("/ip/dhcp-server/lease", "active-address,active-mac-address,host-name,dynamic", "?active-server="+s["name"], "?status=bound")
 		if e != nil {
 			return nil, e
 		}
@@ -458,7 +458,8 @@ func (o observation) lanLeases(iface string, lans []LAN, routerIPs []netip.Addr)
 			if !leaseLabel.MatchString(name) || uuidLabel.MatchString(name) || auth.PublicName(name) != name {
 				name = ""
 			}
-			out = append(out, LeaseInfo{Address: addr, MAC: mac, Interface: iface, Name: name})
+			static := r["dynamic"] == "false" || r["dynamic"] == "no"
+			out = append(out, LeaseInfo{Address: addr, MAC: mac, Interface: iface, Name: name, Static: static})
 		}
 	}
 	return out, nil

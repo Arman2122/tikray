@@ -39,6 +39,9 @@ var h2cTransport = &http2.Transport{
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
 	},
 	IdleConnTimeout: time.Minute,
+	// Recover promptly from silently dead TCP sockets on container restart.
+	ReadIdleTimeout: 30 * time.Second,
+	PingTimeout:     10 * time.Second,
 }
 
 // StatusError is a call that xray answered with a grpc-status other than 0.
