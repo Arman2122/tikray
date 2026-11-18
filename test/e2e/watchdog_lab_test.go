@@ -681,6 +681,12 @@ func watchOwnerManagement(ctx context.Context, t *testing.T, c *routeros.Client,
 
 func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component string) {
 	t.Helper()
+	phase := "prepare"
+	defer func() {
+		if t.Failed() && component == "runner" {
+			t.Log("m3-runner-update-phase=" + phase)
+		}
+	}()
 	var wan *imageWANProof
 	if component == "runner" {
 		wan = f.imageWAN(ctx, t, true)
@@ -758,6 +764,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	if component == "tikray" {
 		stream = f.imageStream(ctx, t, 31875)
 	}
+	phase = "healthy-update"
 	f.imageOperation(ctx, t, component, "update", healthyImageVersion, initial.digest, valid.digest, false)
 	f.waitImageCompletion(ctx, t, component, valid, initial.digest, base)
 	updated := f.requireImage(ctx, t, component, valid)
@@ -785,6 +792,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		f.scheduler(ctx, t, false)
 		f.containerAction(ctx, t, component, "stop", "stopped")
 	}
+	phase = "explicit-rollback"
 	f.imageOperation(ctx, t, component, "rollback", "", valid.digest, initial.digest, component == "runner")
 	f.waitImageCompletion(ctx, t, component, initial, valid.digest, base)
 	verifySibling()
@@ -793,6 +801,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		kept = f.keepImagePeerFlow(ctx, t)
 	}
 	start := time.Now()
+	phase = "unhealthy-update"
 	q := f.imageOperation(ctx, t, component, "update", offlineImageVersion, initial.digest, bad.digest, false)
 	trial := f.requireImage(ctx, t, component, bad)
 	if f.waitForContainer(ctx, imageContainer(component), "running") != nil {
@@ -820,8 +829,11 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		if !fallback || wan.sample(t).closedDirect != 0 || wan.sample(t).unknown != 0 {
 			t.Fatal("unverified running runner failed its open WAN or closed leak check")
 		}
+		phase = "retained-wan"
 		kept.requireDirect(ctx, t)
+		phase = "fresh-dns"
 		f.imageDNSFallback(ctx, t)
+		phase = "alternate-wan"
 		f.imageAlternateGateway(ctx, t, wan)
 		ownerSSH()
 		f.ownerPortForward(ctx, t)
@@ -841,7 +853,9 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		}
 		stream.requireSince(t, 0)
 	}
+	phase = "automatic-rollback"
 	f.waitImageCompletion(ctx, t, component, initial, valid.digest, base)
+	phase = "restored-trial"
 	if time.Since(start) < 4*time.Minute || time.Since(start) > 16*time.Minute {
 		t.Fatal("unhealthy image did not honor the bounded recovery window")
 	}
@@ -858,6 +872,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		if !ok || wan.sample(t).closedDirect != 0 || wan.sample(t).unknown != 0 {
 			t.Fatal("runner update or restore leaked from a closed client or lost the recovered open path")
 		}
+		phase = "retained-proxy"
 		kept.requireProxy(ctx, t)
 	}
 }

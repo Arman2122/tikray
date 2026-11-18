@@ -108,6 +108,7 @@ trap - HUP INT TERM
 printf '%s\n' "$rc" >"$run/exit"
 if ((rc != 0)); then
     echo "CHR suite failed (exit $rc); see the private log" >&2
+    grep -oE 'm3-runner-update-phase=(prepare|healthy-update|explicit-rollback|unhealthy-update|retained-wan|fresh-dns|alternate-wan|automatic-rollback|restored-trial|retained-proxy)$' "$run/harness.log" >&2 || true
     if [[ $pattern != */* ]]; then
         # These files are written from the fixed Go catalogue. The case
         # positions identify failures without exposing even their text.

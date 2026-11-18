@@ -27,7 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         target: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '[{"version":"7.25","ros_arch":"arm64","go_arch":"arm64"}]' || '[{"version":"7.25","ros_arch":"x86_64","go_arch":"amd64"},{"version":"7.23.8","ros_arch":"x86_64","go_arch":"amd64"}]') }}
-        group: [install-uninstall, routing-outage, watchdog]
+        group: [install-uninstall, routing-outage, watchdog, runner-update]
     env:
       TIKRAY_LAB_CHANNEL: ${{ matrix.target.version }}
       TIKRAY_LAB_ARCH: ${{ matrix.target.ros_arch }}
@@ -93,18 +93,27 @@ jobs:
         env:
           GROUP: ${{ matrix.group }}
         run: |
+          run_chr() {
+            TIKRAY_LAB_RESULTS="$2" sudo --preserve-env=PATH,GOMODCACHE,GOCACHE,TIKRAY_LAB_CACHE,TIKRAY_LAB_XRAY,TIKRAY_LAB_IMAGES,TIKRAY_LAB_RESULTS \
+              scripts/test-m3-chr.sh "$TIKRAY_LAB_CHANNEL" "$TIKRAY_LAB_ARCH" "$1"
+          }
           case "$GROUP" in
-            install-uninstall) selection='^TestM3(Install|Uninstall)$' ;;
-            routing-outage) selection='^TestM3(Routing|Outage)$' ;;
-            watchdog) selection='^TestM3Watchdog$' ;;
+            install-uninstall) run_chr '^TestM3(Install|Uninstall)$' "$TIKRAY_LAB_RESULTS" ;;
+            routing-outage) run_chr '^TestM3(Routing|Outage)$' "$TIKRAY_LAB_RESULTS" ;;
+            watchdog)
+              for check in control_restart runner_restart control_update_and_revert reboot_mid_update; do
+                echo "Running watchdog check $check"
+                mkdir "$TIKRAY_LAB_RESULTS/$check"
+                run_chr "^TestM3Watchdog$/^$check$" "$TIKRAY_LAB_RESULTS/$check"
+              done ;;
+            runner-update)
+              run_chr '^TestM3Watchdog$/^runner_update_and_revert$' "$TIKRAY_LAB_RESULTS" ;;
           esac
-          sudo --preserve-env=PATH,GOMODCACHE,GOCACHE,TIKRAY_LAB_CACHE,TIKRAY_LAB_XRAY,TIKRAY_LAB_IMAGES,TIKRAY_LAB_RESULTS \
-            scripts/test-m3-chr.sh "$TIKRAY_LAB_CHANNEL" "$TIKRAY_LAB_ARCH" "$selection"
       - uses: actions/upload-artifact@v4
         with:
           name: chr-${{ matrix.target.version }}-${{ matrix.target.ros_arch }}-${{ matrix.group }}
           path: |
-            ${{ runner.temp }}/chr-results/*.json
+            ${{ runner.temp }}/chr-results/**/*.json
             ${{ runner.temp }}/tested-xray.txt
           if-no-files-found: error
 
