@@ -512,7 +512,9 @@ func (f *installLab) probe(ctx context.Context, t *testing.T, arg string) string
 	var v string
 	var seen int
 	observe := func() bool {
-		out, err := f.CHR.RunPrivate(ctx, command)
+		// A container shell can emit trailing console output after the
+		// SSH channel closes. Keep that output off the router session.
+		out, err := f.CHR.RunPrivateFresh(ctx, command)
 		seen = len(out)
 		var ok bool
 		v, ok = installProbeValue(out, arg)

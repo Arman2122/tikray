@@ -67,21 +67,33 @@ jobs:
             exit 1
           fi
           go test -c -tags lab -o "$RUNNER_TEMP/prepare-chr.test" ./test/lab
-          if ! "$RUNNER_TEMP/prepare-chr.test" -test.v -test.run '^TestPrepareCHRInputs$' -test.timeout=22m >"$RUNNER_TEMP/prepare-inputs.log" 2>&1; then
-            grep -oE 'CHR cache phase: (CHR downloaded|core built)' "$RUNNER_TEMP/prepare-inputs.log" || true
-            echo "::error::Public CHR or xray preparation failed"
-            exit 1
+          prepare_inputs() {
+            timeout --kill-after=30s 23m "$RUNNER_TEMP/prepare-chr.test" -test.v -test.run '^TestPrepareCHRInputs$' -test.timeout=22m >"$RUNNER_TEMP/prepare-inputs.log" 2>&1
+          }
+          if ! prepare_inputs; then
+            echo "Retrying public CHR and xray preparation"
+            if ! prepare_inputs; then
+              grep -oE 'CHR cache phase: (CHR downloaded|core built)' "$RUNNER_TEMP/prepare-inputs.log" || true
+              echo "::error::Public CHR or xray preparation failed"
+              exit 1
+            fi
           fi
           lab_parent_net=$(readlink /proc/self/ns/net)
           lab_parent_mnt=$(readlink /proc/self/ns/mnt)
           lab_parent_pid=$(readlink /proc/self/ns/pid)
           export lab_parent_net lab_parent_mnt lab_parent_pid
-          if ! sudo --preserve-env=PATH,TIKRAY_LAB_CHANNEL,TIKRAY_LAB_ARCH,TIKRAY_LAB_CACHE,lab_parent_net,lab_parent_mnt,lab_parent_pid \
+          prepare_guest() {
+            sudo --preserve-env=PATH,TIKRAY_LAB_CHANNEL,TIKRAY_LAB_ARCH,TIKRAY_LAB_CACHE,lab_parent_net,lab_parent_mnt,lab_parent_pid \
               timeout --kill-after=30s 52m unshare --mount --net --pid --fork --kill-child --mount-proc --propagation private \
-              bash scripts/test-m3-chr.sh --cache-child "$RUNNER_TEMP/prepare-chr.test" >"$RUNNER_TEMP/prepare-chr.log" 2>&1; then
-            grep -oE 'CHR cache phase: (lab network ready|serial connected|serial login|shell synchronized|interfaces available|interface names verified|WAN address configured|LAN address configured|default configured|SSH enabled|SSH ready|container package ready|container mode ready|data disk ready|clean shutdown)' "$RUNNER_TEMP/prepare-chr.log" || true
-            echo "::error::CHR cache preparation failed"
-            exit 1
+              bash scripts/test-m3-chr.sh --cache-child "$RUNNER_TEMP/prepare-chr.test" >"$RUNNER_TEMP/prepare-chr.log" 2>&1
+          }
+          if ! prepare_guest; then
+            echo "Retrying isolated cold CHR preparation"
+            if ! prepare_guest; then
+              grep -oE 'CHR cache phase: (lab network ready|serial connected|serial login|shell synchronized|interfaces available|interface names verified|WAN address configured|LAN address configured|default configured|SSH enabled|SSH ready|container package ready|container mode ready|data disk ready|clean shutdown)' "$RUNNER_TEMP/prepare-chr.log" || true
+              echo "::error::CHR cache preparation failed"
+              exit 1
+            fi
           fi
           read -r core <"$TIKRAY_LAB_PREPARED_XRAY"
           if [[ ! $core =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]; then

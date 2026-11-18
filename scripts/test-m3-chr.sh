@@ -115,6 +115,7 @@ if ((rc != 0)); then
         grep -oE 'packaged installer import failed: (installer acknowledgement missing|private installer execution failed)$' "$run/harness.log" >&2 || true
         grep -oE '(original owner LAN SSH transport was lost|owner LAN SSH command failed|the unrelated stream did not receive two fresh UDP replies|cannot verify the current committed runner selection)$' "$run/harness.log" >&2 || true
         grep -oE 'unrelated connection continuity failed: monitor=(true|false) read=(true|false) api_id=(true|false) ssh_id=(true|false)( (api|ssh)_counts=\[[0-9 ]+\]->\[[0-9 ]+\]){2}$' "$run/harness.log" >&2 || true
+        grep -oE '(missing or ambiguous (runner|control-start) control-side witness \([0-9]+ received bytes\)|private file returned no complete size-checked witness)$' "$run/harness.log" >&2 || true
     fi
     if [[ $pattern != */* ]]; then
         # These files are written from the fixed Go catalogue. The case
