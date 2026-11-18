@@ -159,8 +159,13 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 		}
 		bound, end := context.WithTimeout(c, window)
 		defer end()
+		reader := observer
+		if checkpoint {
+			reader = f.ownerSession(bound, t)
+			defer reader.Close()
+		}
 		_, got := poll(bound, window, 200*time.Millisecond, func() bool {
-			rows, err := observer.CommandAt(bound, observer.Generation(), cmd)
+			rows, err := reader.CommandAt(bound, reader.Generation(), cmd)
 			if err != nil || len(rows) != 1 {
 				return false
 			}
