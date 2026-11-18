@@ -683,8 +683,14 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	t.Helper()
 	phase := "prepare"
 	defer func() {
-		if t.Failed() && component == "runner" {
+		if !t.Failed() {
+			return
+		}
+		switch component {
+		case "runner":
 			t.Log("m3-runner-update-phase=" + phase)
+		case "tikray":
+			t.Log("m3-control-update-phase=" + phase)
 		}
 	}()
 	var wan *imageWANProof
