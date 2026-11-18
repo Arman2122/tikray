@@ -766,6 +766,8 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	if component == "tikray" {
 		stream = f.imageStream(ctx, t, 31875)
 	}
+	phase = "before-healthy-request"
+	verifySibling()
 	phase = "healthy-request"
 	f.imageOperation(ctx, t, component, "update", healthyImageVersion, initial.digest, valid.digest, false)
 	phase = "healthy-completion"

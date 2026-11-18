@@ -108,13 +108,13 @@ trap - HUP INT TERM
 printf '%s\n' "$rc" >"$run/exit"
 if ((rc != 0)); then
     echo "CHR suite failed (exit $rc); see the private log" >&2
-    grep -oE 'm3-runner-update-phase=(prepare|healthy-request|healthy-completion|healthy-runtime|healthy-owner|healthy-reimport|reimported-owner|explicit-rollback|unhealthy-update|retained-wan|fresh-dns|alternate-wan|automatic-rollback|restored-trial|retained-proxy)$' "$run/harness.log" >&2 || true
+    grep -oE 'm3-runner-update-phase=(prepare|before-healthy-request|healthy-request|healthy-completion|healthy-runtime|healthy-owner|healthy-reimport|reimported-owner|explicit-rollback|unhealthy-update|retained-wan|fresh-dns|alternate-wan|automatic-rollback|restored-trial|retained-proxy)$' "$run/harness.log" >&2 || true
     if [[ $pattern == *TestM3Watchdog* ]]; then
         grep -oE '(active owner (LAN|bridge) API|owner (LAN|bridge) API (baseline|readback)): (session changed|command timed out|command unavailable|missing affirmative reply)$' "$run/harness.log" >&2 || true
         grep -oE 'independent image witness: owner_session=(true|false) native_row=(true|false) row_id=(true|false) image=(true|false) process=(true|false) selection=(true|false)$' "$run/harness.log" >&2 || true
         grep -oE 'packaged installer import failed: (installer acknowledgement missing|private installer execution failed)$' "$run/harness.log" >&2 || true
         grep -oE '(original owner LAN SSH transport was lost|owner LAN SSH command failed|the unrelated stream did not receive two fresh UDP replies|cannot verify the current committed runner selection)$' "$run/harness.log" >&2 || true
-        grep -oE 'unrelated connection continuity failed: monitor=(true|false) read=(true|false) api_id=(true|false) ssh_id=(true|false)' "$run/harness.log" >&2 || true
+        grep -oE 'unrelated connection continuity failed: monitor=(true|false) read=(true|false) api_id=(true|false) ssh_id=(true|false)( (api|ssh)_counts=\[[0-9 ]+\]->\[[0-9 ]+\]){2}$' "$run/harness.log" >&2 || true
     fi
     if [[ $pattern != */* ]]; then
         # These files are written from the fixed Go catalogue. The case
