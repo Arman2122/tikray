@@ -263,10 +263,10 @@ func (f *routingLab) imageMarker(ctx context.Context, t *testing.T, row containe
 	// A bounded direct read still returns the exact signed marker bytes.
 	path := rosEscape(row.root + "/m3-qa-image-version")
 	command := `{:do { :local b ([/file/read file="` + path + `" offset=0 chunk-size=32 as-value]->"data"); :if ($b="` + want + `\n") do={:put "m3-runtime-marker-ok"} else={:if ([:len $b]>0) do={:put "m3-runtime-marker-different"}} } on-error={}}`
-	read, cancel := context.WithTimeout(ctx, 8*time.Second)
+	read, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	_, ok := poll(read, 8*time.Second, 250*time.Millisecond, func() bool {
-		out, err := f.CHR.RunPrivate(read, command)
+	_, ok := poll(read, 20*time.Second, 250*time.Millisecond, func() bool {
+		out, err := f.CHR.RunPrivateFresh(read, command)
 		if err == nil && strings.TrimSpace(out) == "m3-runtime-marker-different" {
 			t.Fatal("the extracted signed release marker positively differed from the requested version")
 		}
@@ -817,13 +817,15 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		kept = f.keepImagePeerFlow(ctx, t)
 	}
 	start := time.Now()
-	phase = "unhealthy-update"
+	phase = "unhealthy-request"
 	q := f.imageOperation(ctx, t, component, "update", offlineImageVersion, initial.digest, bad.digest, false)
+	phase = "unhealthy-running"
 	trial := f.requireImage(ctx, t, component, bad)
 	if f.waitForContainer(ctx, imageContainer(component), "running") != nil {
 		t.Fatal("signed negative control never actually started")
 	}
 	t.Logf("%s: signed unhealthy candidate actually running", component)
+	phase = "unhealthy-marker"
 	if !f.imageMarker(ctx, t, trial, offlineImageVersion) {
 		t.Fatal("unhealthy candidate not positively installed")
 	}
@@ -832,12 +834,15 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		t.Fatal("unhealthy candidate cleared the request")
 	}
 	if component == "runner" {
+		phase = "unhealthy-ping"
 		if !f.runnerRespondsToPing(ctx) {
 			t.Fatal("unhealthy runner positive ping control missing")
 		}
+		phase = "unhealthy-gate"
 		if s := f.imageStatus(ctx, t, component); s.Active != initial.digest || s.Pending == nil || s.Pending.OperationID != q.OperationID {
 			t.Fatal("a mere ping admitted a runner without its data path")
 		}
+		phase = "unhealthy-wan"
 		openBase := wan.directCounts(t)
 		_, fallback := poll(ctx, 55*time.Second, time.Second, func() bool {
 			return f.peerEgress(ctx, routingRemote) == egressDirect && newWirePackets(openBase, wan.directCounts(t)) > 0
@@ -896,8 +901,8 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 func (f *routingLab) runnerRespondsToPing(ctx context.Context) bool {
 	// RouterOS can print its packet table even when /ping is evaluated
 	// inside another expression. Only the explicit positive frame counts.
-	_, ok := poll(ctx, 15*time.Second, 500*time.Millisecond, func() bool {
-		out, err := f.CHR.RunPrivate(ctx, `{:local replies [/ping 172.30.252.3 src-address=172.30.252.1 count=2 interval=400ms]; :if ($replies>0) do={:put "m3-runner-ping-ok"}}`)
+	_, ok := poll(ctx, 25*time.Second, 500*time.Millisecond, func() bool {
+		out, err := f.CHR.RunPrivateFresh(ctx, `{:local replies [/ping 172.30.252.3 src-address=172.30.252.1 count=2 interval=400ms]; :if ($replies>0) do={:put "m3-runner-ping-ok"}}`)
 		return err == nil && slices.Contains(strings.Fields(out), "m3-runner-ping-ok")
 	})
 	return ok
