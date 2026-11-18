@@ -1,0 +1,123 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "runner-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release version tag (e.g. v1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  release:
+    name: Build, verify and publish release
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Verify Web UI & Go tests
+        run: |
+          (cd web && npm ci --no-audit --no-fund && npm run check && npm run build)
+          make test
+          make race
+
+      - name: Switch Docker to classic image store (RouterOS compatible)
+        run: |
+          echo '{"features":{"containerd-snapshotter":false}}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+
+      - name: Build multi-arch RouterOS container archives
+        env:
+          TIKRAY_IMAGE_VERSION: ${{ env.RELEASE_TAG }}
+        run: |
+          scripts/build-images.sh amd64 out
+          scripts/build-images.sh arm64 out
+          for image in tikray-runner tikray; do
+            for arch in amd64 arm64; do
+              tar -xOf "out/$image-$arch.tar" manifest.json | grep -q '"Layers"'
+            done
+          done
+
+      - name: Generate RouterOS uninstaller
+        run: |
+          go run ./cmd/tikray-installer -uninstall-out out/uninstall.rsc
+
+      - name: Sign archives and package RouterOS installers (when release key is configured)
+        if: ${{ secrets.TIKRAY_RELEASE_COSIGN_KEY != '' }}
+        env:
+          COSIGN_PASSWORD: ${{ secrets.TIKRAY_RELEASE_COSIGN_PASSWORD }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.TIKRAY_RELEASE_COSIGN_KEY }}
+        run: |
+          umask 077
+          printf '%s' "$COSIGN_PRIVATE_KEY" > "$RUNNER_TEMP/release.key"
+          cosign public-key --key "$RUNNER_TEMP/release.key" > out/publisher.pub
+          for f in out/tikray-arm64.tar out/tikray-amd64.tar out/tikray-runner-arm64.tar out/tikray-runner-amd64.tar; do
+            cosign sign-blob --yes --key "$RUNNER_TEMP/release.key" --output-signature "$f.sig" "$f"
+          done
+          for ver in 7.25.1 7.24.6; do
+            for arch in arm64 amd64; do
+              go run ./cmd/tikray-installer \
+                -version "$ver" -arch "$arch" \
+                -images out -key out/publisher.pub \
+                -out "out/install-${ver}-${arch}.rsc"
+            done
+          done
+          rm -f "$RUNNER_TEMP/release.key"
+
+      - name: Generate SHA256SUMS
+        run: |
+          (cd out && sha256sum *.tar *.tar.sig *.rsc publisher.pub 2>/dev/null || sha256sum *.tar *.rsc) > out/SHA256SUMS
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: out/tikray-${{ env.RELEASE_TAG }}.spdx.json
+          upload-artifact: false
+
+      - name: Push images to GHCR
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          CR_PAT: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$CR_PAT" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          owner=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          for image in tikray tikray-runner; do
+            for arch in amd64 arm64; do
+              docker tag "tikray/$image:$arch" "ghcr.io/$owner/$image:$RELEASE_TAG-$arch"
+              docker push "ghcr.io/$owner/$image:$RELEASE_TAG-$arch"
+            done
+          done
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            out/*.tar
+            out/*.tar.sig
+            out/*.rsc
+            out/publisher.pub
+            out/SHA256SUMS
+            out/*.spdx.json

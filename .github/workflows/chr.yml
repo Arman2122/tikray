@@ -3,7 +3,7 @@ name: RouterOS CHR
 on:
   pull_request:
   push:
-    branches: [m3b-routeros]
+    branches: [main, v1.0, m3b-routeros]
     paths-ignore:
       - docs/**
       - test/e2e/results/**
@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '[{"version":"7.25","ros_arch":"arm64","go_arch":"arm64"}]' || '[{"version":"7.25","ros_arch":"x86_64","go_arch":"amd64"},{"version":"7.23.8","ros_arch":"x86_64","go_arch":"amd64"}]') }}
+        target: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '[{"version":"7.25.1","ros_arch":"arm64","go_arch":"arm64"}]' || '[{"version":"7.25.1","ros_arch":"x86_64","go_arch":"amd64"},{"version":"7.24.6","ros_arch":"x86_64","go_arch":"amd64"}]') }}
         group: [install-uninstall, routing-outage, watchdog, runner-update]
     env:
       TIKRAY_LAB_CHANNEL: ${{ matrix.target.version }}

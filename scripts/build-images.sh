@@ -62,11 +62,20 @@ if [[ -n $image_version ]]; then
   release_labels=(--label "org.opencontainers.image.version=$image_version")
 fi
 
+if [[ ! -r internal/ui/dist/index.html ]]; then
+  echo "build-images.sh: internal/ui/dist/index.html is missing; run 'make ui' first." >&2
+  exit 1
+fi
+
 for spec in "${images[@]}"; do
   read -r name dockerfile <<<"$spec"
   ctx=$(mktemp -d)
   trap 'rm -rf "$ctx"' EXIT
-  CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$ctx/$name" "./cmd/$name"
+  ldflags="-s -w"
+  if [[ $name == tikray && -n $image_version ]]; then
+    ldflags="$ldflags -X main.buildVersion=$image_version"
+  fi
+  CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "$ldflags" -o "$ctx/$name" "./cmd/$name"
   cp "$ca_bundle" "$ctx/ca-certificates.crt"
   tag="tikray/$name:$arch"
   # Buildx resolves the pinned BusyBox index for this platform. The legacy

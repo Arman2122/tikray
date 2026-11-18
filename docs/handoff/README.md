@@ -30,8 +30,8 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M2c: human sign-in and hot server changes | Done, merged (PR #6) | |
 | M3a: RouterOS integration | Merged in PR #7. All three targets passed installer 6/6, routing 9/9 and uninstall 4/4. | [Ledger and image hashes](m3/ledger.md), [CHR results](../../test/e2e/results/) |
 | M3b: geo, image updates and CHR CI | Task 5 implements verified geo updates, guarded native diffs, rollback and restart recovery. Task 6b passed all five watchdog cases on each of the three CHR targets using signed `8b91d54`, including rapid restart WAN protection and real reboot recovery. The results were verified on 2026-11-17. Task 8 passed the six outage checks on all three targets with signed revision 2852272. The planned runner-update regression also passed with the retained UDP and DNS witnesses. Rollback to the authentic pre-UDP controller passed on both x86 releases. All eight hosted CHR jobs passed on signed source 6788352. The nightly workflow selects 7.25 arm64, which also passed the local outage matrix. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
-| M4: web UI | Not started | |
-| M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
+| M4: web UI | Done (`web/` Svelte 5 + Vite + TS embedded via `internal/ui`, mounted in `tikray serve`, plus `boot_id`, live `/v1/stats`, `/v1/geo`, `/v1/routeros/leases/static`, `/v1/inbox/*`, `/v1/backup/*`) | [`m4-m5/ledger.md`](m4-m5/ledger.md) |
+| M5: v1.0 (RouterOS 7.25.1/7.24.6 + xray 26.11.9 upgrade, encrypted backups, open-source docs, release & xray-watch workflows, verification) | Done (physical hardware benchmark remains optional for real-device owners) | [`m4-m5/ledger.md`](m4-m5/ledger.md), [`README.md`](../../README.md) |
 
 ## M3b image operations
 
@@ -269,8 +269,10 @@ CI (`.github/workflows/ci.yml`) runs `make test`, the compat suite on the oldest
 | `internal/service` | `serve`'s core: state owner, apply loop, mutations, subscriptions, events |
 | `internal/health` | Runner, observatory, balancer and SOCKS-probe health |
 | `internal/xray` | Minimal gRPC (h2c) client for xray's stats, observatory and routing |
-| `internal/api`, `internal/apiclient` | HTTPS API (pinned self-signed certificate) and its client |
+| `internal/api`, `internal/apiclient` | HTTPS API (pinned self-signed certificate), UI mount, and its client |
 | `internal/auth` | Admin, setup code, sessions, tokens, CSRF, rate limiter |
+| `internal/backup` | Argon2id + AES-256-GCM passphrase-encrypted state backup/restore (`tikray-backup-v1`) |
+| `internal/ui`, `web/` | Embedded Svelte 5 + TypeScript Web UI (`go:embed all:dist`) |
 | `internal/atomicfile` | Crash-safe file replacement |
 | `deploy/` | Dockerfiles (runner, and tikray on pinned `busybox:1.37.0-musl`) |
 | `test/lab`, `test/e2e`, `test/compat` | RouterOS lab harness, end-to-end suites, xray release compat |

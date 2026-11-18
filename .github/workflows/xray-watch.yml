@@ -1,0 +1,63 @@
+name: xray-watch
+
+on:
+  schedule:
+    - cron: "15 4 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Specific Xray-core tag to verify (leave empty for latest upstream release)"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  compat-watch:
+    name: Verify latest upstream XTLS/Xray-core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve latest upstream XTLS/Xray-core tag
+        id: latest
+        run: |
+          if [[ -n "${{ inputs.version }}" ]]; then
+            tag="${{ inputs.version }}"
+          else
+            tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/XTLS/Xray-core/releases/latest | awk -F/ '{print $NF}')
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Resolved Xray-core release: $tag"
+
+      - name: Run tikray golden config compatibility suite against upstream release
+        env:
+          TIKRAY_COMPAT_REQUIRED: "1"
+          TIKRAY_COMPAT_VERSIONS: "${{ steps.latest.outputs.tag }}"
+        run: |
+          sudo --preserve-env=PATH,HOME,GOPATH,GOMODCACHE,GOCACHE,TIKRAY_COMPAT_REQUIRED,TIKRAY_COMPAT_VERSIONS \
+            go test -tags compat -count=1 -v -timeout 30m ./test/compat/...
+
+      - name: Collect verified upstream SHA-256 digests
+        env:
+          XRAY_TAG: ${{ steps.latest.outputs.tag }}
+        run: |
+          mkdir -p out/xray-watch
+          for asset in Xray-linux-arm64-v8a.zip Xray-linux-64.zip; do
+            dgst=$(curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/${XRAY_TAG}/${asset}.dgst")
+            hash=$(printf '%s\n' "$dgst" | awk -F= '/^SHA2-256|^SHA256/ {gsub(/[[:space:]]/, "", $2); print tolower($2); exit}')
+            if [[ ! $hash =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::Invalid SHA-256 digest for $asset"
+              exit 1
+            fi
+            printf '%s  %s  %s\n' "$XRAY_TAG" "$asset" "$hash" >> out/xray-watch/digests.txt
+          done
+          cat out/xray-watch/digests.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xray-watch-${{ steps.latest.outputs.tag }}
+          path: out/xray-watch/digests.txt

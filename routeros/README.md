@@ -5,11 +5,11 @@ The [M3 ledger](../docs/handoff/m3/ledger.md) records installer validation again
 Build an installer for the router's installed version and CPU from an authenticated image pair. The packager uses `cosign verify-blob` with an independently obtained publisher public key. Supply the Docker-save images and detached signatures in one directory, for example `tikray-arm64.tar`, `tikray-arm64.tar.sig`, `tikray-runner-arm64.tar` and `tikray-runner-arm64.tar.sig`.
 
 ```sh
-go run ./cmd/tikray-installer -version 7.25 -arch arm64 \
+go run ./cmd/tikray-installer -version 7.25.1 -arch arm64 \
   -images ./release-images -key ./publisher.pub -out ./install.rsc
 ```
 
-Use `-arch amd64` for x86_64 CHR. Supported releases are 7.25 and 7.23.8. The generated script contains the expected archive lengths and the SHA-512 digest of each ordered 16 KiB chunk. Obtain the generated installer through a trusted channel. A party that can change the installer could also change its digests. The repository's `routeros/install.rsc` is the packaging source.
+Use `-arch amd64` for x86_64 CHR. Supported release lines are `7.25.1` (stable, `7.25.x` patches), `7.24.6` (long-term, `7.24.x` patches), and `7.23.8` (legacy long-term, `7.23.x` patches). The generated script contains the expected archive lengths and the SHA-512 digest of each ordered 16 KiB chunk. Obtain the generated installer through a trusted channel. A party that can change the installer could also change its digests. The repository's `routeros/install.rsc` is the packaging source.
 
 For a one-paste deployment, package with `-release-base https://<your-release-host>/<release-directory>`, publish that installer and both archives, substitute the real installer URL below, and paste into the owner's router terminal. Configure RouterOS HTTPS trust for that host first. Use a new local download filename on the first import.
 
@@ -24,7 +24,7 @@ The router downloads to a name unique to the current installer lease. It verifie
 For an offline install, upload the generated installer and the two matching archives with Winbox or WebFig. The default archive location is `disk1/tikray/images/`. For the xray core, choose an exact version, stage its architecture-specific upstream zip with the signed `index.json` and `index.json.sig` in `disk1/tikray/data/inbox/`, and put its independently trusted ECDSA P-256 (PKIX PEM) index public key at `disk1/tikray/data/state/index.pub`. Use the index public key format required by `tikray core update`. The xray index key and the image publisher key serve separate purposes.
 
 ```routeros
-:global tikrayCore "26.10.31"; :global tikrayOffline true; /import file-name=tikray-install.rsc
+:global tikrayCore "26.11.9"; :global tikrayOffline true; /import file-name=tikray-install.rsc
 ```
 
 The installer defaults to the mounted ext4 volume `disk1`, directory `tikray`, bridge subnet `172.31.255.0/29`, existing interface lists `LAN` and `WAN`, and online core version `latest`. Override non-secret values in the same owner session before import using `tikrayDisk`, `tikrayDir` (the name `tikray` or a `tikray-…` directory), `tikraySubnet`, `tikrayLanList`, `tikrayWanList`, `tikrayCore` and `tikrayOffline`. The LAN list must describe the complete client population on each selected ingress. The chosen WAN list must include the active default's verified outgoing interface. A route or local address overlapping the bridge must be resolved before installation.

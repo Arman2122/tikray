@@ -1,0 +1,49 @@
+name: Bug Report
+description: Report a bug in tikray, tikray-runner, the RouterOS installer, or the Web UI.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security reminder:** Never paste share links, server UUIDs/passwords, subscription URLs, API tokens, setup codes, RouterOS passwords, or backup passphrases into a public issue.
+  - type: input
+    id: tikray_version
+    attributes:
+      label: tikray Version
+      placeholder: "e.g. v1.0.0 (from `tikray version`)"
+    validations:
+      required: true
+  - type: input
+    id: routeros_version
+    attributes:
+      label: MikroTik RouterOS Version & Model
+      placeholder: "e.g. RouterOS 7.25.1 on RB5009UG+S+IN (arm64) or CHR x86_64"
+    validations:
+      required: true
+  - type: input
+    id: xray_version
+    attributes:
+      label: xray-core Version
+      placeholder: "e.g. 26.11.9 (from `tikray status`)"
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Clear description of the bug and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted status / events output
+      description: Paste output from `tikray status` and `tikray events` (both are automatically redacted, but please double-check before posting).
+      render: text

@@ -1,0 +1,23 @@
+name: Feature Request
+description: Suggest a new capability, protocol enhancement, or usability improvement.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What operational need or workflow does this solve on MikroTik RouterOS?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed design or behavior
+      description: How should this work across the Web UI, API, CLI, or RouterOS reconciler?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any workarounds or trade-offs you considered.
