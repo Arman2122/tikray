@@ -128,7 +128,7 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 	t.Cleanup(func() { observer.Close() })
 	type pair [2]nativeFlowCounters
 	cmd := []string{"/ip/firewall/connection/print", "=.proplist=.id,orig-packets,repl-packets,orig-bytes,repl-bytes,connection-mark,reply-src-address,reply-src-port", "?protocol=udp", "?src-address=" + address, "?src-port=31932", "?dst-address=198.51.100.254", "?dst-port=31931"}
-	sshQuery := `{:local rows [/ip/firewall/connection/find where src-address=[:toip "` + rosEscape(address) + `"] and protocol=udp and src-port=31932 and dst-address=198.51.100.254 and dst-port=31931 and connection-mark!="tikray-open" and connection-mark!="tikray-closed"];:if ([:len $rows]=1) do={:local id [:pick $rows 0];:put ("m3-owner-row|" . [:tostr $id] . "|" . [/ip/firewall/connection/get $id orig-packets] . "|" . [/ip/firewall/connection/get $id repl-packets] . "|" . [/ip/firewall/connection/get $id orig-bytes] . "|" . [/ip/firewall/connection/get $id repl-bytes] . "|end")}}`
+	sshQuery := `{:local rows [/ip/firewall/connection/find where src-address=[:toip "` + rosEscape(address) + `"] and protocol=udp and src-port=31932 and dst-address=198.51.100.254 and dst-port=31931 and connection-mark!="tikray-open" and connection-mark!="tikray-closed" and connection-mark!="tikray-open-udp" and connection-mark!="tikray-open-runner" and connection-mark!="tikray-open-wan"];:if ([:len $rows]=1) do={:local id [:pick $rows 0];:put ("m3-owner-row|" . [:tostr $id] . "|" . [/ip/firewall/connection/get $id orig-packets] . "|" . [/ip/firewall/connection/get $id repl-packets] . "|" . [/ip/firewall/connection/get $id orig-bytes] . "|" . [/ip/firewall/connection/get $id repl-bytes] . "|end")}}`
 	read := func(c context.Context) (pair, bool) {
 		var current pair
 		bound, end := context.WithTimeout(c, 7*time.Second)
@@ -139,7 +139,8 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 				return false
 			}
 			r := rows[0]
-			if r["connection-mark"] == "tikray-open" || r["connection-mark"] == "tikray-closed" || r["reply-src-address"] != "198.51.100.254" || r["reply-src-port"] != "31931" {
+			mark := r["connection-mark"]
+			if (mark != "" && mark != "no-mark") || r["reply-src-address"] != "198.51.100.254" || r["reply-src-port"] != "31931" {
 				return false
 			}
 			var apiOK bool
