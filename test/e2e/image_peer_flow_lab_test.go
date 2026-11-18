@@ -144,6 +144,7 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 	observer := f.ownerSession(ctx, t)
 	t.Cleanup(func() { observer.Close() })
 	type pair [2]nativeFlowCounters
+	var markerLost atomic.Bool
 	cmd := []string{"/ip/firewall/connection/print", "=.proplist=.id,orig-packets,repl-packets,orig-bytes,repl-bytes,connection-mark,reply-src-address,reply-src-port", "?protocol=udp", "?src-address=" + address, "?src-port=31932", "?dst-address=198.51.100.254", "?dst-port=31931"}
 	sshQuery := `{:local rows [/ip/firewall/connection/find where src-address=[:toip "` + rosEscape(address) + `"] and protocol=udp and src-port=31932 and dst-address=198.51.100.254 and dst-port=31931 and connection-mark="` + mark + `"];:if ([:len $rows]=1) do={:local id [:pick $rows 0];:put ("m3-owner-row|" . [:tostr $id] . "|" . [/ip/firewall/connection/get $id orig-packets] . "|" . [/ip/firewall/connection/get $id repl-packets] . "|" . [/ip/firewall/connection/get $id orig-bytes] . "|" . [/ip/firewall/connection/get $id repl-bytes] . "|end")}}`
 	read := func(c context.Context) (pair, bool) {
@@ -156,7 +157,12 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 				return false
 			}
 			r := rows[0]
-			if r["connection-mark"] != mark || r["reply-src-address"] != "198.51.100.254" || r["reply-src-port"] != "31931" {
+			if r["connection-mark"] != mark {
+				// The exact tuple exists without the one-shot mark.
+				markerLost.Store(true)
+				return false
+			}
+			if r["reply-src-address"] != "198.51.100.254" || r["reply-src-port"] != "31931" {
 				return false
 			}
 			var apiOK bool
@@ -201,13 +207,18 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 				return
 			case <-tick.C:
 				now, ok := read(monitor)
-				if !ok || !now[0].continued(prev[0]) || !now[1].continued(prev[1]) {
+				if markerLost.Load() || ok && (!now[0].continued(prev[0]) || !now[1].continued(prev[1])) {
 					if monitor.Err() == nil {
 						failed.Store(true)
 					}
 					return
 				}
-				prev = now
+				if ok {
+					prev = now
+				}
+				// A timed-out observer cannot decide whether the flow
+				// changed. A later positive sample must still present the
+				// original mark, whose only writer has been removed.
 			}
 		}
 	}()
@@ -222,7 +233,7 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 			t.Fatal("the unrelated stream did not receive two fresh UDP replies")
 		}
 		now, ok := read(ctx)
-		if failed.Load() || !ok || !now[0].continued(first[0]) || !now[1].continued(first[1]) || now[0].values[1] <= first[0].values[1] || now[1].values[1] <= first[1].values[1] {
+		if failed.Load() || markerLost.Load() || !ok || !now[0].continued(first[0]) || !now[1].continued(first[1]) || now[0].values[1] <= first[0].values[1] || now[1].values[1] <= first[1].values[1] {
 			t.Fatalf("unrelated connection continuity failed: monitor=%t read=%t api_id=%t ssh_id=%t api_counts=%v->%v ssh_counts=%v->%v", !failed.Load(), ok, now[0].id == first[0].id, now[1].id == first[1].id, first[0].values, now[0].values, first[1].values, now[1].values)
 		}
 	}
