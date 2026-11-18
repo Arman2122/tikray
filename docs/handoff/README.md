@@ -29,7 +29,7 @@ Steering is hybrid: domestic traffic goes direct and the rest goes through xray.
 | M2b: the service (`tikray serve`, HTTPS API, health, subscriptions) | Done, merged (PR #5) | |
 | M2c: human sign-in and hot server changes | Done, merged (PR #6) | |
 | M3a: RouterOS integration | Merged in PR #7. All three targets passed installer 6/6, routing 9/9 and uninstall 4/4. | [Ledger and image hashes](m3/ledger.md), [CHR results](../../test/e2e/results/) |
-| M3b: geo, image updates and CHR CI | Task 5 implements verified geo updates, guarded native diffs, rollback and restart recovery. Task 6b passed all five watchdog cases on each of the three CHR targets using signed `8b91d54`, including rapid restart WAN protection and real reboot recovery. The results were verified on 2026-11-17. Task 8 passed the six outage checks on all three targets with signed revision 2852272. The planned runner-update regression also passed with the retained UDP and DNS witnesses. Rollback to the authentic pre-UDP controller passed on both x86 releases. Hosted CHR CI is under verification. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
+| M3b: geo, image updates and CHR CI | Task 5 implements verified geo updates, guarded native diffs, rollback and restart recovery. Task 6b passed all five watchdog cases on each of the three CHR targets using signed `8b91d54`, including rapid restart WAN protection and real reboot recovery. The results were verified on 2026-11-17. Task 8 passed the six outage checks on all three targets with signed revision 2852272. The planned runner-update regression also passed with the retained UDP and DNS witnesses. Rollback to the authentic pre-UDP controller passed on both x86 releases. All eight hosted CHR jobs passed on signed source 6788352. The nightly workflow selects 7.25 arm64, which also passed the local outage matrix. | [Delivery plan](../superpowers/plans/2026-11-06-m3-routeros.md) |
 | M4: web UI | Not started | |
 | M5: v1.0 (hardening, full e2e matrix, hardware benchmarks, docs, signed release) | Not started | |
 
@@ -131,7 +131,7 @@ The runner has a 30-second HTTP read timeout. Store validation rejects device
 overlap with the private bridge, loopback or multicast and checks the bridge
 subnet against reserved ranges.
 
-- **M3b:** Task 6b is complete with five passing `TestM3Watchdog` cases on each of the three targets. The three-target Task 8 outage results are recorded. The image compatibility replay also passed. Complete hosted CHR CI before the final M3b review and full matrix. The [Task 6b completion record](m3/ledger.md#task-6b-completion) identifies the signed kit and results. The outage work must cover the cached NAT decision of an established open UDP flow on an unsolicited runner failure.
+- **M3b:** Task 6b is complete with five passing `TestM3Watchdog` cases on each of the three targets. The three-target Task 8 outage results are recorded. The image compatibility replay and both hosted x86 matrices passed. Task 9 is the final M3b branch review and cumulative matrix. The [Task 6b completion record](m3/ledger.md#task-6b-completion) identifies the signed kit and results. The outage work must cover the cached NAT decision of an established open UDP flow on an unsolicited runner failure.
 - **M4:**
   - Events need a boot id, because `Seq` restarts at 1 after a restart.
   - The UI signs in with M2c's cookie and CSRF scheme.
@@ -220,6 +220,14 @@ Select the matching bundle for 7.23.8 x86_64 and 7.25 arm64. Use the stable
 x86_64 bundle for `TestService`, `TestAuth` and `TestHot`. The wrapper
 starts each run with a private log and bounded QEMU lifetime and validates
 the results before publishing them.
+
+For Task 8, the committed six-case outage files use the signed bundles
+under out/m3-reviewed/285227264d97f605277b24a4d9bf9da3c7e618fd and
+xray v26.11.9. Select the target bundle and run
+`scripts/test-m3-chr.sh VERSION ARCH '^TestM3Outage$'`. The hosted x86
+run independently verified the cumulative install, routing, outage,
+watchdog and uninstall checks on 6788352. [Outage and CI evidence](m3/ledger.md#task-8-completion)
+
 
 To repeat an exact RouterOS run after the channel moves, set
 `TIKRAY_LAB_CHANNEL` to the version, for example `7.25` or `7.23.8`. After
