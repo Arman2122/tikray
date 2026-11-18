@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Arman2122/tikray/internal/atomicfile"
+	"github.com/Arman2122/tikray/internal/routeros/adapters"
 	"github.com/Arman2122/tikray/test/lab"
 )
 
@@ -99,7 +100,7 @@ func (l *Lab) recordM3Checks(t *testing.T, suite string) func(string, func(*test
 func writeM3Evidence(dir, version string, arch lab.Arch, suite string, obs []m3Observation, partial bool) error {
 	cases := m3Cases[suite]
 	invalid := errors.New("e2e: incomplete or invalid M3 evidence")
-	if len(cases) == 0 || len(obs) == 0 || (version != "7.25" && version != "7.23.8") || (arch != lab.ArchX86 && arch != lab.ArchARM64) {
+	if len(cases) == 0 || len(obs) == 0 || !adapters.SupportedVersion(version) || (arch != lab.ArchX86 && arch != lab.ArchARM64) {
 		return invalid
 	}
 	byID := make(map[string]m3Observation, len(obs))

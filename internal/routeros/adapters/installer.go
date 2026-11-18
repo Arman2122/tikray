@@ -296,7 +296,12 @@ func buildInstaller(p Profile, images []VerifiedArchive, dst io.Writer, readSour
     :if ([$provisionWatch true $watchBody $trafficBody] != true) do={ :error "tikray: watchdog provisioning failed" }`); e != nil {
 		return e
 	}
-	platform := fmt.Sprintf(`:if (($arch != "%s") or ([:pick [/system/resource/get version] 0 [:find ([/system/resource/get version] . " ") " "]] != "%s")) do={ :error "tikray: obtain installer matching installed architecture and version" }; :set imageBytes %d`, p.GOARCH(), p.Version(), total)
+	pattern := p.InstallerVersionPattern()
+	if pattern == "" {
+		return errArchive
+	}
+	escapedPattern := strings.NewReplacer(`\`, `\\`, `$`, `\$`).Replace(pattern)
+	platform := fmt.Sprintf(`:if (($arch != "%s") or !([:pick [/system/resource/get version] 0 [:find ([/system/resource/get version] . " ") " "]] ~ "%s")) do={ :error "tikray: obtain installer matching installed architecture and version" }; :set imageBytes %d`, p.GOARCH(), escapedPattern, total)
 	if e = replace("# @TIKRAY_PLATFORM@", platform); e != nil {
 		return e
 	}

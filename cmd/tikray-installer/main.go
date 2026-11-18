@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	version := flag.String("version", "", "supported RouterOS release")
+	version := flag.String("version", "", "supported RouterOS release (e.g. 7.25.1, 7.24.6)")
 	arch := flag.String("arch", "", "image architecture (amd64 or arm64)")
 	dir := flag.String("images", "", "directory containing both archives and .sig files")
 	key := flag.String("key", "", "independently pinned publisher public key file")

@@ -36,9 +36,9 @@ func TestResolveChannel(t *testing.T) {
 		hits.Add(1)
 		switch r.URL.Path {
 		case "/NEWESTa7.stable":
-			w.Write([]byte("7.25 1792678320\n"))
+			w.Write([]byte("7.25.1 1793623193\n"))
 		case "/NEWESTa7.long-term":
-			w.Write([]byte("7.23.8 1791452776"))
+			w.Write([]byte("7.24.6 1793348669"))
 		default:
 			http.NotFound(w, r)
 		}
@@ -46,7 +46,7 @@ func TestResolveChannel(t *testing.T) {
 	defer srv.Close()
 	ctx := context.Background()
 
-	for channel, want := range map[string]string{"stable": "7.25", "long-term": "7.23.8"} {
+	for channel, want := range map[string]string{"stable": "7.25.1", "long-term": "7.24.6"} {
 		got, err := ResolveChannel(ctx, srv.URL, channel)
 		if err != nil {
 			t.Fatalf("%s: %v", channel, err)
@@ -66,7 +66,7 @@ func TestResolveChannel(t *testing.T) {
 }
 
 func TestPinnedCHRVersion(t *testing.T) {
-	for _, version := range []string{"7.25", "7.23.8"} {
+	for _, version := range []string{"7.25.1", "7.24.6", "7.25", "7.23.8"} {
 		got, err := ResolveChannel(t.Context(), "http://127.0.0.1:1", version)
 		if err != nil || got != version {
 			t.Errorf("pinned release %q = %q, %v", version, got, err)

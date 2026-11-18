@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -144,5 +145,74 @@ func TestUpdateBootstrapBindsVerifiedPublisherAndLiveImages(t *testing.T) {
 	}
 	if BuildInstaller(p, images, &bytes.Buffer{}) == nil {
 		t.Fatal("per-component mismatched signer accepted")
+	}
+}
+
+func TestInstallerSupportsLatestRouterOSReleases(t *testing.T) {
+	for _, tt := range []struct {
+		version, arch, wantRegex string
+		accept, reject           []string
+	}{
+		{
+			version:   "7.25.1",
+			arch:      "arm64",
+			wantRegex: `^7\.25(\.[1-9][0-9]*)?$`,
+			accept:    []string{"7.25", "7.25.1", "7.25.2", "7.25.10"},
+			reject:    []string{"7.25.0", "7.24.6", "7.23.8", "7.26", "7.25beta1"},
+		},
+		{
+			version:   "7.24.6",
+			arch:      "x86_64",
+			wantRegex: `^7\.24\.([6-9]|[1-9][0-9]+)$`,
+			accept:    []string{"7.24.6", "7.24.7", "7.24.10"},
+			reject:    []string{"7.24", "7.24.0", "7.24.5", "7.25.1", "7.23.8"},
+		},
+		{
+			version:   "7.23.8",
+			arch:      "x86_64",
+			wantRegex: `^7\.23\.([8-9]|[1-9][0-9]+)$`,
+			accept:    []string{"7.23.8", "7.23.9", "7.23.12"},
+			reject:    []string{"7.23", "7.23.7", "7.24.6", "7.25"},
+		},
+	} {
+		t.Run(tt.version+"-"+tt.arch, func(t *testing.T) {
+			p, err := Installed(tt.version, tt.arch, "CHR")
+			if err != nil {
+				t.Fatalf("Installed(%q, %q): %v", tt.version, tt.arch, err)
+			}
+			a, err := describeArchive(p, "tikray", fixtureImage(t, "tikray", p.GOARCH()), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := describeArchive(p, "tikray-runner", fixtureImage(t, "tikray-runner", p.GOARCH()), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			signFixturePair(t, &a, &r)
+			var out bytes.Buffer
+			if err := BuildInstaller(p, []VerifiedArchive{a, r}, &out); err != nil {
+				t.Fatal(err)
+			}
+			re := p.InstallerVersionPattern()
+			if re != tt.wantRegex {
+				t.Fatalf("pattern = %q, want %q", re, tt.wantRegex)
+			}
+			compiled := regexp.MustCompile(re)
+			for _, v := range tt.accept {
+				if !compiled.MatchString(v) {
+					t.Errorf("pattern %q rejected supported version %q", re, v)
+				}
+			}
+			for _, v := range tt.reject {
+				if compiled.MatchString(v) {
+					t.Errorf("pattern %q accepted unsupported version %q", re, v)
+				}
+			}
+			// RouterOS escapes \ and $ inside double-quoted strings.
+			escaped := strings.NewReplacer(`\`, `\\`, `$`, `\$`).Replace(re)
+			if !strings.Contains(out.String(), `~ "`+escaped+`"`) {
+				t.Fatalf("installer script missing release-line regex guard %q", escaped)
+			}
+		})
 	}
 }

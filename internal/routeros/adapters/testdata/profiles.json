@@ -1,5 +1,61 @@
 [
   {
+    "name": "latest stable CHR",
+    "version": "7.25.1",
+    "channel": "stable",
+    "arch": "x86_64",
+    "board": "CHR",
+    "wantVersion": "7.25.1",
+    "wantArch": "amd64",
+    "chr": true
+  },
+  {
+    "name": "latest stable ARM64 hardware",
+    "version": "7.25.1",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009UG+S+",
+    "wantVersion": "7.25.1",
+    "wantArch": "arm64"
+  },
+  {
+    "name": "future stable patch on 7.25 line",
+    "version": "7.25.2",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009",
+    "wantVersion": "7.25.2",
+    "wantArch": "arm64"
+  },
+  {
+    "name": "latest long term CHR",
+    "version": "7.24.6 (long-term)",
+    "channel": "long-term",
+    "arch": "x86_64",
+    "board": "CHR",
+    "wantVersion": "7.24.6",
+    "wantArch": "amd64",
+    "chr": true
+  },
+  {
+    "name": "latest long term bare ARM64 hardware",
+    "version": "7.24.6",
+    "channel": "long-term",
+    "arch": "arm64",
+    "board": "hAP ax^3",
+    "wantVersion": "7.24.6",
+    "wantArch": "arm64"
+  },
+  {
+    "name": "future long term patch on 7.24 line",
+    "version": "7.24.7",
+    "channel": "long-term",
+    "arch": "arm64",
+    "board": "RB5009",
+    "wantVersion": "7.24.7",
+    "wantArch": "arm64"
+  },
+  {
     "name": "stable CHR",
     "version": "7.25",
     "channel": "stable",
@@ -117,6 +173,14 @@
     "board": "RB5009"
   },
   {
+    "name": "older 7.24 patch before long-term",
+    "version": "7.24.5",
+    "wantError": "routeros: unsupported version",
+    "channel": "long-term",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
     "name": "future minor",
     "version": "7.26",
     "wantError": "routeros: unsupported version",
@@ -125,20 +189,13 @@
     "board": "RB5009"
   },
   {
-    "name": "future stable patch",
-    "version": "7.25.1",
-    "wantError": "routeros: unsupported version",
-    "channel": "stable",
-    "arch": "arm64",
-    "board": "RB5009"
-  },
-  {
-    "name": "future long term patch",
+    "name": "future long term patch on 7.23 line",
     "version": "7.23.9",
-    "wantError": "routeros: unsupported version",
-    "channel": "stable",
+    "channel": "long-term",
     "arch": "arm64",
-    "board": "RB5009"
+    "board": "RB5009",
+    "wantVersion": "7.23.9",
+    "wantArch": "arm64"
   },
   {
     "name": "older long term patch",

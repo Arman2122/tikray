@@ -17,6 +17,7 @@ import (
 	"github.com/Arman2122/tikray/internal/apiclient"
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/health"
+	"github.com/Arman2122/tikray/internal/routeros/adapters"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
@@ -241,7 +242,7 @@ func TestService(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !supported {
-			if l.Version == "7.25" || l.Version == "7.23.8" {
+			if adapters.SupportedVersion(l.Version) {
 				t.Fatal("expected /container/shell cmd support on this RouterOS release")
 			}
 			note("RouterOS reported an interactive-only /container/shell")

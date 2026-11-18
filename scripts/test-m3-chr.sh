@@ -61,12 +61,12 @@ if [[ $# -lt 2 || $# -gt 3 || $EUID != 0 ]]; then
     exit 2
 fi
 export TIKRAY_LAB_CHANNEL=$1 TIKRAY_LAB_ARCH=$2
-case "$1-$2" in 7.25-x86_64|7.23.8-x86_64|7.25-arm64) ;; *) echo "Unsupported lab target" >&2; exit 2 ;; esac
+case "$1-$2" in 7.25.1-x86_64|7.24.6-x86_64|7.25.1-arm64|7.25-x86_64|7.23.8-x86_64|7.25-arm64) ;; *) echo "Unsupported lab target" >&2; exit 2 ;; esac
 pattern=${3:-'^(TestM3Install|TestM3Routing|TestM3Uninstall)$'}
 project=$(cd "$(dirname "$0")/.." && pwd)
 cd "$project"
 script=$project/scripts/test-m3-chr.sh
-export TIKRAY_LAB_XRAY=${TIKRAY_LAB_XRAY:-v26.10.31}
+export TIKRAY_LAB_XRAY=${TIKRAY_LAB_XRAY:-v26.11.9}
 TIKRAY_LAB_CACHE=$(realpath "${TIKRAY_LAB_CACHE:-$HOME/.cache/tikray-lab}")
 export TIKRAY_LAB_CACHE
 export PATH="$TIKRAY_LAB_CACHE/tools:$PATH"

@@ -35,7 +35,7 @@ import (
 // the middle of a download so another router session observes publication.
 func TestOnlineArchiveStagingOnCHR(t *testing.T) {
 	version := os.Getenv("TIKRAY_LAB_CHANNEL")
-	if os.Getuid() != 0 || (version != "7.23.8" && version != "7.25") || os.Getenv("TIKRAY_LAB_ARCH") != "x86_64" {
+	if os.Getuid() != 0 || !SupportedVersion(version) || os.Getenv("TIKRAY_LAB_ARCH") != "x86_64" {
 		t.Fatal("requires a pinned disposable x86_64 CHR")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)

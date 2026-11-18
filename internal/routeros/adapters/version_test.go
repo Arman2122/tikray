@@ -76,18 +76,28 @@ func TestSelectRouterOSProfile(t *testing.T) {
 
 func TestInstalledRouterOSProfile(t *testing.T) {
 	for _, tt := range []struct {
-		name, version, want string
+		name, version, want, line, channel string
+		vethPreserve, dai                  bool
 	}{
-		{"long term bare", "7.23.8", "7.23.8"},
-		{"long term label", "7.23.8 (long-term)", "7.23.8"},
-		{"stable bare", "7.25", "7.25"},
-		{"stable label", "7.25 (stable)", "7.25"},
-		{"testing label", "7.25 (testing)", ""},
-		{"development label", "7.25 (development)", ""},
-		{"unknown release", "7.25.1", ""},
-		{"noncanonical zero patch", "7.25.0", ""},
-		{"multiple labels", "7.25 (stable) (long-term)", ""},
-		{"empty", "", ""},
+		{"legacy long term bare", "7.23.8", "7.23.8", "7.23", "long-term", false, false},
+		{"legacy long term label", "7.23.8 (long-term)", "7.23.8", "7.23", "long-term", false, false},
+		{"legacy long term patch", "7.23.9", "7.23.9", "7.23", "long-term", false, false},
+		{"current long term bare", "7.24.6", "7.24.6", "7.24", "long-term", true, false},
+		{"current long term label", "7.24.6 (long-term)", "7.24.6", "7.24", "long-term", true, false},
+		{"current long term patch", "7.24.7", "7.24.7", "7.24", "long-term", true, false},
+		{"stable base bare", "7.25", "7.25", "7.25", "stable", true, true},
+		{"stable base label", "7.25 (stable)", "7.25", "7.25", "stable", true, true},
+		{"latest stable bare", "7.25.1", "7.25.1", "7.25", "stable", true, true},
+		{"latest stable label", "7.25.1 (stable)", "7.25.1", "7.25", "stable", true, true},
+		{"stable patch", "7.25.2", "7.25.2", "7.25", "stable", true, true},
+		{"older 7.24 patch", "7.24.5", "", "", "", false, false},
+		{"unpatched 7.24", "7.24", "", "", "", false, false},
+		{"future minor", "7.26", "", "", "", false, false},
+		{"testing label", "7.25.1 (testing)", "", "", "", false, false},
+		{"development label", "7.25.1 (development)", "", "", "", false, false},
+		{"noncanonical zero patch", "7.25.0", "", "", "", false, false},
+		{"multiple labels", "7.25 (stable) (long-term)", "", "", "", false, false},
+		{"empty", "", "", "", "", false, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p, err := adapters.Installed(tt.version, "x86_64", "CHR QEMU Ubuntu 26.04 PC (i440FX + PIIX, 1996)")
@@ -95,16 +105,28 @@ func TestInstalledRouterOSProfile(t *testing.T) {
 				if err == nil || err.Error() != "routeros: unsupported version" {
 					t.Fatal("installed release did not return the expected fixed error category")
 				}
+				if adapters.SupportedVersion(tt.version) {
+					t.Fatalf("SupportedVersion(%q) = true, want false", tt.version)
+				}
 				assertUnsupportedProfile(t, p)
 				return
 			}
 			if err != nil || p.Version() != tt.want || p.GOARCH() != "amd64" || !p.IsCHR() {
-				t.Fatal("installed release selection failed")
+				t.Fatalf("installed release selection failed for %q: %v %+v", tt.version, err, p)
+			}
+			if !adapters.SupportedVersion(tt.version) {
+				t.Fatalf("SupportedVersion(%q) = false, want true", tt.version)
+			}
+			if p.ReleaseLine() != tt.line || p.Channel() != tt.channel {
+				t.Fatalf("line/channel = %q/%q, want %q/%q", p.ReleaseLine(), p.Channel(), tt.line, tt.channel)
+			}
+			if p.SupportsVethIPPreserve() != tt.vethPreserve || p.SupportsDynamicARPInspection() != tt.dai {
+				t.Fatalf("modern capabilities = (%v,%v), want (%v,%v)", p.SupportsVethIPPreserve(), p.SupportsDynamicARPInspection(), tt.vethPreserve, tt.dai)
 			}
 		})
 	}
 	for _, metadata := range [][2]string{{"amd64", "CHR"}, {"x86_64", "x86"}, {"arm64", ""}} {
-		p, err := adapters.Installed("7.25", metadata[0], metadata[1])
+		p, err := adapters.Installed("7.25.1", metadata[0], metadata[1])
 		if err == nil || err.Error() != "routeros: unsupported platform" {
 			t.Fatal("installed release accepted unsupported platform")
 		}
@@ -161,7 +183,7 @@ func assertUnsupportedProfile(t *testing.T, p adapters.Profile) {
 	t.Helper()
 	list, lists, mode := p.MountSyntax()
 	high, max := p.MemoryFields()
-	if p.Version() != "" || p.GOARCH() != "" || p.IsCHR() || p.UsesIngressRouting() || list != "" || lists != "" || mode != "" || high != "" || max != "" || p.RestartPolicyField() != "" || p.DiskFormatCommand() != "" || p.UsesCertificateReceipt() {
+	if p.Version() != "" || p.ReleaseLine() != "" || p.Channel() != "" || p.GOARCH() != "" || p.IsCHR() || p.UsesIngressRouting() || p.SupportsVethIPPreserve() || p.SupportsDynamicARPInspection() || list != "" || lists != "" || mode != "" || high != "" || max != "" || p.RestartPolicyField() != "" || p.DiskFormatCommand() != "" || p.UsesCertificateReceipt() {
 		t.Error("unsupported profile exposes capability vocabulary")
 	}
 	for _, menu := range []string{"/ip/firewall/filter", "/certificate", "/user", "/ip/firewall/connection"} {

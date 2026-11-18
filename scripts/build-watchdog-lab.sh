@@ -86,8 +86,11 @@ for arch in "${arches[@]}"; do
         original=
     done
     ros_arch=x86_64
-    versions=(7.25 7.23.8)
-    if [[ $arch == arm64 ]]; then ros_arch=arm64; versions=(7.25); fi
+    versions=(7.25.1 7.24.6)
+    if [[ $arch == arm64 ]]; then ros_arch=arm64; versions=(7.25.1); fi
+    if [[ -n ${TIKRAY_LAB_CHANNEL:-} && $TIKRAY_LAB_CHANNEL =~ ^7\.[0-9]+(\.[0-9]+)?$ ]]; then
+        versions=("$TIKRAY_LAB_CHANNEL")
+    fi
     for release in "${versions[@]}"; do
         dest="$bundle_root/$release-$ros_arch"
         mkdir -p "$dest/updates/6.0.1" "$dest/updates/6.0.2"
