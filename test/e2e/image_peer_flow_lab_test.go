@@ -147,11 +147,19 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 	var markerLost atomic.Bool
 	cmd := []string{"/ip/firewall/connection/print", "=.proplist=.id,orig-packets,repl-packets,orig-bytes,repl-bytes,connection-mark,reply-src-address,reply-src-port", "?protocol=udp", "?src-address=" + address, "?src-port=31932", "?dst-address=198.51.100.254", "?dst-port=31931"}
 	sshQuery := `{:local rows [/ip/firewall/connection/find where src-address=[:toip "` + rosEscape(address) + `"] and protocol=udp and src-port=31932 and dst-address=198.51.100.254 and dst-port=31931 and connection-mark="` + mark + `"];:if ([:len $rows]=1) do={:local id [:pick $rows 0];:put ("m3-owner-row|" . [:tostr $id] . "|" . [/ip/firewall/connection/get $id orig-packets] . "|" . [/ip/firewall/connection/get $id repl-packets] . "|" . [/ip/firewall/connection/get $id orig-bytes] . "|" . [/ip/firewall/connection/get $id repl-bytes] . "|end")}}`
-	read := func(c context.Context) (pair, bool) {
+	read := func(c context.Context, checkpoint bool) (pair, bool) {
 		var current pair
-		bound, end := context.WithTimeout(c, 7*time.Second)
+		runSSH := f.CHR.RunPrivate
+		window := 7 * time.Second
+		if checkpoint {
+			// Reimport and container-shell probes use their own sessions.
+			// The positive owner checkpoint also needs an independent read.
+			runSSH = f.CHR.RunPrivateFresh
+			window = 20 * time.Second
+		}
+		bound, end := context.WithTimeout(c, window)
 		defer end()
-		_, got := poll(bound, 7*time.Second, 200*time.Millisecond, func() bool {
+		_, got := poll(bound, window, 200*time.Millisecond, func() bool {
 			rows, err := observer.CommandAt(bound, observer.Generation(), cmd)
 			if err != nil || len(rows) != 1 {
 				return false
@@ -170,7 +178,7 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 			if !apiOK {
 				return false
 			}
-			wire, err := f.CHR.RunPrivate(bound, sshQuery)
+			wire, err := runSSH(bound, sshQuery)
 			parts := ownerFlowFrame.FindStringSubmatch(wire)
 			if err != nil || len(parts) != 6 {
 				return false
@@ -181,7 +189,7 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 		})
 		return current, got
 	}
-	first, ok := read(ctx)
+	first, ok := read(ctx, true)
 	if !ok {
 		t.Fatal("two independent owner sessions could not verify the unrelated flow")
 	}
@@ -206,7 +214,7 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 			case <-monitor.Done():
 				return
 			case <-tick.C:
-				now, ok := read(monitor)
+				now, ok := read(monitor, false)
 				if markerLost.Load() || ok && (!now[0].continued(prev[0]) || !now[1].continued(prev[1])) {
 					if monitor.Err() == nil {
 						failed.Store(true)
@@ -232,7 +240,7 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 		if _, ok := poll(ctx, 10*time.Second, 200*time.Millisecond, func() bool { return echoes() >= start+2 }); !ok {
 			t.Fatal("the unrelated stream did not receive two fresh UDP replies")
 		}
-		now, ok := read(ctx)
+		now, ok := read(ctx, true)
 		if failed.Load() || markerLost.Load() || !ok || !now[0].continued(first[0]) || !now[1].continued(first[1]) || now[0].values[1] <= first[0].values[1] || now[1].values[1] <= first[1].values[1] {
 			t.Fatalf("unrelated connection continuity failed: monitor=%t read=%t api_id=%t ssh_id=%t api_counts=%v->%v ssh_counts=%v->%v", !failed.Load(), ok, now[0].id == first[0].id, now[1].id == first[1].id, first[0].values, now[0].values, first[1].values, now[1].values)
 		}
