@@ -427,10 +427,45 @@ func (f *installLab) readOwnerRules(ctx context.Context, t *testing.T) []string 
 	t.Helper()
 	var result []string
 	for _, menu := range []string{"/ip/firewall/filter", "/ip/firewall/nat", "/ipv6/firewall/filter"} {
-		cmd := fmt.Sprintf(`:foreach id in=[%s/find where comment~"^lab:"] do={:local r [%s/get $id]; :put (%q . $id . "|" . ($r->"comment") . "|" . ($r->"chain") . "|" . ($r->"action") . "|" . [:tostr ($r->"disabled")])}`, menu, menu, menu+"|")
-		result = append(result, strings.Split(f.mustRun(ctx, t, cmd), "\n")...)
+		cmd := fmt.Sprintf(`{:local n 0; :foreach id in=[%s/find where comment~"^lab:"] do={:local r [%s/get $id]; :put (%q . $id . "|" . ($r->"comment") . "|" . ($r->"chain") . "|" . ($r->"action") . "|" . [:tostr ($r->"disabled")]); :set n ($n+1)}; :put ("m3-owner-rule-count=" . $n)}`, menu, menu, menu+"|")
+		var rows []string
+		wait, cancel := context.WithTimeout(ctx, 25*time.Second)
+		_, ok := poll(wait, 25*time.Second, 500*time.Millisecond, func() bool {
+			wire, err := f.CHR.RunPrivateFresh(wait, cmd)
+			var framed bool
+			rows, framed = readOwnerRuleFrame(menu, wire)
+			return err == nil && framed
+		})
+		cancel()
+		if !ok {
+			t.Fatal("complete owner firewall witness unavailable")
+		}
+		result = append(result, rows...)
 	}
 	return result
+}
+
+func readOwnerRuleFrame(menu, wire string) ([]string, bool) {
+	var rows []string
+	count := -1
+	for _, line := range strings.Split(wire, "\n") {
+		row := strings.TrimSpace(line)
+		if value, ok := strings.CutPrefix(row, "m3-owner-rule-count="); ok {
+			n, err := strconv.Atoi(value)
+			if count >= 0 || err != nil || n < 0 {
+				return nil, false
+			}
+			count = n
+		}
+		if strings.HasPrefix(row, menu+"|") {
+			fields := strings.Split(row, "|")
+			if len(fields) != 6 || !strings.HasPrefix(fields[1], "*") || !strings.HasPrefix(fields[2], "lab:") {
+				return nil, false
+			}
+			rows = append(rows, row)
+		}
+	}
+	return rows, len(rows) == count
 }
 
 func (f *installLab) checkOwnerRules(ctx context.Context, t *testing.T) {

@@ -66,13 +66,13 @@ with open(sys.argv[3],"wb",buffering=0) as log:
 }
 
 type nativeFlowCounters struct {
-	id     string
-	values [4]uint64
+	id, mark string
+	values   [4]uint64
 }
 
-func flowCounters(id string, fields []string) (nativeFlowCounters, bool) {
-	r := nativeFlowCounters{id: id}
-	if r.id == "" || len(fields) != len(r.values) {
+func flowCounters(id, mark string, fields []string) (nativeFlowCounters, bool) {
+	r := nativeFlowCounters{id: id, mark: mark}
+	if r.id == "" || r.mark == "" || len(fields) != len(r.values) {
 		return r, false
 	}
 	for i, field := range fields {
@@ -86,7 +86,7 @@ func flowCounters(id string, fields []string) (nativeFlowCounters, bool) {
 }
 
 func (r nativeFlowCounters) continued(prev nativeFlowCounters) bool {
-	if r.id != prev.id {
+	if r.mark == "" || r.mark != prev.mark {
 		return false
 	}
 	for i, v := range r.values {
@@ -98,7 +98,7 @@ func (r nativeFlowCounters) continued(prev nativeFlowCounters) bool {
 }
 
 func TestForeignFlowWitnessRejectsReusedID(t *testing.T) {
-	before := nativeFlowCounters{"*1", [4]uint64{900, 900, 27790, 27790}}
+	before := nativeFlowCounters{id: "*1", mark: "one-shot-owner", values: [4]uint64{900, 900, 27790, 27790}}
 	if !before.continued(before) {
 		t.Fatal("steady unrelated connection refused")
 	}
@@ -109,26 +109,43 @@ func TestForeignFlowWitnessRejectsReusedID(t *testing.T) {
 			t.Fatal("a reset counter on the same native ID passed")
 		}
 	}
-	changed := before
-	changed.id = "*2"
-	if changed.continued(before) {
-		t.Fatal("a different native ID passed without an identity proof")
+	replaced := before
+	replaced.mark = ""
+	if replaced.continued(before) {
+		t.Fatal("a native ID without its one-shot marker passed")
+	}
+	renumbered := before
+	renumbered.id = "*2"
+	if !renumbered.continued(before) {
+		t.Fatal("retained one-shot marker and counters did not survive an ID change")
 	}
 }
 
 var ownerFlowFrame = regexp.MustCompile(`m3-owner-row[|]([*][0-9A-Fa-f]+)[|]([0-9]+)[|]([0-9]+)[|]([0-9]+)[|]([0-9]+)[|]end`)
 
-// The API and owner SSH sessions read the same unmarked tuple independently.
-// RouterOS can reuse its displayed ID even when a connection is erased.
-func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, address string, echoes func() int) func() {
+// The API and owner SSH sessions verify the same original tuple. The
+// one-shot writer is removed before replacement, so a recreated tuple
+// cannot obtain the original owner's connection mark.
+func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, address string) func() {
 	t.Helper()
+	const mark = "m3-owner-lifetime"
+	const writer = "lab:owner-lifetime-writer"
+	f.routingWrite(ctx, t, "/ip/firewall/mangle/add", "=chain=prerouting", "=action=mark-connection",
+		"=src-address="+address, "=dst-address=198.51.100.254", "=protocol=udp", "=src-port=31932",
+		"=dst-port=31931", "=connection-mark=no-mark", "=new-connection-mark="+mark,
+		"=passthrough=yes", "=comment="+writer)
+	// A non-writing reference keeps the name allocated after its writer is
+	// removed. No packets enter this unused owner chain.
+	f.routingWrite(ctx, t, "/ip/firewall/mangle/add", "=chain=m3-owner-lifetime-reference", "=action=passthrough",
+		"=connection-mark="+mark, "=comment=lab:owner-lifetime-reference")
+	echoes := f.echoedOwnerPackets(ctx, t, address)
 	// A timed-out per-flow read may cancel its native observer. Keep the
 	// independently monitored owner's management session out of that path.
 	observer := f.ownerSession(ctx, t)
 	t.Cleanup(func() { observer.Close() })
 	type pair [2]nativeFlowCounters
 	cmd := []string{"/ip/firewall/connection/print", "=.proplist=.id,orig-packets,repl-packets,orig-bytes,repl-bytes,connection-mark,reply-src-address,reply-src-port", "?protocol=udp", "?src-address=" + address, "?src-port=31932", "?dst-address=198.51.100.254", "?dst-port=31931"}
-	sshQuery := `{:local rows [/ip/firewall/connection/find where src-address=[:toip "` + rosEscape(address) + `"] and protocol=udp and src-port=31932 and dst-address=198.51.100.254 and dst-port=31931 and connection-mark!="tikray-open" and connection-mark!="tikray-closed" and connection-mark!="tikray-open-udp" and connection-mark!="tikray-open-runner" and connection-mark!="tikray-open-wan"];:if ([:len $rows]=1) do={:local id [:pick $rows 0];:put ("m3-owner-row|" . [:tostr $id] . "|" . [/ip/firewall/connection/get $id orig-packets] . "|" . [/ip/firewall/connection/get $id repl-packets] . "|" . [/ip/firewall/connection/get $id orig-bytes] . "|" . [/ip/firewall/connection/get $id repl-bytes] . "|end")}}`
+	sshQuery := `{:local rows [/ip/firewall/connection/find where src-address=[:toip "` + rosEscape(address) + `"] and protocol=udp and src-port=31932 and dst-address=198.51.100.254 and dst-port=31931 and connection-mark="` + mark + `"];:if ([:len $rows]=1) do={:local id [:pick $rows 0];:put ("m3-owner-row|" . [:tostr $id] . "|" . [/ip/firewall/connection/get $id orig-packets] . "|" . [/ip/firewall/connection/get $id repl-packets] . "|" . [/ip/firewall/connection/get $id orig-bytes] . "|" . [/ip/firewall/connection/get $id repl-bytes] . "|end")}}`
 	read := func(c context.Context) (pair, bool) {
 		var current pair
 		bound, end := context.WithTimeout(c, 7*time.Second)
@@ -139,12 +156,11 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 				return false
 			}
 			r := rows[0]
-			mark := r["connection-mark"]
-			if (mark != "" && mark != "no-mark") || r["reply-src-address"] != "198.51.100.254" || r["reply-src-port"] != "31931" {
+			if r["connection-mark"] != mark || r["reply-src-address"] != "198.51.100.254" || r["reply-src-port"] != "31931" {
 				return false
 			}
 			var apiOK bool
-			current[0], apiOK = flowCounters(r[".id"], []string{r["orig-packets"], r["repl-packets"], r["orig-bytes"], r["repl-bytes"]})
+			current[0], apiOK = flowCounters(r[".id"], r["connection-mark"], []string{r["orig-packets"], r["repl-packets"], r["orig-bytes"], r["repl-bytes"]})
 			if !apiOK {
 				return false
 			}
@@ -154,7 +170,7 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 				return false
 			}
 			var sshOK bool
-			current[1], sshOK = flowCounters(parts[1], parts[2:])
+			current[1], sshOK = flowCounters(parts[1], mark, parts[2:])
 			return sshOK
 		})
 		return current, got
@@ -162,6 +178,14 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 	first, ok := read(ctx)
 	if !ok {
 		t.Fatal("two independent owner sessions could not verify the unrelated flow")
+	}
+	rows := f.readROS(ctx, t, "/ip/firewall/mangle", ".id", "?comment="+writer, "?new-connection-mark="+mark)
+	if len(rows) != 1 || rows[0][".id"] == "" {
+		t.Fatal("one-shot owner mark writer could not be identified")
+	}
+	f.routingWrite(ctx, t, "/ip/firewall/mangle/remove", "=.id="+rows[0][".id"])
+	if len(f.readROS(ctx, t, "/ip/firewall/mangle", ".id", "?new-connection-mark="+mark)) != 0 {
+		t.Fatal("the owner connection mark can still be recreated")
 	}
 	monitor, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -190,6 +214,9 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 	t.Cleanup(func() { cancel(); <-done })
 	return func() {
 		t.Helper()
+		if len(f.readROS(ctx, t, "/ip/firewall/mangle", ".id", "?new-connection-mark="+mark)) != 0 {
+			t.Fatal("an owner connection mark writer reappeared")
+		}
 		start := echoes()
 		if _, ok := poll(ctx, 10*time.Second, 200*time.Millisecond, func() bool { return echoes() >= start+2 }); !ok {
 			t.Fatal("the unrelated stream did not receive two fresh UDP replies")

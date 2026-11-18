@@ -118,3 +118,23 @@ func TestOutageEvidenceRequiresEveryFailureMode(t *testing.T) {
 		t.Fatal("missing recovery counted as complete")
 	}
 }
+
+func TestOwnerRuleFrameRequiresCompleteReply(t *testing.T) {
+	const menu = "/ip/firewall/filter"
+	const row = menu + "|*1|lab:permit|forward|accept|false"
+	wire := "unrelated console output\n" + row + "\nm3-owner-rule-count=1\n"
+	got, ok := readOwnerRuleFrame(menu, wire)
+	if !ok || len(got) != 1 || got[0] != row {
+		t.Fatal("complete owner rule response was not recognized")
+	}
+	for _, invalid := range []string{
+		row,
+		"m3-owner-rule-count=1\n",
+		wire + "m3-owner-rule-count=1\n",
+		"/ip/firewall/nat|*1|lab:permit|forward|accept|false\nm3-owner-rule-count=1\n",
+	} {
+		if _, ok := readOwnerRuleFrame(menu, invalid); ok {
+			t.Fatal("incomplete or ambiguous owner inventory was accepted")
+		}
+	}
+}

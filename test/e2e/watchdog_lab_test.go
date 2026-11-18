@@ -716,7 +716,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	t.Cleanup(func() {
 		_ = f.Net.Client(context.Background(), "ip", "addr", "del", unrelated+"/32", "dev", "eth0").Run()
 	})
-	ownerTracking := f.monitorForeignFlow(ctx, t, unrelated, f.echoedOwnerPackets(ctx, t, unrelated))
+	ownerTracking := f.monitorForeignFlow(ctx, t, unrelated)
 	other, kind := "runner", "runner"
 	if component == "runner" {
 		other, kind = "tikray", "control-start"
