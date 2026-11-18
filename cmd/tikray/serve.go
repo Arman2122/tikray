@@ -18,6 +18,7 @@ import (
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/service"
 	"github.com/Arman2122/tikray/internal/store"
+	"github.com/Arman2122/tikray/internal/ui"
 	"github.com/Arman2122/tikray/internal/xray"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -179,7 +180,7 @@ func (c *cli) serve(ctx context.Context, args []string) int {
 	}
 	go func() { ended <- svc.Run(ctx) }()
 	go func() {
-		ended <- api.ServeListener(ctx, ln, api.NewHandler(svc, token, people, auth.NewLimiter(nil), installationID), cert)
+		ended <- api.ServeListener(ctx, ln, api.NewHandlerWithUI(svc, token, people, auth.NewLimiter(nil), installationID, ui.Handler()), cert)
 	}()
 	var first error
 	for range 2 {
