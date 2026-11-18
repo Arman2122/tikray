@@ -729,9 +729,11 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	// Finish the lab network, observer logins and initial upload before
 	// taking the management baseline. From the first owner mutation
 	// onward, both clients must retain their original live connection.
+	bridgeAPI := f.ownerSession(ctx, t)
+	t.Cleanup(func() { bridgeAPI.Close() })
 	ownerCommand := watchOwnerManagement(ctx, t, ownerAPI, "LAN")
-	bridgeCommand := watchOwnerManagement(ctx, t, f.ros, "bridge")
-	generation := f.ros.Generation()
+	bridgeCommand := watchOwnerManagement(ctx, t, bridgeAPI, "bridge")
+	generation := bridgeAPI.Generation()
 	verifySibling := func() {
 		t.Helper()
 		ownerSSH()
@@ -739,7 +741,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		bridgeCommand()
 		ownerTracking()
 		r, ok := f.containerImage(ctx, other)
-		sameSession := f.ros.Generation() == generation
+		sameSession := bridgeAPI.Generation() == generation
 		sameProcess := f.probe(ctx, t, kind) == otherProcess
 		sameSelection := f.activeImageSelection(ctx, t) == selection
 		if !sameSession || !ok || r.id != otherImage.id || r.imageID != otherImage.imageID || !sameProcess || !sameSelection {
@@ -764,9 +766,11 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	if component == "tikray" {
 		stream = f.imageStream(ctx, t, 31875)
 	}
-	phase = "healthy-update"
+	phase = "healthy-request"
 	f.imageOperation(ctx, t, component, "update", healthyImageVersion, initial.digest, valid.digest, false)
+	phase = "healthy-completion"
 	f.waitImageCompletion(ctx, t, component, valid, initial.digest, base)
+	phase = "healthy-runtime"
 	updated := f.requireImage(ctx, t, component, valid)
 	freshProcess := f.probe(ctx, t, changedProbe) != priorProcess
 	matchingMarker := f.imageMarker(ctx, t, updated, healthyImageVersion)
@@ -774,14 +778,17 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 		t.Fatalf("candidate runtime witness: new_process=%t signed_marker=%t", freshProcess, matchingMarker)
 	}
 	f.expectPath(ctx, t, routingRemote, true)
+	phase = "healthy-owner"
 	verifySibling()
 	// Re-import the same signed installer while the newer release is
 	// active. A baseline image in the installer must not replace it.
+	phase = "healthy-reimport"
 	f.requireSuccess(ctx, t)
 	reimported := f.requireImage(ctx, t, component, valid)
 	if reimported.id != updated.id || f.imageStatus(ctx, t, component).Active != valid.digest {
 		t.Fatal("reimport replaced an already verified updated container")
 	}
+	phase = "reimported-owner"
 	verifySibling()
 	if stream != nil {
 		stream.requireSince(t, 0)
