@@ -21,7 +21,7 @@ jobs:
     name: Build, verify and publish release
     runs-on: ubuntu-latest
     env:
-      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -62,11 +62,14 @@ jobs:
           go run ./cmd/tikray-installer -uninstall-out out/uninstall.rsc
 
       - name: Sign archives and package RouterOS installers (when release key is configured)
-        if: ${{ secrets.TIKRAY_RELEASE_COSIGN_KEY != '' }}
         env:
           COSIGN_PASSWORD: ${{ secrets.TIKRAY_RELEASE_COSIGN_PASSWORD }}
           COSIGN_PRIVATE_KEY: ${{ secrets.TIKRAY_RELEASE_COSIGN_KEY }}
         run: |
+          if [[ -z "${COSIGN_PRIVATE_KEY:-}" ]]; then
+            echo "TIKRAY_RELEASE_COSIGN_KEY is not configured; skipping Cosign archive signing and packaged installers."
+            exit 0
+          fi
           umask 077
           printf '%s' "$COSIGN_PRIVATE_KEY" > "$RUNNER_TEMP/release.key"
           cosign public-key --key "$RUNNER_TEMP/release.key" > out/publisher.pub

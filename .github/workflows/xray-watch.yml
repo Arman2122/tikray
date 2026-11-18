@@ -25,8 +25,8 @@ jobs:
       - name: Resolve latest upstream XTLS/Xray-core tag
         id: latest
         run: |
-          if [[ -n "${{ inputs.version }}" ]]; then
-            tag="${{ inputs.version }}"
+          if [[ -n "${{ github.event.inputs.version }}" ]]; then
+            tag="${{ github.event.inputs.version }}"
           else
             tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/XTLS/Xray-core/releases/latest | awk -F/ '{print $NF}')
           fi
