@@ -113,6 +113,8 @@ if ((rc != 0)); then
         grep -oE '(active owner (LAN|bridge) API|owner (LAN|bridge) API (baseline|readback)): (session changed|command timed out|command unavailable|missing affirmative reply)$' "$run/harness.log" >&2 || true
         grep -oE 'independent image witness: owner_session=(true|false) native_row=(true|false) row_id=(true|false) image=(true|false) process=(true|false) selection=(true|false)$' "$run/harness.log" >&2 || true
         grep -oE 'packaged installer import failed: (installer acknowledgement missing|private installer execution failed)$' "$run/harness.log" >&2 || true
+        grep -oE '(original owner LAN SSH transport was lost|owner LAN SSH command failed|the unrelated stream did not receive two fresh UDP replies|cannot verify the current committed runner selection)$' "$run/harness.log" >&2 || true
+        grep -oE 'unrelated connection continuity failed: monitor=(true|false) read=(true|false) api_id=(true|false) ssh_id=(true|false)' "$run/harness.log" >&2 || true
     fi
     if [[ $pattern != */* ]]; then
         # These files are written from the fixed Go catalogue. The case
