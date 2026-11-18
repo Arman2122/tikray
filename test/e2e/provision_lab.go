@@ -326,7 +326,9 @@ func (f *installLab) runInstaller(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 	cmd := fmt.Sprintf(`:global tikraySubnet "%s"; :global tikrayCore "%s"; :global tikrayOffline true; :onerror r in={ /import file-name=m3-lab-install.rsc; :put "m3-import-ok" } do={ :put ("m3-import-error=" . [:convert [:tostr $r] to=base64]) }`, installSubnet, f.Newest)
-	out, e := f.CHR.RunPrivate(ctx, cmd)
+	// RouterOS can deliver trailing container-shell output on a reused
+	// connection. Give each owner import its own private SSH transport.
+	out, e := f.CHR.RunPrivateFresh(ctx, cmd)
 	if e != nil {
 		return "", errors.New("private installer execution failed")
 	}

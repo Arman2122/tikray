@@ -790,6 +790,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	}
 	phase = "reimported-owner"
 	verifySibling()
+	t.Logf("%s: repeat import retained the signed replacement and both owner sessions", component)
 	if stream != nil {
 		stream.requireSince(t, 0)
 	}

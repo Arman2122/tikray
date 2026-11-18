@@ -112,6 +112,7 @@ if ((rc != 0)); then
     if [[ $pattern == *TestM3Watchdog* ]]; then
         grep -oE '(active owner (LAN|bridge) API|owner (LAN|bridge) API (baseline|readback)): (session changed|command timed out|command unavailable|missing affirmative reply)$' "$run/harness.log" >&2 || true
         grep -oE 'independent image witness: owner_session=(true|false) native_row=(true|false) row_id=(true|false) image=(true|false) process=(true|false) selection=(true|false)$' "$run/harness.log" >&2 || true
+        grep -oE 'packaged installer import failed: (installer acknowledgement missing|private installer execution failed)$' "$run/harness.log" >&2 || true
     fi
     if [[ $pattern != */* ]]; then
         # These files are written from the fixed Go catalogue. The case
