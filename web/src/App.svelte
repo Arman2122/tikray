@@ -8,6 +8,7 @@
     type ServiceStatus,
     type State
   } from './lib/api';
+  import { formatBrandVersion } from './lib/format';
   import { toast } from './lib/toast.svelte';
   import Icon from './components/Icon.svelte';
   import CommandPalette from './components/CommandPalette.svelte';
@@ -274,7 +275,7 @@
           </div>
           <div>
             <span class="brand-title">tikray</span>
-            <span class="brand-sub mono">{status?.version || 'v1.0.0'}</span>
+            <span class="brand-sub mono" title={status?.version || 'v1.0.0'}>{formatBrandVersion(status?.version)}</span>
           </div>
         </div>
       </div>

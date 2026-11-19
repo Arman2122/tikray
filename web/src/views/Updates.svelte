@@ -7,7 +7,7 @@
     type ImageStatus,
     type ServiceStatus
   } from '../lib/api';
-  import { formatBytes, formatTime, friendlyError } from '../lib/format';
+  import { formatBuildVersion, formatBytes, formatTime, friendlyError } from '../lib/format';
   import { toast } from '../lib/toast.svelte';
   import Icon from '../components/Icon.svelte';
 
@@ -470,7 +470,9 @@
           <h2 class="card-title">3. tikray Control Image</h2>
           <p class="card-sub">Blue/green container replacement via RouterOS watchdog — zero traffic interruption</p>
         </div>
-        <span class="badge accent mono">{ctlImage?.active || status?.version || 'dev'}</span>
+        <span class="badge accent mono" title={ctlImage?.active || status?.version || 'v1.0.0'}>
+          {formatBuildVersion(ctlImage?.active || status?.version)}
+        </span>
       </div>
 
       {#if !ctlImage}
@@ -483,10 +485,10 @@
         <div class="row" style="gap: 8px">
           <span class="badge">State: {ctlImage.state || 'idle'}</span>
           {#if ctlImage.previous}
-            <span class="badge mono">Previous: {ctlImage.previous}</span>
+            <span class="badge mono" title={ctlImage.previous}>Previous: {formatBuildVersion(ctlImage.previous)}</span>
           {/if}
           {#if ctlImage.target}
-            <span class="badge warn mono">Target: {ctlImage.target}</span>
+            <span class="badge warn mono" title={ctlImage.target}>Target: {formatBuildVersion(ctlImage.target)}</span>
           {/if}
         </div>
         {#if ctlImage.error}
@@ -519,7 +521,9 @@
           <h2 class="card-title">4. tikray-runner Data Image</h2>
           <p class="card-sub">TUN / policy-routing data-plane container — rare OS or supervisor updates only</p>
         </div>
-        <span class="badge mono">{runnerImage?.active || '—'}</span>
+        <span class="badge mono" title={runnerImage?.active || ''}>
+          {runnerImage?.active ? formatBuildVersion(runnerImage.active) : '—'}
+        </span>
       </div>
 
       {#if !runnerImage}

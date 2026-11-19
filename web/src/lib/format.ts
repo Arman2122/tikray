@@ -13,6 +13,19 @@ export function friendlyError(err: unknown, fallback: string): string {
   return raw.replace(/^(service|artifacts|runnerapi|routeros|auth|backup):\s*/i, '');
 }
 
+export function formatBrandVersion(v?: string, fallback = 'v1.0.0'): string {
+  const s = v?.trim();
+  if (!s || /^[0-9a-f]{12,40}$/i.test(s)) return fallback;
+  return s;
+}
+
+export function formatBuildVersion(v?: string, fallback = 'v1.0.0'): string {
+  const s = v?.trim();
+  if (!s) return fallback;
+  if (/^[0-9a-f]{12,40}$/i.test(s)) return `${fallback} · ${s.slice(0, 7)}`;
+  return s;
+}
+
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];

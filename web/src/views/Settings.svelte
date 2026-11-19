@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api, ApiError, type BackupBundle, type ServiceStatus, type State, type TokenInfo } from '../lib/api';
-  import { downloadJSON, formatTime, splitLines } from '../lib/format';
+  import { downloadJSON, formatBuildVersion, formatTime, splitLines } from '../lib/format';
   import { toast } from '../lib/toast.svelte';
   import Icon from '../components/Icon.svelte';
   import Modal from '../components/Modal.svelte';
@@ -381,7 +381,7 @@
         </div>
         <div class="row-between">
           <span class="hint">Control Version</span>
-          <span class="mono">{status?.version || 'dev'}</span>
+          <span class="mono" title={status?.version || 'v1.0.0'}>{formatBuildVersion(status?.version)}</span>
         </div>
         <div class="row-between">
           <span class="hint">Process Boot ID</span>
