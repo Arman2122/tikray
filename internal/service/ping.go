@@ -61,7 +61,7 @@ func (s *Service) PingServer(ctx context.Context, id string) (PingResult, error)
 	}
 	snap := s.health()
 	redact := RedactorFor(st)
-	isActive := snap.Selected == id || (snap.Selected == "" && enabledCount == 1 && !srv.Disabled)
+	isActive := isActiveExit(snap.Selected, st.Routing.Pinned, id, enabledCount, srv.Disabled)
 	res := s.measureServer(ctx, *srv, newHealthDelayAdapter(snap), isActive, redact)
 	s.storePing(res)
 	return res, nil
@@ -100,7 +100,7 @@ func (s *Service) PingAllServers(ctx context.Context) []PingResult {
 				out[idx] = PingResult{ID: item.ID, Error: "canceled", TestedAt: s.now().UTC()}
 				return
 			}
-			isActive := snap.Selected == item.ID || (snap.Selected == "" && len(targets) == 1)
+			isActive := isActiveExit(snap.Selected, st.Routing.Pinned, item.ID, len(targets), false)
 			res := s.measureServer(ctx, item, adapter, isActive, redact)
 			s.storePing(res)
 			out[idx] = res
@@ -108,6 +108,67 @@ func (s *Service) PingAllServers(ctx context.Context) []PingResult {
 	}
 	wg.Wait()
 	return out
+}
+
+func isActiveExit(selected, pinned, id string, enabledCount int, disabled bool) bool {
+	if disabled {
+		return false
+	}
+	if selected != "" {
+		return selected == id
+	}
+	if pinned != "" {
+		return pinned == id
+	}
+	return enabledCount == 1
+}
+
+// seedInitialPings runs one lightweight startup latency check once the health
+// monitor has seen the runner's active exit, so the Dashboard immediately shows
+// real TCP/HTTP latency instead of waiting for a manual Ping after reboot.
+func (s *Service) seedInitialPings(ctx context.Context) {
+	if s.monitor == nil || s.socks == "" || s.repairBridge {
+		return
+	}
+	// Wait briefly (up to 8 s) for the first monitor poll to populate Selected
+	// so the active exit gets both TCP and warm HTTP 204 latency on boot.
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(8 * time.Second)
+	defer deadline.Stop()
+wait:
+	for {
+		if snap := s.health(); snap.Selected != "" {
+			break wait
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			break wait
+		case <-ticker.C:
+		}
+	}
+	st, _ := s.store.State()
+	hasTargets := false
+	for _, srv := range st.Servers {
+		if !srv.Disabled && srv.Invalid == "" {
+			hasTargets = true
+			break
+		}
+	}
+	if !hasTargets {
+		return
+	}
+	s.mu.Lock()
+	alreadyPopulated := len(s.pings) > 0
+	s.mu.Unlock()
+	if alreadyPopulated {
+		return
+	}
+	pctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	_ = s.PingAllServers(pctx)
 }
 
 func (s *Service) storePing(res PingResult) {

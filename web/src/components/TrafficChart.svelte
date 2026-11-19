@@ -92,20 +92,29 @@
     return new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
 
-  function handlePointerMove(e: MouseEvent): void {
+  function pickIndexAtClientX(svg: SVGSVGElement, clientX: number): void {
     if (samples.length < 2) return;
-    const svg = e.currentTarget as SVGSVGElement;
     const rect = svg.getBoundingClientRect();
-    const relX = ((e.clientX - rect.left) / rect.width) * W;
+    if (rect.width <= 0) return;
+    const relX = ((clientX - rect.left) / rect.width) * W;
     const clamped = Math.max(PAD_L, Math.min(PAD_L + plotW, relX));
     const ratio = (clamped - PAD_L) / plotW;
     hoverIdx = Math.round(ratio * (samples.length - 1));
   }
 
+  function handlePointerMove(e: MouseEvent): void {
+    pickIndexAtClientX(e.currentTarget as SVGSVGElement, e.clientX);
+  }
+
+  function handleTouch(e: TouchEvent): void {
+    if (e.touches.length === 0) return;
+    pickIndexAtClientX(e.currentTarget as SVGSVGElement, e.touches[0].clientX);
+  }
+
   const tooltipLeftPct = $derived.by(() => {
     if (!hoveredDownPt) return 0;
     const pct = (hoveredDownPt[0] / W) * 100;
-    return pct > 62 ? Math.max(4, pct - 34) : Math.min(62, pct + 2);
+    return pct > 56 ? Math.max(2, pct - 36) : Math.min(58, pct + 2);
   });
 </script>
 
@@ -113,7 +122,7 @@
   <div class="row-between">
     <div>
       <h2 class="card-title">Live Proxy Throughput</h2>
-      <p class="card-sub">Real-time transfer rate from xray-core gRPC counters · hover to inspect</p>
+      <p class="card-sub">Real-time transfer rate from xray-core gRPC counters</p>
     </div>
     <div class="row" style="gap: 8px">
       <span class="badge accent tabular">↓ {fmtRate(latest.downBps)}</span>
@@ -143,6 +152,9 @@
         aria-label="Live throughput chart"
         onmousemove={handlePointerMove}
         onmouseleave={() => (hoverIdx = null)}
+        ontouchstart={handleTouch}
+        ontouchmove={handleTouch}
+        ontouchend={() => (hoverIdx = null)}
       >
         <defs>
           <linearGradient id="tk-down-grad" x1="0" y1="0" x2="0" y2="1">

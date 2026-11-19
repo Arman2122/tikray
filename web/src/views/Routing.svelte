@@ -202,7 +202,7 @@
       <div class="empty-state">No custom routing rules defined.</div>
     {:else}
       <div class="table-wrap">
-        <table>
+        <table class="responsive-table">
           <thead>
             <tr>
               <th>#</th>
@@ -215,10 +215,10 @@
           <tbody>
             {#each rules as r, idx}
               <tr>
-                <td class="mono tabular" style="color: var(--text-dim)">{idx + 1}</td>
-                <td class="mono" style="font-size: 12px">{(r.domains ?? []).join(', ') || '—'}</td>
-                <td class="mono" style="font-size: 12px">{(r.ips ?? []).join(', ') || '—'}</td>
-                <td>
+                <td data-label="#" class="mono tabular" style="color: var(--text-dim)">{idx + 1}</td>
+                <td data-label="Domains" class="mono" style="font-size: 12px; word-break: break-word">{(r.domains ?? []).join(', ') || '—'}</td>
+                <td data-label="IPs / CIDRs" class="mono" style="font-size: 12px; word-break: break-word">{(r.ips ?? []).join(', ') || '—'}</td>
+                <td data-label="Action">
                   <span
                     class="badge {r.action === 'block'
                       ? 'danger'
@@ -231,8 +231,8 @@
                     {r.action}{r.server ? `: ${stateData?.servers.find((s) => s.id === r.server)?.name ?? r.server}` : ''}
                   </span>
                 </td>
-                <td style="text-align: right">
-                  <div class="row" style="justify-content: flex-end; gap: 4px">
+                <td data-label="Actions" class="cell-actions" style="text-align: right">
+                  <div class="row action-row" style="justify-content: flex-end; gap: 4px">
                     <button class="btn btn-sm" disabled={idx === 0} onclick={() => moveRule(idx, -1)}>↑</button>
                     <button class="btn btn-sm" disabled={idx === rules.length - 1} onclick={() => moveRule(idx, 1)}>↓</button>
                     <button class="btn btn-sm" onclick={() => openRuleModal(idx)}>Edit</button>

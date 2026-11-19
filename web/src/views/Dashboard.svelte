@@ -21,6 +21,7 @@
 
   let applying = $state(false);
   let pingingAll = $state(false);
+  let pingingId = $state('');
   let localPings = $state<Record<string, PingResult>>({});
 
   const greeting = $derived.by(() => {
@@ -52,22 +53,24 @@
 
   const pingMap = $derived({ ...(status?.pings ?? {}), ...localPings });
 
-  function bestLatencyMs(id: string, obsNs?: number): { ms: number; label: string; detail: string } | null {
+  function bestLatencyMs(
+    id: string,
+    obsNs?: number
+  ): { ms: number; label: string; detail: string; tcpMs?: number; httpMs?: number } | null {
     const p = pingMap[id];
     const parts: string[] = [];
-    if (p?.tcp_ms) parts.push(`TCP ${p.tcp_ms} ms`);
-    if (p?.http_ms) parts.push(`HTTP 204 ${p.http_ms} ms`);
+    if (p?.http_ms && p.http_ms > 0) parts.push(`HTTP 204 ${p.http_ms} ms`);
+    if (p?.tcp_ms && p.tcp_ms > 0) parts.push(`TCP ${p.tcp_ms} ms`);
     const obsMs = obsNs && obsNs > 0 ? Math.round(obsNs / 1_000_000) : p?.obs_ms;
     if (obsMs && obsMs > 0) parts.push(`Cold E2E ${obsMs} ms`);
 
+    // Never display xray-core's cold 5-handshake HTTPS observatory delay (~1000 ms)
+    // as primary latency; keep it strictly in hover tooltip diagnostics.
     if (p?.http_ms && p.http_ms > 0) {
-      return { ms: p.http_ms, label: 'HTTP', detail: parts.join(' · ') };
+      return { ms: p.http_ms, label: 'HTTP', detail: parts.join(' · '), tcpMs: p.tcp_ms, httpMs: p.http_ms };
     }
     if (p?.tcp_ms && p.tcp_ms > 0) {
-      return { ms: p.tcp_ms, label: 'TCP', detail: parts.join(' · ') };
-    }
-    if (obsMs && obsMs > 0) {
-      return { ms: obsMs, label: 'E2E', detail: parts.join(' · ') };
+      return { ms: p.tcp_ms, label: 'TCP', detail: parts.join(' · '), tcpMs: p.tcp_ms };
     }
     return null;
   }
@@ -144,12 +147,23 @@
     return { total, alive, disabled, down, alivePct };
   });
 
-  const fastestMetric = $derived.by(() => {
-    let best: { ms: number; label: string; name: string; detail: string } | null = null;
+  const selectedLatency = $derived(
+    selectedServer ? bestLatencyMs(selectedServer.id, selectedHealth?.delay) : null
+  );
+
+  const selectedAlive = $derived(
+    Boolean(selectedHealth?.alive || (selectedServer && pingMap[selectedServer.id]?.alive))
+  );
+
+  const activeLatency = $derived.by(() => {
+    if (selectedServer && selectedLatency) {
+      return { ...selectedLatency, name: selectedServer.name };
+    }
+    let best: { ms: number; label: string; name: string; detail: string; tcpMs?: number; httpMs?: number } | null = null;
     for (const r of serverRows) {
       if (r.srv.disabled || !r.lat) continue;
       if (!best || r.lat.ms < best.ms) {
-        best = { ms: r.lat.ms, label: r.lat.label, name: r.srv.name, detail: r.lat.detail };
+        best = { ...r.lat, name: r.srv.name };
       }
     }
     return best;
@@ -229,6 +243,24 @@
       toast.err(friendlyError(err, 'Apply failed'));
     } finally {
       applying = false;
+    }
+  }
+
+  async function runPingOne(id: string, name: string): Promise<void> {
+    pingingId = id;
+    try {
+      const res = await api.pingServer(id);
+      localPings = { ...localPings, [id]: res };
+      if (res.alive) {
+        toast.ok(res.http_ms ? `${name}: HTTP ${res.http_ms} ms (TCP ${res.tcp_ms} ms)` : `${name}: TCP ${res.tcp_ms} ms`);
+      } else {
+        toast.warn(`${name}: ${res.error || 'unreachable'}`);
+      }
+      await onRefresh();
+    } catch (err) {
+      toast.err(friendlyError(err, 'Latency test failed'));
+    } finally {
+      pingingId = '';
     }
   }
 
@@ -358,20 +390,28 @@
         <span class="kpi-label">Active Latency</span>
         <Icon name="zap" size={14} />
       </div>
-      <div class="kpi-value tabular" title={fastestMetric?.detail}>
-        {fastestMetric ? `${fastestMetric.ms} ms` : '—'}
-      </div>
-      <div class="meter-track">
-        {#if fastestMetric}
-          <div
-            class="meter-fill {latencyTone(fastestMetric.ms)}"
-            style="width: {Math.min(100, Math.max(10, Math.round((fastestMetric.ms / 500) * 100)))}%"
-          ></div>
+      <div class="kpi-value tabular" title={activeLatency?.detail}>
+        {#if activeLatency}
+          {activeLatency.ms} ms
+        {:else if selectedAlive}
+          Online
+        {:else}
+          —
         {/if}
       </div>
-      <span class="kpi-meta" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis">
-        {#if fastestMetric}
-          {fastestMetric.label} · {selectedServer?.name || fastestMetric.name}
+      <div class="meter-track">
+        {#if activeLatency}
+          <div
+            class="meter-fill {latencyTone(activeLatency.ms)}"
+            style="width: {Math.min(100, Math.max(10, Math.round((activeLatency.ms / 300) * 100)))}%"
+          ></div>
+        {:else if selectedAlive}
+          <div class="meter-fill ok" style="width: 24%"></div>
+        {/if}
+      </div>
+      <span class="kpi-meta" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis" title={activeLatency?.detail}>
+        {#if activeLatency}
+          {activeLatency.label}{activeLatency.httpMs && activeLatency.tcpMs ? ` · TCP ${activeLatency.tcpMs} ms` : ''} · {activeLatency.name}
         {:else if serverCounts.total > 0}
           Click Test Latency to measure
         {:else}
@@ -469,7 +509,8 @@
       {stateData}
       {stats}
       {selectedServer}
-      selectedDelay={selectedHealth?.delay}
+      {selectedLatency}
+      {selectedAlive}
       {onNavigate}
     />
   </div>
@@ -501,10 +542,10 @@
       {:else}
         <div class="stack" style="gap: 2px">
           {#each serverRows.slice(0, 6) as item (item.srv.id)}
-            {@const pct = item.lat ? Math.min(100, Math.max(8, Math.round((item.lat.ms / 500) * 100))) : 0}
+            {@const pct = item.lat ? Math.min(100, Math.max(8, Math.round((item.lat.ms / 300) * 100))) : item.h?.alive ? 20 : 0}
             <div class="metric-row">
               <div class="metric-row-top">
-                <div class="row" style="gap: 7px; min-width: 0">
+                <div class="row" style="gap: 7px; min-width: 0; flex: 1; flex-wrap: nowrap">
                   <span
                     class="dot {item.srv.disabled
                       ? ''
@@ -524,8 +565,10 @@
                     <span class="badge accent" style="padding: 0 6px; font-size: 10px">Pinned</span>
                   {/if}
                 </div>
-                <div class="row tabular mono" style="gap: 10px; font-size: 11.5px; color: var(--text-muted)">
-                  {#if item.lat}
+                <div class="row tabular mono" style="gap: 8px; font-size: 11.5px; color: var(--text-muted); flex-wrap: nowrap">
+                  {#if pingingId === item.srv.id}
+                    <span style="color: var(--accent)">testing…</span>
+                  {:else if item.lat}
                     <span
                       style="color: var(--{latencyTone(item.lat.ms)}); font-weight: 600"
                       title={item.lat.detail}
@@ -534,17 +577,36 @@
                     </span>
                   {:else if item.srv.disabled}
                     <span class="hint">disabled</span>
+                  {:else if item.h?.alive}
+                    <span style="color: var(--ok); font-weight: 600" title="Alive via observatory · click Ping for TCP/HTTP latency">
+                      Online
+                    </span>
                   {:else}
                     <span class="hint">{item.ping?.error || item.h?.last_error || 'pending'}</span>
                   {/if}
                   {#if item.traffic}
-                    <span class="hint">{formatBytes(item.traffic.downlink + item.traffic.uplink)}</span>
+                    <span class="hint hide-xs">{formatBytes(item.traffic.downlink + item.traffic.uplink)}</span>
+                  {/if}
+                  {#if !item.srv.disabled && !item.srv.invalid}
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-icon"
+                      style="width: 24px; height: 24px; padding: 2px"
+                      title="Test latency for {item.srv.name}"
+                      aria-label="Test latency for {item.srv.name}"
+                      disabled={pingingId === item.srv.id}
+                      onclick={() => runPingOne(item.srv.id, item.srv.name)}
+                    >
+                      <Icon name="zap" size={12} />
+                    </button>
                   {/if}
                 </div>
               </div>
               <div class="meter-track">
                 {#if item.lat}
-                  <div class="meter-fill {item.selected ? 'ok' : 'accent'}" style="width: {pct}%"></div>
+                  <div class="meter-fill {latencyTone(item.lat.ms)}" style="width: {pct}%"></div>
+                {:else if item.h?.alive}
+                  <div class="meter-fill ok" style="width: 20%"></div>
                 {/if}
               </div>
             </div>

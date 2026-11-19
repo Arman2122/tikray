@@ -278,15 +278,15 @@
       </div>
     </div>
 
-    <form class="row" onsubmit={createToken}>
+    <form class="form-inline" onsubmit={createToken}>
       <input
         class="input"
-        style="flex: 1; min-width: 200px"
+        style="flex: 1; min-width: 180px"
         placeholder="Token label (e.g. home-assistant)"
         bind:value={tokenName}
         required
       />
-      <select class="select" style="width: 170px" bind:value={tokenExpires}>
+      <select class="select form-inline-narrow" bind:value={tokenExpires}>
         <option value="">No expiry</option>
         <option value="24h">Expires in 24 hours</option>
         <option value="168h">Expires in 7 days</option>
@@ -303,7 +303,7 @@
       <div class="empty-state">No named API tokens issued.</div>
     {:else}
       <div class="table-wrap">
-        <table>
+        <table class="responsive-table">
           <thead>
             <tr>
               <th>ID</th>
@@ -317,16 +317,16 @@
           <tbody>
             {#each tokens as t (t.id)}
               <tr>
-                <td class="mono">{t.id}</td>
-                <td style="font-weight: 600">{t.name}</td>
-                <td class="tabular" style="font-size: 12.5px; color: var(--text-muted)">{formatTime(t.created)}</td>
-                <td class="tabular" style="font-size: 12.5px; color: var(--text-muted)">
+                <td data-label="ID" class="mono">{t.id}</td>
+                <td data-label="Name" class="cell-primary" style="font-weight: 600">{t.name}</td>
+                <td data-label="Created" class="tabular" style="font-size: 12.5px; color: var(--text-muted)">{formatTime(t.created)}</td>
+                <td data-label="Expires" class="tabular" style="font-size: 12.5px; color: var(--text-muted)">
                   {t.expires ? formatTime(t.expires) : 'Never'}
                 </td>
-                <td class="tabular" style="font-size: 12.5px; color: var(--text-muted)">
+                <td data-label="Last Used" class="tabular" style="font-size: 12.5px; color: var(--text-muted)">
                   {t.last_used ? formatTime(t.last_used) : 'Never'}
                 </td>
-                <td style="text-align: right">
+                <td data-label="Action" class="cell-actions" style="text-align: right">
                   <button class="btn btn-sm btn-danger" onclick={() => revokeToken(t)}>Revoke</button>
                 </td>
               </tr>

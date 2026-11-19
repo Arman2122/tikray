@@ -369,6 +369,13 @@ func (s *Service) Run(ctx context.Context) error {
 			defer wg.Done()
 			s.monitor.Run(ctx)
 		}()
+		if s.socks != "" {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				s.seedInitialPings(ctx)
+			}()
+		}
 	}
 	wg.Add(1)
 	go func() {

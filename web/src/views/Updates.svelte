@@ -256,8 +256,8 @@
       </div>
 
       <form class="stack" onsubmit={runCoreUpdate}>
-        <div class="row">
-          <select class="select mono" style="flex: 1" bind:value={coreVersionSelect} aria-label="xray-core version">
+        <div class="form-inline">
+          <select class="select mono" style="flex: 1; min-width: 180px" bind:value={coreVersionSelect} aria-label="xray-core version">
             <option value="latest">
               latest{coreReleases?.latest ? ` (v${coreReleases.latest} — recommended)` : ' (recommended)'}
             </option>
@@ -270,12 +270,14 @@
             {/each}
             <option value="__custom__">Custom version tag…</option>
           </select>
-          <button type="submit" class="btn btn-primary" disabled={coreBusy}>
-            {coreBusy ? 'Updating…' : 'Update Core'}
-          </button>
-          <button type="button" class="btn" disabled={coreBusy || (core?.slots.length ?? 0) < 2} onclick={runCoreRollback}>
-            Rollback
-          </button>
+          <div class="form-inline-actions">
+            <button type="submit" class="btn btn-primary" disabled={coreBusy}>
+              {coreBusy ? 'Updating…' : 'Update Core'}
+            </button>
+            <button type="button" class="btn" disabled={coreBusy || (core?.slots.length ?? 0) < 2} onclick={runCoreRollback}>
+              Rollback
+            </button>
+          </div>
         </div>
         {#if coreVersionSelect === '__custom__'}
           <input
@@ -360,23 +362,25 @@
       </div>
 
       <form class="stack" onsubmit={runGeoUpdate}>
-        <div class="row">
-          <select class="select" style="width: 140px" bind:value={geoProfile} aria-label="Geo profile">
+        <div class="form-inline">
+          <select class="select form-inline-narrow" bind:value={geoProfile} aria-label="Geo profile">
             <option value="iran">iran</option>
             <option value="v2fly">v2fly</option>
             <option value="loyalsoldier">loyalsoldier</option>
             <option value="custom">custom</option>
           </select>
-          <select class="select mono" style="flex: 1" bind:value={geoVersionMode} aria-label="Geo release version">
+          <select class="select mono" style="flex: 1; min-width: 150px" bind:value={geoVersionMode} aria-label="Geo release version">
             <option value="latest">latest (recommended)</option>
             <option value="custom">Custom release tag…</option>
           </select>
-          <button type="submit" class="btn btn-primary" disabled={geoBusy}>
-            {geoBusy ? 'Updating…' : 'Update Geo'}
-          </button>
-          <button type="button" class="btn" disabled={geoBusy || (geo?.slots.length ?? 0) < 2} onclick={runGeoRollback}>
-            Rollback
-          </button>
+          <div class="form-inline-actions">
+            <button type="submit" class="btn btn-primary" disabled={geoBusy}>
+              {geoBusy ? 'Updating…' : 'Update Geo'}
+            </button>
+            <button type="button" class="btn" disabled={geoBusy || (geo?.slots.length ?? 0) < 2} onclick={runGeoRollback}>
+              Rollback
+            </button>
+          </div>
         </div>
         {#if geoVersionMode === 'custom'}
           <input

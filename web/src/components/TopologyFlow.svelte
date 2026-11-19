@@ -1,17 +1,18 @@
 <script lang="ts">
   import type { Server, ServiceStats, ServiceStatus, State } from '../lib/api';
-  import { formatBytes, formatMs } from '../lib/format';
+  import { formatBytes } from '../lib/format';
 
   interface Props {
     status: ServiceStatus | null;
     stateData: State | null;
     stats: ServiceStats | null;
     selectedServer: Server | null;
-    selectedDelay?: number;
+    selectedLatency?: { ms: number; label: string; detail: string } | null;
+    selectedAlive?: boolean;
     onNavigate: (view: string) => void;
   }
 
-  let { status, stateData, stats, selectedServer, selectedDelay, onNavigate }: Props = $props();
+  let { status, stateData, stats, selectedServer, selectedLatency = null, selectedAlive = false, onNavigate }: Props = $props();
 
   const routerTone = $derived(
     !status?.routeros
@@ -128,11 +129,13 @@
       <strong class="topo-title" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%">
         {selectedServer ? selectedServer.name : 'Direct / None'}
       </strong>
-      <span class="hint tabular">
-        {#if selectedDelay && selectedDelay > 0}
-          {formatMs(selectedDelay)} · {stateData?.routing.pinned ? 'Pinned' : 'leastPing'}
+      <span class="hint tabular" title={selectedLatency?.detail}>
+        {#if selectedLatency}
+          {selectedLatency.ms} ms {selectedLatency.label} · {stateData?.routing.pinned ? 'Pinned' : 'leastPing'}
+        {:else if selectedAlive}
+          Online · {stateData?.routing.pinned ? 'Pinned' : 'leastPing'}
         {:else if selectedServer}
-          Probing exit…
+          Checking exit…
         {:else}
           Add a server to proxy
         {/if}

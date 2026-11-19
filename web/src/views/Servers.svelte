@@ -9,7 +9,7 @@
     type State,
     type Subscription
   } from '../lib/api';
-  import { formatMs, formatTime, friendlyError, serverEndpoint } from '../lib/format';
+  import { formatTime, friendlyError, serverEndpoint } from '../lib/format';
   import { inspectShareLink } from '../lib/linkPreview';
   import { toast } from '../lib/toast.svelte';
   import Icon from '../components/Icon.svelte';
@@ -65,14 +65,13 @@
   function serverLatency(srvId: string, obsNs?: number): { ms: number; kind: string; detail: string } | null {
     const p = pingMap[srvId];
     const parts: string[] = [];
-    if (p?.tcp_ms) parts.push(`TCP ${p.tcp_ms} ms`);
-    if (p?.http_ms) parts.push(`HTTP 204 ${p.http_ms} ms`);
+    if (p?.http_ms && p.http_ms > 0) parts.push(`HTTP 204 ${p.http_ms} ms`);
+    if (p?.tcp_ms && p.tcp_ms > 0) parts.push(`TCP ${p.tcp_ms} ms`);
     const obsMs = obsNs && obsNs > 0 ? Math.round(obsNs / 1_000_000) : p?.obs_ms;
     if (obsMs && obsMs > 0) parts.push(`Cold E2E ${obsMs} ms`);
 
     if (p?.http_ms && p.http_ms > 0) return { ms: p.http_ms, kind: 'HTTP', detail: parts.join(' · ') };
     if (p?.tcp_ms && p.tcp_ms > 0) return { ms: p.tcp_ms, kind: 'TCP', detail: parts.join(' · ') };
-    if (obsMs && obsMs > 0) return { ms: obsMs, kind: 'E2E', detail: parts.join(' · ') };
     return null;
   }
 
@@ -234,13 +233,16 @@
       outboundJSON = '';
       await onRefresh();
       // Auto-test latency on first import (v2rayN-style immediate feedback).
-      for (const cid of createdIds.slice(0, 6)) {
-        api
-          .pingServer(cid)
-          .then((res) => {
-            localPings = { ...localPings, [cid]: res };
-          })
-          .catch(() => {});
+      if (createdIds.length > 0) {
+        Promise.allSettled(
+          createdIds.slice(0, 6).map((cid) =>
+            api.pingServer(cid).then((res) => {
+              localPings = { ...localPings, [cid]: res };
+            })
+          )
+        ).then(() => {
+          onRefresh();
+        });
       }
     } catch (err) {
       toast.err(friendlyError(err, 'Could not add server'));
@@ -441,8 +443,7 @@
           {/each}
         </div>
         <input
-          class="input"
-          style="max-width: 260px"
+          class="input search-input"
           type="search"
           placeholder="Search name, ID, host…"
           bind:value={search}
@@ -456,7 +457,7 @@
         </div>
       {:else}
         <div class="table-wrap">
-          <table>
+          <table class="responsive-table">
             <thead>
               <tr>
                 <th>Name</th>
@@ -480,7 +481,7 @@
                   !isReachable && ((h && runnerOnline && !srv.untested && (h.last_error || h.last_seen)) || (p && !p.alive && p.error))
                 )}
                 <tr>
-                  <td>
+                  <td data-label="Server" class="cell-primary">
                     <div class="stack" style="gap: 3px">
                       <div class="row" style="gap: 7px">
                         <span class="dot {srv.disabled ? '' : isReachable ? 'ok' : hasFailedProbe ? 'danger' : 'warn'}"></span>
@@ -502,10 +503,10 @@
                       {/if}
                     </div>
                   </td>
-                  <td class="mono" style="font-size: 12.5px; color: var(--text-muted)">
+                  <td data-label="Endpoint" class="mono" style="font-size: 12.5px; color: var(--text-muted); word-break: break-all">
                     {ep.protocol} · {ep.endpoint}
                   </td>
-                  <td class="tabular">
+                  <td data-label="Latency" class="tabular">
                     {#if srv.disabled}
                       <span class="badge">Disabled</span>
                     {:else if pingingId === srv.id}
@@ -514,6 +515,8 @@
                       <span class="badge {latencyBadgeTone(lat.ms)} mono" title={lat.detail}>
                         {lat.ms} ms <span style="opacity: 0.7; font-weight: 500">{lat.kind}</span>
                       </span>
+                    {:else if isReachable}
+                      <span class="badge ok" title="Alive via observatory · click Ping for TCP/HTTP latency">Online</span>
                     {:else if hasFailedProbe}
                       <span class="badge danger" title={p?.error || h?.last_error}>Unreachable</span>
                     {:else if srv.untested}
@@ -522,7 +525,7 @@
                       <span class="badge warn">Pending</span>
                     {/if}
                   </td>
-                  <td>
+                  <td data-label="Origin">
                     {#if srv.subscription}
                       <span class="badge purple">
                         {subMap.get(srv.subscription)?.name ?? srv.subscription}
@@ -531,8 +534,8 @@
                       <span class="hint">Manual</span>
                     {/if}
                   </td>
-                  <td style="text-align: right">
-                    <div class="row" style="justify-content: flex-end; gap: 5px">
+                  <td data-label="Actions" class="cell-actions" style="text-align: right">
+                    <div class="row action-row" style="justify-content: flex-end; gap: 5px">
                       <button
                         type="button"
                         class="btn btn-sm"
@@ -577,7 +580,7 @@
         </div>
       {:else}
         <div class="table-wrap">
-          <table>
+          <table class="responsive-table">
             <thead>
               <tr>
                 <th>Name</th>
@@ -590,17 +593,17 @@
             <tbody>
               {#each stateData?.subscriptions ?? [] as sub (sub.id)}
                 <tr>
-                  <td>
+                  <td data-label="Subscription" class="cell-primary">
                     <div style="font-weight: 600">{sub.name}</div>
                     <div class="hint mono" style="font-size: 11px">
                       {sub.id} · URL hidden for security
                     </div>
                   </td>
-                  <td class="mono">{sub.interval}</td>
-                  <td class="tabular" style="font-size: 12.5px; color: var(--text-muted)">
+                  <td data-label="Interval" class="mono">{sub.interval}</td>
+                  <td data-label="Last Fetch" class="tabular" style="font-size: 12.5px; color: var(--text-muted)">
                     {formatTime(sub.last_fetch)}
                   </td>
-                  <td>
+                  <td data-label="Status">
                     {#if sub.disabled}
                       <span class="badge">Paused</span>
                     {:else if sub.last_error}
@@ -614,8 +617,8 @@
                       </div>
                     {/if}
                   </td>
-                  <td style="text-align: right">
-                    <div class="row" style="justify-content: flex-end; gap: 6px">
+                  <td data-label="Actions" class="cell-actions" style="text-align: right">
+                    <div class="row action-row" style="justify-content: flex-end; gap: 6px">
                       <button
                         class="btn btn-sm btn-primary"
                         disabled={refreshingId === sub.id}
@@ -785,6 +788,7 @@
 {#if editingServer}
   {@const editEp = serverEndpoint(editingServer)}
   {@const editHealth = healthMap.get(editingServer.id)}
+  {@const editLat = serverLatency(editingServer.id, editHealth?.delay)}
   {@const editPinned = stateData?.routing.pinned === editingServer.id}
   <Modal title="Edit Server · {editingServer.name}" wide={true} onClose={() => (editingServer = null)}>
     <!-- Live Server Summary Strip -->
@@ -792,12 +796,16 @@
       <div class="row-between" style="flex-wrap: wrap; gap: 8px">
         <div class="row" style="gap: 8px; flex-wrap: wrap">
           <span class="badge accent mono">{editEp.protocol}</span>
-          <span class="mono" style="font-size: 13px; font-weight: 600">{editEp.endpoint}</span>
+          <span class="mono" style="font-size: 13px; font-weight: 600; word-break: break-all">{editEp.endpoint}</span>
           <span class="mono hint" style="font-size: 11.5px">ID: {editingServer.id}</span>
         </div>
         <div class="row" style="gap: 6px; flex-wrap: wrap">
-          {#if editHealth?.alive}
-            <span class="badge ok tabular">Alive · {formatMs(editHealth.delay)}</span>
+          {#if editLat}
+            <span class="badge {latencyBadgeTone(editLat.ms)} tabular mono" title={editLat.detail}>
+              {editLat.ms} ms {editLat.kind}
+            </span>
+          {:else if editHealth?.alive}
+            <span class="badge ok">Online</span>
           {:else if editHealth?.last_error}
             <span class="badge danger">{editHealth.last_error}</span>
           {:else}

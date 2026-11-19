@@ -303,7 +303,7 @@
     <div class="editor-section">
       <div class="editor-section-title">Endpoint &amp; Authentication ({scheme.toUpperCase()})</div>
       <div class="grid-3">
-        <div class="field" style="grid-column: span 2">
+        <div class="field col-span-2">
           <label for="{idPrefix}-host">Server Address / Host</label>
           <input id="{idPrefix}-host" class="input mono" bind:value={host} oninput={rebuildLink} />
         </div>

@@ -216,6 +216,8 @@
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         if (signedIn) paletteOpen = !paletteOpen;
+      } else if (e.key === 'Escape' && mobileMenu) {
+        mobileMenu = false;
       }
     };
     window.addEventListener('popstate', onPop);
@@ -275,21 +277,14 @@
             <span class="brand-sub mono">{status?.version || 'v1.0.0'}</span>
           </div>
         </div>
-        {#if status}
-          {@const lvl = status.health.level}
-          {@const liveTone =
-            lvl === 'ok'
-              ? 'ok'
-              : lvl === 'degraded'
-                ? 'warn'
-                : lvl === 'down' || lvl === 'outage'
-                  ? 'danger'
-                  : 'accent'}
-          <span class="live-pill">
-            <span class="dot {liveTone}"></span>
-            {lvl === 'ok' ? 'Live' : lvl === 'idle' ? 'Idle' : lvl}
-          </span>
-        {/if}
+        <button
+          type="button"
+          class="btn btn-ghost btn-icon mobile-only"
+          aria-label="Close navigation menu"
+          onclick={() => (mobileMenu = false)}
+        >
+          ×
+        </button>
       </div>
 
       <div class="sidebar-tools">
@@ -375,7 +370,7 @@
 
     <div class="main-col">
       <header class="mobile-topbar">
-        <div class="row" style="gap: 10px">
+        <div class="row" style="gap: 8px; min-width: 0; flex: 1; flex-wrap: nowrap">
           <button
             type="button"
             class="btn btn-ghost btn-icon"
@@ -384,14 +379,24 @@
           >
             <Icon name="menu" size={18} />
           </button>
-          <span style="font-size: 14px; font-weight: 600">{activeTitle}</span>
+          <span style="font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">
+            {activeTitle}
+          </span>
         </div>
-        <div class="row" style="gap: 6px">
-          <button type="button" class="btn btn-sm" onclick={() => (paletteOpen = true)}>
-            <Icon name="search" size={13} />
+        <div class="row" style="gap: 6px; flex-wrap: nowrap">
+          <button type="button" class="btn btn-sm btn-icon" aria-label="Search" onclick={() => (paletteOpen = true)}>
+            <Icon name="search" size={14} />
           </button>
-          <button type="button" class="btn btn-sm" onclick={refreshAll}>
-            <Icon name="refresh" size={13} />
+          <button
+            type="button"
+            class="btn btn-sm btn-icon"
+            aria-label="Toggle theme"
+            onclick={() => (theme = theme === 'dark' ? 'light' : 'dark')}
+          >
+            <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={14} />
+          </button>
+          <button type="button" class="btn btn-sm btn-icon" aria-label="Refresh" onclick={refreshAll}>
+            <Icon name="refresh" size={14} />
           </button>
         </div>
       </header>

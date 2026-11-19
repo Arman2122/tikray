@@ -76,8 +76,7 @@
       {/each}
     </div>
     <input
-      class="input"
-      style="max-width: 240px"
+      class="input search-input"
       type="search"
       placeholder="Filter message…"
       bind:value={search}
@@ -88,7 +87,7 @@
     <div class="empty-state">No matching events.</div>
   {:else}
     <div class="table-wrap">
-      <table>
+      <table class="responsive-table">
         <thead>
           <tr>
             <th>Seq</th>
@@ -100,11 +99,11 @@
         <tbody>
           {#each filtered as ev (ev.seq)}
             <tr>
-              <td class="mono tabular" style="color: var(--text-dim); width: 58px">{ev.seq}</td>
-              <td class="tabular" style="white-space: nowrap; color: var(--text-muted); font-size: 12.5px">
+              <td data-label="Seq" class="mono tabular" style="color: var(--text-dim)">{ev.seq}</td>
+              <td data-label="Time" class="tabular" style="white-space: nowrap; color: var(--text-muted); font-size: 12.5px">
                 {formatTime(ev.at)}
               </td>
-              <td>
+              <td data-label="Kind">
                 <span
                   class="badge {ev.kind === 'error' || ev.kind === 'degraded'
                     ? 'danger'
@@ -117,7 +116,7 @@
                   {ev.kind}
                 </span>
               </td>
-              <td class="mono" style="font-size: 12.5px; word-break: break-word">{ev.message}</td>
+              <td data-label="Message" class="mono" style="font-size: 12.5px; word-break: break-word">{ev.message}</td>
             </tr>
           {/each}
         </tbody>

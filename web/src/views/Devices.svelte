@@ -206,7 +206,7 @@
       <div class="empty-state">No per-device overrides configured. All LAN hosts follow the default policy.</div>
     {:else}
       <div class="table-wrap">
-        <table>
+        <table class="responsive-table">
           <thead>
             <tr>
               <th>Address / CIDR</th>
@@ -219,10 +219,10 @@
           <tbody>
             {#each stateData?.devices ?? [] as d (d.address)}
               <tr>
-                <td class="mono" style="font-weight: 600">{d.address}</td>
-                <td>{d.name || '—'}</td>
-                <td class="mono" style="font-size: 12px; color: var(--text-muted)">{d.mac || '—'}</td>
-                <td>
+                <td data-label="Address" class="mono cell-primary" style="font-weight: 600">{d.address}</td>
+                <td data-label="Name">{d.name || '—'}</td>
+                <td data-label="MAC" class="mono" style="font-size: 12px; color: var(--text-muted)">{d.mac || '—'}</td>
+                <td data-label="Policy">
                   <div class="row" style="gap: 6px">
                     <span
                       class="badge {d.policy.mode === 'full'
@@ -238,8 +238,8 @@
                     {/if}
                   </div>
                 </td>
-                <td style="text-align: right">
-                  <div class="row" style="justify-content: flex-end; gap: 6px">
+                <td data-label="Actions" class="cell-actions" style="text-align: right">
+                  <div class="row action-row" style="justify-content: flex-end; gap: 6px">
                     <button class="btn btn-sm" onclick={() => openEditDevice(d)}>Edit</button>
                     <button class="btn btn-sm btn-danger" onclick={() => removeDevice(d)} aria-label="Remove device">
                       <Icon name="trash" size={13} />
@@ -283,7 +283,7 @@
       <div class="empty-state">{loadingLeases ? 'Reading leases from RouterOS…' : 'No bound DHCP leases observed.'}</div>
     {:else}
       <div class="table-wrap">
-        <table>
+        <table class="responsive-table">
           <thead>
             <tr>
               <th>IP Address</th>
@@ -296,18 +296,18 @@
           <tbody>
             {#each leases as l (l.address)}
               <tr>
-                <td class="mono" style="font-weight: 600">{l.address}</td>
-                <td>{l.name || '—'}</td>
-                <td class="mono" style="font-size: 12px; color: var(--text-muted)">{l.mac}</td>
-                <td>
+                <td data-label="IP Address" class="mono cell-primary" style="font-weight: 600">{l.address}</td>
+                <td data-label="Hostname">{l.name || '—'}</td>
+                <td data-label="MAC" class="mono" style="font-size: 12px; color: var(--text-muted)">{l.mac}</td>
+                <td data-label="Lease">
                   {#if l.static}
                     <span class="badge ok">Static</span>
                   {:else}
                     <span class="badge warn">Dynamic</span>
                   {/if}
                 </td>
-                <td style="text-align: right">
-                  <div class="row" style="justify-content: flex-end; gap: 6px">
+                <td data-label="Actions" class="cell-actions" style="text-align: right">
+                  <div class="row action-row" style="justify-content: flex-end; gap: 6px">
                     {#if !l.static}
                       <button
                         class="btn btn-sm"
