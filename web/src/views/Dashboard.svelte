@@ -1,21 +1,13 @@
 <script lang="ts">
-  import { api, type ServiceEvent, type ServiceStats, type ServiceStatus, type State } from '../lib/api';
-  import {
-    delayClass,
-    delayPercent,
-    formatBytes,
-    formatMs,
-    formatTime,
-    formatUptime,
-    friendlyError,
-    serverEndpoint
-  } from '../lib/format';
+  import { api, type PingResult, type ServiceEvent, type ServiceStats, type ServiceStatus, type State } from '../lib/api';
+  import { formatBytes, formatTime, formatUptime, friendlyError } from '../lib/format';
   import { toast } from '../lib/toast.svelte';
   import Icon from '../components/Icon.svelte';
   import TopologyFlow from '../components/TopologyFlow.svelte';
   import TrafficChart, { type RateSample } from '../components/TrafficChart.svelte';
 
   interface Props {
+    username: string;
     status: ServiceStatus | null;
     stateData: State | null;
     stats: ServiceStats | null;
@@ -25,24 +17,21 @@
     onNavigate: (view: string) => void;
   }
 
-  let { status, stateData, stats, rateHistory, events, onRefresh, onNavigate }: Props = $props();
+  let { username, status, stateData, stats, rateHistory, events, onRefresh, onNavigate }: Props = $props();
 
   let applying = $state(false);
+  let pingingAll = $state(false);
+  let localPings = $state<Record<string, PingResult>>({});
+
+  const greeting = $derived.by(() => {
+    const now = new Date();
+    const h = now.getHours();
+    const part = h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+    const dateStr = now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+    return `${part}, ${username || 'admin'} · ${dateStr}`;
+  });
 
   const healthLevel = $derived(status?.health.level ?? 'unknown');
-  const healthLabel = $derived(
-    healthLevel === 'ok'
-      ? 'Healthy'
-      : healthLevel === 'idle'
-        ? 'Idle'
-        : healthLevel === 'outage'
-          ? 'Outage'
-          : healthLevel === 'degraded'
-            ? 'Degraded'
-            : healthLevel === 'down'
-              ? 'Down'
-              : 'Unknown'
-  );
   const healthTone = $derived(
     healthLevel === 'ok'
       ? 'ok'
@@ -50,35 +39,60 @@
         ? 'warn'
         : healthLevel === 'down' || healthLevel === 'outage'
           ? 'danger'
-          : ''
+          : 'accent'
   );
 
-  const selectedServer = $derived.by(() => {
-    const id = status?.health.selected || status?.health.pinned;
-    if (!id || !stateData) return null;
-    return stateData.servers.find((s) => s.id === id) ?? null;
-  });
+  const selectedServer = $derived(
+    stateData?.servers.find((s) => s.id === status?.health.selected) ?? null
+  );
 
-  const selectedHealth = $derived.by(() => {
-    const id = status?.health.selected || status?.health.pinned;
-    if (!id || !status) return null;
-    return status.health.servers.find((s) => s.id === id) ?? null;
-  });
+  const selectedHealth = $derived(
+    status?.health.servers.find((h) => h.id === status?.health.selected) ?? null
+  );
+
+  const pingMap = $derived({ ...(status?.pings ?? {}), ...localPings });
+
+  function bestLatencyMs(id: string, obsNs?: number): { ms: number; label: string; detail: string } | null {
+    const p = pingMap[id];
+    const parts: string[] = [];
+    if (p?.tcp_ms) parts.push(`TCP ${p.tcp_ms} ms`);
+    if (p?.http_ms) parts.push(`HTTP 204 ${p.http_ms} ms`);
+    const obsMs = obsNs && obsNs > 0 ? Math.round(obsNs / 1_000_000) : p?.obs_ms;
+    if (obsMs && obsMs > 0) parts.push(`Cold E2E ${obsMs} ms`);
+
+    if (p?.http_ms && p.http_ms > 0) {
+      return { ms: p.http_ms, label: 'HTTP', detail: parts.join(' · ') };
+    }
+    if (p?.tcp_ms && p.tcp_ms > 0) {
+      return { ms: p.tcp_ms, label: 'TCP', detail: parts.join(' · ') };
+    }
+    if (obsMs && obsMs > 0) {
+      return { ms: obsMs, label: 'E2E', detail: parts.join(' · ') };
+    }
+    return null;
+  }
+
+  function latencyTone(ms: number): 'ok' | 'warn' | 'danger' {
+    if (ms <= 180) return 'ok';
+    if (ms <= 450) return 'warn';
+    return 'danger';
+  }
 
   const totalTraffic = $derived.by(() => {
-    if (!stats?.available) return { up: 0, down: 0 };
-    const tun = stats.inbounds.find((i) => i.tag === 'tun-in');
-    if (tun && (tun.uplink > 0 || tun.downlink > 0)) {
-      return { up: tun.uplink, down: tun.downlink };
+    if (!stats?.outbounds) return { up: 0, down: 0 };
+    let up = 0;
+    let down = 0;
+    for (const o of stats.outbounds) {
+      if (o.tag === 'direct' || o.server_id) {
+        up += o.uplink;
+        down += o.downlink;
+      }
     }
-    return stats.outbounds.reduce(
-      (acc, cur) => ({ up: acc.up + cur.uplink, down: acc.down + cur.downlink }),
-      { up: 0, down: 0 }
-    );
+    return { up, down };
   });
 
   const trafficSplit = $derived.by(() => {
-    if (!stats?.available) return { proxied: 0, direct: 0, proxyPct: 0, directPct: 0 };
+    if (!stats?.outbounds) return { proxied: 0, direct: 0, proxyPct: 0, directPct: 0 };
     let proxied = 0;
     let direct = 0;
     for (const o of stats.outbounds) {
@@ -96,13 +110,109 @@
     const srvs = stateData?.servers ?? [];
     const healthMap = new Map((status?.health.servers ?? []).map((h) => [h.id, h]));
     const statMap = new Map((stats?.outbounds ?? []).filter((o) => o.server_id).map((o) => [o.server_id!, o]));
-    return srvs.map((srv) => ({
-      srv,
-      h: healthMap.get(srv.id),
-      traffic: statMap.get(srv.id),
-      selected: status?.health.selected === srv.id,
-      pinned: stateData?.routing.pinned === srv.id
-    }));
+    return srvs.map((srv) => {
+      const h = healthMap.get(srv.id);
+      const lat = bestLatencyMs(srv.id, h?.delay);
+      return {
+        srv,
+        h,
+        lat,
+        ping: pingMap[srv.id],
+        traffic: statMap.get(srv.id),
+        selected: status?.health.selected === srv.id,
+        pinned: stateData?.routing.pinned === srv.id
+      };
+    });
+  });
+
+  const serverCounts = $derived.by(() => {
+    let alive = 0;
+    let disabled = 0;
+    let down = 0;
+    const runnerOnline = Boolean(status?.health.runner.reachable);
+    for (const row of serverRows) {
+      if (row.srv.disabled) {
+        disabled++;
+      } else if (row.h?.alive || row.ping?.alive) {
+        alive++;
+      } else if (runnerOnline && !row.srv.untested && (row.h?.last_error || row.ping?.error)) {
+        down++;
+      }
+    }
+    const total = serverRows.length;
+    const alivePct = total > 0 ? Math.round((alive / total) * 100) : 0;
+    return { total, alive, disabled, down, alivePct };
+  });
+
+  const fastestMetric = $derived.by(() => {
+    let best: { ms: number; label: string; name: string; detail: string } | null = null;
+    for (const r of serverRows) {
+      if (r.srv.disabled || !r.lat) continue;
+      if (!best || r.lat.ms < best.ms) {
+        best = { ms: r.lat.ms, label: r.lat.label, name: r.srv.name, detail: r.lat.detail };
+      }
+    }
+    return best;
+  });
+
+  const heapPct = $derived.by(() => {
+    const alloc = stats?.sys?.alloc ?? 0;
+    const budget = 128 * 1024 * 1024;
+    if (alloc <= 0) return 0;
+    return Math.min(100, Math.max(2, Math.round((alloc / budget) * 100)));
+  });
+
+  const attentionItems = $derived.by(() => {
+    const items: { tone: 'danger' | 'warn'; title: string; sub: string; view: string }[] = [];
+    if (status?.routeros?.degraded === 'bridge_repair') {
+      items.push({
+        tone: 'danger',
+        title: 'Container bridge overlap detected',
+        sub: 'Repair bridge subnet before RouterOS policy writes resume',
+        view: 'settings'
+      });
+    }
+    if (status && !status.health.runner.reachable) {
+      items.push({
+        tone: 'danger',
+        title: 'Data-plane runner offline',
+        sub: status.health.runner.error || 'Waiting for tikray-runner heartbeat',
+        view: 'updates'
+      });
+    }
+    if (status?.geo_degraded) {
+      items.push({
+        tone: 'warn',
+        title: !status.health.runner.reachable ? 'Geo update deferred (runner offline)' : 'Geo bundle needs attention',
+        sub: 'Review geo slots and domestic bypass bundle in Updates',
+        view: 'updates'
+      });
+    }
+    if (status?.routeros?.untested) {
+      items.push({
+        tone: 'warn',
+        title: `RouterOS ${status.routeros.version} running in forward-compat mode`,
+        sub: 'Verify reconciliation events after major RouterOS upgrades',
+        view: 'events'
+      });
+    }
+    if (serverCounts.down > 0) {
+      items.push({
+        tone: 'danger',
+        title: `${serverCounts.down} proxy server${serverCounts.down === 1 ? '' : 's'} unreachable`,
+        sub: 'Run latency test or inspect credentials in Servers',
+        view: 'servers'
+      });
+    }
+    if (serverCounts.total === 0) {
+      items.push({
+        tone: 'warn',
+        title: 'No proxy servers configured',
+        sub: 'Add a VLESS, REALITY, XHTTP, Trojan, or VMess share link',
+        view: 'servers'
+      });
+    }
+    return items;
   });
 
   async function applyNow(): Promise<void> {
@@ -110,7 +220,7 @@
     try {
       const res = await api.applyNow();
       if (res.outcome === 'committed' || res.outcome === 'noop') {
-        toast.ok(res.hot ? 'Applied live via xray hot-reload.' : `Applied successfully (${res.outcome}).`);
+        toast.ok(res.hot ? 'Applied live via xray hot-reload.' : `Applied (${res.outcome}).`);
       } else {
         toast.warn(`Apply ended with ${res.outcome}: ${res.detail ?? ''}`);
       }
@@ -121,371 +231,411 @@
       applying = false;
     }
   }
+
+  async function runPingAll(): Promise<void> {
+    if (serverRows.length === 0) return;
+    pingingAll = true;
+    try {
+      const results = await api.pingAllServers();
+      const next = { ...localPings };
+      for (const r of results) next[r.id] = r;
+      localPings = next;
+      const aliveCount = results.filter((r) => r.alive).length;
+      toast.ok(`Tested ${results.length} server${results.length === 1 ? '' : 's'}: ${aliveCount} reachable.`);
+      await onRefresh();
+    } catch (err) {
+      toast.err(friendlyError(err, 'Latency test failed'));
+    } finally {
+      pingingAll = false;
+    }
+  }
 </script>
 
 <div class="stack-lg">
-  <!-- Health & Reconciler Hero Banner -->
-  <div class="banner {healthTone}">
-    <div class="stack" style="gap: 6px">
-      <div class="row" style="gap: 10px">
-        <span class="dot {healthTone}"></span>
-        <span style="font-size: 16px; font-weight: 700">
-          Proxy {healthLabel}
-        </span>
-        {#if status}
-          <span class="badge {status.applied ? 'ok' : 'warn'} tabular">
-            {status.applied ? `Applied · rev ${status.revision}` : `Pending · rev ${status.revision}`}
-          </span>
-          {#if status.core}
-            <span class="badge {status.core_tested ? 'accent' : 'warn'} mono">
-              xray {status.core}{status.core_tested ? '' : ' (untested)'}
-            </span>
-          {/if}
-          {#if status.routeros}
-            <span
-              class="badge {status.routeros.degraded
-                ? 'danger'
-                : status.routeros.pending || status.routeros.untested
-                  ? 'warn'
-                  : 'ok'}"
-            >
-              RouterOS{status.routeros.version ? ` ${status.routeros.version}` : ''}:
-              {status.routeros.degraded ||
-                (status.routeros.pending
-                  ? 'reconciling'
-                  : status.routeros.untested
-                    ? 'untested'
-                    : 'verified')}
-            </span>
-          {:else}
-            <span class="badge">Standalone Mode</span>
-          {/if}
-        {/if}
-      </div>
-      <div class="hint">
-        {#if status?.routeros?.degraded === 'bridge_repair'}
-          Bridge network needs repair before policy writes resume.
-        {:else if status?.health.runner.error}
-          Runner: {status.health.runner.error}
-        {:else if status?.health.probe.ran && !status.health.probe.ok && status.health.probe.error}
-          Probe failed: {status.health.probe.error}
-        {:else if status?.health.runner.reachable}
-          Runner {status.health.runner.state ?? 'running'} · Routes {status.health.runner.routes_ok ? 'OK' : 'pending'} · Gateway {status.health.runner.gateway_up ? 'UP' : 'down'}
-          {#if status.health.probe.ran && status.health.probe.ok}
-            · E2E probe OK
-          {/if}
-        {:else}
-          Waiting for runner heartbeat…
-        {/if}
-      </div>
+  <!-- Obsidian SaaS Greeting Header -->
+  <div class="page-header" style="margin-bottom: 2px">
+    <div>
+      <h1 class="page-title">Dashboard</h1>
+      <p class="page-sub">{greeting}</p>
     </div>
-
-    <div class="row">
-      {#if status?.routeros?.degraded === 'bridge_repair'}
-        <button class="btn btn-danger" onclick={() => onNavigate('settings')}>Repair Bridge</button>
-      {/if}
-      <button class="btn btn-primary" disabled={applying} onclick={applyNow}>
-        <Icon name="refresh" size={14} />
+    <div class="row" style="gap: 8px">
+      <button
+        type="button"
+        class="btn btn-sm"
+        disabled={pingingAll || serverCounts.total === 0}
+        onclick={runPingAll}
+      >
+        <Icon name="zap" size={13} />
+        {pingingAll ? 'Testing…' : 'Test Latency'}
+      </button>
+      <button type="button" class="btn btn-primary btn-sm" disabled={applying} onclick={applyNow}>
+        <Icon name="refresh" size={13} />
         {applying ? 'Applying…' : 'Apply Now'}
       </button>
     </div>
   </div>
 
-  {#if status?.geo_degraded}
-    <div class="alert warn row-between">
-      <span>
-        {#if !status.health.runner.reachable}
-          Geo update could not complete while the data-plane runner is offline.
+  <!-- 4-Column Unified Top Telemetry Strip -->
+  <div class="telemetry-strip">
+    <button type="button" class="telemetry-cell" onclick={() => onNavigate('settings')}>
+      <span class="telemetry-kicker">
+        <Icon name="shield" size={11} />
+        RouterOS
+      </span>
+      <span class="telemetry-val">
+        <span
+          class="dot {!status?.routeros
+            ? 'accent'
+            : status.routeros.degraded
+              ? 'danger'
+              : status.routeros.pending || status.routeros.untested
+                ? 'warn'
+                : 'ok'}"
+        ></span>
+        {#if status?.routeros}
+          v{status.routeros.version || '7.x'} · {status.routeros.degraded || (status.routeros.pending ? 'Syncing' : 'In sync')}
         {:else}
-          Geo bundle is degraded or has a pending recovery transaction.
+          Standalone · Local bridge
         {/if}
       </span>
-      <button class="btn btn-sm" onclick={() => onNavigate('updates')}>Open Updates</button>
-    </div>
-  {/if}
+    </button>
 
-  <!-- KPI Grid -->
+    <button type="button" class="telemetry-cell" onclick={() => onNavigate('servers')}>
+      <span class="telemetry-kicker">
+        <Icon name="activity" size={11} />
+        Proxy Tunnel
+      </span>
+      <span class="telemetry-val">
+        <span class="dot {healthTone}"></span>
+        {healthLevel === 'ok' ? 'Connected' : healthLevel === 'idle' ? 'Idle' : healthLevel} · rev {status?.revision ?? 0}
+      </span>
+    </button>
+
+    <button type="button" class="telemetry-cell" onclick={() => onNavigate('updates')}>
+      <span class="telemetry-kicker">
+        <Icon name="cpu" size={11} />
+        xray-core
+      </span>
+      <span class="telemetry-val mono">
+        <span class="dot {status?.health.runner.reachable && status?.core ? 'ok' : 'warn'}"></span>
+        {status?.core ? `v${status.core}` : 'None'}{stats?.sys ? ` · ${formatBytes(stats.sys.alloc)}` : ''}
+      </span>
+    </button>
+
+    <button type="button" class="telemetry-cell" onclick={() => onNavigate('events')}>
+      <span class="telemetry-kicker">
+        <Icon name="events" size={11} />
+        Audit Trail
+      </span>
+      <span class="telemetry-val tabular">
+        <span class="dot ok"></span>
+        Intact · {events.length} {events.length === 1 ? 'entry' : 'entries'}
+      </span>
+    </button>
+  </div>
+
+  <!-- 4-Column KPI Metric Row with Razor-Thin Micro Meters -->
   <div class="grid-4">
     <div class="kpi">
-      <span class="kpi-label">Active Exit Server</span>
-      <span class="kpi-value" style="font-size: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
-        {selectedServer ? selectedServer.name : 'None'}
-      </span>
+      <div class="kpi-top">
+        <span class="kpi-label">Proxy Servers</span>
+        <Icon name="servers" size={14} />
+      </div>
+      <div class="kpi-value tabular">{serverCounts.total}</div>
+      <div class="meter-track">
+        <div
+          class="meter-fill {serverCounts.down > 0 ? 'warn' : 'ok'}"
+          style="width: {serverCounts.total > 0 ? Math.max(6, serverCounts.alivePct) : 0}%"
+        ></div>
+      </div>
       <span class="kpi-meta tabular">
-        {#if selectedHealth?.alive}
-          Latency {formatMs(selectedHealth.delay)}
-          {#if stateData?.routing.pinned}
-            · Pinned
-          {:else}
-            · Auto leastPing
-          {/if}
-        {:else if (stateData?.servers.length ?? 0) === 0}
-          Add a server to enable proxy
+        {serverCounts.alive} alive · {serverCounts.down} down · {serverCounts.disabled} disabled
+      </span>
+    </div>
+
+    <div class="kpi">
+      <div class="kpi-top">
+        <span class="kpi-label">Active Latency</span>
+        <Icon name="zap" size={14} />
+      </div>
+      <div class="kpi-value tabular" title={fastestMetric?.detail}>
+        {fastestMetric ? `${fastestMetric.ms} ms` : '—'}
+      </div>
+      <div class="meter-track">
+        {#if fastestMetric}
+          <div
+            class="meter-fill {latencyTone(fastestMetric.ms)}"
+            style="width: {Math.min(100, Math.max(10, Math.round((fastestMetric.ms / 500) * 100)))}%"
+          ></div>
+        {/if}
+      </div>
+      <span class="kpi-meta" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis">
+        {#if fastestMetric}
+          {fastestMetric.label} · {selectedServer?.name || fastestMetric.name}
+        {:else if serverCounts.total > 0}
+          Click Test Latency to measure
         {:else}
-          No alive proxy server
+          No active exit server
         {/if}
       </span>
     </div>
 
     <div class="kpi">
-      <span class="kpi-label">Live Traffic</span>
-      <span class="kpi-value tabular">
-        {stats?.available ? formatBytes(totalTraffic.down + totalTraffic.up) : '—'}
+      <div class="kpi-top">
+        <span class="kpi-label">Data Plane RAM</span>
+        <Icon name="cpu" size={14} />
+      </div>
+      <div class="kpi-value tabular">
+        {stats?.sys ? formatBytes(stats.sys.alloc) : '—'}
+      </div>
+      <div class="meter-track">
+        <div class="meter-fill accent" style="width: {heapPct}%"></div>
+      </div>
+      <span class="kpi-meta tabular">
+        {#if stats?.sys}
+          {heapPct}% of 128 MiB · {stats.sys.num_goroutine} goroutines · up {formatUptime(stats.sys.uptime)}
+        {:else}
+          Waiting for xray stats API
+        {/if}
       </span>
+    </div>
+
+    <div class="kpi">
+      <div class="kpi-top">
+        <span class="kpi-label">Session Traffic</span>
+        <Icon name="globe" size={14} />
+      </div>
+      <div class="kpi-value tabular">
+        {stats?.available ? formatBytes(totalTraffic.down + totalTraffic.up) : '—'}
+      </div>
+      <div class="meter-track">
+        <div class="meter-fill accent" style="width: {trafficSplit.proxyPct}%"></div>
+        <div class="meter-fill ok" style="width: {trafficSplit.directPct}%"></div>
+      </div>
       <span class="kpi-meta tabular">
         {#if stats?.available}
           ↓ {formatBytes(totalTraffic.down)} · ↑ {formatBytes(totalTraffic.up)}
         {:else}
-          xray stats API unavailable
-        {/if}
-      </span>
-    </div>
-
-    <div class="kpi">
-      <span class="kpi-label">Routing Policy</span>
-      <span class="kpi-value" style="text-transform: capitalize">
-        {stateData?.default_policy.mode ?? 'direct'}
-      </span>
-      <span class="kpi-meta tabular">
-        {stateData?.devices.length ?? 0} device overrides
-        {#if stateData?.default_policy.kill_switch}
-          · Kill switch ON
-        {/if}
-      </span>
-    </div>
-
-    <div class="kpi">
-      <span class="kpi-label">xray-core Runtime</span>
-      <span class="kpi-value tabular">
-        {stats?.available && stats.sys ? formatUptime(stats.sys.uptime) : '—'}
-      </span>
-      <span class="kpi-meta tabular">
-        {#if stats?.available && stats.sys}
-          RAM {formatBytes(stats.sys.alloc)} · {stats.sys.num_goroutine} goroutines
-        {:else}
-          Waiting for xray runtime
+          No traffic sampled yet
         {/if}
       </span>
     </div>
   </div>
 
-  <!-- Live Interactive Data-Path Topology -->
-  <TopologyFlow
-    {status}
-    {stateData}
-    {stats}
-    {selectedServer}
-    selectedDelay={selectedHealth?.delay}
-    {onNavigate}
-  />
-
-  <!-- Real-time Throughput & Traffic Split -->
-  <div class="grid-2">
-    <TrafficChart samples={rateHistory} available={Boolean(stats?.available)} />
-
-    <div class="card stack" style="justify-content: space-between">
-      <div class="stack" style="gap: 10px">
+  <!-- Bento Row 1: Needs Attention + Live Data-Path Topology -->
+  <div class="bento-asym">
+    <div class="card stack" style="gap: 12px">
+      <div class="row-between">
         <div>
-          <h2 class="card-title">Proxy vs Direct Traffic Split</h2>
+          <h2 class="card-title">Needs Attention</h2>
           <p class="card-sub">
-            Cumulative xray-core outbound ratio (RouterOS FastTrack domestic bypass runs outside xray at wire speed)
+            {attentionItems.length === 0 ? 'All checks passing' : `${attentionItems.length} item${attentionItems.length === 1 ? '' : 's'} to review`}
           </p>
         </div>
+        <span class="badge {attentionItems.length === 0 ? 'ok' : attentionItems.some((a) => a.tone === 'danger') ? 'danger' : 'warn'} tabular">
+          {attentionItems.length}
+        </span>
+      </div>
 
-        <div class="split-bar" aria-label="Traffic split bar">
-          <div class="split-proxy" style="width: {trafficSplit.proxyPct}%"></div>
-          <div class="split-direct" style="width: {trafficSplit.directPct}%"></div>
-        </div>
-
-        <div class="grid-2" style="gap: 10px">
-          <div style="padding: 10px 12px; border-radius: 8px; background: var(--bg-subtle); border: 1px solid var(--border)">
-            <div class="row" style="gap: 6px; margin-bottom: 4px">
-              <span class="dot" style="background: var(--accent)"></span>
-              <span class="hint" style="font-weight: 600">Proxied Tunnels</span>
-            </div>
-            <div class="mono tabular" style="font-size: 16px; font-weight: 700">
-              {formatBytes(trafficSplit.proxied)}
-            </div>
-            <div class="hint tabular">{trafficSplit.proxyPct}% of xray volume</div>
-          </div>
-          <div style="padding: 10px 12px; border-radius: 8px; background: var(--bg-subtle); border: 1px solid var(--border)">
-            <div class="row" style="gap: 6px; margin-bottom: 4px">
-              <span class="dot ok"></span>
-              <span class="hint" style="font-weight: 600">Direct Inside xray</span>
-            </div>
-            <div class="mono tabular" style="font-size: 16px; font-weight: 700">
-              {formatBytes(trafficSplit.direct)}
-            </div>
-            <div class="hint tabular">{trafficSplit.directPct}% of xray volume</div>
+      {#if attentionItems.length === 0}
+        <div class="attention-item" style="cursor: default">
+          <span class="dot ok" style="margin-top: 5px"></span>
+          <div>
+            <span class="attention-title">All systems operational</span>
+            <span class="attention-sub">
+              {status?.health.probe.ran && status.health.probe.ok
+                ? 'End-to-end SOCKS probe passed · zero drift alerts'
+                : 'Control plane and data-plane runner healthy'}
+            </span>
           </div>
         </div>
-      </div>
-
-      <div class="row-between hint tabular" style="font-size: 12px; padding-top: 8px; border-top: 1px solid var(--border)">
-        <span>Memory limit: xray 128 MiB · ctl 48 MiB · runner 24 MiB</span>
-        <span>Hot-reload: active</span>
-      </div>
+      {:else}
+        <div class="attention-list">
+          {#each attentionItems as item}
+            <button type="button" class="attention-item" onclick={() => onNavigate(item.view)}>
+              <span class="dot {item.tone}" style="margin-top: 5px"></span>
+              <div style="min-width: 0">
+                <span class="attention-title">{item.title}</span>
+                <span class="attention-sub">{item.sub}</span>
+              </div>
+            </button>
+          {/each}
+        </div>
+      {/if}
     </div>
+
+    <TopologyFlow
+      {status}
+      {stateData}
+      {stats}
+      {selectedServer}
+      selectedDelay={selectedHealth?.delay}
+      {onNavigate}
+    />
   </div>
 
-  <!-- Server Health Table -->
-  <div class="card">
-    <div class="card-header">
-      <div>
-        <h2 class="card-title">Servers &amp; Observatory Health</h2>
-        <p class="card-sub">Live latency, selection status, and per-outbound traffic counters</p>
-      </div>
-      <button class="btn btn-sm" onclick={() => onNavigate('servers')}>Manage Servers</button>
-    </div>
+  <!-- Bento Row 2: High-Design Interactive Throughput Chart + Proportional Servers & Latency Card -->
+  <div class="bento-chart">
+    <TrafficChart samples={rateHistory} available={stats?.available ?? false} />
 
-    {#if serverRows.length === 0}
-      <div class="empty-state stack" style="align-items: center">
-        <p>No proxy servers configured yet.</p>
-        <button class="btn btn-primary btn-sm" onclick={() => onNavigate('servers')}>
-          <Icon name="plus" size={14} /> Add First Server
-        </button>
+    <div class="card stack" style="gap: 10px">
+      <div class="row-between">
+        <div>
+          <h2 class="card-title">Servers &amp; Latency</h2>
+          <p class="card-sub">v2rayN-style TCP/HTTP real delay &amp; outbound volume</p>
+        </div>
+        <div class="row" style="gap: 10px">
+          <button type="button" class="card-link" onclick={() => onNavigate('servers')}>All servers →</button>
+        </div>
       </div>
-    {:else}
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Server</th>
-              <th>Protocol / Endpoint</th>
-              <th>Health</th>
-              <th>Latency</th>
-              <th>Traffic</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each serverRows as item (item.srv.id)}
-              {@const ep = serverEndpoint(item.srv)}
-              {@const runnerOnline = Boolean(status?.health.runner.reachable)}
-              {@const hasFailedProbe = Boolean(
-                item.h && !item.h.alive && runnerOnline && !item.srv.untested && (item.h.last_error || item.h.last_seen)
-              )}
-              <tr>
-                <td>
-                  <div class="row" style="gap: 8px">
-                    <span
-                      class="dot {item.srv.disabled
-                        ? ''
-                        : item.h?.alive
-                          ? 'ok'
-                          : hasFailedProbe
-                            ? 'danger'
-                            : 'warn'}"
-                    ></span>
-                    <span style="font-weight: 600">{item.srv.name}</span>
-                    {#if item.selected}
-                      <span class="badge ok">Active</span>
-                    {/if}
-                    {#if item.pinned}
-                      <span class="badge accent">Pinned</span>
-                    {/if}
-                    {#if item.srv.disabled}
-                      <span class="badge">Disabled</span>
-                    {/if}
-                    {#if item.srv.invalid}
-                      <span class="badge danger" title={item.srv.invalid}>Invalid</span>
-                    {/if}
-                  </div>
-                </td>
-                <td class="mono" style="font-size: 12.5px; color: var(--text-muted)">
-                  {ep.protocol} · {ep.endpoint}
-                </td>
-                <td>
-                  {#if item.srv.disabled}
-                    <span class="hint">disabled</span>
-                  {:else if item.h?.alive}
-                    <span class="badge ok">Alive</span>
-                  {:else if hasFailedProbe}
-                    <span class="badge danger" title={item.h?.last_error}>Down</span>
-                  {:else if item.srv.untested}
-                    <span class="badge warn">Untested</span>
-                  {:else}
-                    <span class="badge warn">Pending</span>
-                  {/if}
-                </td>
-                <td class="tabular">
-                  {#if item.h?.alive}
-                    <div class="row" style="gap: 8px">
-                      <div class="latency-bar">
-                        <div
-                          class="latency-fill {delayClass(item.h.delay)}"
-                          style="width: {delayPercent(item.h.delay)}%"
-                        ></div>
-                      </div>
-                      <span style="font-size: 12.5px">{formatMs(item.h.delay)}</span>
-                    </div>
-                  {:else}
-                    <span class="hint">—</span>
-                  {/if}
-                </td>
-                <td class="tabular mono" style="font-size: 12px; color: var(--text-muted)">
-                  {#if item.traffic}
-                    ↓ {formatBytes(item.traffic.downlink)} / ↑ {formatBytes(item.traffic.uplink)}
-                  {:else}
-                    —
-                  {/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
-    {/if}
-  </div>
 
-  <!-- Recent Events -->
-  <div class="card">
-    <div class="card-header">
-      <div>
-        <h2 class="card-title">Recent Activity</h2>
-        <p class="card-sub">Redacted control-plane and RouterOS reconciliation events</p>
-      </div>
-      <button class="btn btn-sm" onclick={() => onNavigate('events')}>View All Events</button>
-    </div>
-
-    {#if events.length === 0}
-      <div class="empty-state">No events recorded yet in this process lifetime.</div>
-    {:else}
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Time</th>
-              <th>Kind</th>
-              <th>Message</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each events.slice(-8).reverse() as ev (ev.seq)}
-              <tr>
-                <td class="mono tabular" style="color: var(--text-dim); width: 52px">{ev.seq}</td>
-                <td class="tabular" style="white-space: nowrap; color: var(--text-muted); font-size: 12.5px">
-                  {formatTime(ev.at)}
-                </td>
-                <td>
+      {#if serverRows.length === 0}
+        <div class="empty-state" style="padding: 32px 16px">
+          <div class="stack" style="align-items: center; gap: 10px">
+            <span>No proxy servers configured yet.</span>
+            <button type="button" class="btn btn-primary btn-sm" onclick={() => onNavigate('servers')}>
+              <Icon name="plus" size={13} /> Add First Server
+            </button>
+          </div>
+        </div>
+      {:else}
+        <div class="stack" style="gap: 2px">
+          {#each serverRows.slice(0, 6) as item (item.srv.id)}
+            {@const pct = item.lat ? Math.min(100, Math.max(8, Math.round((item.lat.ms / 500) * 100))) : 0}
+            <div class="metric-row">
+              <div class="metric-row-top">
+                <div class="row" style="gap: 7px; min-width: 0">
                   <span
-                    class="badge {ev.kind === 'error' || ev.kind === 'degraded'
-                      ? 'danger'
-                      : ev.kind === 'warning'
-                        ? 'warn'
-                        : ev.kind === 'apply' || ev.kind === 'routeros'
-                          ? 'ok'
-                          : 'accent'}"
-                  >
-                    {ev.kind}
+                    class="dot {item.srv.disabled
+                      ? ''
+                      : item.h?.alive || item.ping?.alive
+                        ? 'ok'
+                        : item.h?.last_error || item.ping?.error
+                          ? 'danger'
+                          : 'warn'}"
+                  ></span>
+                  <span style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">
+                    {item.srv.name}
                   </span>
-                </td>
-                <td class="mono" style="font-size: 12.5px">{ev.message}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+                  {#if item.selected}
+                    <span class="badge ok" style="padding: 0 6px; font-size: 10px">Active</span>
+                  {/if}
+                  {#if item.pinned}
+                    <span class="badge accent" style="padding: 0 6px; font-size: 10px">Pinned</span>
+                  {/if}
+                </div>
+                <div class="row tabular mono" style="gap: 10px; font-size: 11.5px; color: var(--text-muted)">
+                  {#if item.lat}
+                    <span
+                      style="color: var(--{latencyTone(item.lat.ms)}); font-weight: 600"
+                      title={item.lat.detail}
+                    >
+                      {item.lat.ms} ms <span style="opacity: 0.65; font-weight: 400">{item.lat.label}</span>
+                    </span>
+                  {:else if item.srv.disabled}
+                    <span class="hint">disabled</span>
+                  {:else}
+                    <span class="hint">{item.ping?.error || item.h?.last_error || 'pending'}</span>
+                  {/if}
+                  {#if item.traffic}
+                    <span class="hint">{formatBytes(item.traffic.downlink + item.traffic.uplink)}</span>
+                  {/if}
+                </div>
+              </div>
+              <div class="meter-track">
+                {#if item.lat}
+                  <div class="meter-fill {item.selected ? 'ok' : 'accent'}" style="width: {pct}%"></div>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  </div>
+
+  <!-- Bento Row 3: Traffic Split & Policy + Recent Activity -->
+  <div class="grid-2">
+    <div class="card stack" style="gap: 12px">
+      <div class="row-between">
+        <div>
+          <h2 class="card-title">Traffic Split &amp; Policy</h2>
+          <p class="card-sub">Domestic LAN/ISP traffic bypasses xray at native RouterOS FastTrack speed</p>
+        </div>
+        <button type="button" class="card-link" onclick={() => onNavigate('devices')}>Configure →</button>
       </div>
-    {/if}
+
+      <div class="split-bar" aria-label="Traffic split">
+        <div class="split-proxy" style="width: {trafficSplit.proxyPct}%"></div>
+        <div class="split-direct" style="width: {trafficSplit.directPct}%"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="editor-section" style="padding: 10px 12px; gap: 3px">
+          <div class="row" style="gap: 6px">
+            <span class="dot accent"></span>
+            <span class="hint">Proxied Tunnels</span>
+          </div>
+          <strong class="tabular" style="font-size: 15px">{formatBytes(trafficSplit.proxied)}</strong>
+          <span class="hint tabular">{trafficSplit.proxyPct}% of xray volume</span>
+        </div>
+        <div class="editor-section" style="padding: 10px 12px; gap: 3px">
+          <div class="row" style="gap: 6px">
+            <span class="dot ok"></span>
+            <span class="hint">Direct Inside xray</span>
+          </div>
+          <strong class="tabular" style="font-size: 15px">{formatBytes(trafficSplit.direct)}</strong>
+          <span class="hint tabular">{trafficSplit.directPct}% of xray volume</span>
+        </div>
+      </div>
+
+      <div class="row-between hint" style="padding-top: 6px; border-top: 1px solid var(--border)">
+        <span>
+          Default policy: <strong style="color: var(--text); text-transform: capitalize">{stateData?.default_policy.mode ?? 'direct'}</strong>
+          {stateData?.default_policy.kill_switch ? ' · Kill Switch ON' : ''}
+        </span>
+        <span class="mono">RAM: 128M / 48M / 24M</span>
+      </div>
+    </div>
+
+    <div class="card stack" style="gap: 10px">
+      <div class="row-between">
+        <div>
+          <h2 class="card-title">Recent Activity</h2>
+          <p class="card-sub">Redacted control-plane and RouterOS audit stream</p>
+        </div>
+        <button type="button" class="card-link" onclick={() => onNavigate('events')}>All events →</button>
+      </div>
+
+      {#if events.length === 0}
+        <div class="empty-state">No events recorded yet in this process lifetime.</div>
+      {:else}
+        <div class="stack" style="gap: 6px">
+          {#each events.slice(-6).reverse() as ev (ev.seq)}
+            <div class="row-between" style="padding: 6px 0; border-bottom: 1px solid var(--border); gap: 10px">
+              <div class="row" style="gap: 8px; min-width: 0; flex: 1">
+                <span
+                  class="dot {ev.kind === 'error' || ev.kind === 'degraded'
+                    ? 'danger'
+                    : ev.kind === 'warning'
+                      ? 'warn'
+                      : ev.kind === 'apply' || ev.kind === 'routeros' || ev.kind === 'core' || ev.kind === 'geo'
+                        ? 'ok'
+                        : 'accent'}"
+                ></span>
+                <span
+                  class="mono"
+                  style="font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis"
+                  title={ev.message}
+                >
+                  {ev.message}
+                </span>
+              </div>
+              <span class="hint tabular" style="white-space: nowrap; font-size: 11px">{formatTime(ev.at)}</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
   </div>
 </div>

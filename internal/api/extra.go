@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/netip"
@@ -11,6 +12,15 @@ import (
 	"github.com/Arman2122/tikray/internal/backup"
 	"github.com/Arman2122/tikray/internal/service"
 )
+
+type serverPinger interface {
+	PingServer(ctx context.Context, id string) (service.PingResult, error)
+	PingAllServers(ctx context.Context) []service.PingResult
+}
+
+type coreReleaseLister interface {
+	CoreReleases(ctx context.Context) service.CoreReleasesInfo
+}
 
 // NewHandlerWithUI serves the API and, when ui is non-nil, serves the embedded
 // Web UI for browser GET/HEAD requests outside /v1/* and /healthz.
@@ -153,4 +163,42 @@ func (h *handler) uploadInbox(w http.ResponseWriter, r *http.Request, kind, prof
 		Name  string `json:"name"`
 		Bytes int64  `json:"bytes"`
 	}{name, n})
+}
+
+func (h *handler) pingServer(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.b.(serverPinger)
+	if !ok {
+		h.writeError(w, http.StatusServiceUnavailable, codeUnavailable, "latency testing is not supported")
+		return
+	}
+	res, err := p.PingServer(r.Context(), r.PathValue("id"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	_, rev := h.b.State()
+	h.reply(w, http.StatusOK, rev, res)
+}
+
+func (h *handler) pingAllServers(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.b.(serverPinger)
+	if !ok {
+		h.writeError(w, http.StatusServiceUnavailable, codeUnavailable, "latency testing is not supported")
+		return
+	}
+	res := p.PingAllServers(r.Context())
+	_, rev := h.b.State()
+	h.reply(w, http.StatusOK, rev, res)
+}
+
+func (h *handler) coreReleases(w http.ResponseWriter, r *http.Request) {
+	l, ok := h.b.(coreReleaseLister)
+	if !ok {
+		_, rev := h.b.State()
+		h.reply(w, http.StatusOK, rev, service.CoreReleasesInfo{Releases: []service.CoreRelease{}})
+		return
+	}
+	info := l.CoreReleases(r.Context())
+	_, rev := h.b.State()
+	h.reply(w, http.StatusOK, rev, info)
 }

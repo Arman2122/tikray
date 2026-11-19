@@ -1,5 +1,12 @@
 <script lang="ts">
-  import { api, type CoreInfo, type GeoInfo, type ImageStatus, type ServiceStatus } from '../lib/api';
+  import {
+    api,
+    type CoreInfo,
+    type CoreReleasesInfo,
+    type GeoInfo,
+    type ImageStatus,
+    type ServiceStatus
+  } from '../lib/api';
   import { formatBytes, formatTime, friendlyError } from '../lib/format';
   import { toast } from '../lib/toast.svelte';
   import Icon from '../components/Icon.svelte';
@@ -15,13 +22,15 @@
   const managedRouter = $derived(Boolean(status?.routeros));
 
   let core = $state<CoreInfo | null>(null);
+  let coreReleases = $state<CoreReleasesInfo | null>(null);
   let geo = $state<GeoInfo | null>(null);
   let ctlImage = $state<ImageStatus | null>(null);
   let runnerImage = $state<ImageStatus | null>(null);
   let imageError = $state('');
 
   // Core update state
-  let coreVersion = $state('latest');
+  let coreVersionSelect = $state('latest');
+  let coreCustomVersion = $state('');
   let allowUnverified = $state(false);
   let coreBusy = $state(false);
   let showCoreInbox = $state(false);
@@ -31,7 +40,8 @@
 
   // Geo update state
   let geoProfile = $state('iran');
-  let geoVersion = $state('latest');
+  let geoVersionMode = $state<'latest' | 'custom'>('latest');
+  let geoCustomVersion = $state('');
   let geoBusy = $state(false);
   let showGeoInbox = $state(false);
   let geoInboxVersion = $state('');
@@ -45,8 +55,13 @@
   let imageBusy = $state<'tikray' | 'runner' | ''>('');
 
   async function loadAll(): Promise<void> {
-    const [coreRes, geoRes] = await Promise.allSettled([api.getCore(), api.getGeo()]);
+    const [coreRes, relRes, geoRes] = await Promise.allSettled([
+      api.getCore(),
+      api.getCoreReleases(),
+      api.getGeo()
+    ]);
     if (coreRes.status === 'fulfilled') core = coreRes.value;
+    if (relRes.status === 'fulfilled') coreReleases = relRes.value;
     if (geoRes.status === 'fulfilled') {
       geo = geoRes.value;
       if (geoRes.value.profile) geoProfile = geoRes.value.profile;
@@ -71,9 +86,15 @@
 
   async function runCoreUpdate(e: SubmitEvent): Promise<void> {
     e.preventDefault();
+    const target =
+      coreVersionSelect === '__custom__' ? coreCustomVersion.trim() : coreVersionSelect.trim() || 'latest';
+    if (!target) {
+      toast.warn('Enter a custom xray-core version (e.g. 26.11.9).');
+      return;
+    }
     coreBusy = true;
     try {
-      const res = await api.updateCore(coreVersion.trim() || 'latest', allowUnverified);
+      const res = await api.updateCore(target, allowUnverified);
       toast.ok(`xray-core update ${res.outcome}: ${res.to}`);
       await Promise.all([loadAll(), onRefresh()]);
     } catch (err) {
@@ -117,9 +138,14 @@
 
   async function runGeoUpdate(e: SubmitEvent): Promise<void> {
     e.preventDefault();
+    const target = geoVersionMode === 'custom' ? geoCustomVersion.trim() : 'latest';
+    if (!target) {
+      toast.warn('Enter a custom Geo release tag.');
+      return;
+    }
     geoBusy = true;
     try {
-      const res = await api.updateGeo(geoProfile, geoVersion.trim() || 'latest');
+      const res = await api.updateGeo(geoProfile, target);
       toast.ok(`Geo bundle ${res.outcome}: ${res.to}`);
       await Promise.all([loadAll(), onRefresh()]);
     } catch (err) {
@@ -231,13 +257,19 @@
 
       <form class="stack" onsubmit={runCoreUpdate}>
         <div class="row">
-          <input
-            class="input mono"
-            style="flex: 1"
-            placeholder="latest or 26.11.9"
-            bind:value={coreVersion}
-            required
-          />
+          <select class="select mono" style="flex: 1" bind:value={coreVersionSelect} aria-label="xray-core version">
+            <option value="latest">
+              latest{coreReleases?.latest ? ` (v${coreReleases.latest} — recommended)` : ' (recommended)'}
+            </option>
+            {#each coreReleases?.releases ?? [] as rel (rel.version)}
+              <option value={rel.version}>
+                v{rel.version}{rel.active ? ' · Active' : ''}{rel.installed && !rel.active ? ' · Installed' : ''}{rel.tested
+                  ? ' · Verified'
+                  : ' · Untested'}
+              </option>
+            {/each}
+            <option value="__custom__">Custom version tag…</option>
+          </select>
           <button type="submit" class="btn btn-primary" disabled={coreBusy}>
             {coreBusy ? 'Updating…' : 'Update Core'}
           </button>
@@ -245,7 +277,15 @@
             Rollback
           </button>
         </div>
-        <label class="toggle" style="font-size: 12.5px; color: var(--text-muted)">
+        {#if coreVersionSelect === '__custom__'}
+          <input
+            class="input mono"
+            placeholder="Enter exact xray-core version, e.g. 26.11.9"
+            bind:value={coreCustomVersion}
+            required
+          />
+        {/if}
+        <label class="toggle" style="font-size: 12px; color: var(--text-muted)">
           <input type="checkbox" bind:checked={allowUnverified} />
           <span>Allow unverified offline inbox archive (manual air-gapped install only)</span>
         </label>
@@ -321,19 +361,16 @@
 
       <form class="stack" onsubmit={runGeoUpdate}>
         <div class="row">
-          <select class="select" style="width: 145px" bind:value={geoProfile}>
+          <select class="select" style="width: 140px" bind:value={geoProfile} aria-label="Geo profile">
             <option value="iran">iran</option>
             <option value="v2fly">v2fly</option>
             <option value="loyalsoldier">loyalsoldier</option>
             <option value="custom">custom</option>
           </select>
-          <input
-            class="input mono"
-            style="flex: 1"
-            placeholder="latest or release date"
-            bind:value={geoVersion}
-            required
-          />
+          <select class="select mono" style="flex: 1" bind:value={geoVersionMode} aria-label="Geo release version">
+            <option value="latest">latest (recommended)</option>
+            <option value="custom">Custom release tag…</option>
+          </select>
           <button type="submit" class="btn btn-primary" disabled={geoBusy}>
             {geoBusy ? 'Updating…' : 'Update Geo'}
           </button>
@@ -341,6 +378,14 @@
             Rollback
           </button>
         </div>
+        {#if geoVersionMode === 'custom'}
+          <input
+            class="input mono"
+            placeholder={geoProfile === 'v2fly' ? 'e.g. 20261119+20261119' : 'e.g. 20261119'}
+            bind:value={geoCustomVersion}
+            required
+          />
+        {/if}
       </form>
 
       {#if (geo?.slots.length ?? 0) > 0}

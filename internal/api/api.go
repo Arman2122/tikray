@@ -146,6 +146,8 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter, instal
 
 	mux.HandleFunc("GET /v1/servers", h.listServers)
 	mux.HandleFunc("POST /v1/servers", h.addServer)
+	mux.HandleFunc("POST /v1/servers/ping", h.pingAllServers)
+	mux.HandleFunc("POST /v1/servers/{id}/ping", h.pingServer)
 	mux.HandleFunc("PATCH /v1/servers/{id}", h.patchServer)
 	mux.HandleFunc("DELETE /v1/servers/{id}", remove(h, b.RemoveServer))
 
@@ -170,6 +172,7 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter, instal
 	mux.HandleFunc("POST /v1/core/update", h.coreUpdate)
 	mux.HandleFunc("POST /v1/core/rollback", h.coreRollback)
 	mux.HandleFunc("GET /v1/core", h.core)
+	mux.HandleFunc("GET /v1/core/releases", h.coreReleases)
 	mux.HandleFunc("GET /v1/images/{component}", h.imageStatus)
 	mux.HandleFunc("POST /v1/images/{component}/{action}", h.imageChange)
 	mux.HandleFunc("GET /v1/geo", h.geoStatus)

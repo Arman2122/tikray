@@ -1,5 +1,14 @@
 <script lang="ts">
-  import { api, ApiError, type RefreshResult, type Server, type ServiceStatus, type State, type Subscription } from '../lib/api';
+  import {
+    api,
+    ApiError,
+    type PingResult,
+    type RefreshResult,
+    type Server,
+    type ServiceStatus,
+    type State,
+    type Subscription
+  } from '../lib/api';
   import { formatMs, formatTime, friendlyError, serverEndpoint } from '../lib/format';
   import { inspectShareLink } from '../lib/linkPreview';
   import { toast } from '../lib/toast.svelte';
@@ -42,12 +51,81 @@
   let subURL = $state('');
   let subInterval = $state('24h');
 
-  // Refresh summary
+  // Refresh & latency test state
   let refreshingId = $state('');
   let lastRefresh = $state<{ id: string; result: RefreshResult } | null>(null);
+  let pingingId = $state('');
+  let pingingAll = $state(false);
+  let localPings = $state<Record<string, PingResult>>({});
 
   const healthMap = $derived(new Map((status?.health.servers ?? []).map((h) => [h.id, h])));
   const subMap = $derived(new Map((stateData?.subscriptions ?? []).map((s) => [s.id, s])));
+  const pingMap = $derived({ ...(status?.pings ?? {}), ...localPings });
+
+  function serverLatency(srvId: string, obsNs?: number): { ms: number; kind: string; detail: string } | null {
+    const p = pingMap[srvId];
+    const parts: string[] = [];
+    if (p?.tcp_ms) parts.push(`TCP ${p.tcp_ms} ms`);
+    if (p?.http_ms) parts.push(`HTTP 204 ${p.http_ms} ms`);
+    const obsMs = obsNs && obsNs > 0 ? Math.round(obsNs / 1_000_000) : p?.obs_ms;
+    if (obsMs && obsMs > 0) parts.push(`Cold E2E ${obsMs} ms`);
+
+    if (p?.http_ms && p.http_ms > 0) return { ms: p.http_ms, kind: 'HTTP', detail: parts.join(' · ') };
+    if (p?.tcp_ms && p.tcp_ms > 0) return { ms: p.tcp_ms, kind: 'TCP', detail: parts.join(' · ') };
+    if (obsMs && obsMs > 0) return { ms: obsMs, kind: 'E2E', detail: parts.join(' · ') };
+    return null;
+  }
+
+  function latencyBadgeTone(ms: number): 'ok' | 'warn' | 'danger' {
+    if (ms <= 180) return 'ok';
+    if (ms <= 450) return 'warn';
+    return 'danger';
+  }
+
+  async function pingOne(srv: Server): Promise<void> {
+    pingingId = srv.id;
+    try {
+      const res = await api.pingServer(srv.id);
+      localPings = { ...localPings, [srv.id]: res };
+      if (res.alive) {
+        const msg = res.http_ms
+          ? `${srv.name}: HTTP ${res.http_ms} ms (TCP ${res.tcp_ms} ms)`
+          : `${srv.name}: TCP ${res.tcp_ms} ms`;
+        toast.ok(msg);
+      } else {
+        toast.warn(`${srv.name}: ${res.error || 'unreachable'}`);
+      }
+      await onRefresh();
+    } catch (err) {
+      toast.err(friendlyError(err, 'Latency test failed'));
+    } finally {
+      pingingId = '';
+    }
+  }
+
+  async function pingAll(): Promise<void> {
+    pingingAll = true;
+    try {
+      const list = await api.pingAllServers();
+      const next = { ...localPings };
+      for (const r of list) next[r.id] = r;
+      localPings = next;
+      const alive = list.filter((r) => r.alive);
+      if (alive.length > 0) {
+        const best = alive.reduce((a, b) =>
+          (a.http_ms || a.tcp_ms || 99999) <= (b.http_ms || b.tcp_ms || 99999) ? a : b
+        );
+        toast.ok(`Tested ${list.length} server${list.length === 1 ? '' : 's'} · fastest ${best.http_ms || best.tcp_ms} ms.`);
+      } else {
+        toast.warn(`Tested ${list.length} server${list.length === 1 ? '' : 's'} · none reachable.`);
+      }
+      await onRefresh();
+    } catch (err) {
+      toast.err(friendlyError(err, 'Latency test failed'));
+    } finally {
+      pingingAll = false;
+    }
+  }
 
   const linkPreviews = $derived.by(() => {
     return linkInput
@@ -86,17 +164,19 @@
     e.preventDefault();
     saving = true;
     try {
+      const createdIds: string[] = [];
       if (addMode === 'visual') {
         const line = singleLinkInput.trim();
         if (!line) {
           toast.warn('Paste a share link (vless://, trojan://, vmess://, ss://).');
           return;
         }
-        await api.addServer({
+        const srv = await api.addServer({
           link: line,
           name: serverName.trim() || undefined
         });
-        toast.ok('Added server successfully.');
+        createdIds.push(srv.id);
+        toast.ok(`Added ${srv.name} — testing latency…`);
       } else if (addMode === 'bulk') {
         const lines = linkInput
           .split(/\r?\n/)
@@ -111,10 +191,11 @@
         let firstErr = '';
         for (const line of lines) {
           try {
-            await api.addServer({
+            const srv = await api.addServer({
               link: line,
               name: lines.length === 1 && serverName.trim() ? serverName.trim() : undefined
             });
+            createdIds.push(srv.id);
             added++;
           } catch (err) {
             failed++;
@@ -124,7 +205,7 @@
           }
         }
         if (added > 0) {
-          toast.ok(`Added ${added} server${added === 1 ? '' : 's'}${failed > 0 ? ` (${failed} failed)` : ''}.`);
+          toast.ok(`Added ${added} server${added === 1 ? '' : 's'}${failed > 0 ? ` (${failed} failed)` : ''} — testing latency…`);
         }
         if (failed > 0 && added === 0) {
           toast.err(firstErr);
@@ -142,8 +223,9 @@
           toast.err('A server name is required for raw outbound JSON.');
           return;
         }
-        await api.addServer({ name: serverName.trim(), outbound: parsed });
-        toast.ok(`Added server "${serverName.trim()}".`);
+        const srv = await api.addServer({ name: serverName.trim(), outbound: parsed });
+        createdIds.push(srv.id);
+        toast.ok(`Added server "${serverName.trim()}" — testing latency…`);
       }
       showAddServer = false;
       singleLinkInput = '';
@@ -151,6 +233,15 @@
       serverName = '';
       outboundJSON = '';
       await onRefresh();
+      // Auto-test latency on first import (v2rayN-style immediate feedback).
+      for (const cid of createdIds.slice(0, 6)) {
+        api
+          .pingServer(cid)
+          .then((res) => {
+            localPings = { ...localPings, [cid]: res };
+          })
+          .catch(() => {});
+      }
     } catch (err) {
       toast.err(friendlyError(err, 'Could not add server'));
     } finally {
@@ -318,11 +409,22 @@
     </div>
 
     {#if tab === 'servers'}
-      <button class="btn btn-primary" onclick={() => (showAddServer = true)}>
-        <Icon name="plus" size={14} /> Add Server
-      </button>
+      <div class="row" style="gap: 8px">
+        <button
+          type="button"
+          class="btn"
+          disabled={pingingAll || (stateData?.servers.length ?? 0) === 0}
+          onclick={pingAll}
+        >
+          <Icon name="zap" size={14} />
+          {pingingAll ? 'Testing Latency…' : 'Test All Latency'}
+        </button>
+        <button type="button" class="btn btn-primary" onclick={() => (showAddServer = true)}>
+          <Icon name="plus" size={14} /> Add Server
+        </button>
+      </div>
     {:else}
-      <button class="btn btn-primary" onclick={() => (showAddSub = true)}>
+      <button type="button" class="btn btn-primary" onclick={() => (showAddSub = true)}>
         <Icon name="plus" size={14} /> Add Subscription
       </button>
     {/if}
@@ -367,16 +469,21 @@
             <tbody>
               {#each filteredServers as srv (srv.id)}
                 {@const h = healthMap.get(srv.id)}
+                {@const p = pingMap[srv.id]}
+                {@const lat = serverLatency(srv.id, h?.delay)}
                 {@const ep = serverEndpoint(srv)}
                 {@const isPinned = stateData?.routing.pinned === srv.id}
                 {@const isSelected = status?.health.selected === srv.id}
                 {@const runnerOnline = Boolean(status?.health.runner.reachable)}
-                {@const hasFailedProbe = Boolean(h && !h.alive && runnerOnline && !srv.untested && (h.last_error || h.last_seen))}
+                {@const isReachable = Boolean(h?.alive || p?.alive)}
+                {@const hasFailedProbe = Boolean(
+                  !isReachable && ((h && runnerOnline && !srv.untested && (h.last_error || h.last_seen)) || (p && !p.alive && p.error))
+                )}
                 <tr>
                   <td>
                     <div class="stack" style="gap: 3px">
                       <div class="row" style="gap: 7px">
-                        <span class="dot {srv.disabled ? '' : h?.alive ? 'ok' : hasFailedProbe ? 'danger' : 'warn'}"></span>
+                        <span class="dot {srv.disabled ? '' : isReachable ? 'ok' : hasFailedProbe ? 'danger' : 'warn'}"></span>
                         <span style="font-weight: 600">{srv.name}</span>
                         <span class="mono hint" style="font-size: 11px">{srv.id}</span>
                         {#if isSelected}
@@ -388,10 +495,10 @@
                       </div>
                       {#if srv.invalid}
                         <span style="font-size: 12px; color: var(--danger)">{srv.invalid}</span>
-                      {:else if srv.untested}
-                        <span style="font-size: 12px; color: var(--warn)">Untested (will verify when core runs)</span>
-                      {:else if hasFailedProbe && h?.last_error}
-                        <span style="font-size: 12px; color: var(--danger)">{h.last_error}</span>
+                      {:else if srv.untested && !p}
+                        <span style="font-size: 12px; color: var(--warn)">Untested (click Test Latency or wait for core)</span>
+                      {:else if hasFailedProbe && (p?.error || h?.last_error)}
+                        <span style="font-size: 12px; color: var(--danger)">{p?.error || h?.last_error}</span>
                       {/if}
                     </div>
                   </td>
@@ -401,10 +508,14 @@
                   <td class="tabular">
                     {#if srv.disabled}
                       <span class="badge">Disabled</span>
-                    {:else if h?.alive}
-                      <span class="badge ok">{formatMs(h.delay)}</span>
+                    {:else if pingingId === srv.id}
+                      <span class="badge accent">Testing…</span>
+                    {:else if lat}
+                      <span class="badge {latencyBadgeTone(lat.ms)} mono" title={lat.detail}>
+                        {lat.ms} ms <span style="opacity: 0.7; font-weight: 500">{lat.kind}</span>
+                      </span>
                     {:else if hasFailedProbe}
-                      <span class="badge danger" title={h?.last_error}>Unreachable</span>
+                      <span class="badge danger" title={p?.error || h?.last_error}>Unreachable</span>
                     {:else if srv.untested}
                       <span class="badge warn">Untested</span>
                     {:else}
@@ -421,8 +532,19 @@
                     {/if}
                   </td>
                   <td style="text-align: right">
-                    <div class="row" style="justify-content: flex-end; gap: 6px">
+                    <div class="row" style="justify-content: flex-end; gap: 5px">
                       <button
+                        type="button"
+                        class="btn btn-sm"
+                        title="Test TCP & HTTP latency (v2rayN-style)"
+                        disabled={srv.disabled || Boolean(srv.invalid) || pingingId === srv.id}
+                        onclick={() => pingOne(srv)}
+                      >
+                        <Icon name="zap" size={13} />
+                        Ping
+                      </button>
+                      <button
+                        type="button"
                         class="btn btn-sm {isPinned ? 'btn-primary' : ''}"
                         title={isPinned ? 'Unpin server' : 'Pin as active exit'}
                         disabled={srv.disabled}
@@ -431,11 +553,11 @@
                         <Icon name="pin" size={13} />
                         {isPinned ? 'Unpin' : 'Pin'}
                       </button>
-                      <button class="btn btn-sm" onclick={() => toggleServer(srv)}>
+                      <button type="button" class="btn btn-sm" onclick={() => toggleServer(srv)}>
                         {srv.disabled ? 'Enable' : 'Disable'}
                       </button>
-                      <button class="btn btn-sm" onclick={() => openEditServer(srv)}>Edit</button>
-                      <button class="btn btn-sm btn-danger" onclick={() => removeServer(srv)} aria-label="Delete server">
+                      <button type="button" class="btn btn-sm" onclick={() => openEditServer(srv)}>Edit</button>
+                      <button type="button" class="btn btn-sm btn-danger" onclick={() => removeServer(srv)} aria-label="Delete server">
                         <Icon name="trash" size={13} />
                       </button>
                     </div>

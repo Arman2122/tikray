@@ -65,6 +65,8 @@ Common error codes: `bad_request` (400), `unauthorized` / `bad_credentials` / `b
 |---|---|---|---|
 | `GET` | `/v1/servers` | Any | List public server summaries |
 | `POST` | `/v1/servers` | Any | Add server via `{"link", "name"}` or `{"name", "outbound"}` |
+| `POST` | `/v1/servers/ping` | Any | Run bounded concurrent TCP + warm HTTP 204 latency tests across all enabled servers |
+| `POST` | `/v1/servers/{id}/ping` | Any | Measure on-demand TCP 1-RTT and warm HTTP 204 latency for one server |
 | `PATCH` | `/v1/servers/{id}` | Any | Rename, enable/disable, or replace link/outbound |
 | `DELETE` | `/v1/servers/{id}` | Any | Delete server (clears pin / rules referencing it) |
 | `GET` | `/v1/subscriptions` | Any | List subscriptions (URLs hidden) |
@@ -94,6 +96,7 @@ Common error codes: `bad_request` (400), `unauthorized` / `bad_credentials` / `b
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/v1/core` | Any | Active xray-core version, installed slots, and update history |
+| `GET` | `/v1/core/releases` | Any | Cached recent compatible xray-core releases (with offline fallback to tested + installed slots) |
 | `POST` | `/v1/core/update` | Any | Verify, trial, and commit xray-core (`{"version": "latest"|"26.11.9", "allow_unverified": bool}`) |
 | `POST` | `/v1/core/rollback` | Any | Roll back xray-core to previous committed slot |
 | `GET` | `/v1/geo` | Any | Active geo slot, profile, verified slots with domestic prefix counts, and geo history |

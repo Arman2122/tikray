@@ -20,7 +20,14 @@
       | 'check'
       | 'copy'
       | 'upload'
-      | 'download';
+      | 'download'
+      | 'zap'
+      | 'bell'
+      | 'search'
+      | 'activity'
+      | 'cpu'
+      | 'globe'
+      | 'alert';
     size?: number;
   }
 
@@ -95,5 +102,26 @@
     <path d="M12 15V3m0 0-4 4m4-4 4 4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
   {:else if name === 'download'}
     <path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+  {:else if name === 'zap'}
+    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+  {:else if name === 'bell'}
+    <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+    <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+  {:else if name === 'search'}
+    <circle cx="11" cy="11" r="7" />
+    <path d="m20 20-3.5-3.5" />
+  {:else if name === 'activity'}
+    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+  {:else if name === 'cpu'}
+    <rect x="4" y="4" width="16" height="16" rx="2" />
+    <rect x="9" y="9" width="6" height="6" />
+    <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" />
+  {:else if name === 'globe'}
+    <circle cx="12" cy="12" r="9" />
+    <path d="M3.6 9h16.8M3.6 15h16.8M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+  {:else if name === 'alert'}
+    <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+    <line x1="12" y1="9" x2="12" y2="13" />
+    <line x1="12" y1="17" x2="12.01" y2="17" />
   {/if}
 </svg>

@@ -137,6 +137,7 @@ type Config struct {
 type Service struct {
 	bootID         string
 	version        string
+	socks          string
 	xray           XrayStats
 	imageSchedules *ImageSchedules
 	imagesDisabled bool
@@ -196,6 +197,11 @@ type Service struct {
 	// holds is, by subscription ID, the time before which the scheduler
 	// leaves a subscription whose refresh failed alone. It is in memory only.
 	holds map[string]time.Time
+	// pings caches the most recent on-demand latency test result per server ID.
+	pings map[string]PingResult
+	// releaseCache caches upstream GitHub xray-core tags for the UI dropdown.
+	releaseCache   []string
+	releaseCacheAt time.Time
 
 	emu    sync.Mutex // guards events and seq, and orders the log's lines
 	events []Event
@@ -249,6 +255,7 @@ func New(c Config) (*Service, error) {
 	s := &Service{
 		bootID:         hex.EncodeToString(bootBuf[:]),
 		version:        c.Version,
+		socks:          c.Socks,
 		xray:           c.Xray,
 		imageSchedules: c.ImageSchedules,
 		imagesDisabled: c.ImagesDisabled,
@@ -410,6 +417,8 @@ type Status struct {
 	Degraded []string `json:"degraded"`
 	// GeoDegraded means the last geo operation failed or its journal needs recovery.
 	GeoDegraded bool `json:"geo_degraded,omitempty"`
+	// Pings maps server ID to its most recent on-demand TCP/HTTP latency test.
+	Pings map[string]PingResult `json:"pings,omitempty"`
 }
 
 // Status reports the service's state. It asks the runner for its active
@@ -418,7 +427,14 @@ type Status struct {
 // it changes.
 func (s *Service) Status(ctx context.Context) Status {
 	st, rev := s.store.State()
-	out := Status{BootID: s.bootID, Version: s.version, Revision: rev, Health: s.health(), Degraded: []string{}}
+	out := Status{
+		BootID:   s.bootID,
+		Version:  s.version,
+		Revision: rev,
+		Health:   s.health(),
+		Degraded: []string{},
+		Pings:    s.snapshotPings(st.Servers),
+	}
 	for _, srv := range st.Servers {
 		if srv.Invalid != "" {
 			out.Degraded = append(out.Degraded, srv.ID)

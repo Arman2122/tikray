@@ -172,6 +172,29 @@ export interface RouterStatus {
   last_verified?: string;
 }
 
+export interface PingResult {
+  id: string;
+  tcp_ms?: number;
+  http_ms?: number;
+  obs_ms?: number;
+  alive: boolean;
+  error?: string;
+  tested_at: string;
+}
+
+export interface CoreRelease {
+  version: string;
+  tested: boolean;
+  installed: boolean;
+  active: boolean;
+}
+
+export interface CoreReleasesInfo {
+  latest?: string;
+  releases: CoreRelease[];
+  online: boolean;
+}
+
 export interface ServiceStatus {
   boot_id?: string;
   version?: string;
@@ -185,6 +208,7 @@ export interface ServiceStatus {
   health: HealthSnapshot;
   degraded: string[];
   geo_degraded?: boolean;
+  pings?: Record<string, PingResult>;
 }
 
 export interface TrafficCounter {
@@ -491,6 +515,12 @@ export const api = {
       useIfMatch: true
     });
   },
+  async pingServer(id: string): Promise<PingResult> {
+    return (await request<PingResult>(`/v1/servers/${encodeURIComponent(id)}/ping`, { method: 'POST' })).data;
+  },
+  async pingAllServers(): Promise<PingResult[]> {
+    return (await request<PingResult[]>('/v1/servers/ping', { method: 'POST' })).data;
+  },
 
   // Subscriptions
   async addSubscription(name: string, url: string, interval: string): Promise<Subscription> {
@@ -584,6 +614,9 @@ export const api = {
   // Core, Geo, Images, Offline Inbox
   async getCore(): Promise<CoreInfo> {
     return (await request<CoreInfo>('/v1/core')).data;
+  },
+  async getCoreReleases(): Promise<CoreReleasesInfo> {
+    return (await request<CoreReleasesInfo>('/v1/core/releases')).data;
   },
   async updateCore(version: string, allowUnverified = false): Promise<ArtifactResult> {
     return (
