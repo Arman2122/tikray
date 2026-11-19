@@ -24,9 +24,9 @@ Ledger with the controller's rulings: `.superpowers/sdd/2026-10-26-m2c-auth-hot/
 
 ## Working rules
 
-- Work only in `/home/user/tikray/.claude/worktrees/m2c-auth` (branch `m2c-auth`). Use absolute paths or that directory as cwd.
-- The Bash tool here refuses: shell loops, commands built from `$variables`, `cd … &&` chains, and inline heredoc scripts. Run plain separate commands; if you need a script, write it to a file with the Write tool first, then run it.
-- Commits: the repo's configured identity is already `Arman2122 <arman.seyri@gmail.com>`. Use plain `git commit -m "<message from the brief>"`. **No trailers at all** (no Co-Authored-By, no Claude-Session, nothing). Never push, never amend or rebase existing commits, never touch other branches.
+- Work only in the `m2c-auth` worktree. Use paths relative to the repository root.
+- The shell runner here refuses: shell loops, commands built from `$variables`, `cd … &&` chains, and inline heredoc scripts. Run plain separate commands; if you need a script, write it to a file first, then run it.
+- Commits: the repo's configured identity is already `Arman2122 <arman.seyri@gmail.com>`. Use plain `git commit -m "<message from the brief>"`. **No trailers at all** (no Co-Authored-By, no session trailers, nothing). Never push, never amend or rebase existing commits, never touch other branches.
 - `make test` is the full unit suite. Use `-race` where the brief says. Known timing-sensitive cmd/tikray tests (300 ms health windows) can flake under heavy parallel load: if one fails in a full run, re-run it alone and record both; don't change it.
 - Follow the surrounding code's style: comment density, naming, error prefixes like `auth: …`.
 - Never print secrets in test failure messages either.

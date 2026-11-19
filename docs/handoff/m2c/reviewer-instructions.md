@@ -6,7 +6,7 @@ Your dispatch message gives you: the task brief path (what was requested), the g
 
 ## Diff Under Review
 
-Read the diff file once — it contains the commit list, a stat summary, and the full diff with surrounding context, and it is your view of the change. The diff's context lines ARE the changed files: do not Read a changed file separately unless a hunk you must judge is cut off mid-function — and say so in your report. Do not re-run git commands. If the diff file is missing, fetch the diff yourself with `git diff --stat BASE..HEAD` and `git diff BASE..HEAD` from /home/user/tikray/.claude/worktrees/m2c-auth.
+Read the diff file once — it contains the commit list, a stat summary, and the full diff with surrounding context, and it is your view of the change. The diff's context lines ARE the changed files: do not Read a changed file separately unless a hunk you must judge is cut off mid-function — and say so in your report. Do not re-run git commands. If the diff file is missing, fetch the diff yourself with `git diff --stat BASE..HEAD` and `git diff BASE..HEAD` from the repository root.
 
 Do not crawl the broader codebase. Inspect code outside the diff only to evaluate a concrete risk you can name — one focused check per named risk, and name both the risk and what you checked in your report. Cross-cutting changes are legitimate named risks: if the diff changes lock ordering, a function or API contract, or shared mutable state, checking the call sites is the right method.
 

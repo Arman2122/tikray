@@ -9,8 +9,8 @@ Commit: `fb767521ef5ef82d354cf78331ba97aa6d0c491a` on `m2c-auth`
 (message `Test hot outbound changes against every xray release tikray supports`, no trailers, not pushed).
 
 Files:
-- `/home/user/tikray/.claude/worktrees/m2c-auth/test/compat/hot_test.go` (new): `TestHotAgainstReleases`.
-- `/home/user/tikray/.claude/worktrees/m2c-auth/test/compat/xrayapi_test.go`: the config builder split into
+- `test/compat/hot_test.go` (new): `TestHotAgainstReleases`.
+- `test/compat/xrayapi_test.go`: the config builder split into
   `apiConfigWith(port, probeURL, probeInterval, services, outbounds)`; `apiConfig` calls it with the same
   arguments as before, so M2b's config is byte-identical and `TestXrayAPIAgainstReleases` still passes.
 
@@ -122,7 +122,7 @@ file in the runner's working directory would be read as a config; `srv-<id>` tag
   `FAIL`, 106 s. 26.3.27 fails steps 3 and 4; 26.4.13 fails step 4 only.
 - `go test -tags compat -count=1 -run "TestXrayAPIAgainstReleases|TestCompatVersions|TestGeoCodes|TestWriteGeoDat" ./test/compat/...`: `ok` (the builder refactor did not change M2b's tests).
 - `make test` (`go vet ./... && go test ./...`): all packages `ok` (cached, as no untagged code changed). No timing-sensitive flake seen.
-- Full verbose logs of the runs (not committed): `/tmp/claude-0/-home-user-tikray/d8985965-8c91-53e3-95ba-176f31bab2e8/scratchpad/hot-run-final.txt` and `.../hot-run-extra.txt`.
+- Full verbose logs of the runs (not committed): local scratchpad files `hot-run-final.txt` and `hot-run-extra.txt`.
 
 ## Concerns / decisions for the controller
 
@@ -237,5 +237,5 @@ Run time of the rmo step: about 6 s on 26.1.18 and 26.3.27 (the 6 s linger log),
   with `-race` again: `ok` (16.2 s), and once more on the final tree: `ok`. I did not change that test.
 - `go vet ./... && go vet -tags compat ./test/compat/`: clean. `gofmt -l` on the changed packages: no output.
 - `make test`: all packages `ok` (artifacts re-run, 10.9 s; the others cached).
-- Logs (not committed): `/tmp/claude-0/-home-user-tikray/d8985965-8c91-53e3-95ba-176f31bab2e8/scratchpad/` files
+- Logs (not committed): local scratchpad files
   `red-unit.txt`, `green-unit.txt`, `hot-fix1-default.txt`, `hot-fix1-extra.txt`.

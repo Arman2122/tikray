@@ -141,7 +141,7 @@ subnet against reserved ranges.
 
 - **Commit author:**
   - Every commit is authored `Arman2122 <arman.seyri@gmail.com>`.
-  - Commits carry no `Co-Authored-By`, `Claude-Session` or other trailers.
+  - Commits carry no `Co-Authored-By`, session or other trailers.
   - No AI model names appear in commits, PRs or code.
 - **History:** never force-push or rewrite pushed history without asking.
 - **Merging:** never merge a PR without asking the owner.
@@ -166,9 +166,9 @@ Each milestone follows the same steps:
 5. After the last task, a whole-branch review drives one fix wave.
 6. The branch goes up as a PR, with evidence (test results, `test/e2e/results/*.json`). The owner merges it.
 
-You don't need any particular tool for this; any assistant can follow it. Claude Code users with the superpowers plugin get it as skills: `writing-plans`, `subagent-driven-development` and `executing-plans`. Those skills keep their working files in the git-ignored `.superpowers/sdd/<plan>/`. The files in `m2c/` here are a copy of that workspace.
+You don't need any particular tool for this; any engineer or assistant can follow it. The files in `m2c/` here are an archived snapshot of that milestone workspace.
 
-The copied files mention absolute paths such as `/home/user/tikray/.claude/worktrees/m2c-auth` and `/tmp/claude-0/...`. Those belonged to the original cloud machine; read them relative to the repository root. Branch `m2c-auth` in those files is now `claude/serene-goldberg-1as8mu`. The "Bash tool refuses loops" rule in `context.md` was specific to that machine.
+Any absolute worktree paths referenced in older archived notes belonged to the original build machine; read them relative to the repository root.
 
 ## Setting up a machine
 

@@ -6,7 +6,7 @@ Start with [`docs/handoff/README.md`](docs/handoff/README.md). It covers the pro
 
 - **Commit author:**
   - Author every commit as `Arman2122 <arman.seyri@gmail.com>`.
-  - Add no trailers: no `Co-Authored-By`, no `Claude-Session`, nothing.
+  - Add no trailers: no `Co-Authored-By`, no session trailers, nothing.
   - Never put AI model names in commits, PR text or code.
 - **History:** never force-push or rewrite pushed history, and never merge a PR, without asking the owner first.
 - **Secrets:** never let a secret reach logs, errors, events, history, API responses, test output or results files. That covers:

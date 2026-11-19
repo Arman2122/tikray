@@ -3,7 +3,7 @@ name: RouterOS CHR
 on:
   pull_request:
   push:
-    branches: [main, v1.0, m3b-routeros]
+    branches: [main]
     paths-ignore:
       - docs/**
       - test/e2e/results/**
