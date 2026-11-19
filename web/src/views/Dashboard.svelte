@@ -1,6 +1,15 @@
 <script lang="ts">
-  import { api, ApiError, type ServiceEvent, type ServiceStats, type ServiceStatus, type State } from '../lib/api';
-  import { delayClass, delayPercent, formatBytes, formatMs, formatTime, formatUptime, serverEndpoint } from '../lib/format';
+  import { api, type ServiceEvent, type ServiceStats, type ServiceStatus, type State } from '../lib/api';
+  import {
+    delayClass,
+    delayPercent,
+    formatBytes,
+    formatMs,
+    formatTime,
+    formatUptime,
+    friendlyError,
+    serverEndpoint
+  } from '../lib/format';
   import { toast } from '../lib/toast.svelte';
   import Icon from '../components/Icon.svelte';
   import TopologyFlow from '../components/TopologyFlow.svelte';
@@ -88,7 +97,7 @@
       }
       await onRefresh();
     } catch (err) {
-      toast.err(err instanceof ApiError ? err.detail || err.message : 'Apply failed');
+      toast.err(friendlyError(err, 'Apply failed'));
     } finally {
       applying = false;
     }
@@ -165,7 +174,13 @@
 
   {#if status?.geo_degraded}
     <div class="alert warn row-between">
-      <span>Geo bundle is degraded or has a pending recovery transaction.</span>
+      <span>
+        {#if !status.health.runner.reachable}
+          Geo update could not complete while the data-plane runner is offline.
+        {:else}
+          Geo bundle is degraded or has a pending recovery transaction.
+        {/if}
+      </span>
       <button class="btn btn-sm" onclick={() => onNavigate('updates')}>Open Updates</button>
     </div>
   {/if}
@@ -326,6 +341,10 @@
           <tbody>
             {#each serverRows as item (item.srv.id)}
               {@const ep = serverEndpoint(item.srv)}
+              {@const runnerOnline = Boolean(status?.health.runner.reachable)}
+              {@const hasFailedProbe = Boolean(
+                item.h && !item.h.alive && runnerOnline && !item.srv.untested && (item.h.last_error || item.h.last_seen)
+              )}
               <tr>
                 <td>
                   <div class="row" style="gap: 8px">
@@ -334,7 +353,7 @@
                         ? ''
                         : item.h?.alive
                           ? 'ok'
-                          : item.h
+                          : hasFailedProbe
                             ? 'danger'
                             : 'warn'}"
                     ></span>
@@ -361,10 +380,12 @@
                     <span class="hint">disabled</span>
                   {:else if item.h?.alive}
                     <span class="badge ok">Alive</span>
-                  {:else if item.h}
-                    <span class="badge danger" title={item.h.last_error}>Down</span>
+                  {:else if hasFailedProbe}
+                    <span class="badge danger" title={item.h?.last_error}>Down</span>
+                  {:else if item.srv.untested}
+                    <span class="badge warn">Untested</span>
                   {:else}
-                    <span class="badge">Probing</span>
+                    <span class="badge warn">Pending</span>
                   {/if}
                 </td>
                 <td class="tabular">

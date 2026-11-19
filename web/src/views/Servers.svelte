@@ -320,11 +320,13 @@
                 {@const ep = serverEndpoint(srv)}
                 {@const isPinned = stateData?.routing.pinned === srv.id}
                 {@const isSelected = status?.health.selected === srv.id}
+                {@const runnerOnline = Boolean(status?.health.runner.reachable)}
+                {@const hasFailedProbe = Boolean(h && !h.alive && runnerOnline && !srv.untested && (h.last_error || h.last_seen))}
                 <tr>
                   <td>
                     <div class="stack" style="gap: 3px">
                       <div class="row" style="gap: 7px">
-                        <span class="dot {srv.disabled ? '' : h?.alive ? 'ok' : h ? 'danger' : 'warn'}"></span>
+                        <span class="dot {srv.disabled ? '' : h?.alive ? 'ok' : hasFailedProbe ? 'danger' : 'warn'}"></span>
                         <span style="font-weight: 600">{srv.name}</span>
                         <span class="mono hint" style="font-size: 11px">{srv.id}</span>
                         {#if isSelected}
@@ -349,10 +351,12 @@
                       <span class="badge">Disabled</span>
                     {:else if h?.alive}
                       <span class="badge ok">{formatMs(h.delay)}</span>
-                    {:else if h}
-                      <span class="badge danger" title={h.last_error}>Unreachable</span>
+                    {:else if hasFailedProbe}
+                      <span class="badge danger" title={h?.last_error}>Unreachable</span>
+                    {:else if srv.untested}
+                      <span class="badge warn">Untested</span>
                     {:else}
-                      <span class="badge">Pending</span>
+                      <span class="badge warn">Pending</span>
                     {/if}
                   </td>
                   <td>

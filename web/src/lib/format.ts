@@ -1,4 +1,17 @@
-import type { Server } from './api';
+import { ApiError, type Server } from './api';
+
+export function friendlyError(err: unknown, fallback: string): string {
+  const raw = err instanceof ApiError ? err.detail || err.message : err instanceof Error ? err.message : '';
+  if (!raw) return fallback;
+  const lower = raw.toLowerCase();
+  if (lower.includes('waiting for the runner token') || lower.includes("runner can't be reached")) {
+    return 'Data-plane runner (tikray-runner) is offline or still starting up.';
+  }
+  if (lower.includes('cannot verify installed image state')) {
+    return 'Managed RouterOS installation required — container image updates run via the native RouterOS watchdog.';
+  }
+  return raw.replace(/^(service|artifacts|runnerapi|routeros|auth|backup):\s*/i, '');
+}
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '0 B';

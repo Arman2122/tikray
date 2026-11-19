@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { api, ApiError, type CoreInfo, type GeoInfo, type ImageStatus, type ServiceStatus } from '../lib/api';
-  import { formatBytes, formatTime } from '../lib/format';
+  import { api, type CoreInfo, type GeoInfo, type ImageStatus, type ServiceStatus } from '../lib/api';
+  import { formatBytes, formatTime, friendlyError } from '../lib/format';
   import { toast } from '../lib/toast.svelte';
   import Icon from '../components/Icon.svelte';
 
@@ -10,6 +10,9 @@
   }
 
   let { status, onRefresh }: Props = $props();
+
+  const runnerOnline = $derived(Boolean(status?.health.runner.reachable));
+  const managedRouter = $derived(Boolean(status?.routeros));
 
   let core = $state<CoreInfo | null>(null);
   let geo = $state<GeoInfo | null>(null);
@@ -53,8 +56,11 @@
     if (cImg.status === 'fulfilled') {
       ctlImage = cImg.value;
       imageError = '';
-    } else if (cImg.reason instanceof ApiError) {
-      imageError = cImg.reason.detail || cImg.reason.message;
+    } else if (cImg.status === 'rejected') {
+      imageError = friendlyError(
+        cImg.reason,
+        'Managed RouterOS installation required — container image updates run via the native RouterOS watchdog.'
+      );
     }
     if (rImg.status === 'fulfilled') runnerImage = rImg.value;
   }
@@ -71,7 +77,7 @@
       toast.ok(`xray-core update ${res.outcome}: ${res.to}`);
       await Promise.all([loadAll(), onRefresh()]);
     } catch (err) {
-      toast.err(err instanceof ApiError ? err.detail || err.message : 'Core update failed');
+      toast.err(friendlyError(err, 'Core update failed'));
     } finally {
       coreBusy = false;
     }
@@ -85,7 +91,7 @@
       toast.ok(`xray-core rollback ${res.outcome}: ${res.to}`);
       await Promise.all([loadAll(), onRefresh()]);
     } catch (err) {
-      toast.err(err instanceof ApiError ? err.detail || err.message : 'Core rollback failed');
+      toast.err(friendlyError(err, 'Core rollback failed'));
     } finally {
       coreBusy = false;
     }
@@ -103,7 +109,7 @@
       toast.ok(`Uploaded ${res.name} (${formatBytes(res.bytes)}) to offline inbox.`);
       coreFile = null;
     } catch (err) {
-      toast.err(err instanceof ApiError ? err.detail || err.message : 'Core inbox upload failed');
+      toast.err(friendlyError(err, 'Core inbox upload failed'));
     } finally {
       uploadingCore = false;
     }
@@ -117,7 +123,7 @@
       toast.ok(`Geo bundle ${res.outcome}: ${res.to}`);
       await Promise.all([loadAll(), onRefresh()]);
     } catch (err) {
-      toast.err(err instanceof ApiError ? err.detail || err.message : 'Geo update failed');
+      toast.err(friendlyError(err, 'Geo update failed'));
     } finally {
       geoBusy = false;
     }
@@ -131,7 +137,7 @@
       toast.ok(`Geo rollback ${res.outcome}: ${res.to}`);
       await Promise.all([loadAll(), onRefresh()]);
     } catch (err) {
-      toast.err(err instanceof ApiError ? err.detail || err.message : 'Geo rollback failed');
+      toast.err(friendlyError(err, 'Geo rollback failed'));
     } finally {
       geoBusy = false;
     }
@@ -149,7 +155,7 @@
       toast.ok(`Uploaded ${res.name} (${formatBytes(res.bytes)}) to geo inbox.`);
       geoUploadFile = null;
     } catch (err) {
-      toast.err(err instanceof ApiError ? err.detail || err.message : 'Geo inbox upload failed');
+      toast.err(friendlyError(err, 'Geo inbox upload failed'));
     } finally {
       uploadingGeo = false;
     }
@@ -175,7 +181,7 @@
       toast.ok(`Queued ${comp} image update to ${op.target ?? version} (${op.state}).`);
       await loadAll();
     } catch (err) {
-      toast.err(err instanceof ApiError ? err.detail || err.message : 'Image update failed');
+      toast.err(friendlyError(err, 'Image update failed'));
     } finally {
       imageBusy = '';
     }
@@ -189,7 +195,7 @@
       toast.ok(`Queued ${comp} image rollback (${op.state}).`);
       await loadAll();
     } catch (err) {
-      toast.err(err instanceof ApiError ? err.detail || err.message : 'Image rollback failed');
+      toast.err(friendlyError(err, 'Image rollback failed'));
     } finally {
       imageBusy = '';
     }
@@ -202,6 +208,13 @@
     bundles, the control-plane image (blue/green zero-downtime), and the runner data-plane image. Every switch trials
     before commit and auto-rolls back on failure.
   </div>
+
+  {#if !runnerOnline}
+    <div class="alert warn">
+      Data-plane runner (<code>tikray-runner</code>) is currently offline. Offline Inbox uploads remain available; live
+      <code>xray-core</code> and Geo trials require a connected runner.
+    </div>
+  {/if}
 
   <div class="grid-2">
     <!-- 1. xray-core -->
@@ -301,7 +314,7 @@
           <h2 class="card-title">2. Geo Data Bundle</h2>
           <p class="card-sub">Synchronized geosite.dat, geoip.dat, and RouterOS domestic IPv4 bypass ranges</p>
         </div>
-        <span class="badge {geo?.degraded ? 'danger' : geo?.active ? 'ok' : ''} mono">
+        <span class="badge {geo?.active ? (geo.degraded ? 'danger' : 'ok') : 'warn'} mono">
           {geo?.active || 'none'}
         </span>
       </div>
@@ -413,7 +426,9 @@
 
       {#if !ctlImage}
         <div class="empty-state">
-          {imageError || 'Image updates require a managed RouterOS watchdog installation and configured image publisher.'}
+          {managedRouter && imageError
+            ? imageError
+            : 'Managed RouterOS installation required — blue/green container image updates run via the native RouterOS watchdog.'}
         </div>
       {:else}
         <div class="row" style="gap: 8px">
@@ -460,7 +475,9 @@
 
       {#if !runnerImage}
         <div class="empty-state">
-          {imageError || 'Runner image updates require a managed RouterOS watchdog installation.'}
+          {managedRouter && imageError
+            ? imageError
+            : 'Managed RouterOS installation required — runner container image updates run via the native RouterOS watchdog.'}
         </div>
       {:else}
         <div class="alert warn" style="font-size: 12.5px">
