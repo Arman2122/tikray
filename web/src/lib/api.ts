@@ -163,6 +163,8 @@ export interface HealthSnapshot {
 }
 
 export interface RouterStatus {
+  version?: string;
+  untested?: boolean;
   revision: number;
   pending: boolean;
   degraded?: string;

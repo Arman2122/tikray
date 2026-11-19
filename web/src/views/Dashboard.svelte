@@ -3,17 +3,20 @@
   import { delayClass, delayPercent, formatBytes, formatMs, formatTime, formatUptime, serverEndpoint } from '../lib/format';
   import { toast } from '../lib/toast.svelte';
   import Icon from '../components/Icon.svelte';
+  import TopologyFlow from '../components/TopologyFlow.svelte';
+  import TrafficChart, { type RateSample } from '../components/TrafficChart.svelte';
 
   interface Props {
     status: ServiceStatus | null;
     stateData: State | null;
     stats: ServiceStats | null;
+    rateHistory: RateSample[];
     events: ServiceEvent[];
     onRefresh: () => Promise<void>;
     onNavigate: (view: string) => void;
   }
 
-  let { status, stateData, stats, events, onRefresh, onNavigate }: Props = $props();
+  let { status, stateData, stats, rateHistory, events, onRefresh, onNavigate }: Props = $props();
 
   let applying = $state(false);
 
@@ -44,6 +47,21 @@
       (acc, cur) => ({ up: acc.up + cur.uplink, down: acc.down + cur.downlink }),
       { up: 0, down: 0 }
     );
+  });
+
+  const trafficSplit = $derived.by(() => {
+    if (!stats?.available) return { proxied: 0, direct: 0, proxyPct: 0, directPct: 0 };
+    let proxied = 0;
+    let direct = 0;
+    for (const o of stats.outbounds) {
+      const sum = o.uplink + o.downlink;
+      if (o.server_id) proxied += sum;
+      else if (o.tag === 'direct') direct += sum;
+    }
+    const total = proxied + direct;
+    if (total === 0) return { proxied: 0, direct: 0, proxyPct: 0, directPct: 0 };
+    const proxyPct = Math.round((proxied / total) * 100);
+    return { proxied, direct, proxyPct, directPct: 100 - proxyPct };
   });
 
   const serverRows = $derived.by(() => {
@@ -96,8 +114,20 @@
             </span>
           {/if}
           {#if status.routeros}
-            <span class="badge {status.routeros.degraded ? 'danger' : status.routeros.pending ? 'warn' : 'ok'}">
-              RouterOS: {status.routeros.degraded || (status.routeros.pending ? 'reconciling' : 'verified')}
+            <span
+              class="badge {status.routeros.degraded
+                ? 'danger'
+                : status.routeros.pending || status.routeros.untested
+                  ? 'warn'
+                  : 'ok'}"
+            >
+              RouterOS{status.routeros.version ? ` ${status.routeros.version}` : ''}:
+              {status.routeros.degraded ||
+                (status.routeros.pending
+                  ? 'reconciling'
+                  : status.routeros.untested
+                    ? 'untested'
+                    : 'verified')}
             </span>
           {:else}
             <span class="badge">Standalone Mode</span>
@@ -202,6 +232,65 @@
           Waiting for xray runtime
         {/if}
       </span>
+    </div>
+  </div>
+
+  <!-- Live Interactive Data-Path Topology -->
+  <TopologyFlow
+    {status}
+    {stateData}
+    {stats}
+    {selectedServer}
+    selectedDelay={selectedHealth?.delay}
+    {onNavigate}
+  />
+
+  <!-- Real-time Throughput & Traffic Split -->
+  <div class="grid-2">
+    <TrafficChart samples={rateHistory} available={Boolean(stats?.available)} />
+
+    <div class="card stack" style="justify-content: space-between">
+      <div class="stack" style="gap: 10px">
+        <div>
+          <h2 class="card-title">Proxy vs Direct Traffic Split</h2>
+          <p class="card-sub">
+            Cumulative xray-core outbound ratio (RouterOS FastTrack domestic bypass runs outside xray at wire speed)
+          </p>
+        </div>
+
+        <div class="split-bar" aria-label="Traffic split bar">
+          <div class="split-proxy" style="width: {trafficSplit.proxyPct}%"></div>
+          <div class="split-direct" style="width: {trafficSplit.directPct}%"></div>
+        </div>
+
+        <div class="grid-2" style="gap: 10px">
+          <div style="padding: 10px 12px; border-radius: 8px; background: var(--bg-subtle); border: 1px solid var(--border)">
+            <div class="row" style="gap: 6px; margin-bottom: 4px">
+              <span class="dot" style="background: var(--accent)"></span>
+              <span class="hint" style="font-weight: 600">Proxied Tunnels</span>
+            </div>
+            <div class="mono tabular" style="font-size: 16px; font-weight: 700">
+              {formatBytes(trafficSplit.proxied)}
+            </div>
+            <div class="hint tabular">{trafficSplit.proxyPct}% of xray volume</div>
+          </div>
+          <div style="padding: 10px 12px; border-radius: 8px; background: var(--bg-subtle); border: 1px solid var(--border)">
+            <div class="row" style="gap: 6px; margin-bottom: 4px">
+              <span class="dot ok"></span>
+              <span class="hint" style="font-weight: 600">Direct Inside xray</span>
+            </div>
+            <div class="mono tabular" style="font-size: 16px; font-weight: 700">
+              {formatBytes(trafficSplit.direct)}
+            </div>
+            <div class="hint tabular">{trafficSplit.directPct}% of xray volume</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row-between hint tabular" style="font-size: 12px; padding-top: 8px; border-top: 1px solid var(--border)">
+        <span>Memory limit: xray 128 MiB · ctl 48 MiB · runner 24 MiB</span>
+        <span>Hot-reload: active</span>
+      </div>
     </div>
   </div>
 

@@ -43,7 +43,7 @@ Two containers share a single `/data` volume over a dedicated, reply-only ARP pr
 - **Hybrid Traffic Steering** — Domestic IPs/domains and local LAN traffic bypass the proxy directly at RouterOS speed; international traffic goes through `xray-core`. Per-device (`/32`) and per-subnet (`CIDR`) overrides support `direct`, `smart`, and `full` modes with optional **Kill Switch** and IPv6 leak protection.
 - **Four Independent Update Lifecycles** — Update `xray-core`, Geo data (`iran`, `v2fly`, `loyalsoldier`, `custom`), the `tikray` control image (blue/green, zero traffic interruption), and `tikray-runner` independently — every switch verifies cryptographic digests/signatures, trials health end-to-end, and automatically rolls back on failure.
 - **Zero-Downtime Hot Server Changes** — Adding, removing, enabling, or disabling servers hot-reloads outbounds through `xray api` without restarting `xray-core` or dropping active connections, with automatic trial fallback on error.
-- **Embedded Offline-First Web UI** — Responsive Svelte 5 SPA compiled directly into the `tikray` Go binary (~49 KB gzipped, dark & light themes, zero external CDNs or fonts) so it loads instantaneously even on completely air-gapped or heavily censored networks.
+- **Embedded Offline-First Web UI** — Responsive Svelte 5 SPA compiled directly into the `tikray` Go binary (~57 KB gzipped, dark & light themes, zero external CDNs or fonts) featuring live SVG throughput charts, an interactive 4-stage traffic topology flow, `Ctrl+K` / `⌘K` command palette, and a client-side share-link inspector that loads instantaneously even on air-gapped networks.
 - **First-Class Offline & Censored-Network Support** — Every update path supports upstream direct fetch, proxy fallback through the active tunnel, user mirrors, and an authenticated offline inbox (`/v1/inbox/*` or `disk1/tikray/data/inbox/`).
 - **Encrypted Backup & Restore** — Export and restore full state (including server credentials and subscription URLs) sealed with **Argon2id + AES-256-GCM** (`tikray-backup-v1`), preserving managed bridge topology on restore.
 - **RouterOS Operational Safety** — Scoped native API access, readback-verified reconciliation, RouterOS DHCP lease discovery & static lease conversion, automatic container watchdog, one-command `tikray-emergency-off`, and clean `keep`/`purge` uninstall.
@@ -55,13 +55,14 @@ Two containers share a single `/data` volume over a dedicated, reply-only ARP pr
 
 ### RouterOS Versions
 
-| Channel | Verified Versions | Status |
+| Channel | Versions | Status |
 |---|---|---|
-| **Stable** | `7.25.1` (and `7.25.x` point patches) | Primary target (supports bare version format, DAI, VETH IP preserve, `/tool/fetch` & address-list fixes) |
-| **Long-Term** | `7.24.6` (and `7.24.x` point patches) | Supported |
-| **Legacy Long-Term** | `7.23.8` (and `7.23.x` point patches) | Supported |
+| **Stable** | `7.25.1` (and `7.25.x` point patches) | Lab-verified primary target (bare version format, DAI, VETH IP preserve, `/tool/fetch` & address-list fixes) |
+| **Long-Term** | `7.24.6` (and `7.24.x` point patches) | Lab-verified |
+| **Legacy Long-Term** | `7.23.8` (and `7.23.x` point patches) | Lab-verified |
+| **Future Stable v7** | `7.26+` (canonical stable/long-term releases) | Forward-compatible (labeled `untested` in UI/status until verified in CHR CI) |
 
-> Beta, RC, testing, development, and RouterOS v6 builds are intentionally refused by the version adapter and installer guard.
+> Beta, RC, testing, development, RouterOS v6, and pre-`7.23.8` builds are refused by the version adapter and installer guard.
 
 ### Hardware & Architectures
 

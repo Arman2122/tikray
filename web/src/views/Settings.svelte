@@ -389,7 +389,18 @@
         </div>
         <div class="row-between">
           <span class="hint">RouterOS Mode</span>
-          <span>{status?.routeros ? 'Managed (Native API-SSL)' : 'Standalone'}</span>
+          <span>
+            {#if status?.routeros?.version}
+              Managed · RouterOS <code class="mono">{status.routeros.version}</code>
+              {#if status.routeros.untested}
+                <span class="badge warn" style="margin-left: 6px">untested</span>
+              {/if}
+            {:else if status?.routeros}
+              Managed (Native API-SSL)
+            {:else}
+              Standalone
+            {/if}
+          </span>
         </div>
       </div>
 

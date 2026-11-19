@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api, ApiError, type RefreshResult, type Server, type ServiceStatus, type State, type Subscription } from '../lib/api';
   import { formatMs, formatTime, serverEndpoint } from '../lib/format';
+  import { inspectShareLink } from '../lib/linkPreview';
   import { toast } from '../lib/toast.svelte';
   import Icon from '../components/Icon.svelte';
   import Modal from '../components/Modal.svelte';
@@ -42,6 +43,13 @@
 
   const healthMap = $derived(new Map((status?.health.servers ?? []).map((h) => [h.id, h])));
   const subMap = $derived(new Map((stateData?.subscriptions ?? []).map((s) => [s.id, s])));
+
+  const linkPreviews = $derived.by(() => {
+    return linkInput
+      .split(/\r?\n/)
+      .map((l) => inspectShareLink(l))
+      .filter((p): p is NonNullable<typeof p> => p !== null);
+  });
 
   const filteredServers = $derived.by(() => {
     const q = search.trim().toLowerCase();
@@ -500,10 +508,42 @@
             required
           ></textarea>
           <span class="hint">
-            Supports VLESS (TLS / REALITY / Vision / XHTTP / WS / gRPC), VMess, Trojan, and Shadowsocks. Credentials
-            are never shown again in API views.
+            Supports VLESS (TLS / REALITY / Vision / XHTTP + Extra / PQ ML-DSA-65 / PQ Encryption / TLS ECH / WS /
+            gRPC / HTTPUpgrade), VMess, Trojan, and Shadowsocks. Credentials are never echoed back in API views.
           </span>
         </div>
+        {#if linkPreviews.length > 0}
+          <div class="preview-box">
+            <div class="row-between">
+              <span class="label">Live Link Preview ({linkPreviews.length})</span>
+              <span class="hint">Parsed locally in browser</span>
+            </div>
+            {#each linkPreviews.slice(0, 4) as pv}
+              <div class="stack" style="gap: 4px; padding-top: 4px; border-top: 1px solid var(--border)">
+                <div class="row-between">
+                  <div class="row" style="gap: 6px">
+                    <span class="dot {pv.valid ? 'ok' : 'danger'}"></span>
+                    <strong style="font-size: 12.5px">{pv.name || pv.scheme}</strong>
+                    {#if pv.endpoint}
+                      <span class="mono hint" style="font-size: 11.5px">{pv.endpoint}</span>
+                    {/if}
+                  </div>
+                  <div class="row" style="gap: 4px">
+                    {#each pv.badges as b}
+                      <span class="badge {b.tone}" style="font-size: 10.5px; padding: 1px 7px">{b.label}</span>
+                    {/each}
+                  </div>
+                </div>
+                {#if pv.warning}
+                  <span style="font-size: 11.5px; color: var(--warn)">{pv.warning}</span>
+                {/if}
+              </div>
+            {/each}
+            {#if linkPreviews.length > 4}
+              <span class="hint">+{linkPreviews.length - 4} more link(s) queued for bulk import</span>
+            {/if}
+          </div>
+        {/if}
         <div class="field">
           <label for="srv-name">Custom Name (optional, single link only)</label>
           <input id="srv-name" class="input" placeholder="Auto from #fragment" bind:value={serverName} />

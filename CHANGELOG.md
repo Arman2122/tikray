@@ -9,12 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 First production open-source release of **tikray** for MikroTik RouterOS v7.
 
 ### Added
-- **RouterOS v7.25.1 (Stable) & v7.24.6 (Long-Term) Support**:
-  - Release-line version matching (`7.25.x` patch ≥ 1, `7.24.x` patch ≥ 6, `7.23.x` patch ≥ 8) with strict rejection of pre-release, beta, rc, and unverified branches.
-  - Native POSIX ERE installer guards, channel/feature detection (`SupportsVethIPPreserve`, `SupportsDynamicARPInspection`), and `xray-core` compatibility tested through **`v26.11.9`**.
+- **Future-Proof MikroTik RouterOS v7 Support**:
+  - Lab-verified release lines: `7.25.1` (stable, `7.25.x`), `7.24.6` (long-term, `7.24.x`), and `7.23.8` (legacy long-term, `7.23.x`), plus forward-compatible acceptance of future canonical `7.26+` stable/long-term releases (`Profile.Verified() == false`, surfaced as a non-blocking `untested` badge in `Status.routeros` and Web UI) while still rejecting pre-releases (`beta`, `rc`, `testing`, `development`), `.0` patches, v6/v8, and pre-`7.23.8` builds.
+  - Native POSIX ERE installer guards, live RouterOS version exposure in `/v1/status`, channel/feature detection (`SupportsVethIPPreserve`, `SupportsDynamicARPInspection`), and `xray-core` compatibility tested through **`v26.11.9`**.
+- **Modern `xray-core` 26.x Share-Link Features (`internal/sharelink`)**:
+  - Native support for `xhttp` `extra` JSON objects (XMUX, `downloadSettings`, `noGRPCHeader`, padding; 16 KiB cap, zero secret echo), post-quantum REALITY `pqv` (`mldsa65Verify`), and TLS ECH `ech` (`echConfigList`).
 - **Embedded Svelte 5 Web UI (`web/`, `internal/ui/`)**:
-  - Compiled into the `tikray` binary via `go:embed` (~49 KB gzipped, zero external fonts or CDNs, dark & light themes, strict CSP).
-  - Full control-plane interface: First-run Setup & Login (with rate-limit countdown), Dashboard (health hero, live xray telemetry, latency bars, Apply Now), Servers & Subscriptions (bulk share-link import, raw JSON, hot toggle, pin, refresh summaries), Devices & Policy (default policy cards, kill switch, RouterOS DHCP leases + Make Static), Routing & DNS (ordered rules, domestic bypass, DoH presets, probe URL), Updates (4 independent lifecycle cards + offline inbox uploads), Live Events (auto-polling with `boot_id` restart detection), and Settings (encrypted backup export/restore, API tokens with one-time display, password rotation, bridge repair).
+  - Compiled into the `tikray` binary via `go:embed` (~57 KB gzipped, zero external fonts or CDNs, dark & light themes, strict CSP).
+  - Full control-plane interface: First-run Setup & Login (with rate-limit countdown), Dashboard (health hero, interactive live 4-stage Data-Path Topology widget, real-time SVG Throughput chart, Proxy-vs-Direct traffic split, latency bars, Apply Now), `Ctrl+K` Command Palette, Servers & Subscriptions (live share-link capability preview badges, bulk import, raw JSON, hot toggle, pin, refresh summaries), Devices & Policy (default policy cards, kill switch, RouterOS DHCP leases + Make Static), Routing & DNS (ordered rules, domestic bypass, DoH presets, probe URL), Updates (4 independent lifecycle cards + offline inbox uploads), Live Events (auto-polling with `boot_id` restart detection), and Settings (encrypted backup export/restore, API tokens with one-time display, password rotation, bridge repair).
 - **Passphrase-Encrypted Backup & Restore (`internal/backup`)**:
   - Portable `tikray-backup-v1` format using Argon2id (`19456 KiB, t=2, p=1`, bounded concurrency) + AES-256-GCM with format AAD.
   - `POST /v1/backup/export`, `POST /v1/backup/restore`, and `tikray backup export|restore` (passphrase via `TIKRAY_BACKUP_PASSPHRASE` or stdin; preserves managed router bridge subnet on restore).
@@ -33,7 +35,7 @@ First production open-source release of **tikray** for MikroTik RouterOS v7.
   - Flagship `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `docs/architecture.md`, `docs/api.md`, and GitHub issue/PR templates.
 
 ### Changed
-- **Hardening**: Added HTTP/2 idle keepalive pings (`ReadIdleTimeout: 30s`, `PingTimeout: 10s`) to `internal/xray` h2c transport and case-insensitive UUID credential redaction in `internal/service`.
+- **MikroTik Memory Optimization & Hardening**: Added default `GOMEMLIMIT` bounds (`48MiB` for `tikray`, `24MiB` for `tikray-runner`, alongside `128MiB` for `xray-core`), HTTP/2 idle keepalive pings (`ReadIdleTimeout: 30s`, `PingTimeout: 10s`) on `internal/xray` h2c transport, and case-insensitive UUID credential redaction in `internal/service`.
 - **CI**: Added Web UI type-check/build verification and `-race` test jobs in `.github/workflows/ci.yml`; updated CHR acceptance matrix in `.github/workflows/chr.yml` to RouterOS `7.25.1` and `7.24.6`.
 
 ### Foundation (Milestones M0–M3b)

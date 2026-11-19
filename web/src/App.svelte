@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     api,
+    ApiError,
     onUnauthorized,
     type ServiceEvent,
     type ServiceStats,
@@ -9,6 +10,8 @@
   } from './lib/api';
   import { toast } from './lib/toast.svelte';
   import Icon from './components/Icon.svelte';
+  import CommandPalette from './components/CommandPalette.svelte';
+  import type { RateSample } from './components/TrafficChart.svelte';
   import SetupLogin from './views/SetupLogin.svelte';
   import Dashboard from './views/Dashboard.svelte';
   import Servers from './views/Servers.svelte';
@@ -55,6 +58,46 @@
   let events = $state<ServiceEvent[]>([]);
   let bootId = $state('');
   let eventsPaused = $state(false);
+  let paletteOpen = $state(false);
+  let rateHistory = $state<RateSample[]>([]);
+  let lastCounter: { at: number; down: number; up: number } | null = null;
+
+  function recordStatsSample(next: ServiceStats): void {
+    stats = next;
+    if (!next.available) return;
+    const now = Date.now();
+    const tun = next.inbounds.find((i) => i.tag === 'tun-in');
+    let down = 0;
+    let up = 0;
+    if (tun && (tun.downlink > 0 || tun.uplink > 0)) {
+      down = tun.downlink;
+      up = tun.uplink;
+    } else {
+      for (const o of next.outbounds) {
+        down += o.downlink;
+        up += o.uplink;
+      }
+    }
+    if (lastCounter && now > lastCounter.at) {
+      const dt = (now - lastCounter.at) / 1000;
+      const downBps = down >= lastCounter.down ? (down - lastCounter.down) / dt : 0;
+      const upBps = up >= lastCounter.up ? (up - lastCounter.up) / dt : 0;
+      rateHistory = [...rateHistory, { at: now, downBps, upBps }].slice(-36);
+    } else if (rateHistory.length === 0) {
+      rateHistory = [{ at: now, downBps: 0, upBps: 0 }];
+    }
+    lastCounter = { at: now, down, up };
+  }
+
+  async function quickApplyNow(): Promise<void> {
+    try {
+      const res = await api.applyNow();
+      toast.ok(res.hot ? 'Applied live via xray hot-reload.' : `Applied (${res.outcome}).`);
+      await refreshAll();
+    } catch (err) {
+      toast.err(err instanceof ApiError ? err.detail || err.message : 'Apply failed');
+    }
+  }
 
   $effect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -97,7 +140,7 @@
     ]);
     if (stRes.status === 'fulfilled') status = stRes.value;
     if (stateRes.status === 'fulfilled') stateData = stateRes.value;
-    if (statsRes.status === 'fulfilled') stats = statsRes.value;
+    if (statsRes.status === 'fulfilled') recordStatsSample(statsRes.value);
     await pollEvents(false);
   }
 
@@ -155,9 +198,19 @@
     const onPop = () => {
       view = viewFromPath();
     };
+    const onGlobalKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        if (signedIn) paletteOpen = !paletteOpen;
+      }
+    };
     window.addEventListener('popstate', onPop);
+    window.addEventListener('keydown', onGlobalKey);
     checkAuth();
-    return () => window.removeEventListener('popstate', onPop);
+    return () => {
+      window.removeEventListener('popstate', onPop);
+      window.removeEventListener('keydown', onGlobalKey);
+    };
   });
 
   // Live background polling while signed in
@@ -166,7 +219,7 @@
     const statusTimer = setInterval(async () => {
       const [stRes, statsRes] = await Promise.allSettled([api.getStatus(), api.getStats()]);
       if (stRes.status === 'fulfilled') status = stRes.value;
-      if (statsRes.status === 'fulfilled') stats = statsRes.value;
+      if (statsRes.status === 'fulfilled') recordStatsSample(statsRes.value);
     }, 5000);
     const eventTimer = setInterval(() => {
       if (!eventsPaused) {
@@ -257,6 +310,14 @@
         </div>
 
         <div class="topbar-actions">
+          <button
+            class="btn btn-sm"
+            title="Open Command Palette (Ctrl+K)"
+            onclick={() => (paletteOpen = true)}
+          >
+            <span>Quick Jump</span>
+            <span class="kbd">Ctrl K</span>
+          </button>
           {#if status}
             <span
               class="badge {status.health.level === 'healthy'
@@ -287,7 +348,7 @@
 
       <main class="content">
         {#if view === 'dashboard'}
-          <Dashboard {status} {stateData} {stats} {events} onRefresh={refreshAll} onNavigate={navigate} />
+          <Dashboard {status} {stateData} {stats} {rateHistory} {events} onRefresh={refreshAll} onNavigate={navigate} />
         {:else if view === 'servers'}
           <Servers {status} {stateData} onRefresh={refreshAll} />
         {:else if view === 'devices'}
@@ -310,6 +371,17 @@
       </main>
     </div>
   </div>
+
+  <CommandPalette
+    open={paletteOpen}
+    servers={stateData?.servers ?? []}
+    onClose={() => (paletteOpen = false)}
+    onNavigate={navigate}
+    onToggleTheme={() => (theme = theme === 'dark' ? 'light' : 'dark')}
+    onRefresh={refreshAll}
+    onApplyNow={quickApplyNow}
+    onSignOut={signOut}
+  />
 {/if}
 
 <!-- Toast notifications -->
