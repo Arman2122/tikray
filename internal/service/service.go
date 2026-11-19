@@ -431,6 +431,12 @@ func (s *Service) Status(ctx context.Context) Status {
 	verified := s.routerSelection
 	if s.router != nil {
 		router := s.routerStatus
+		if rp, ok := s.router.(routerProfiler); ok {
+			if prof := rp.Profile(); prof.Version() != "" {
+				router.Version = prof.Version()
+				router.Untested = !prof.Verified()
+			}
+		}
 		router.Pending = router.Pending || router.Revision != rev || router.LastVerified.IsZero()
 		out.Router = &router
 		out.Pending = out.Pending || router.Pending

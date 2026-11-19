@@ -8,9 +8,14 @@ import (
 
 	"github.com/Arman2122/tikray/internal/artifacts"
 	"github.com/Arman2122/tikray/internal/routeros"
+	"github.com/Arman2122/tikray/internal/routeros/adapters"
 	"github.com/Arman2122/tikray/internal/runnerapi"
 	"github.com/Arman2122/tikray/internal/store"
 )
+
+type routerProfiler interface {
+	Profile() adapters.Profile
+}
 
 // RouterController prepares scoped protection before either policy changes.
 // Reconcile releases it only after verifying the effective router policy.
@@ -24,6 +29,8 @@ type RouterController interface {
 }
 
 type RouterStatus struct {
+	Version      string    `json:"version,omitempty"`
+	Untested     bool      `json:"untested,omitempty"`
 	Revision     uint64    `json:"revision"`
 	Pending      bool      `json:"pending"`
 	Degraded     string    `json:"degraded,omitempty"`

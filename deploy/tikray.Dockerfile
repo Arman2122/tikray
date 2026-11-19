@@ -22,6 +22,7 @@
 # arm64 image builds without emulation. To move to a newer base, pull the tag
 # and put the digest of `docker buildx imagetools inspect busybox:<tag>` here.
 FROM busybox:1.37.0-musl@sha256:5cec3fc171c87218698e85a52af7087de727372aae264a787b8112901a5b0092
+ENV GOMEMLIMIT=48MiB
 COPY tikray /usr/local/bin/tikray
 COPY ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 ENTRYPOINT ["/usr/local/bin/tikray"]

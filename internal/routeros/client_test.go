@@ -114,20 +114,24 @@ func testPeer(t *testing.T, authenticated bool, serve func(net.Conn, *bufio.Read
 }
 
 func TestUnknownProfileNeverBecomesWritable(t *testing.T) {
-	var calls atomic.Int32
-	_, cfg := testPeer(t, true, func(_ net.Conn, r *bufio.Reader) {
-		if _, err := readSentence(r); err == nil {
-			calls.Add(1)
-		}
-	}, "7.99")
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	c, err := Dial(ctx, cfg)
-	if c != nil {
-		c.Close()
-	}
-	if !errors.Is(err, ErrUnsupported) || calls.Load() != 0 {
-		t.Fatal("unsupported profile became usable")
+	for _, bad := range []string{"6.49.18", "7.22", "7.26beta1", "8.0"} {
+		t.Run(bad, func(t *testing.T) {
+			var calls atomic.Int32
+			_, cfg := testPeer(t, true, func(_ net.Conn, r *bufio.Reader) {
+				if _, err := readSentence(r); err == nil {
+					calls.Add(1)
+				}
+			}, bad)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			c, err := Dial(ctx, cfg)
+			if c != nil {
+				c.Close()
+			}
+			if !errors.Is(err, ErrUnsupported) || calls.Load() != 0 {
+				t.Fatalf("unsupported profile %q became usable: err=%v calls=%d", bad, err, calls.Load())
+			}
+		})
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Arman2122/tikray/internal/atomicfile"
+	"github.com/Arman2122/tikray/internal/routeros/adapters"
 	"github.com/Arman2122/tikray/internal/store"
 )
 
@@ -334,6 +335,18 @@ func (m *Managed) Watch(ctx context.Context, notify func()) error {
 	return ctx.Err()
 }
 func (m *Managed) current() *Engine { m.mu.RLock(); defer m.mu.RUnlock(); return m.engine }
+
+// Profile returns the connected router's detected RouterOS profile, or the
+// zero value while disconnected.
+func (m *Managed) Profile() adapters.Profile {
+	m.mu.RLock()
+	c := m.client
+	m.mu.RUnlock()
+	if c == nil {
+		return adapters.Profile{}
+	}
+	return c.Profile()
+}
 func (m *Managed) Prepare(ctx context.Context, t Target) error {
 	if e := m.current(); e != nil {
 		return e.Prepare(ctx, t)

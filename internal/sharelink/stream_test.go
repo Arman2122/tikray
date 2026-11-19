@@ -27,6 +27,9 @@ func TestStreamFromQuery(t *testing.T) {
 		"allowInsecure": {"true"},
 		"pcs":           {" PIN "},
 		"vcn":           {"real.example.com"},
+		"extra":         {`{"noGRPCHeader":true}`},
+		"pqv":           {"PQKEY"},
+		"ech":           {"ECHLIST"},
 	}
 	want := stream{
 		Network: "ws", Security: "reality", SNI: "www.example.com", Fingerprint: "chrome",
@@ -34,6 +37,7 @@ func TestStreamFromQuery(t *testing.T) {
 		Host: "h.example.com", Path: "/p", ServiceName: "gun", Authority: "a.example.com",
 		Mode: "multi", HeaderType: "http", AllowInsecure: true,
 		PinnedCertSHA256: " PIN ", VerifyCertByName: "real.example.com",
+		Extra: `{"noGRPCHeader":true}`, MLDSA65Verify: "PQKEY", ECHConfigList: "ECHLIST",
 	}
 	if got := streamFromQuery(q, "tls"); !reflect.DeepEqual(got, want) {
 		t.Errorf("streamFromQuery:\n got %+v\nwant %+v", got, want)

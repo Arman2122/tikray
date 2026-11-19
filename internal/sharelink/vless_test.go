@@ -101,6 +101,27 @@ var vlessCases = []parseCase{
 		wantJSON: vlessOut("nas.lan", "443", plainUser, `{"network":"grpc","grpcSettings":{"multiMode":false}}`),
 	},
 	{
+		name:     "xhttp with extra JSON, reality and post-quantum pqv",
+		link:     "vless://" + vlessID + "@203.0.113.10:443?type=xhttp&security=reality&sni=www.example.com&fp=chrome&pbk=" + vlessPBK + "&pqv=MLDSA65KEY&path=/x&mode=auto&extra=%7B%22noGRPCHeader%22%3Atrue%2C%22xPaddingBytes%22%3A%22100-500%22%7D#pq-xhttp",
+		wantName: "pq-xhttp",
+		wantJSON: vlessOut("203.0.113.10", "443", plainUser,
+			`{"network":"xhttp","realitySettings":{"fingerprint":"chrome","mldsa65Verify":"MLDSA65KEY","publicKey":"`+vlessPBK+`","serverName":"www.example.com"},"security":"reality","xhttpSettings":{"extra":{"noGRPCHeader":true,"xPaddingBytes":"100-500"},"mode":"auto","path":"/x"}}`),
+	},
+	{
+		name:     "tls with ECH config list",
+		link:     "vless://" + vlessID + "@203.0.113.10:443?type=ws&security=tls&sni=cdn.example.com&ech=cloudflare-ech.com%2Bhttps%3A%2F%2F1.1.1.1%2Fdns-query#ech",
+		wantName: "ech",
+		wantJSON: vlessOut("203.0.113.10", "443", plainUser,
+			`{"network":"ws","security":"tls","tlsSettings":{"echConfigList":"cloudflare-ech.com+https://1.1.1.1/dns-query","serverName":"cdn.example.com"},"wsSettings":{"path":"/"}}`),
+	},
+	{
+		name:        "xhttp malformed extra JSON refused without echoing secret",
+		link:        vlessPlain + "?type=xhttp&extra=not-json-secret-value",
+		wantErr:     kindInvalid,
+		errContains: "xhttp extra must be a valid JSON object",
+		secret:      "not-json-secret-value",
+	},
+	{
 		name:     "xhttp",
 		link:     vlessPlain + "?type=xhttp&path=/x&mode=packet-up#x",
 		wantName: "x",

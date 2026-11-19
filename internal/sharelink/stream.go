@@ -1,11 +1,14 @@
 package sharelink
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 )
+
+const maxExtraJSON = 16 << 10
 
 // stream is the transport and security a share link asks for. Its fields are
 // the link's own strings, not yet checked: settings checks them and builds
@@ -46,13 +49,23 @@ type stream struct {
 	// certificate is verified against instead of the SNI. Both are for tls
 	// only, and settings passes them on as they are, trimmed.
 	PinnedCertSHA256, VerifyCertByName string
+	// Extra is a JSON object passed into xhttpSettings.extra (XMUX, padding,
+	// downloadSettings, etc. in xray-core 25+/26+).
+	Extra string
+	// MLDSA65Verify is the post-quantum ML-DSA-65 REALITY verification key
+	// (pqv query parameter -> realitySettings.mldsa65Verify).
+	MLDSA65Verify string
+	// ECHConfigList is the TLS Encrypted Client Hello config list
+	// (ech query parameter -> tlsSettings.echConfigList).
+	ECHConfigList string
 }
 
 // streamKeys are the query parameters that streamFromQuery reads. A malformed
 // one fails the link, as dropping it would change the outbound.
 var streamKeys = []string{
 	"type", "security", "sni", "fp", "alpn", "pbk", "sid", "spx", "host", "path",
-	"serviceName", "authority", "mode", "headerType", "allowInsecure", "insecure", "pcs", "vcn",
+	"serviceName", "authority", "mode", "headerType", "allowInsecure", "insecure",
+	"pcs", "vcn", "extra", "pqv", "ech",
 }
 
 // streamFromQuery reads the transport and security from a share link's query.
@@ -78,6 +91,9 @@ func streamFromQuery(q url.Values, defaultSecurity string) stream {
 
 		PinnedCertSHA256: q.Get("pcs"),
 		VerifyCertByName: q.Get("vcn"),
+		Extra:            q.Get("extra"),
+		MLDSA65Verify:    q.Get("pqv"),
+		ECHConfigList:    q.Get("ech"),
 	}
 	if strings.TrimSpace(s.Security) == "" {
 		s.Security = defaultSecurity
@@ -146,7 +162,18 @@ func (s stream) settings() (map[string]any, error) {
 		out["httpupgradeSettings"] = compact(map[string]string{"path": s.Path, "host": s.Host})
 	case "xhttp", "splithttp":
 		network = "xhttp"
-		out["xhttpSettings"] = compact(map[string]string{"path": s.Path, "host": s.Host, "mode": orDefault(s.Mode, "auto")})
+		x := compact(map[string]string{"path": s.Path, "host": s.Host, "mode": orDefault(s.Mode, "auto")})
+		if rawExtra := strings.TrimSpace(s.Extra); rawExtra != "" {
+			if len(rawExtra) > maxExtraJSON {
+				return nil, errors.New("sharelink: xhttp extra exceeds maximum size")
+			}
+			var extraObj map[string]any
+			if err := json.Unmarshal([]byte(rawExtra), &extraObj); err != nil || extraObj == nil {
+				return nil, errors.New("sharelink: xhttp extra must be a valid JSON object")
+			}
+			x["extra"] = extraObj
+		}
+		out["xhttpSettings"] = x
 	case "kcp", "mkcp", "quic", "h2", "http":
 		return nil, fmt.Errorf("%w network %q", ErrUnsupported, network)
 	default:
@@ -170,6 +197,7 @@ func (s stream) settings() (map[string]any, error) {
 			"fingerprint":          s.Fingerprint,
 			"pinnedPeerCertSha256": strings.TrimSpace(s.PinnedCertSHA256),
 			"verifyPeerCertByName": strings.TrimSpace(s.VerifyCertByName),
+			"echConfigList":        strings.TrimSpace(s.ECHConfigList),
 		})
 		if alpn := splitList(s.ALPN); len(alpn) > 0 {
 			t["alpn"] = alpn
@@ -185,11 +213,12 @@ func (s stream) settings() (map[string]any, error) {
 		}
 		out["security"] = "reality"
 		out["realitySettings"] = compact(map[string]string{
-			"serverName":  s.SNI,
-			"fingerprint": orDefault(s.Fingerprint, "chrome"),
-			"publicKey":   s.PublicKey,
-			"shortId":     s.ShortID,
-			"spiderX":     s.SpiderX,
+			"serverName":    s.SNI,
+			"fingerprint":   orDefault(s.Fingerprint, "chrome"),
+			"publicKey":     s.PublicKey,
+			"shortId":       s.ShortID,
+			"spiderX":       s.SpiderX,
+			"mldsa65Verify": strings.TrimSpace(s.MLDSA65Verify),
 		})
 	default:
 		return nil, errors.New("sharelink: unknown security, want none, tls or reality")

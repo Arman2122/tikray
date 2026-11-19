@@ -154,6 +154,13 @@ func TestInstallerSupportsLatestRouterOSReleases(t *testing.T) {
 		accept, reject           []string
 	}{
 		{
+			version:   "7.26.1",
+			arch:      "arm64",
+			wantRegex: `^7\.26(\.[1-9][0-9]*)?$`,
+			accept:    []string{"7.26", "7.26.1", "7.26.4"},
+			reject:    []string{"7.26.0", "7.25.1", "7.27", "7.26beta1"},
+		},
+		{
 			version:   "7.25.1",
 			arch:      "arm64",
 			wantRegex: `^7\.25(\.[1-9][0-9]*)?$`,

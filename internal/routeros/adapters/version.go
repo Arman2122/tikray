@@ -3,48 +3,51 @@ package adapters
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 )
 
 // Profile is immutable after Select. Its zero value permits no capabilities.
 type Profile struct {
-	version string
-	minor   uint64
-	patch   uint64
-	channel string
-	goarch  string
-	chr     bool
+	version  string
+	minor    uint64
+	patch    uint64
+	channel  string
+	goarch   string
+	chr      bool
+	verified bool
 }
 
 // SupportedVersion reports whether version names a supported stable or
 // long-term RouterOS v7 release (with or without its release label).
 func SupportedVersion(version string) bool {
-	_, _, _, _, ok := parseSupportedRelease(version)
+	_, _, _, _, _, ok := parseSupportedRelease(version)
 	return ok
 }
 
 // Installed selects from the installed release catalog, without consulting the
 // mutable upgrade preference. A long-term install may select stable upgrades.
 func Installed(version, arch, board string) (Profile, error) {
-	_, _, _, channel, ok := parseSupportedRelease(version)
+	_, _, _, channel, _, ok := parseSupportedRelease(version)
 	if !ok {
 		return Profile{}, errors.New("routeros: unsupported version")
 	}
 	return Select(version, channel, arch, board)
 }
 
-// Select accepts verified RouterOS v7 release lines (7.25.x stable, 7.24.6+
-// long-term, and legacy 7.23.8+ long-term), stable or long-term channels,
-// ARM64 devices, and x86_64 CHR. A resource version may include a supported
-// release label, independent of the selected upgrade channel. RouterOS 7.25+
-// omits the channel suffix from /system/resource version strings. Unknown
-// minor branches need evidence before writes.
+// Select accepts lab-verified RouterOS v7 release lines (7.25.x stable,
+// 7.24.6+ long-term, and legacy 7.23.8+ long-term) as well as forward-compatible
+// future stable/long-term RouterOS v7 minor branches (7.26+), on ARM64 devices
+// and x86_64 CHR. Future minor branches report Verified() == false so the UI
+// and status API can label them untested without locking out users who upgrade
+// RouterOS. Pre-releases (beta, rc, testing, development), v6/v8, and unpatched
+// pre-7.23.8 releases are always refused.
 func Select(version, channel, arch, board string) (Profile, error) {
 	if channel != "stable" && channel != "long-term" {
 		return Profile{}, errors.New("routeros: unsupported channel")
 	}
-	release, minor, patch, defaultChannel, ok := parseSupportedRelease(version)
+	release, minor, patch, defaultChannel, verified, ok := parseSupportedRelease(version)
 	if !ok {
 		return Profile{}, errors.New("routeros: unsupported version")
 	}
@@ -66,63 +69,67 @@ func Select(version, channel, arch, board string) (Profile, error) {
 	}
 	// Raw board names are not needed after the platform check.
 	return Profile{
-		version: release,
-		minor:   minor,
-		patch:   patch,
-		channel: defaultChannel,
-		goarch:  goarch,
-		chr:     chr,
+		version:  release,
+		minor:    minor,
+		patch:    patch,
+		channel:  defaultChannel,
+		goarch:   goarch,
+		chr:      chr,
+		verified: verified,
 	}, nil
 }
 
-func parseSupportedRelease(version string) (release string, minor, patch uint64, channel string, ok bool) {
+func parseSupportedRelease(version string) (release string, minor, patch uint64, channel string, verified, ok bool) {
 	if len(version) > 64 {
-		return "", 0, 0, "", false
+		return "", 0, 0, "", false, false
 	}
 	release = releaseVersion(version)
 	parts := strings.Split(release, ".")
 	if len(parts) < 2 || len(parts) > 3 {
-		return "", 0, 0, "", false
+		return "", 0, 0, "", false, false
 	}
 	var numbers [3]uint64
 	for i, part := range parts {
 		if part == "" || len(part) > 1 && part[0] == '0' {
-			return "", 0, 0, "", false
+			return "", 0, 0, "", false, false
 		}
 		for j := range part {
 			if part[j] < '0' || part[j] > '9' {
-				return "", 0, 0, "", false
+				return "", 0, 0, "", false, false
 			}
 		}
 		n, err := strconv.ParseUint(part, 10, 32)
 		if err != nil {
-			return "", 0, 0, "", false
+			return "", 0, 0, "", false, false
 		}
 		numbers[i] = n
 	}
 	if numbers[0] != 7 {
-		return "", 0, 0, "", false
+		return "", 0, 0, "", false, false
 	}
-	// Non-canonical zero patch (e.g. 7.25.0) is never issued by RouterOS.
+	// Non-canonical zero patch (e.g. 7.25.0, 7.26.0) is never issued by RouterOS.
 	if len(parts) == 3 && numbers[2] == 0 {
-		return "", 0, 0, "", false
+		return "", 0, 0, "", false, false
 	}
-	switch numbers[1] {
-	case 25:
+	switch {
+	case numbers[1] >= 26:
+		// Forward-compatible stable/long-term v7 minor branches (unverified until lab-tested).
+		return release, numbers[1], numbers[2], "stable", false, true
+	case numbers[1] == 25:
 		// 7.25 and 7.25.x stable releases (e.g. 7.25.1).
-		return release, numbers[1], numbers[2], "stable", true
-	case 24:
+		return release, numbers[1], numbers[2], "stable", true, true
+	case numbers[1] == 24:
 		// 7.24.6+ long-term branch.
 		if len(parts) == 3 && numbers[2] >= 6 {
-			return release, numbers[1], numbers[2], "long-term", true
+			return release, numbers[1], numbers[2], "long-term", true, true
 		}
-	case 23:
+	case numbers[1] == 23:
 		// 7.23.8+ legacy long-term compatibility for in-place upgrades.
 		if len(parts) == 3 && numbers[2] >= 8 {
-			return release, numbers[1], numbers[2], "long-term", true
+			return release, numbers[1], numbers[2], "long-term", true, true
 		}
 	}
-	return "", 0, 0, "", false
+	return "", 0, 0, "", false, false
 }
 
 func releaseVersion(version string) string {
@@ -153,7 +160,12 @@ func (p Profile) IsCHR() bool     { return p.chr }
 // Channel returns the release line's channel ("stable" or "long-term").
 func (p Profile) Channel() string { return p.channel }
 
-// ReleaseLine returns the verified major.minor branch ("7.25", "7.24", "7.23").
+// Verified reports whether this RouterOS release line has been explicitly
+// lab-verified (7.23.8+, 7.24.6+, 7.25.x). Forward-compatible future v7 minor
+// branches (7.26+) return false so callers can surface a non-blocking warning.
+func (p Profile) Verified() bool { return p.verified }
+
+// ReleaseLine returns the major.minor branch (e.g. "7.25", "7.24", "7.26").
 func (p Profile) ReleaseLine() string {
 	if p.version == "" {
 		return ""
@@ -170,17 +182,19 @@ func (p Profile) SupportsVethIPPreserve() bool { return p.version != "" && p.min
 func (p Profile) SupportsDynamicARPInspection() bool { return p.version != "" && p.minor >= 25 }
 
 // InstallerVersionPattern returns a POSIX ERE matching compatible RouterOS
-// patch releases on the same verified release line.
+// patch releases on the same release line.
 func (p Profile) InstallerVersionPattern() string {
 	if p.version == "" {
 		return ""
 	}
-	switch p.minor {
-	case 25:
+	switch {
+	case p.minor >= 26:
+		return fmt.Sprintf(`^7\.%d(\.[1-9][0-9]*)?$`, p.minor)
+	case p.minor == 25:
 		return `^7\.25(\.[1-9][0-9]*)?$`
-	case 24:
+	case p.minor == 24:
 		return `^7\.24\.([6-9]|[1-9][0-9]+)$`
-	case 23:
+	case p.minor == 23:
 		return `^7\.23\.([8-9]|[1-9][0-9]+)$`
 	default:
 		return ""

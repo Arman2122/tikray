@@ -181,8 +181,34 @@
     "board": "RB5009"
   },
   {
-    "name": "future minor",
+    "name": "future minor forward compatible",
     "version": "7.26",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009",
+    "wantVersion": "7.26",
+    "wantArch": "arm64"
+  },
+  {
+    "name": "future minor patch forward compatible",
+    "version": "7.26.1",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009",
+    "wantVersion": "7.26.1",
+    "wantArch": "arm64"
+  },
+  {
+    "name": "future minor noncanonical zero patch",
+    "version": "7.26.0",
+    "wantError": "routeros: unsupported version",
+    "channel": "stable",
+    "arch": "arm64",
+    "board": "RB5009"
+  },
+  {
+    "name": "future minor beta rejected",
+    "version": "7.26beta1",
     "wantError": "routeros: unsupported version",
     "channel": "stable",
     "arch": "arm64",
