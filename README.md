@@ -14,7 +14,7 @@
 [![Go 1.24+](https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![RouterOS 7.23–7.26+](https://img.shields.io/badge/RouterOS-7.25.1%20%7C%207.24.6%20%7C%207.26%2B-0ea5e9)](docs/wiki/Installation-Guide.md)
 [![xray-core 26.x](https://img.shields.io/badge/xray--core-26.1.18%20–%2026.11.9-6366f1)](docs/wiki/Protocols-and-Share-Links.md)
-[![Embedded UI](https://img.shields.io/badge/Web%20UI-57%20KB%20gz%20·%20Offline-10b981)](docs/wiki/Web-UI-and-CLI-Guide.md)
+[![Embedded UI](https://img.shields.io/badge/Web%20UI-86%20KB%20gz%20·%20Offline-10b981)](docs/wiki/Web-UI-and-CLI-Guide.md)
 
 <p align="center">
   <strong>Turn any container-capable MikroTik RouterOS v7 router into a hardened, self-healing <a href="https://github.com/XTLS/Xray-core">xray-core</a> gateway — zero external hardware required.</strong>
@@ -23,6 +23,7 @@
 <p align="center">
   <a href="#why-tikray">Why tikray</a> &nbsp;·&nbsp;
   <a href="#embedded-web-ui">Web UI</a> &nbsp;·&nbsp;
+  <a href="#wi-fi-lan-ports--multi-wan-routing">Wi-Fi &amp; WAN</a> &nbsp;·&nbsp;
   <a href="#architecture">Architecture</a> &nbsp;·&nbsp;
   <a href="#protocols--xray-core-26x">Protocols</a> &nbsp;·&nbsp;
   <a href="#supported-routeros--hardware">Hardware</a> &nbsp;·&nbsp;
@@ -43,11 +44,13 @@ Running `xray-core` directly on a MikroTik router usually means fragile shell sc
 |---|:---:|:---:|:---:|
 | Zero extra hardware (native RouterOS containers) | ✅ | ❌ | ✅ |
 | Domestic & LAN traffic offloaded at RouterOS FastTrack speed | Manual | Partial | **Automatic** |
-| Per-device / per-subnet `direct` / `smart` / `full` + **Kill Switch** | ❌ | Manual | **Built-in + DHCP Static** |
+| Per-**Wi-Fi SSID**, **LAN port**, **VLAN**, &amp; **device** policies + **Kill Switch** | ❌ | Manual | **Built-in + RouterOS Discovery** |
+| Multi-WAN **Internet-in uplink pinning** for Xray tunnels with failover | ❌ | Manual | **Automatic (`tikray-wan` FIB)** |
+| **v2rayN-style Visual Config + JSON Editor** &amp; warm HTTP 204 ping | ❌ | Separate app | **Built-in (auto-ping on connect)** |
 | Automatic **trial & rollback** on bad config or `xray-core` upgrade | ❌ | ❌ | **Deadline-backed** |
 | Zero-downtime **hot outbound reload** (no dropped connections) | ❌ | Manual | **Automatic (`xray api`)** |
 | Native RouterOS **watchdog** & one-command **`tikray-emergency-off`** | ❌ | ❌ | **Built-in (works offline)** |
-| Offline-first Web UI (57 KB gz, zero CDNs) + CLI + HTTPS API | ❌ | Heavy | **Embedded in binary** |
+| Offline-first responsive Web UI (86 KB gz, zero CDNs) + CLI + HTTPS API | ❌ | Heavy | **Embedded in binary** |
 | Air-gapped / censored-network **offline inbox** & proxy fallback | ❌ | Manual | **First-class** |
 | Passphrase-encrypted portable backup (**Argon2id + AES-256-GCM**) | ❌ | Manual | **Built-in** |
 | Cryptographic verification (`cosign`, SHA-512 chunks, ECDSA P-256) | ❌ | Manual | **Enforced end-to-end** |
@@ -56,13 +59,13 @@ Running `xray-core` directly on a MikroTik router usually means fragile shell sc
 
 ## Embedded Web UI
 
-Compiled directly into the `tikray` Go binary via `go:embed` (**56.6 KB total gzipped** across HTML + CSS + JS), the Svelte 5 SPA ships with **zero external fonts, CDNs, or telemetry** so it opens instantaneously on air-gapped or heavily filtered networks — in both dark and light themes.
+Compiled directly into the `tikray` Go binary via `go:embed` (**86 KB total gzipped** across HTML + CSS + JS), the Obsidian-styled Svelte 5 SPA ships with **zero external fonts, CDNs, or telemetry** so it opens instantaneously on desktop, tablet, and mobile devices even on air-gapped or heavily filtered networks — in both dark and light themes.
 
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/webui-preview-dark.svg" />
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/webui-preview-light.svg" />
-    <img alt="tikray Embedded Svelte 5 Web UI Dashboard" src="docs/assets/webui-preview-dark.svg" width="100%" />
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/dashboard-dark.png" />
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/dashboard-light.png" />
+    <img alt="tikray Embedded Svelte 5 Web UI Dashboard" src="docs/assets/dashboard-dark.png" width="100%" />
   </picture>
 </div>
 
@@ -71,19 +74,57 @@ Compiled directly into the `tikray` Go binary via `go:embed` (**56.6 KB total gz
 <table>
   <tr>
     <td width="50%" valign="top">
-      <strong>Observability &amp; Speed</strong><br/>
-      • <strong>Live SVG Throughput Charts</strong> — smooth cubic-bezier download/upload rate sparklines from <code>/v1/stats</code> deltas (zero charting libs).<br/>
-      • <strong>Interactive 4-Stage Topology</strong> — animated <code>LAN → RouterOS v7 → xray-core → Active Exit</code> map with live RouterOS version badge &amp; outage states.<br/>
-      • <strong>Proxy vs. Direct Split</strong> — real-time visibility into domestic offload vs. tunnel traffic plus server RTT bars.
+      <strong>Observability &amp; Real Latency</strong><br/>
+      • <strong>Live SVG Throughput Charts</strong> — smooth interactive download/upload rate curves from <code>/v1/stats</code> deltas with hover/touch scrubbing (zero charting libs).<br/>
+      • <strong>Interactive 4-Stage Topology</strong> — live <code>LAN &amp; Interfaces → RouterOS v7 &amp; WAN → xray-core → Active Exit</code> map.<br/>
+      • <strong>Warm HTTP 204 &amp; TCP Latency</strong> — v2rayN-style real tunnel latency measured automatically on every server connect and via 1-click <strong>Test Latency</strong>.
     </td>
     <td width="50%" valign="top">
       <strong>Operator Workflow</strong><br/>
-      • <strong><code>Ctrl+K</code> / <code>⌘K</code> Command Palette</strong> — jump to any view, apply config, refresh subscriptions, toggle theme, or pin servers from the keyboard.<br/>
-      • <strong>Live Share-Link Inspector</strong> — client-side capability badges (<code>REALITY</code>, <code>XTLS-Vision</code>, <code>XHTTP+Extra</code>, <code>ML-DSA-65</code>, <code>ECH</code>, <code>Pinned Cert</code>) before submit, without echoing secrets.<br/>
-      • <strong>4-Lifecycle Updates &amp; Inbox</strong> — manage <code>xray-core</code>, Geo data, <code>tikray</code>, and <code>tikray-runner</code> independently, including browser uploads for offline staging.
+      • <strong>v2rayN-Style Config &amp; JSON Editor</strong> — edit VLESS, VMess, Trojan, Shadowsocks 2022, REALITY, XHTTP <code>extra</code>, Mux, and raw JSON with secret-preserving saves.<br/>
+      • <strong>Wi-Fi, Ports &amp; Multi-WAN Control</strong> — discover live MikroTik radios, Ethernet ports, VLANs, and WAN uplinks, plus 1-click RouterOS v7 CLI provisioning recipes.<br/>
+      • <strong><code>Ctrl+K</code> Command Palette &amp; 4-Lifecycle Updates</strong> — pick <code>xray-core</code> versions from a dropdown, upload offline inbox archives, or pin exits from the keyboard.
     </td>
   </tr>
 </table>
+
+### Feature Gallery
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/assets/network-interfaces-dark.png">
+        <img alt="Wi-Fi SSID, LAN Ports, VLANs & Multi-WAN Uplink Control" src="docs/assets/network-interfaces-dark.png" width="100%" />
+      </a>
+      <p align="center"><sub><strong>Network &amp; Devices</strong> — Live MikroTik Wi-Fi SSIDs, LAN ports, VLANs, per-interface policies &amp; Xray WAN uplink pinning.</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/assets/server-editor-dark.png">
+        <img alt="v2rayN-Style Visual Server Config & Live JSON Editor" src="docs/assets/server-editor-dark.png" width="100%" />
+      </a>
+      <p align="center"><sub><strong>Server Config &amp; JSON Editor</strong> — Visual form synced two-way with raw <code>xray-core</code> JSON, Share Link unpacker &amp; saved-secret indicators.</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" valign="top">
+      <a href="docs/assets/updates-dark.png">
+        <img alt="4-Lifecycle Updates & xray-core Release Picker" src="docs/assets/updates-dark.png" width="100%" />
+      </a>
+      <p align="center"><sub><strong>Updates &amp; Cores</strong> — <code>xray-core</code> release picker dropdown (<code>latest</code> + verified slots), Geo bundles, blue/green control &amp; runner image lifecycles, and offline inbox staging.</sub></p>
+    </td>
+  </tr>
+</table>
+
+---
+
+## Wi-Fi, LAN Ports & Multi-WAN Routing
+
+Real MikroTik deployments rarely treat every port and SSID the same. **tikray** models your router's actual Layer-3 topology natively in RouterOS v7:
+
+- **Dedicated VPN Wi-Fi SSIDs & LAN Ports** — Assign `Direct`, `Smart Split`, or `Full Tunnel` (with optional **Kill Switch** and matching IPv6 leak guard) to any routed Wi-Fi interface (e.g. `wifi-vpn` broadcasting `Home-VPN`), dedicated Ethernet port (`ether4` for Apple TV / PS5), VLAN (`vlan20`), or bridge — while keeping L2 switch-chip hardware offload and FastTrack completely intact on your main LAN.
+- **Built-In RouterOS v7 Setup Recipes** — For bridged ports or main Wi-Fi radios, the Web UI generates copy-paste RouterOS v7 CLI commands (supporting both modern `/interface/wifi` WiFiWave2 and legacy `/interface/wireless`) to spin up a dedicated VPN SSID or detach a LAN port onto its own subnet and DHCP server, then stages its policy in one click.
+- **Internet-In (WAN Uplink) Pinning** — On single- or multi-WAN routers (`ether1`, `pppoe-out1`, `lte1`, fiber + 5G backup), **tikray** discovers all active and standby default routes and lets you either follow the active WAN automatically (**Auto**, zero extra rules) or pin Xray's outbound tunnels to a specific WAN interface via a dedicated `tikray-wan` FIB table (`check-gateway=ping` + automatic distance-2 failover).
+- **Precedence Order** — `Per-Device / CIDR Override` → `Interface Policy (Wi-Fi / Port / VLAN)` → `Default LAN Policy`.
 
 ---
 
@@ -93,9 +134,9 @@ Two hardened Linux containers share one `/data` volume across an isolated, reply
 
 ```mermaid
 flowchart LR
-    LAN["LAN Clients<br/>Direct / Smart / Full + Kill Switch"]
-    ROS["MikroTik RouterOS v7<br/>Policy Routing · Mangle · SRCNAT<br/>IPv6 Guard · Pinned API-SSL · Watchdog"]
-    WAN["ISP / WAN<br/>Domestic &amp; Direct FastTrack"]
+    LAN["LAN · Wi-Fi SSIDs · Ports · VLANs<br/>Per-Interface &amp; Per-Device Policy + Kill Switch"]
+    ROS["MikroTik RouterOS v7<br/>Policy Routing · Mangle · SRCNAT<br/>Multi-WAN tikray-wan · IPv6 Guard · Watchdog"]
+    WAN["ISP / Multi-WAN Uplinks<br/>Domestic &amp; Direct FastTrack"]
     CTL["tikray (Control Plane · 48 MiB)<br/>Embedded Web UI · HTTPS API · CLI<br/>Reconciler · Health · Subscriptions"]
     RUN["tikray-runner (Data Plane · 24 MiB)<br/>FROM scratch · PID 1 · xray-core TUN<br/>Trial/Rollback · Hot Reload · gRPC Stats"]
     UP["Upstream Proxy Servers<br/>VLESS · REALITY · XHTTP · ECH · SS-2022"]
@@ -105,14 +146,14 @@ flowchart LR
     ROS -- "Steered Traffic<br/>(Private /29 Bridge)" --> RUN
     CTL <-- "Cert-Pinned Native API-SSL" --> ROS
     CTL <-- "Local Control API + gRPC" --> RUN
-    RUN -- "Encrypted Tunnel" --> UP
+    RUN -- "Encrypted Tunnel<br/>(Auto or Pinned WAN)" --> UP
 ```
 
 ### Router-Friendly Memory Budget
 
 | Component | Base Image | Memory Guard | Role |
 |---|---|---|---|
-| **`tikray`** | `busybox:1.37.0-musl` + static Go | `GOMEMLIMIT=48MiB` | Web UI, HTTPS API, CLI, RouterOS reconciler, subscriptions, health monitor |
+| **`tikray`** | `busybox:1.37.0-musl` + static Go | `GOMEMLIMIT=48MiB` | Web UI, HTTPS API, CLI, RouterOS reconciler, interface discovery, subscriptions, health monitor |
 | **`tikray-runner`** | **`FROM scratch`** + static Go | `GOMEMLIMIT=24MiB` | PID 1 supervisor, netlink TUN/routing, deadline-backed trials (no shell) |
 | **`xray-core`** | Downloaded & verified onto `/data` | `XRAY_GOMEMLIMIT=128MiB` | High-throughput proxy data plane (`CAP_NET_ADMIN` + `/dev/net/tun`) |
 
@@ -131,7 +172,7 @@ Tested from **`xray-core v26.1.18`** through **`v26.11.9`**, with automatic vers
 | **XHTTP Advanced (`extra`)** | `type=xhttp&extra={…}` | Full JSON object support (XMUX, `downloadSettings`, `noGRPCHeader`, padding; 16 KiB cap, zero secret echo, nested `allowInsecure` blocked) |
 | **TLS + ECH + Cert Pinning** | `security=tls` | **TLS Encrypted Client Hello (`ech` → `echConfigList`)**, pinned cert SHA-256 (`pcs`), custom verify name (`vcn`), ALPN, CDN host fallback |
 | **VMess / Trojan / SS** | `vmess://`, `trojan://`, `ss://` | Standard & **Shadowsocks 2022** (with key-length validation); unsafe plaintext/no-TLS outbounds and deprecated `allowInsecure` are refused cleanly |
-| **Raw JSON Escape Hatch** | `--json FILE` / Web UI | Paste any full `xray-core` outbound JSON object directly for experimental transports or custom `finalmask` chains |
+| **Visual & Raw JSON Editor** | `--json FILE` / Web UI | v2rayN-style Visual Config editor synced two-way with raw `xray-core` outbound JSON (including experimental transports and `finalmask`) |
 | **Subscriptions** | Scheduled + Manual | Base64, plain-line, and SIP008 feeds with diff summaries (`added / updated / removed / kept / skipped`) and never-leaked URLs |
 
 ---
@@ -230,7 +271,7 @@ Open `https://<router-ip>` in your browser, verify the certificate fingerprint, 
 
 ## CLI & HTTPS API Cheat Sheet
 
-Every operation works identically through the **Embedded Web UI**, the **`tikray` CLI** (local container or remote via `TIKRAY_API` + `TIKRAY_API_TOKEN` + `TIKRAY_API_FINGERPRINT`), and the **HTTPS REST API v1** ([`docs/api.md`](docs/api.md)):
+Every operation works through the **Embedded Web UI**, the **`tikray` CLI** (local container or remote via `TIKRAY_API` + `TIKRAY_API_TOKEN` + `TIKRAY_API_FINGERPRINT`), and the **HTTPS REST API v1** ([`docs/api.md`](docs/api.md)):
 
 ```sh
 tikray status                                              # Control, runner, xray & RouterOS status
@@ -248,11 +289,13 @@ tikray backup restore --in backup.json                     # Atomic restore (pre
 tikray events                                              # Stream redacted control-plane events
 ```
 
+Key HTTPS REST API v1 endpoints also include `GET /v1/routeros/interfaces`, `PUT /v1/interfaces/{name}`, `DELETE /v1/interfaces/{name}`, `PUT /v1/network/wan`, `GET /v1/servers/{id}/config`, `POST /v1/servers/{id}/ping`, and `GET /v1/core/releases` — see [`docs/api.md`](docs/api.md).
+
 ---
 
 ## Security & Supply-Chain Hardening
 
-- **Zero-Secret Discipline** — Share links, server UUIDs/passwords, subscription URLs, root/named API tokens, passwords/hashes, setup codes, session IDs, CSRF tokens, backup passphrases, and RouterOS API credentials never reach API views, logs, events, history files, or error messages.
+- **Zero-Secret Discipline** — Share links, server UUIDs/passwords, subscription URLs, Wi-Fi passphrases, root/named API tokens, passwords/hashes, setup codes, session IDs, CSRF tokens, backup passphrases, and RouterOS API credentials never reach API views, logs, events, history files, or error messages. Editing an existing server preserves stored secrets via a non-secret sentinel unless explicitly rotated.
 - **Certificate Pinning Everywhere** — Both the RouterOS native API-SSL reconciler and remote `tikray` CLI pin exact leaf SHA-256 certificate fingerprints.
 - **Memory-Bounded Cryptography** — Admin passwords and portable `tikray-backup-v1` archives use **Argon2id** (`19 MiB, t=2, p=1`, concurrency capped at 2 for constrained router RAM) + **AES-256-GCM**.
 - **Browser Defense** — `Secure; HttpOnly; SameSite=Strict` cookies, HMAC-SHA256 `X-Tikray-CSRF` headers, strict CSP, `ETag`/`If-Match` optimistic concurrency, and IP/global login rate limiting (`429 Retry-After`).
