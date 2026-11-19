@@ -78,18 +78,19 @@ func TestBackupAndInboxRoutes(t *testing.T) {
 	}
 	h := NewHandler(fb, testToken, store, auth.NewLimiter(nil), "")
 
-	// Named API token is forbidden from backup export, restore, and inbox upload.
-	for _, tc := range []struct{ path, body string }{
-		{"/v1/backup/export", `{"passphrase":"export-passphrase-123"}`},
-		{"/v1/backup/restore", `{"passphrase":"export-passphrase-123","bundle":{}}`},
-		{"/v1/inbox/core/Xray-linux-arm64-v8a.zip", "zipbytes"},
+	// Named API token is forbidden from backup export, restore, inbox upload, and server config inspection.
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodPost, "/v1/backup/export", `{"passphrase":"export-passphrase-123"}`},
+		{http.MethodPost, "/v1/backup/restore", `{"passphrase":"export-passphrase-123","bundle":{}}`},
+		{http.MethodPost, "/v1/inbox/core/Xray-linux-arm64-v8a.zip", "zipbytes"},
+		{http.MethodGet, "/v1/servers/5ab3c4d5/config", ""},
 	} {
-		r := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+		r := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
 		r.Header.Set("Authorization", "Bearer "+tok)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
 		if w.Code != http.StatusForbidden {
-			t.Fatalf("named token on %s got %d, want 403", tc.path, w.Code)
+			t.Fatalf("named token on %s %s got %d, want 403", tc.method, tc.path, w.Code)
 		}
 	}
 

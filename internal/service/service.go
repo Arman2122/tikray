@@ -181,6 +181,8 @@ type Service struct {
 	// refreshing holds a token while a subscription refresh runs: a channel,
 	// so that a caller's context can end the wait.
 	refreshing chan struct{}
+	// connectCh notifies watchConnectedLatency whenever xray connects to a server.
+	connectCh chan string
 
 	mu sync.Mutex // guards the fields below
 	// kicked counts the kicks, and served is the count a pass that ended
@@ -284,6 +286,7 @@ func New(c Config) (*Service, error) {
 
 		fetcher:    c.Fetcher,
 		refreshing: make(chan struct{}, 1),
+		connectCh:  make(chan string, 1),
 		holds:      map[string]time.Time{},
 		after:      realTimer,
 		schedAfter: realTimer,
@@ -306,6 +309,15 @@ func New(c Config) (*Service, error) {
 			m.State = func() store.State {
 				st, _ := c.Store.State()
 				return st
+			}
+		}
+		if s.socks != "" && !repairBridge {
+			prev := m.OnSelected
+			m.OnSelected = func(id string) {
+				if prev != nil {
+					prev(id)
+				}
+				s.notifyServerConnected(id)
 			}
 		}
 	}
@@ -373,7 +385,7 @@ func (s *Service) Run(ctx context.Context) error {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				s.seedInitialPings(ctx)
+				s.watchConnectedLatency(ctx)
 			}()
 		}
 	}

@@ -203,10 +203,6 @@ pre,
   line-height: 1.2;
 }
 
-.mobile-only {
-  display: none;
-}
-
 /* Sidebar Search & Bell Bar */
 .sidebar-tools {
   display: flex;
@@ -1009,6 +1005,125 @@ pre,
   cursor: pointer;
 }
 
+/* Tactile Pill Switch (v2rayN-grade Mux / Enabled toggle) */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch-input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.switch-track {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--surface-active);
+  border: 1px solid var(--border-strong);
+  transition: background 150ms var(--ease), border-color 150ms var(--ease);
+  flex-shrink: 0;
+}
+
+.switch-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--text-muted);
+  transition: transform 150ms var(--ease), background 150ms var(--ease);
+}
+
+.switch-input:checked + .switch-track {
+  background: var(--accent-solid);
+  border-color: var(--accent-solid);
+}
+
+.switch-input:checked + .switch-track::after {
+  transform: translateX(16px);
+  background: #ffffff;
+}
+
+.switch-input:focus-visible + .switch-track {
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+/* v2rayN-style Config Form Row & JSON Code Editor */
+.cfg-grid {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px 16px;
+}
+
+.cfg-label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cfg-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cfg-control > .input,
+.cfg-control > .select {
+  flex: 1;
+  min-width: 0;
+}
+
+.json-editor {
+  width: 100%;
+  min-height: 360px;
+  padding: 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  tab-size: 2;
+  resize: vertical;
+  outline: none;
+  transition: border-color 140ms var(--ease), box-shadow 140ms var(--ease);
+}
+
+.json-editor:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.saved-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--ok-soft);
+  border: 1px solid var(--ok-border);
+  color: var(--ok);
+  white-space: nowrap;
+}
+
 /* Tables */
 .table-wrap {
   width: 100%;
@@ -1626,9 +1741,6 @@ tbody tr:hover td {
     padding: env(safe-area-inset-top) 14px 0;
     height: calc(52px + env(safe-area-inset-top));
   }
-  .mobile-only {
-    display: inline-flex;
-  }
   .sidebar {
     position: fixed;
     left: 0;
@@ -1740,6 +1852,17 @@ tbody tr:hover td {
   }
   .chart-svg {
     height: 150px;
+  }
+  .cfg-grid {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .cfg-label {
+    margin-top: 4px;
+  }
+  .json-editor {
+    min-height: 260px;
+    font-size: 13px;
   }
   .hide-xs {
     display: none;

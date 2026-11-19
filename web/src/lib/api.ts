@@ -33,6 +33,16 @@ export interface Policy {
   kill_switch?: boolean;
 }
 
+export const KEEP_SECRET_SENTINEL = '__tikray_saved__';
+
+export interface ServerConfigView {
+  id: string;
+  name: string;
+  disabled?: boolean;
+  subscription?: string;
+  outbound: Record<string, unknown>;
+}
+
 export interface Server {
   id: string;
   name: string;
@@ -488,6 +498,9 @@ export const api = {
   },
 
   // Servers
+  async getServerConfig(id: string): Promise<ServerConfigView> {
+    return (await request<ServerConfigView>(`/v1/servers/${encodeURIComponent(id)}/config`)).data;
+  },
   async addServer(payload: { link?: string; name?: string; outbound?: unknown }): Promise<Server> {
     return (
       await request<Server>('/v1/servers', {

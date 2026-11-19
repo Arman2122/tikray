@@ -145,6 +145,7 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter, instal
 	mux.HandleFunc("POST /v1/routeros/leases/static", h.makeStaticLease)
 
 	mux.HandleFunc("GET /v1/servers", h.listServers)
+	mux.HandleFunc("GET /v1/servers/{id}/config", h.serverConfig)
 	mux.HandleFunc("POST /v1/servers", h.addServer)
 	mux.HandleFunc("POST /v1/servers/ping", h.pingAllServers)
 	mux.HandleFunc("POST /v1/servers/{id}/ping", h.pingServer)

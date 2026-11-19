@@ -126,6 +126,9 @@ type Monitor struct {
 	ProbeEvery time.Duration
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
+	// OnSelected, if set, is called whenever the active exit server changes to
+	// a non-empty server ID. It must not block.
+	OnSelected func(id string)
 
 	mu   sync.Mutex
 	snap Snapshot // the last check's, under mu
@@ -299,8 +302,13 @@ func (m *Monitor) tick(ctx context.Context) {
 	snap.Runner.Err = redact(snap.Runner.Err)
 	snap.Level = level(live, proxy, snap.Servers, snap.Probe)
 	m.mu.Lock()
+	prevSelected := m.snap.Selected
 	m.snap = snap
+	onSelected := m.OnSelected
 	m.mu.Unlock()
+	if onSelected != nil && snap.Selected != "" && snap.Selected != prevSelected {
+		onSelected(snap.Selected)
+	}
 }
 
 func (m *Monitor) runnerStatus(ctx context.Context) (runnerapi.Status, error) {

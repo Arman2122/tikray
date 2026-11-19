@@ -22,6 +22,10 @@ type coreReleaseLister interface {
 	CoreReleases(ctx context.Context) service.CoreReleasesInfo
 }
 
+type serverConfigReader interface {
+	ServerConfig(id string) (service.ServerConfigView, error)
+}
+
 // NewHandlerWithUI serves the API and, when ui is non-nil, serves the embedded
 // Web UI for browser GET/HEAD requests outside /v1/* and /healthz.
 //
@@ -201,4 +205,22 @@ func (h *handler) coreReleases(w http.ResponseWriter, r *http.Request) {
 	info := l.CoreReleases(r.Context())
 	_, rev := h.b.State()
 	h.reply(w, http.StatusOK, rev, info)
+}
+
+func (h *handler) serverConfig(w http.ResponseWriter, r *http.Request) {
+	if !h.requireAdminOrRoot(w, r, "inspect a server configuration") {
+		return
+	}
+	reader, ok := h.b.(serverConfigReader)
+	if !ok {
+		h.writeError(w, http.StatusServiceUnavailable, codeUnavailable, "server config inspection is not supported")
+		return
+	}
+	cfg, err := reader.ServerConfig(r.PathValue("id"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	_, rev := h.b.State()
+	h.reply(w, http.StatusOK, rev, cfg)
 }

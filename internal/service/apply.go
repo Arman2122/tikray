@@ -207,6 +207,9 @@ func (s *Service) pass(ctx context.Context, retry time.Duration) (again bool) {
 		retry = 0
 	}
 	s.noteApply(rev, res, err, retry)
+	if err == nil && res.Outcome == runnerapi.OutcomeCommitted {
+		s.notifyAfterApply(st)
+	}
 	return again
 }
 
@@ -279,7 +282,20 @@ func (s *Service) ApplyNow(ctx context.Context) (artifacts.Result, error) {
 		s.Kick()
 	}
 	s.noteApply(rev, res, err, 0)
+	if err == nil && res.Outcome == runnerapi.OutcomeCommitted {
+		s.notifyAfterApply(st)
+	}
 	return res, s.redactError(err)
+}
+
+func (s *Service) notifyAfterApply(st store.State) {
+	if st.Routing.Pinned != "" {
+		s.notifyServerConnected(st.Routing.Pinned)
+		return
+	}
+	if sel := s.health().Selected; sel != "" {
+		s.notifyServerConnected(sel)
+	}
 }
 
 // CoreUpdate switches the runner to xray-core version ("latest" or a release)

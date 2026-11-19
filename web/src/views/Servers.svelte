@@ -5,6 +5,7 @@
     type PingResult,
     type RefreshResult,
     type Server,
+    type ServerConfigView,
     type ServiceStatus,
     type State,
     type Subscription
@@ -14,7 +15,7 @@
   import { toast } from '../lib/toast.svelte';
   import Icon from '../components/Icon.svelte';
   import Modal from '../components/Modal.svelte';
-  import ShareLinkEditor from '../components/ShareLinkEditor.svelte';
+  import ServerConfigEditor, { type ServerEditorResult } from '../components/ServerConfigEditor.svelte';
 
   interface Props {
     status: ServiceStatus | null;
@@ -30,20 +31,16 @@
 
   // Add Server modal
   let showAddServer = $state(false);
-  let addMode = $state<'visual' | 'bulk' | 'json'>('visual');
-  let singleLinkInput = $state('');
+  let addMode = $state<'editor' | 'bulk'>('editor');
   let linkInput = $state('');
   let serverName = $state('');
-  let outboundJSON = $state('');
   let saving = $state(false);
 
-  // Edit Server modal
+  // Edit Server modal (v2rayN-style Visual + JSON editor)
   let editingServer = $state<Server | null>(null);
-  let editTab = $state<'general' | 'link' | 'json'>('general');
-  let editName = $state('');
-  let editDisabled = $state(false);
-  let editLink = $state('');
-  let editOutboundJSON = $state('');
+  let editConfig = $state<ServerConfigView | null>(null);
+  let loadingEditConfig = $state(false);
+  let editLoadError = $state('');
 
   // Add Subscription modal
   let showAddSub = $state(false);
@@ -51,10 +48,11 @@
   let subURL = $state('');
   let subInterval = $state('24h');
 
-  // Refresh & latency test state
+  // Refresh, connect & latency test state
   let refreshingId = $state('');
   let lastRefresh = $state<{ id: string; result: RefreshResult } | null>(null);
   let pingingId = $state('');
+  let pinningId = $state('');
   let pingingAll = $state(false);
   let localPings = $state<Record<string, PingResult>>({});
 
@@ -150,102 +148,86 @@
     });
   });
 
-  function formatJSONField(raw: string): string | null {
+  function autoPingCreated(ids: string[]): void {
+    if (ids.length === 0) return;
+    Promise.allSettled(
+      ids.slice(0, 6).map((cid) =>
+        api.pingServer(cid).then((res) => {
+          localPings = { ...localPings, [cid]: res };
+        })
+      )
+    ).then(() => {
+      onRefresh();
+    });
+  }
+
+  async function addFromEditor(res: ServerEditorResult): Promise<void> {
+    saving = true;
     try {
-      return JSON.stringify(JSON.parse(raw), null, 2);
-    } catch {
-      toast.warn('Invalid JSON — check syntax before formatting.');
-      return null;
+      const payload: { name?: string; link?: string; outbound?: unknown } = {};
+      if (res.name) payload.name = res.name;
+      if (res.link) {
+        payload.link = res.link;
+      } else if (res.outbound) {
+        payload.outbound = res.outbound;
+      }
+      const srv = await api.addServer(payload);
+      toast.ok(`Added ${srv.name} — measuring latency…`);
+      showAddServer = false;
+      await onRefresh();
+      autoPingCreated([srv.id]);
+    } catch (err) {
+      toast.err(friendlyError(err, 'Could not add server'));
+    } finally {
+      saving = false;
     }
   }
 
-  async function addServerSubmit(e: SubmitEvent): Promise<void> {
+  async function addBulkSubmit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     saving = true;
     try {
+      const lines = linkInput
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (lines.length === 0) {
+        toast.warn('Paste at least one share link (vless://, vmess://, trojan://, ss://).');
+        return;
+      }
       const createdIds: string[] = [];
-      if (addMode === 'visual') {
-        const line = singleLinkInput.trim();
-        if (!line) {
-          toast.warn('Paste a share link (vless://, trojan://, vmess://, ss://).');
-          return;
-        }
-        const srv = await api.addServer({
-          link: line,
-          name: serverName.trim() || undefined
-        });
-        createdIds.push(srv.id);
-        toast.ok(`Added ${srv.name} — testing latency…`);
-      } else if (addMode === 'bulk') {
-        const lines = linkInput
-          .split(/\r?\n/)
-          .map((l) => l.trim())
-          .filter(Boolean);
-        if (lines.length === 0) {
-          toast.warn('Paste at least one share link (vless://, vmess://, trojan://, ss://).');
-          return;
-        }
-        let added = 0;
-        let failed = 0;
-        let firstErr = '';
-        for (const line of lines) {
-          try {
-            const srv = await api.addServer({
-              link: line,
-              name: lines.length === 1 && serverName.trim() ? serverName.trim() : undefined
-            });
-            createdIds.push(srv.id);
-            added++;
-          } catch (err) {
-            failed++;
-            if (!firstErr) {
-              firstErr = friendlyError(err, 'Failed to add server');
-            }
+      let added = 0;
+      let failed = 0;
+      let firstErr = '';
+      for (const line of lines) {
+        try {
+          const srv = await api.addServer({
+            link: line,
+            name: lines.length === 1 && serverName.trim() ? serverName.trim() : undefined
+          });
+          createdIds.push(srv.id);
+          added++;
+        } catch (err) {
+          failed++;
+          if (!firstErr) {
+            firstErr = friendlyError(err, 'Failed to add server');
           }
         }
-        if (added > 0) {
-          toast.ok(`Added ${added} server${added === 1 ? '' : 's'}${failed > 0 ? ` (${failed} failed)` : ''} — testing latency…`);
-        }
-        if (failed > 0 && added === 0) {
-          toast.err(firstErr);
-          return;
-        }
-      } else {
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(outboundJSON);
-        } catch {
-          toast.err('Outbound must be valid JSON.');
-          return;
-        }
-        if (!serverName.trim()) {
-          toast.err('A server name is required for raw outbound JSON.');
-          return;
-        }
-        const srv = await api.addServer({ name: serverName.trim(), outbound: parsed });
-        createdIds.push(srv.id);
-        toast.ok(`Added server "${serverName.trim()}" — testing latency…`);
+      }
+      if (added > 0) {
+        toast.ok(`Added ${added} server${added === 1 ? '' : 's'}${failed > 0 ? ` (${failed} failed)` : ''} — measuring latency…`);
+      }
+      if (failed > 0 && added === 0) {
+        toast.err(firstErr);
+        return;
       }
       showAddServer = false;
-      singleLinkInput = '';
       linkInput = '';
       serverName = '';
-      outboundJSON = '';
       await onRefresh();
-      // Auto-test latency on first import (v2rayN-style immediate feedback).
-      if (createdIds.length > 0) {
-        Promise.allSettled(
-          createdIds.slice(0, 6).map((cid) =>
-            api.pingServer(cid).then((res) => {
-              localPings = { ...localPings, [cid]: res };
-            })
-          )
-        ).then(() => {
-          onRefresh();
-        });
-      }
+      autoPingCreated(createdIds);
     } catch (err) {
-      toast.err(friendlyError(err, 'Could not add server'));
+      toast.err(friendlyError(err, 'Could not add servers'));
     } finally {
       saving = false;
     }
@@ -264,65 +246,90 @@
   async function togglePin(srv: Server): Promise<void> {
     if (!stateData) return;
     const pinned = stateData.routing.pinned === srv.id ? '' : srv.id;
+    pinningId = srv.id;
     try {
       await api.setRouting({ ...stateData.routing, pinned: pinned || undefined });
-      toast.ok(pinned ? `Pinned exit to ${srv.name}.` : 'Cleared server pin (auto leastPing).');
+      // Apply immediately via hot-reload so xray connects to the selected server right away.
+      try {
+        await api.applyNow();
+      } catch {
+        // Reconciler loop will still apply if runner was temporarily busy.
+      }
       await onRefresh();
+      if (pinned) {
+        // Measure live HTTP 204 latency on connect.
+        pingingId = srv.id;
+        try {
+          const res = await api.pingServer(srv.id);
+          localPings = { ...localPings, [srv.id]: res };
+          if (res.alive) {
+            const msg = res.http_ms
+              ? `Connected to ${srv.name} · HTTP ${res.http_ms} ms (TCP ${res.tcp_ms} ms)`
+              : `Connected to ${srv.name} · TCP ${res.tcp_ms} ms`;
+            toast.ok(msg);
+          } else {
+            toast.warn(`Pinned ${srv.name}, but latency probe failed: ${res.error || 'unreachable'}`);
+          }
+          await onRefresh();
+        } finally {
+          pingingId = '';
+        }
+      } else {
+        toast.ok('Cleared server pin (auto leastPing).');
+      }
     } catch (err) {
       toast.err(err instanceof ApiError ? err.detail || err.message : 'Could not update pin');
+    } finally {
+      pinningId = '';
     }
   }
 
-  function openEditServer(srv: Server): void {
+  async function openEditServer(srv: Server): Promise<void> {
     editingServer = srv;
-    editTab = 'general';
-    editName = srv.name;
-    editDisabled = Boolean(srv.disabled);
-    editLink = '';
-    editOutboundJSON = '';
+    editConfig = null;
+    editLoadError = '';
+    loadingEditConfig = true;
+    try {
+      editConfig = await api.getServerConfig(srv.id);
+    } catch (err) {
+      editLoadError = friendlyError(err, 'Could not load server configuration');
+    } finally {
+      loadingEditConfig = false;
+    }
   }
 
-  async function saveEditServer(e: SubmitEvent): Promise<void> {
-    e.preventDefault();
+  async function saveEditedConfig(res: ServerEditorResult): Promise<void> {
     if (!editingServer) return;
     saving = true;
     try {
       const patch: { name?: string; disabled?: boolean; link?: string; outbound?: unknown } = {};
-      if (editName.trim() && editName.trim() !== editingServer.name) {
-        patch.name = editName.trim();
+      if (res.name && res.name !== editingServer.name) {
+        patch.name = res.name;
       }
-      if (editDisabled !== Boolean(editingServer.disabled)) {
-        patch.disabled = editDisabled;
+      if (res.disabled !== Boolean(editingServer.disabled)) {
+        patch.disabled = res.disabled;
       }
-      if (editTab === 'link' && editLink.trim()) {
-        patch.link = editLink.trim();
-      } else if (editTab === 'json' && editOutboundJSON.trim()) {
-        try {
-          patch.outbound = JSON.parse(editOutboundJSON);
-        } catch {
-          toast.err('Outbound must be valid JSON.');
-          return;
-        }
-      } else if (editTab === 'general') {
-        if (editLink.trim()) {
-          patch.link = editLink.trim();
-        } else if (editOutboundJSON.trim()) {
-          try {
-            patch.outbound = JSON.parse(editOutboundJSON);
-          } catch {
-            toast.err('Outbound must be valid JSON.');
-            return;
-          }
-        }
+      if (res.link) {
+        patch.link = res.link;
+      } else if (res.outbound) {
+        patch.outbound = res.outbound;
       }
-      if (Object.keys(patch).length === 0) {
-        editingServer = null;
-        return;
-      }
-      await api.patchServer(editingServer.id, patch);
-      toast.ok(`Updated ${editName.trim() || editingServer.name}.`);
+      const targetId = editingServer.id;
+      const targetName = res.name || editingServer.name;
+      await api.patchServer(targetId, patch);
+      toast.ok(`Updated ${targetName}.`);
       editingServer = null;
+      editConfig = null;
       await onRefresh();
+      if (!res.disabled) {
+        api
+          .pingServer(targetId)
+          .then((pr) => {
+            localPings = { ...localPings, [targetId]: pr };
+            onRefresh();
+          })
+          .catch(() => {});
+      }
     } catch (err) {
       toast.err(friendlyError(err, 'Could not update server'));
     } finally {
@@ -549,12 +556,12 @@
                       <button
                         type="button"
                         class="btn btn-sm {isPinned ? 'btn-primary' : ''}"
-                        title={isPinned ? 'Unpin server' : 'Pin as active exit'}
-                        disabled={srv.disabled}
+                        title={isPinned ? 'Unpin server (return to auto)' : 'Connect & pin as active exit'}
+                        disabled={srv.disabled || pinningId === srv.id}
                         onclick={() => togglePin(srv)}
                       >
                         <Icon name="pin" size={13} />
-                        {isPinned ? 'Unpin' : 'Pin'}
+                        {pinningId === srv.id ? 'Connecting…' : isPinned ? 'Unpin' : 'Pin'}
                       </button>
                       <button type="button" class="btn btn-sm" onclick={() => toggleServer(srv)}>
                         {srv.disabled ? 'Enable' : 'Disable'}
@@ -668,43 +675,39 @@
 <!-- Add Server Modal -->
 {#if showAddServer}
   <Modal title="Add Proxy Server" wide={true} onClose={() => (showAddServer = false)}>
-    <div class="tabs">
-      <button type="button" class="tab {addMode === 'visual' ? 'active' : ''}" onclick={() => (addMode = 'visual')}>
-        Visual Link Editor
-      </button>
-      <button type="button" class="tab {addMode === 'bulk' ? 'active' : ''}" onclick={() => (addMode = 'bulk')}>
-        Bulk Share Links
-      </button>
-      <button type="button" class="tab {addMode === 'json' ? 'active' : ''}" onclick={() => (addMode = 'json')}>
-        Raw Xray Outbound JSON
-      </button>
+    <div class="row-between" style="padding-bottom: 6px; border-bottom: 1px solid var(--border)">
+      <div class="tabs">
+        <button type="button" class="tab {addMode === 'editor' ? 'active' : ''}" onclick={() => (addMode = 'editor')}>
+          Server Editor (Visual / JSON / Link)
+        </button>
+        <button type="button" class="tab {addMode === 'bulk' ? 'active' : ''}" onclick={() => (addMode = 'bulk')}>
+          Bulk Share Links
+        </button>
+      </div>
     </div>
 
-    <form class="stack" onsubmit={addServerSubmit}>
-      {#if addMode === 'visual'}
-        <ShareLinkEditor
-          bind:value={singleLinkInput}
-          idPrefix="add-sle"
-          placeholder="Paste vless://, trojan://, vmess://, or ss:// — all parameters unpack below for editing"
-          required={true}
-        />
-        <div class="field">
-          <label for="srv-name-visual">Custom Display Name (optional)</label>
-          <input id="srv-name-visual" class="input" placeholder="Defaults to #remark from share link" bind:value={serverName} />
-        </div>
-      {:else if addMode === 'bulk'}
+    {#if addMode === 'editor'}
+      <ServerConfigEditor
+        mode="add"
+        {saving}
+        onCancel={() => (showAddServer = false)}
+        onSubmit={addFromEditor}
+      />
+    {:else}
+      <form class="stack" onsubmit={addBulkSubmit}>
         <div class="field">
           <label for="srv-links">Share Link(s) — One Per Line</label>
           <textarea
             id="srv-links"
             class="textarea"
+            style="min-height: 130px"
             placeholder="vless://...&#10;trojan://...&#10;(Paste one or multiple lines for bulk import)"
             bind:value={linkInput}
             required
           ></textarea>
           <span class="hint">
             Supports VLESS (TLS / REALITY / Vision / XHTTP + Extra / PQ ML-DSA-65 / PQ Encryption / TLS ECH / WS /
-            gRPC / HTTPUpgrade), VMess, Trojan, and Shadowsocks. Credentials are never echoed back in API views.
+            gRPC / HTTPUpgrade), VMess, Trojan, and Shadowsocks.
           </span>
         </div>
         {#if linkPreviews.length > 0}
@@ -740,64 +743,34 @@
           </div>
         {/if}
         <div class="field">
-          <label for="srv-name">Custom Name (optional, single link only)</label>
+          <label for="srv-name">Custom Alias (optional, single link only)</label>
           <input id="srv-name" class="input" placeholder="Auto from #fragment" bind:value={serverName} />
         </div>
-      {:else}
-        <div class="field">
-          <label for="json-name">Server Name</label>
-          <input id="json-name" class="input" placeholder="e.g. wireguard-eu" bind:value={serverName} required />
+        <div class="row" style="justify-content: flex-end">
+          <button type="button" class="btn" onclick={() => (showAddServer = false)}>Cancel</button>
+          <button type="submit" class="btn btn-primary" disabled={saving}>
+            {saving ? 'Validating & Importing…' : 'Import Links'}
+          </button>
         </div>
-        <div class="field">
-          <div class="row-between">
-            <label for="json-body">Xray Outbound JSON Object</label>
-            <button
-              type="button"
-              class="btn btn-ghost btn-sm"
-              style="padding: 1px 7px; font-size: 11px"
-              onclick={() => {
-                const formatted = formatJSONField(outboundJSON);
-                if (formatted !== null) outboundJSON = formatted;
-              }}
-            >
-              Format JSON
-            </button>
-          </div>
-          <textarea
-            id="json-body"
-            class="textarea"
-            style="min-height: 190px"
-            placeholder={'{"protocol":"vless","settings":{...},"streamSettings":{...}}'}
-            bind:value={outboundJSON}
-            required
-          ></textarea>
-        </div>
-      {/if}
-
-      <div class="row" style="justify-content: flex-end">
-        <button type="button" class="btn" onclick={() => (showAddServer = false)}>Cancel</button>
-        <button type="submit" class="btn btn-primary" disabled={saving}>
-          {saving ? 'Validating & Saving…' : 'Save Server'}
-        </button>
-      </div>
-    </form>
+      </form>
+    {/if}
   </Modal>
 {/if}
 
-<!-- Edit Server Modal -->
+<!-- Edit Server Modal (v2rayN-style Visual Config + Live JSON Editor) -->
 {#if editingServer}
   {@const editEp = serverEndpoint(editingServer)}
   {@const editHealth = healthMap.get(editingServer.id)}
   {@const editLat = serverLatency(editingServer.id, editHealth?.delay)}
   {@const editPinned = stateData?.routing.pinned === editingServer.id}
-  <Modal title="Edit Server · {editingServer.name}" wide={true} onClose={() => (editingServer = null)}>
+  <Modal title="{editEp.protocol.toUpperCase()} · {editingServer.name}" wide={true} onClose={() => ((editingServer = null), (editConfig = null))}>
     <!-- Live Server Summary Strip -->
-    <div class="editor-section" style="gap: 8px">
+    <div class="editor-section" style="padding: 10px 14px; gap: 6px">
       <div class="row-between" style="flex-wrap: wrap; gap: 8px">
         <div class="row" style="gap: 8px; flex-wrap: wrap">
           <span class="badge accent mono">{editEp.protocol}</span>
-          <span class="mono" style="font-size: 13px; font-weight: 600; word-break: break-all">{editEp.endpoint}</span>
-          <span class="mono hint" style="font-size: 11.5px">ID: {editingServer.id}</span>
+          <span class="mono" style="font-size: 12.5px; font-weight: 600; word-break: break-all">{editEp.endpoint}</span>
+          <span class="mono hint" style="font-size: 11px">ID: {editingServer.id}</span>
         </div>
         <div class="row" style="gap: 6px; flex-wrap: wrap">
           {#if editLat}
@@ -809,7 +782,7 @@
           {:else if editHealth?.last_error}
             <span class="badge danger">{editHealth.last_error}</span>
           {:else}
-            <span class="badge warn">Pending probe</span>
+            <span class="badge warn">Pending</span>
           {/if}
           {#if editPinned}
             <span class="badge accent">Pinned</span>
@@ -821,93 +794,21 @@
       </div>
     </div>
 
-    <div class="tabs">
-      <button type="button" class="tab {editTab === 'general' ? 'active' : ''}" onclick={() => (editTab = 'general')}>
-        General
-      </button>
-      <button type="button" class="tab {editTab === 'link' ? 'active' : ''}" onclick={() => (editTab = 'link')}>
-        Share Link &amp; Visual Settings
-      </button>
-      <button type="button" class="tab {editTab === 'json' ? 'active' : ''}" onclick={() => (editTab = 'json')}>
-        Raw Outbound JSON
-      </button>
-    </div>
-
-    <form class="stack" onsubmit={saveEditServer}>
-      {#if editTab === 'general'}
-        <div class="field">
-          <label for="edit-name">Display Name</label>
-          <input id="edit-name" class="input" bind:value={editName} required />
-        </div>
-
-        <label class="toggle" style="font-size: 13px">
-          <input type="checkbox" checked={!editDisabled} onchange={(e) => (editDisabled = !e.currentTarget.checked)} />
-          <span>Server enabled (participates in health observatory &amp; load balancing)</span>
-        </label>
-
-        <div class="alert" style="font-size: 12.5px">
-          <div class="row-between" style="flex-wrap: wrap; gap: 10px">
-            <span>
-              <strong>Zero-secret protection:</strong> Stored credentials (UUID, REALITY keys, PQ encryption) are
-              write-only and never sent back to the browser.
-            </span>
-            <button type="button" class="btn btn-sm" onclick={() => (editTab = 'link')}>
-              Edit Link / Settings →
-            </button>
-          </div>
-        </div>
-      {:else if editTab === 'link'}
-        <div class="field">
-          <label for="edit-name-link">Display Name</label>
-          <input id="edit-name-link" class="input" bind:value={editName} required />
-        </div>
-        <ShareLinkEditor
-          bind:value={editLink}
-          idPrefix="edit-sle"
-          placeholder="Paste the share link to inspect and visually edit Host, Port, Flow, PQ Encryption, XHTTP Mode/Extra JSON, REALITY/TLS, SNI, ECH, PQV…"
-        />
-        <span class="hint">
-          Leave the share link empty to keep existing credentials unchanged. Saving replaces the outbound via
-          zero-downtime hot reload.
-        </span>
-      {:else}
-        <div class="field">
-          <label for="edit-name-json">Display Name</label>
-          <input id="edit-name-json" class="input" bind:value={editName} required />
-        </div>
-        <div class="field">
-          <div class="row-between">
-            <label for="edit-json-body">Replacement Xray Outbound JSON</label>
-            <button
-              type="button"
-              class="btn btn-ghost btn-sm"
-              style="padding: 1px 7px; font-size: 11px"
-              onclick={() => {
-                const formatted = formatJSONField(editOutboundJSON);
-                if (formatted !== null) editOutboundJSON = formatted;
-              }}
-            >
-              Format JSON
-            </button>
-          </div>
-          <textarea
-            id="edit-json-body"
-            class="textarea"
-            style="min-height: 200px"
-            placeholder={'{"protocol":"vless","settings":{...},"streamSettings":{...}}'}
-            bind:value={editOutboundJSON}
-          ></textarea>
-          <span class="hint">Replaces the server's xray-core outbound object directly (validated by xraypolicy).</span>
-        </div>
-      {/if}
-
-      <div class="row" style="justify-content: flex-end">
-        <button type="button" class="btn" onclick={() => (editingServer = null)}>Cancel</button>
-        <button type="submit" class="btn btn-primary" disabled={saving}>
-          {saving ? 'Saving & Reloading…' : 'Save Changes'}
-        </button>
-      </div>
-    </form>
+    {#if loadingEditConfig}
+      <div class="empty-state" style="padding: 36px 16px">Loading server configuration…</div>
+    {:else if editLoadError}
+      <div class="alert danger">{editLoadError}</div>
+    {:else if editConfig}
+      <ServerConfigEditor
+        mode="edit"
+        initialName={editConfig.name}
+        initialDisabled={Boolean(editConfig.disabled)}
+        initialOutbound={editConfig.outbound}
+        {saving}
+        onCancel={() => ((editingServer = null), (editConfig = null))}
+        onSubmit={saveEditedConfig}
+      />
+    {/if}
   </Modal>
 {/if}
 

@@ -277,14 +277,6 @@
             <span class="brand-sub mono">{status?.version || 'v1.0.0'}</span>
           </div>
         </div>
-        <button
-          type="button"
-          class="btn btn-ghost btn-icon mobile-only"
-          aria-label="Close navigation menu"
-          onclick={() => (mobileMenu = false)}
-        >
-          ×
-        </button>
       </div>
 
       <div class="sidebar-tools">

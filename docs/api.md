@@ -64,6 +64,7 @@ Common error codes: `bad_request` (400), `unauthorized` / `bad_credentials` / `b
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/v1/servers` | Any | List public server summaries |
+| `GET` | `/v1/servers/{id}/config` | Session / Root | Credential-sanitized server outbound configuration for visual & JSON editing (secrets replaced with `__tikray_saved__`) |
 | `POST` | `/v1/servers` | Any | Add server via `{"link", "name"}` or `{"name", "outbound"}` |
 | `POST` | `/v1/servers/ping` | Any | Run bounded concurrent TCP + warm HTTP 204 latency tests across all enabled servers |
 | `POST` | `/v1/servers/{id}/ping` | Any | Measure on-demand TCP 1-RTT and warm HTTP 204 latency for one server |

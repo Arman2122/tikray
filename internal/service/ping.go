@@ -123,52 +123,62 @@ func isActiveExit(selected, pinned, id string, enabledCount int, disabled bool) 
 	return enabledCount == 1
 }
 
-// seedInitialPings runs one lightweight startup latency check once the health
-// monitor has seen the runner's active exit, so the Dashboard immediately shows
-// real TCP/HTTP latency instead of waiting for a manual Ping after reboot.
-func (s *Service) seedInitialPings(ctx context.Context) {
-	if s.monitor == nil || s.socks == "" || s.repairBridge {
+// notifyServerConnected schedules an event-driven HTTP+TCP latency measurement
+// for server id without blocking the caller. Rapid consecutive switches
+// coalesce to the latest connected server.
+func (s *Service) notifyServerConnected(id string) {
+	if id == "" || s.connectCh == nil || s.socks == "" || s.repairBridge {
 		return
 	}
-	// Wait briefly (up to 8 s) for the first monitor poll to populate Selected
-	// so the active exit gets both TCP and warm HTTP 204 latency on boot.
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	deadline := time.NewTimer(8 * time.Second)
-	defer deadline.Stop()
-wait:
+	// Replace any stale pending ID so the worker always tests the latest exit.
 	for {
-		if snap := s.health(); snap.Selected != "" {
-			break wait
+		select {
+		case s.connectCh <- id:
+			return
+		default:
+			select {
+			case <-s.connectCh:
+			default:
+			}
 		}
+	}
+}
+
+// watchConnectedLatency listens for server-connect events (boot selection,
+// pinning, unpinning, failover, or post-apply reconnect) and measures live
+// HTTP 204 + TCP latency for the newly connected server with zero polling loops.
+func (s *Service) watchConnectedLatency(ctx context.Context) {
+	if s.monitor == nil || s.socks == "" || s.repairBridge || s.connectCh == nil {
+		return
+	}
+	firstConnect := true
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-deadline.C:
-			break wait
-		case <-ticker.C:
+		case id := <-s.connectCh:
+			if id == "" {
+				continue
+			}
+			// Give xray-core a brief moment to settle hot-reloaded outbounds
+			// before sending the warm HTTP 204 probe through SOCKS5.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(350 * time.Millisecond):
+			}
+			pctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+			if firstConnect {
+				firstConnect = false
+				// On the very first boot connection, measure all enabled servers
+				// once (active server gets warm HTTP 204 + TCP; others get TCP).
+				_ = s.PingAllServers(pctx)
+			} else {
+				_, _ = s.PingServer(pctx, id)
+			}
+			cancel()
 		}
 	}
-	st, _ := s.store.State()
-	hasTargets := false
-	for _, srv := range st.Servers {
-		if !srv.Disabled && srv.Invalid == "" {
-			hasTargets = true
-			break
-		}
-	}
-	if !hasTargets {
-		return
-	}
-	s.mu.Lock()
-	alreadyPopulated := len(s.pings) > 0
-	s.mu.Unlock()
-	if alreadyPopulated {
-		return
-	}
-	pctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	_ = s.PingAllServers(pctx)
 }
 
 func (s *Service) storePing(res PingResult) {

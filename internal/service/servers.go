@@ -167,6 +167,9 @@ func (s *Service) AddServer(ctx context.Context, rev uint64, n NewServer) (store
 	if err != nil {
 		return store.Server{}, 0, err
 	}
+	if strings.Contains(string(src.outbound), KeepSecretSentinel) {
+		return store.Server{}, 0, &Refused{Reason: "a new server cannot contain a saved-credential placeholder; enter credentials directly"}
+	}
 	srv := store.Server{ID: store.NewID(), Name: cmp.Or(n.Name, src.name), Link: src.link, Outbound: src.outbound}
 	add := func(st *store.State) ([]note, error) {
 		st.Servers = append(st.Servers, srv)
@@ -229,7 +232,15 @@ func (s *Service) UpdateServer(ctx context.Context, rev uint64, id string, p Ser
 			srv.Disabled = *p.Disabled
 		}
 		if replace {
-			srv.Link, srv.Outbound, srv.Invalid = src.link, src.outbound, ""
+			outbound := src.outbound
+			if len(p.Outbound) > 0 {
+				var err error
+				outbound, err = mergePreservedSecrets(old.Outbound, outbound)
+				if err != nil {
+					return nil, err
+				}
+			}
+			srv.Link, srv.Outbound, srv.Invalid = src.link, outbound, ""
 		}
 		if len(src.warnings) == 0 {
 			return nil, nil
