@@ -74,7 +74,7 @@ jobs:
           printf '%s' "$COSIGN_PRIVATE_KEY" > "$RUNNER_TEMP/release.key"
           cosign public-key --key "$RUNNER_TEMP/release.key" > out/publisher.pub
           for f in out/tikray-arm64.tar out/tikray-amd64.tar out/tikray-runner-arm64.tar out/tikray-runner-amd64.tar; do
-            cosign sign-blob --yes --key "$RUNNER_TEMP/release.key" --output-signature "$f.sig" "$f"
+            cosign sign-blob --yes --tlog-upload=false --key "$RUNNER_TEMP/release.key" --output-signature "$f.sig" "$f"
           done
           for ver in 7.25.1 7.24.6; do
             for arch in arm64 amd64; do
