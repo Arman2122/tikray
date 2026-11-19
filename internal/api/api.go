@@ -143,6 +143,7 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter, instal
 	mux.HandleFunc("GET /v1/events", h.events)
 	mux.HandleFunc("GET /v1/routeros/leases", h.leases)
 	mux.HandleFunc("POST /v1/routeros/leases/static", h.makeStaticLease)
+	mux.HandleFunc("GET /v1/routeros/interfaces", h.routerInterfaces)
 
 	mux.HandleFunc("GET /v1/servers", h.listServers)
 	mux.HandleFunc("GET /v1/servers/{id}/config", h.serverConfig)
@@ -161,7 +162,10 @@ func NewHandler(b Backend, root string, a *auth.Store, lim *auth.Limiter, instal
 	mux.HandleFunc("GET /v1/devices", h.listDevices)
 	mux.HandleFunc("PUT /v1/devices/{address}", h.setDevice)
 	mux.HandleFunc("DELETE /v1/devices/{address}", h.removeDevice)
+	mux.HandleFunc("PUT /v1/interfaces/{name}", h.setInterfacePolicy)
+	mux.HandleFunc("DELETE /v1/interfaces/{name}", h.removeInterfacePolicy)
 	mux.HandleFunc("PUT /v1/network", h.repairNetwork)
+	mux.HandleFunc("PUT /v1/network/wan", h.setWANInterface)
 
 	mux.HandleFunc("PUT /v1/policy", set(h, b.SetDefaultPolicy))
 	mux.HandleFunc("PUT /v1/routing", set(h, b.SetRouting))

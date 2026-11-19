@@ -85,6 +85,10 @@ Common error codes: `bad_request` (400), `unauthorized` / `bad_credentials` / `b
 | `DELETE` | `/v1/devices/{address}` | Any | Remove device/CIDR override |
 | `GET` | `/v1/routeros/leases` | Any | Read active bound LAN DHCP leases (`address`, `mac`, `name`, `static`) |
 | `POST` | `/v1/routeros/leases/static` | Any | Convert a bound dynamic LAN DHCP lease to static (`{"address": "192.168.88.25"}`) |
+| `GET` | `/v1/routeros/interfaces` | Any | Discover live MikroTik Wi-Fi radios/SSIDs, Ethernet LAN ports, bridges, VLANs, subnets, and Internet-in WAN uplinks |
+| `PUT` | `/v1/interfaces/{name}` | Any | Set per-interface steering policy (`{"name", "policy": {"mode", "kill_switch"}}`) for Wi-Fi, LAN port, VLAN, or bridge |
+| `DELETE` | `/v1/interfaces/{name}` | Any | Remove per-interface steering override (reverts interface to default LAN policy) |
+| `PUT` | `/v1/network/wan` | Any | Pin or clear (`""` = Auto) the RouterOS WAN Internet-in uplink used for Xray outbound tunnels (`{"wan_interface": "pppoe-out1"}`) |
 | `PUT` | `/v1/policy` | Any | Set default LAN policy `{"mode": "direct"|"smart"|"full", "kill_switch": bool}` |
 | `PUT` | `/v1/routing` | Any | Replace pinned server, custom rules, domestic extras, and block list |
 | `PUT` | `/v1/dns` | Any | Replace `remote` (DoH/IPv4) and optional `domestic` (IPv4) resolvers |

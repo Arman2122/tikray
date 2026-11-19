@@ -100,9 +100,9 @@ func (o observation) ownedRows(menu string) ([]Observed, error) {
 	// four precise tags even if a table reference has drifted, never its peers.
 	switch menu {
 	case routeMenu:
-		q = valuesQuery("comment", "tikray:route-open-runner", "tikray:route-open-fallback", "tikray:route-closed-runner", "tikray:route-closed-fallback")
+		q = valuesQuery("comment", "tikray:route-open-runner", "tikray:route-open-fallback", "tikray:route-closed-runner", "tikray:route-closed-fallback", "tikray:route-wan-primary", "tikray:route-wan-fallback")
 	case tableMenu:
-		q = valuesQuery("comment", "tikray:table-open", "tikray:table-closed")
+		q = valuesQuery("comment", "tikray:table-open", "tikray:table-closed", "tikray:table-wan")
 	case watchMenu:
 		q = valuesQuery("comment", "tikray:runner-watch", "tikray:udp-watch")
 	}
@@ -334,7 +334,7 @@ func reservedReferenceQuery(fields ...string) []string {
 }
 func reservedPolicyName(name string) bool {
 	switch name {
-	case "tikray-open", "tikray-closed", openUDP, openRunner, openWAN, preChain, egressChain, ipv6Chain, proxyPacket, "tikray-local", "tikray-domestic", "tikray-src-full-open", "tikray-src-full-closed", "tikray-src-smart-open", "tikray-src-smart-closed":
+	case "tikray-open", "tikray-closed", "tikray-wan", openUDP, openRunner, openWAN, preChain, egressChain, ipv6Chain, proxyPacket, "tikray-local", "tikray-domestic", "tikray-src-full-open", "tikray-src-full-closed", "tikray-src-smart-open", "tikray-src-smart-closed":
 		return true
 	}
 	digest, ok := strings.CutPrefix(name, "tikray-h")

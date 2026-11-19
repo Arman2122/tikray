@@ -243,12 +243,25 @@ func (h *handler) visibleRouting(r store.Routing, redact func(string) string) st
 	return r
 }
 
+func (h *handler) visibleInterfaces(st store.State, redact func(string) string) []store.InterfacePolicy {
+	if len(st.Interfaces) == 0 {
+		return nil
+	}
+	ifaces := slices.Clone(st.Interfaces)
+	for i := range ifaces {
+		ifaces[i].Name = h.shown(ifaces[i].Name, redact, auth.Session{})
+	}
+	return ifaces
+}
+
 func (h *handler) visibleState(st store.State) store.State {
 	redact := service.RedactorFor(st)
 	st.Servers = h.visibleServers(st, redact)
 	st.Subscriptions = h.visibleSubscriptions(st, redact)
 	st.Devices = h.visibleDevices(st, redact)
+	st.Interfaces = h.visibleInterfaces(st, redact)
 	st.Routing = h.visibleRouting(st.Routing, redact)
+	st.Network.WANInterface = h.shown(st.Network.WANInterface, redact, auth.Session{})
 	st.Health.ProbeURL = h.publicURL(st.Health.ProbeURL, redact)
 	st.DNS.Remote = h.publicURL(st.DNS.Remote, redact)
 	return st

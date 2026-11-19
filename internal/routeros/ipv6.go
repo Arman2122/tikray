@@ -28,7 +28,7 @@ type guardIngress struct {
 func ipv6Guard(in PolicyInput, obs Topology) ([]Object, error) {
 	ingresses := make(map[string]*guardIngress)
 	for _, lan := range obs.LANs {
-		reject, ok := subnetGuard(in, lan.Prefix)
+		reject, ok := subnetGuard(in, lan)
 		if !ok || lan.Interface == "" || reject && !lan.Dedicated {
 			return nil, errIPv6Guard
 		}
@@ -98,21 +98,22 @@ func ipv6Guard(in PolicyInput, obs Topology) ([]Object, error) {
 // Apart from /32 MAC exceptions, every address on a LAN must have the
 // same IPv6 disposition. Count the union of the disjoint device subnets so
 // that several prefixes covering a dedicated ingress work as one guard.
-func subnetGuard(in PolicyInput, lan netip.Prefix) (reject, ok bool) {
-	size := int64(1) << (32 - lan.Bits())
+func subnetGuard(in PolicyInput, lan LAN) (reject, ok bool) {
+	base := in.policyForInterface(lan.Interface)
+	size := int64(1) << (32 - lan.Prefix.Bits())
 	var different int64
 	for _, d := range in.Devices {
-		if d.Address.Bits() == 32 || !d.Address.Overlaps(lan) ||
-			(d.Policy.Mode == store.ModeDirect) == (in.Default.Mode == store.ModeDirect) {
+		if d.Address.Bits() == 32 || !d.Address.Overlaps(lan.Prefix) ||
+			(d.Policy.Mode == store.ModeDirect) == (base.Mode == store.ModeDirect) {
 			continue
 		}
-		different += int64(1) << (32 - max(d.Address.Bits(), lan.Bits()))
+		different += int64(1) << (32 - max(d.Address.Bits(), lan.Prefix.Bits()))
 	}
 	switch different {
 	case 0:
-		return in.Default.Mode != store.ModeDirect, true
+		return base.Mode != store.ModeDirect, true
 	case size:
-		return in.Default.Mode == store.ModeDirect, true
+		return base.Mode == store.ModeDirect, true
 	default:
 		return false, false
 	}

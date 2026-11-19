@@ -31,7 +31,7 @@
       title: 'Proxy & Network',
       items: [
         { id: 'servers', label: 'Servers & Subs', icon: 'servers' },
-        { id: 'devices', label: 'Devices & Leases', icon: 'devices' },
+        { id: 'devices', label: 'Network & Devices', icon: 'devices' },
         { id: 'routing', label: 'Routing & DNS', icon: 'routing' }
       ]
     },
@@ -322,7 +322,7 @@
               {#if item.id === 'servers' && stateData}
                 <span class="nav-badge tabular">{stateData.servers.length}</span>
               {:else if item.id === 'devices' && stateData}
-                <span class="nav-badge tabular">{stateData.devices.length}</span>
+                <span class="nav-badge tabular">{stateData.devices.length + (stateData.interfaces?.length ?? 0)}</span>
               {/if}
             </button>
           {/each}
@@ -415,7 +415,7 @@
                     {#if view === 'servers'}
                       Manage proxy outbounds, subscriptions, visual share-link settings, and v2rayN-style latency probes
                     {:else if view === 'devices'}
-                      Configure LAN default policy, per-device overrides, kill switches, and static RouterOS DHCP leases
+                      Steer Wi-Fi SSIDs, LAN ports, VLANs, Xray Internet-in WAN uplinks, per-device policies, and DHCP leases
                     {:else if view === 'routing'}
                       Ordered domain/IP rules, domestic bypass lists, DoH resolvers, and connectivity probes
                     {:else if view === 'updates'}

@@ -23,12 +23,12 @@ var managedMenus = []string{addressListMenu, tableMenu, routeMenu, ipv6Filter, f
 
 var rolePatterns = map[string]*regexp.Regexp{
 	firewallFilter: regexp.MustCompile(`^(egress-(guard|skip-local|drop-(marked|smart|full)|dns-(full|smart)-(open|closed)-(tcp|udp))|no-fasttrack|udp-guard-(pending|legacy|runner|wan))$`),
-	firewallMangle: regexp.MustCompile(`^(jump-pre|skip-(router|local|dns-(tcp|udp)|owner-route:[0-9a-f]{32})|(mss|packet|route)-(open|closed)|conn-(full|smart)-(open(-udp)?|closed)|udp-birth-(runner|wan)|route-udp-(pending|runner|wan)|packet-udp-(runner|wan))$`),
+	firewallMangle: regexp.MustCompile(`^(jump-pre|runner-wan|skip-(router|local|dns-(tcp|udp)|owner-route:[0-9a-f]{32})|(mss|packet|route)-(open|closed)|conn-(full|smart)-(open(-udp)?|closed)|udp-birth-(runner|wan)|route-udp-(pending|runner|wan)|packet-udp-(runner|wan))$`),
 	firewallNAT:    regexp.MustCompile(`^(dns-((smart|full)-(closed|open)|router-(smart|full)-open)-(udp|tcp)|preserve-(backup-)?(open(-runner)?|closed|dns-(smart|full)-(open|closed)-(tcp|udp)))$`),
 	ipv6Filter:     regexp.MustCompile(`^ipv6:(jump|ingress:[a-f0-9]{32})$`),
 	watchMenu:      regexp.MustCompile(`^(runner-watch|udp-watch)$`),
-	routeMenu:      regexp.MustCompile(`^route-(open|closed)-(fallback|runner)$`),
-	tableMenu:      regexp.MustCompile(`^table-(open|closed)$`),
+	routeMenu:      regexp.MustCompile(`^route-((open|closed)-(fallback|runner)|wan-(primary|fallback))$`),
+	tableMenu:      regexp.MustCompile(`^table-(open|closed|wan)$`),
 }
 var holdPattern = regexp.MustCompile(`^tikray:hold:[a-f0-9]{32}$`)
 

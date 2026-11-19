@@ -217,6 +217,44 @@ func (s *Service) RemoveDevice(ctx context.Context, rev uint64, addr netip.Prefi
 	return next, err
 }
 
+// SetInterfacePolicy sets or replaces the default steering policy for traffic
+// arriving on a specific RouterOS interface (Wi-Fi, LAN port, VLAN, or bridge).
+func (s *Service) SetInterfacePolicy(ctx context.Context, rev uint64, item store.InterfacePolicy) (uint64, error) {
+	item.Interface = strings.TrimSpace(item.Interface)
+	item.Name = strings.TrimSpace(item.Name)
+	return s.set(ctx, rev, func(st *store.State) {
+		if i := slices.IndexFunc(st.Interfaces, func(o store.InterfacePolicy) bool { return o.Interface == item.Interface }); i >= 0 {
+			st.Interfaces[i] = item
+		} else {
+			st.Interfaces = append(st.Interfaces, item)
+		}
+	})
+}
+
+// RemoveInterfacePolicy removes an interface steering override so that
+// interface inherits DefaultPolicy again.
+func (s *Service) RemoveInterfacePolicy(ctx context.Context, rev uint64, iface string) (uint64, error) {
+	iface = strings.TrimSpace(iface)
+	_, next, err := s.change(ctx, rev, func(st *store.State) ([]note, error) {
+		i := slices.IndexFunc(st.Interfaces, func(o store.InterfacePolicy) bool { return o.Interface == iface })
+		if i < 0 {
+			return nil, notFound(*st, "interface", iface)
+		}
+		st.Interfaces = slices.Delete(st.Interfaces, i, i+1)
+		return nil, nil
+	})
+	return next, err
+}
+
+// SetWANInterface sets (or clears when empty) the preferred RouterOS Internet-in
+// WAN uplink used for tikray-runner's outbound VPN connections.
+func (s *Service) SetWANInterface(ctx context.Context, rev uint64, iface string) (uint64, error) {
+	iface = strings.TrimSpace(iface)
+	return s.set(ctx, rev, func(st *store.State) {
+		st.Network.WANInterface = iface
+	})
+}
+
 // NetworkRepair lists the operator's corrections for an M2 router overlap.
 // An omitted subnet preserves the bridge. Only named offending devices may go.
 type NetworkRepair struct {

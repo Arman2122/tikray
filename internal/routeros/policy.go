@@ -74,7 +74,7 @@ func ipv4Policy(in PolicyInput, obs Topology, active map[store.Policy]bool) ([]O
 	foreignMarks := slices.Clone(obs.ForeignRoutingMarks)
 	slices.Sort(foreignMarks)
 	for _, mark := range slices.Compact(foreignMarks) {
-		if !interfaceName(mark) || mark == "tikray-open" || mark == "tikray-closed" {
+		if !interfaceName(mark) || mark == "tikray-open" || mark == "tikray-closed" || mark == "tikray-wan" {
 			return nil, errConflict
 		}
 		sum := sha256.Sum256([]byte(mark))
@@ -135,6 +135,56 @@ func ipv4Policy(in PolicyInput, obs Topology, active map[store.Policy]bool) ([]O
 		jump.DependsOn = append(jump.DependsOn, r.Comment)
 	}
 	return append(out, jump), nil
+}
+
+// runnerWANRules pins tikray-runner's own outbound VPN connections to a chosen
+// RouterOS WAN uplink (e.g. a specific fiber/PPPoE/LTE interface on multi-WAN
+// routers) while skipping all local/bridge destinations and keeping automatic
+// fallback to the router's active primary WAN when the preferred uplink drops.
+func runnerWANRules(runner, wanIface string, obs Topology) ([]Object, error) {
+	if wanIface == "" {
+		return nil, nil
+	}
+	var chosen *WANPath
+	for i := range obs.WANUplinks {
+		if obs.WANUplinks[i].Interface == wanIface {
+			chosen = &obs.WANUplinks[i]
+			break
+		}
+	}
+	if chosen == nil {
+		for i := range obs.WAN {
+			if obs.WAN[i].Interface == wanIface {
+				chosen = &obs.WAN[i]
+				break
+			}
+		}
+	}
+	if chosen == nil {
+		return nil, errTopology
+	}
+	table := "tikray-wan"
+	tableRow := object(tableMenu, "table-wan", map[string]string{"name": table, "fib": "yes"})
+	primary := object(routeMenu, "route-wan-primary", map[string]string{
+		"dst-address": "0.0.0.0/0", "routing-table": table, "distance": "1",
+		"gateway": chosen.nextHop(), "check-gateway": "ping",
+	}, tableRow.Comment)
+	out := []Object{tableRow, primary}
+	deps := []string{primary.Comment}
+	if len(obs.WAN) > 0 && obs.WAN[0].Interface != chosen.Interface {
+		fallback := object(routeMenu, "route-wan-fallback", map[string]string{
+			"dst-address": "0.0.0.0/0", "routing-table": table, "distance": "2",
+			"gateway": obs.WAN[0].nextHop(),
+		}, tableRow.Comment)
+		out = append(out, fallback)
+		deps = append(deps, fallback.Comment)
+	}
+	mark := object(firewallMangle, "runner-wan", map[string]string{
+		"chain": "prerouting", "in-interface": "tikray", "src-address": runner,
+		"dst-address-type": "!local", "dst-address-list": "!tikray-local",
+		"action": "mark-routing", "new-routing-mark": table, "passthrough": "no",
+	}, deps...)
+	return append(out, mark), nil
 }
 
 func policyClass(p store.Policy) string {

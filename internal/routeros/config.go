@@ -389,3 +389,27 @@ func (m *Managed) MakeStaticLease(ctx context.Context, addr netip.Addr) (LeaseIn
 	}
 	return l, nil
 }
+
+// Interfaces reads the live RouterOS interface, Wi-Fi, LAN port and WAN uplink
+// inventory, scrubbing any router credential from returned labels.
+func (m *Managed) Interfaces(ctx context.Context) (NetworkInventory, error) {
+	e := m.current()
+	if e == nil {
+		return NetworkInventory{}, ErrUnavailable
+	}
+	inv, err := e.Interfaces(ctx)
+	if err != nil {
+		return NetworkInventory{}, err
+	}
+	if prof := m.Profile(); prof.Version() != "" {
+		inv.RouterOS = prof.Version()
+	}
+	if m.cfg.Password != "" {
+		for i := range inv.Interfaces {
+			if strings.Contains(inv.Interfaces[i].SSID, m.cfg.Password) {
+				inv.Interfaces[i].SSID = ""
+			}
+		}
+	}
+	return inv, nil
+}

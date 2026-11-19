@@ -214,6 +214,9 @@ func (e *Engine) verify(ctx context.Context, p *pass) error {
 	if a.Generation != p.a.Generation {
 		return ErrStaleGeneration
 	}
+	if err := e.resolveWANUplink(ctx, &a, p.target.Policy.Network.WANInterface); err != nil {
+		return err
+	}
 	rows, err := Desired(p.target.Policy, p.target.observedTopology(a.Topology), p.target.Geo)
 	if err != nil {
 		return err
@@ -313,6 +316,9 @@ func (e *Engine) prepare(ctx context.Context, t Target) (*pass, error) {
 	}
 	p.a, err = e.Snapshot(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err = e.resolveWANUplink(ctx, &p.a, t.Policy.Network.WANInterface); err != nil {
 		return nil, err
 	}
 	marker, busy, err := EmergencyState(ctx, e.c, p.a.Generation)

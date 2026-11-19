@@ -66,7 +66,10 @@
         {stateData?.default_policy.mode ?? 'direct'} default
       </strong>
       <span class="hint tabular">
-        {stateData?.devices.length ?? 0} device rule{(stateData?.devices.length ?? 0) === 1 ? '' : 's'}
+        {#if (stateData?.interfaces?.length ?? 0) > 0}
+          {stateData?.interfaces?.length} iface{(stateData?.interfaces?.length ?? 0) === 1 ? '' : 's'} ·
+        {/if}
+        {stateData?.devices.length ?? 0} device{(stateData?.devices.length ?? 0) === 1 ? '' : 's'}
         {stateData?.default_policy.kill_switch ? ' · Kill switch' : ''}
       </span>
     </button>
@@ -91,11 +94,11 @@
         {#if status?.routeros?.degraded}
           {status.routeros.degraded}
         {:else if status?.routeros?.untested}
-          Forward-compat (untested)
+          Forward-compat · {stateData?.network.wan_interface ? `WAN ${stateData.network.wan_interface}` : 'Auto WAN'}
         {:else if status?.routeros}
-          FastTrack + policy verified
+          {stateData?.network.wan_interface ? `WAN ${stateData.network.wan_interface} · FastTrack` : 'Auto WAN · FastTrack'}
         {:else}
-          Local daemon mode
+          {stateData?.network.wan_interface ? `WAN ${stateData.network.wan_interface} · Standalone` : 'Local daemon mode'}
         {/if}
       </span>
     </button>

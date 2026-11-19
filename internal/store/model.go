@@ -112,6 +112,16 @@ type Device struct {
 	Policy  Policy       `json:"policy"`
 }
 
+// InterfacePolicy sets the default steering policy for clients arriving on a
+// specific RouterOS interface (such as a Wi-Fi interface/SSID like "wifi-vpn",
+// a dedicated LAN port like "ether4", a VLAN, or a bridge). Per-device IP/CIDR
+// rules still override it within that interface's subnet.
+type InterfacePolicy struct {
+	Interface string `json:"interface"`
+	Name      string `json:"name,omitempty"`
+	Policy    Policy `json:"policy"`
+}
+
 // Action says where a routing rule sends the traffic it matches.
 type Action string
 
@@ -170,13 +180,17 @@ type DNS struct {
 }
 
 // Network is the private subnet that links the router, tikray and the
-// runner.
+// runner, plus the optional preferred RouterOS WAN uplink for xray egress.
 type Network struct {
 	// Subnet is an IPv4 prefix of /29 or larger, so that .1 to .3 fit.
 	Subnet netip.Prefix `json:"subnet"`
 	// RequireLocalBridge is set atomically with a subnet repaired over HTTPS.
 	// Recheck its local control address on restart before using runner credentials.
 	RequireLocalBridge bool `json:"require_local_bridge,omitempty"`
+	// WANInterface optionally pins which RouterOS Internet-in uplink (such as
+	// "pppoe-out1", "ether1", or "lte1") carries tikray-runner's outbound VPN
+	// connections. Empty means Auto (follow RouterOS's active main default).
+	WANInterface string `json:"wan_interface,omitempty"`
 }
 
 // host is the subnet's address number i.
@@ -205,10 +219,11 @@ type Health struct {
 
 // State is everything tikray is told to make true.
 type State struct {
-	Servers       []Server       `json:"servers"`
-	Subscriptions []Subscription `json:"subscriptions"`
-	Devices       []Device       `json:"devices"`
-	// DefaultPolicy applies to every device not listed in Devices.
+	Servers       []Server          `json:"servers"`
+	Subscriptions []Subscription    `json:"subscriptions"`
+	Devices       []Device          `json:"devices"`
+	Interfaces    []InterfacePolicy `json:"interfaces,omitempty"`
+	// DefaultPolicy applies to every device not listed in Devices or Interfaces.
 	DefaultPolicy Policy  `json:"default_policy"`
 	Routing       Routing `json:"routing"`
 	DNS           DNS     `json:"dns"`
@@ -249,6 +264,7 @@ func (s State) Clone() State {
 	}
 	c.Subscriptions = slices.Clone(s.Subscriptions)
 	c.Devices = slices.Clone(s.Devices)
+	c.Interfaces = slices.Clone(s.Interfaces)
 	c.Routing.BlockList = slices.Clone(s.Routing.BlockList)
 	c.Routing.Domestic.Domains = slices.Clone(s.Routing.Domestic.Domains)
 	c.Routing.Domestic.IPs = slices.Clone(s.Routing.Domestic.IPs)

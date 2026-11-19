@@ -19,9 +19,11 @@ func Desired(in PolicyInput, obs Topology, geo []netip.Prefix) ([]Object, error)
 	if err != nil {
 		return nil, err
 	}
-	// An explicitly all-direct target can detach existing steering even
-	// during a WAN outage. The executor still preflights owned removals.
-	if in.Default.Mode == store.ModeDirect && !slices.ContainsFunc(in.Devices, func(d PolicyDevice) bool { return d.Policy.Mode != store.ModeDirect }) {
+	// An explicitly all-direct target with no custom WAN pin can detach existing
+	// steering even during a WAN outage. The executor still preflights owned removals.
+	hasInterfaceProxy := slices.ContainsFunc(in.Interfaces, func(p PolicyInterface) bool { return p.Policy.Mode != store.ModeDirect })
+	hasDeviceProxy := slices.ContainsFunc(in.Devices, func(d PolicyDevice) bool { return d.Policy.Mode != store.ModeDirect })
+	if in.Default.Mode == store.ModeDirect && !hasInterfaceProxy && !hasDeviceProxy && in.Network.WANInterface == "" {
 		return nil, nil
 	}
 	if err := checkTopology(in, obs); err != nil {
@@ -39,7 +41,11 @@ func Desired(in PolicyInput, obs Topology, geo []netip.Prefix) ([]Object, error)
 	if err != nil {
 		return nil, err
 	}
-	if len(sets) == 0 {
+	wanRules, err := runnerWANRules(in.Network.Runner().String(), in.Network.WANInterface, obs)
+	if err != nil {
+		return nil, err
+	}
+	if len(sets) == 0 && len(wanRules) == 0 {
 		return nil, nil
 	}
 	active := make(map[store.Policy]bool, len(sets))
@@ -55,18 +61,20 @@ func Desired(in PolicyInput, obs Topology, geo []netip.Prefix) ([]Object, error)
 	}
 
 	objects = appendMembers(objects, "tikray-local", localDestinations(obs))
-	objects = appendMembers(objects, "tikray-domestic", uniquePrefixes(slices.Concat(in.Domestic, geo)))
-
-	guards, err := ipv6Guard(in, obs)
-	if err != nil {
-		return nil, err
+	if len(sets) > 0 {
+		objects = appendMembers(objects, "tikray-domestic", uniquePrefixes(slices.Concat(in.Domestic, geo)))
+		guards, err := ipv6Guard(in, obs)
+		if err != nil {
+			return nil, err
+		}
+		rules, err := ipv4Policy(in, obs, active)
+		if err != nil {
+			return nil, err
+		}
+		objects = append(objects, guards...)
+		objects = append(objects, rules...)
 	}
-	rules, err := ipv4Policy(in, obs, active)
-	if err != nil {
-		return nil, err
-	}
-	objects = append(objects, guards...)
-	objects = append(objects, rules...)
+	objects = append(objects, wanRules...)
 	orderRules(objects)
 	return objects, nil
 }
@@ -328,14 +336,15 @@ func effectiveSources(in PolicyInput, obs Topology) (map[store.Policy][]netip.Pr
 		add(lo, hi, p)
 	}
 	for _, lan := range obs.LANs {
+		lanDefault := in.policyForInterface(lan.Interface)
 		cursor, end := span(lan.Prefix)
 		for _, d := range devices[lan.Prefix] {
 			begin, next := span(d.Address)
-			emit(cursor, begin, in.Default)
+			emit(cursor, begin, lanDefault)
 			emit(begin, next, d.Policy)
 			cursor = next
 		}
-		emit(cursor, end, in.Default)
+		emit(cursor, end, lanDefault)
 	}
 	sets := make(map[store.Policy][]netip.Prefix, len(ranges))
 	for p, rs := range ranges {

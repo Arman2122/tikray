@@ -122,6 +122,7 @@ func (s State) storedProblems() problems {
 	for i, d := range s.Devices {
 		p.policy(fmt.Sprintf("devices[%d].policy", i), d.Policy)
 	}
+	p.interfaces(s.Interfaces)
 	p.policy("default_policy", s.DefaultPolicy)
 	p.routing(s.Routing, servers)
 	p.dns(s.DNS, s.DomesticResolver())
@@ -173,6 +174,11 @@ func (s State) shownValues(fn func(path, v string)) {
 		fn(fmt.Sprintf("devices[%d].name", i), d.Name)
 		fn(fmt.Sprintf("devices[%d].mac", i), d.MAC)
 	}
+	for i, iface := range s.Interfaces {
+		fn(fmt.Sprintf("interfaces[%d].interface", i), iface.Interface)
+		fn(fmt.Sprintf("interfaces[%d].name", i), iface.Name)
+	}
+	fn("network.wan_interface", s.Network.WANInterface)
 	list("routing.block_list", s.Routing.BlockList)
 	list("routing.domestic.domains", s.Routing.Domestic.Domains)
 	list("routing.domestic.ips", s.Routing.Domestic.IPs)
@@ -468,6 +474,47 @@ func (p *problems) network(n Network) {
 		p.add("network.subnet", "is too small: the router, tikray and the runner need .1 to .3 (use /%d or larger)", maxSubnetBits)
 	case sn != sn.Masked():
 		p.add("network.subnet", "has host bits set")
+	}
+	if n.WANInterface != "" && !ValidInterfaceName(n.WANInterface) {
+		p.add("network.wan_interface", "must be a valid RouterOS interface name")
+	}
+}
+
+// ValidInterfaceName reports whether s is a safe, non-reserved RouterOS
+// interface name (excluding tikray's own bridge/veth interfaces and wildcards).
+func ValidInterfaceName(s string) bool {
+	if s == "" || len(s) > 64 || !utf8.ValidString(s) || s != strings.TrimSpace(s) {
+		return false
+	}
+	if strings.HasPrefix(s, "!") || strings.ContainsAny(s, ",%@ \t\r\n") || strings.ContainsFunc(s, ForbiddenInName) {
+		return false
+	}
+	switch strings.ToLower(s) {
+	case "all", "none", "dynamic", "static", "tikray", "tikray-ctl", "tikray-runner":
+		return false
+	}
+	return true
+}
+
+func (p *problems) interfaces(ifaces []InterfacePolicy) {
+	seen := make(map[string]int, len(ifaces))
+	for i, item := range ifaces {
+		path := fmt.Sprintf("interfaces[%d]", i)
+		if !ValidInterfaceName(item.Interface) {
+			p.add(path+".interface", "must be a valid RouterOS interface name")
+		} else if prev, dup := seen[item.Interface]; dup {
+			p.add(path+".interface", "duplicates interfaces[%d]", prev)
+		} else {
+			seen[item.Interface] = i
+		}
+		if item.Name != "" {
+			if strings.ContainsFunc(item.Name, ForbiddenInName) {
+				p.add(path+".name", "must not hold control characters or bidi overrides")
+			} else if utf8.RuneCountInString(item.Name) > MaxNameRunes {
+				p.add(path+".name", "must be at most %d characters", MaxNameRunes)
+			}
+		}
+		p.policy(path+".policy", item.Policy)
 	}
 }
 

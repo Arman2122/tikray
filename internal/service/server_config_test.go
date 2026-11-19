@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/Arman2122/tikray/internal/store"
 )
 
 func TestServerConfigSanitizesSecretsAndUpdatePreservesThem(t *testing.T) {
@@ -94,5 +96,58 @@ func TestServerConfigSanitizesSecretsAndUpdatePreservesThem(t *testing.T) {
 	// Brand-new server with sentinel must be refused.
 	if _, _, err := e.s.AddServer(t.Context(), 2, NewServer{Name: "bad-sentinel", Outbound: cfg.Outbound}); err == nil {
 		t.Fatal("AddServer accepted KeepSecretSentinel without prior secret")
+	}
+}
+
+func TestInterfacePoliciesAndWANUplinkMutations(t *testing.T) {
+	e := newEnv(t)
+	e.s = e.newService(Config{})
+
+	// Set Wi-Fi VPN interface policy.
+	rev, err := e.s.SetInterfacePolicy(t.Context(), 0, store.InterfacePolicy{
+		Interface: "wifi-vpn",
+		Name:      "VPN Wi-Fi",
+		Policy:    store.Policy{Mode: store.ModeFull, KillSwitch: true},
+	})
+	if err != nil {
+		t.Fatalf("SetInterfacePolicy: %v", err)
+	}
+	// Pin Xray WAN uplink.
+	rev, err = e.s.SetWANInterface(t.Context(), rev, "pppoe-out1")
+	if err != nil {
+		t.Fatalf("SetWANInterface: %v", err)
+	}
+	st, _ := e.s.State()
+	if len(st.Interfaces) != 1 || st.Interfaces[0].Interface != "wifi-vpn" || !st.Interfaces[0].Policy.KillSwitch {
+		t.Fatalf("unexpected Interfaces state: %+v", st.Interfaces)
+	}
+	if st.Network.WANInterface != "pppoe-out1" {
+		t.Fatalf("WANInterface = %q, want pppoe-out1", st.Network.WANInterface)
+	}
+
+	// Reject reserved or invalid interface names.
+	if _, err := e.s.SetWANInterface(t.Context(), rev, "tikray"); err == nil {
+		t.Fatal("expected refusal for reserved interface name tikray")
+	}
+	if _, err := e.s.SetInterfacePolicy(t.Context(), rev, store.InterfacePolicy{
+		Interface: "!ether1",
+		Policy:    store.Policy{Mode: store.ModeSmart},
+	}); err == nil {
+		t.Fatal("expected refusal for negated interface name")
+	}
+
+	// Standalone RouterInterfaces returns Managed: false without error.
+	inv, err := e.s.RouterInterfaces(t.Context())
+	if err != nil || inv.Managed {
+		t.Fatalf("standalone RouterInterfaces = (%+v, %v), want managed=false, nil", inv, err)
+	}
+
+	// Remove interface override cleanly.
+	if _, err := e.s.RemoveInterfacePolicy(t.Context(), rev, "wifi-vpn"); err != nil {
+		t.Fatalf("RemoveInterfacePolicy: %v", err)
+	}
+	st, _ = e.s.State()
+	if len(st.Interfaces) != 0 {
+		t.Fatalf("expected empty Interfaces after remove, got %+v", st.Interfaces)
 	}
 }

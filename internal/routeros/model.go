@@ -17,15 +17,29 @@ var (
 
 // PolicyInput contains only the desired state needed to compile RouterOS rules.
 type PolicyInput struct {
-	Network  store.Network
-	Default  store.Policy
-	Devices  []PolicyDevice
-	Domestic []netip.Prefix
+	Network    store.Network
+	Default    store.Policy
+	Interfaces []PolicyInterface
+	Devices    []PolicyDevice
+	Domestic   []netip.Prefix
+}
+type PolicyInterface struct {
+	Interface string
+	Policy    store.Policy
 }
 type PolicyDevice struct {
 	Address netip.Prefix
 	MAC     string
 	Policy  store.Policy
+}
+
+func (in PolicyInput) policyForInterface(iface string) store.Policy {
+	for _, p := range in.Interfaces {
+		if p.Interface == iface {
+			return p.Policy
+		}
+	}
+	return in.Default
 }
 
 // LAN associates a managed IPv4 network with its observed ingress. Dedicated
@@ -113,6 +127,7 @@ type Topology struct {
 	Connected   []netip.Prefix
 	RouterIPs   []netip.Addr
 	WAN         []WANPath
+	WANUplinks  []WANPath
 	Leases      []Lease
 	FastTrack   []FastTrackRule
 	ForeignRefs []ForeignRef
@@ -148,7 +163,13 @@ func srcList(p store.Policy) string {
 // Project drops names, outbound configurations, credentials and xray-only
 // matchers before the router planner sees the state.
 func Project(st store.State) (PolicyInput, error) {
-	in := PolicyInput{Network: store.Network{Subnet: st.Network.Subnet}, Default: st.DefaultPolicy}
+	in := PolicyInput{
+		Network: store.Network{Subnet: st.Network.Subnet, WANInterface: st.Network.WANInterface},
+		Default: st.DefaultPolicy,
+	}
+	for _, iface := range st.Interfaces {
+		in.Interfaces = append(in.Interfaces, PolicyInterface{Interface: iface.Interface, Policy: iface.Policy})
+	}
 	for _, d := range st.Devices {
 		in.Devices = append(in.Devices, PolicyDevice{Address: d.Address, MAC: d.MAC, Policy: d.Policy})
 	}
@@ -178,6 +199,15 @@ func normalizePolicy(in PolicyInput) (PolicyInput, error) {
 	if !validPolicy(in.Default) {
 		return PolicyInput{}, errPolicy
 	}
+	in.Interfaces = slices.Clone(in.Interfaces)
+	seenIface := make(map[string]bool, len(in.Interfaces))
+	for _, item := range in.Interfaces {
+		if !store.ValidInterfaceName(item.Interface) || seenIface[item.Interface] || !validPolicy(item.Policy) {
+			return PolicyInput{}, errPolicy
+		}
+		seenIface[item.Interface] = true
+	}
+	slices.SortFunc(in.Interfaces, func(a, b PolicyInterface) int { return strings.Compare(a.Interface, b.Interface) })
 	in.Devices = slices.Clone(in.Devices)
 	devices := make([]store.Device, 0, len(in.Devices))
 	for i, d := range in.Devices {

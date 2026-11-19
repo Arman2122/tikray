@@ -112,9 +112,50 @@ export interface HealthConfig {
   probe_url: string;
 }
 
+export interface InterfacePolicy {
+  interface: string;
+  name?: string;
+  policy: Policy;
+}
+
+export interface RouterInterface {
+  name: string;
+  type: string;
+  role: 'wan' | 'lan' | 'bridge-port' | 'unassigned';
+  running: boolean;
+  disabled?: boolean;
+  bridge?: string;
+  ssid?: string;
+  subnets?: string[];
+  lists?: string[];
+  in_scope?: boolean;
+  rx_bytes?: number;
+  tx_bytes?: number;
+}
+
+export interface WANUplink {
+  interface: string;
+  type?: string;
+  gateway?: string;
+  point_to_point?: boolean;
+  active: boolean;
+  distance?: number;
+  running: boolean;
+}
+
+export interface NetworkInventory {
+  managed: boolean;
+  routeros?: string;
+  lan_list?: string;
+  active_wan?: string;
+  uplinks: WANUplink[];
+  interfaces: RouterInterface[];
+}
+
 export interface NetworkConfig {
   subnet: string;
   require_local_bridge?: boolean;
+  wan_interface?: string;
 }
 
 export interface State {
@@ -122,6 +163,7 @@ export interface State {
   servers: Server[];
   subscriptions: Subscription[];
   devices: Device[];
+  interfaces?: InterfacePolicy[];
   default_policy: Policy;
   routing: Routing;
   dns: DNSConfig;
@@ -590,6 +632,33 @@ export const api = {
   },
   async getLeases(): Promise<LeaseInfo[]> {
     return (await request<LeaseInfo[]>('/v1/routeros/leases')).data;
+  },
+  async getRouterInterfaces(): Promise<NetworkInventory> {
+    return (await request<NetworkInventory>('/v1/routeros/interfaces')).data;
+  },
+  async setInterfacePolicy(iface: string, body: { name?: string; policy: Policy }): Promise<InterfacePolicy> {
+    return (
+      await request<InterfacePolicy>(`/v1/interfaces/${encodeURIComponent(iface)}`, {
+        method: 'PUT',
+        body,
+        useIfMatch: true
+      })
+    ).data;
+  },
+  async deleteInterfacePolicy(iface: string): Promise<void> {
+    await request<void>(`/v1/interfaces/${encodeURIComponent(iface)}`, {
+      method: 'DELETE',
+      useIfMatch: true
+    });
+  },
+  async setWANInterface(wanInterface: string): Promise<NetworkConfig> {
+    return (
+      await request<NetworkConfig>('/v1/network/wan', {
+        method: 'PUT',
+        body: { wan_interface: wanInterface },
+        useIfMatch: true
+      })
+    ).data;
   },
   async makeStaticLease(address: string): Promise<LeaseInfo> {
     return (

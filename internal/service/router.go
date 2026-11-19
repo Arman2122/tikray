@@ -17,6 +17,10 @@ type routerProfiler interface {
 	Profile() adapters.Profile
 }
 
+type routerInterfaceReader interface {
+	Interfaces(context.Context) (routeros.NetworkInventory, error)
+}
+
 // RouterController prepares scoped protection before either policy changes.
 // Reconcile releases it only after verifying the effective router policy.
 type RouterController interface {
@@ -278,4 +282,36 @@ func (s *Service) MakeStaticLease(ctx context.Context, addr netip.Addr) (routero
 	}
 	s.record(KindRouter, "made DHCP lease static")
 	return lease, nil
+}
+
+// RouterInterfaces reads live MikroTik physical ports, Wi-Fi radios/SSIDs,
+// bridges, VLANs, subnets, and WAN Internet-in uplinks on demand. In standalone
+// mode it returns Managed: false cleanly without failing.
+func (s *Service) RouterInterfaces(ctx context.Context) (routeros.NetworkInventory, error) {
+	empty := routeros.NetworkInventory{
+		Managed:    false,
+		Uplinks:    []routeros.WANUplink{},
+		Interfaces: []routeros.RouterInterface{},
+	}
+	if s.router == nil || s.repairBridge {
+		return empty, nil
+	}
+	reader, ok := s.router.(routerInterfaceReader)
+	if !ok {
+		return empty, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, statusTimeout)
+	defer cancel()
+	inv, err := reader.Interfaces(ctx)
+	if err != nil {
+		return routeros.NetworkInventory{}, publicRouterError(err)
+	}
+	st, _ := s.store.State()
+	redact := RedactorFor(st)
+	for i := range inv.Interfaces {
+		if inv.Interfaces[i].SSID != "" && redact(inv.Interfaces[i].SSID) != inv.Interfaces[i].SSID {
+			inv.Interfaces[i].SSID = ""
+		}
+	}
+	return inv, nil
 }

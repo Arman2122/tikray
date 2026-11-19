@@ -10,7 +10,9 @@ import (
 
 	"github.com/Arman2122/tikray/internal/auth"
 	"github.com/Arman2122/tikray/internal/backup"
+	"github.com/Arman2122/tikray/internal/routeros"
 	"github.com/Arman2122/tikray/internal/service"
+	"github.com/Arman2122/tikray/internal/store"
 )
 
 type serverPinger interface {
@@ -24,6 +26,13 @@ type coreReleaseLister interface {
 
 type serverConfigReader interface {
 	ServerConfig(id string) (service.ServerConfigView, error)
+}
+
+type interfacePolicyManager interface {
+	RouterInterfaces(ctx context.Context) (routeros.NetworkInventory, error)
+	SetInterfacePolicy(ctx context.Context, rev uint64, item store.InterfacePolicy) (uint64, error)
+	RemoveInterfacePolicy(ctx context.Context, rev uint64, iface string) (uint64, error)
+	SetWANInterface(ctx context.Context, rev uint64, iface string) (uint64, error)
 }
 
 // NewHandlerWithUI serves the API and, when ui is non-nil, serves the embedded
@@ -223,4 +232,97 @@ func (h *handler) serverConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	_, rev := h.b.State()
 	h.reply(w, http.StatusOK, rev, cfg)
+}
+
+func (h *handler) routerInterfaces(w http.ResponseWriter, r *http.Request) {
+	mgr, ok := h.b.(interfacePolicyManager)
+	if !ok {
+		_, rev := h.b.State()
+		h.reply(w, http.StatusOK, rev, routeros.NetworkInventory{
+			Managed:    false,
+			Uplinks:    []routeros.WANUplink{},
+			Interfaces: []routeros.RouterInterface{},
+		})
+		return
+	}
+	inv, err := mgr.RouterInterfaces(r.Context())
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	_, rev := h.b.State()
+	h.reply(w, http.StatusOK, rev, inv)
+}
+
+func (h *handler) setInterfacePolicy(w http.ResponseWriter, r *http.Request) {
+	mgr, ok := h.b.(interfacePolicyManager)
+	if !ok {
+		h.writeError(w, http.StatusServiceUnavailable, codeUnavailable, "interface policies are not supported")
+		return
+	}
+	rev, ok := h.revision(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Name   string       `json:"name"`
+		Policy store.Policy `json:"policy"`
+	}
+	if !h.decode(w, r, &in) || h.maskedRequest(w, in) {
+		return
+	}
+	iface := strings.TrimSpace(r.PathValue("name"))
+	item := store.InterfacePolicy{Interface: iface, Name: in.Name, Policy: in.Policy}
+	newRev, err := mgr.SetInterfacePolicy(r.Context(), rev, item)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	st, _ := h.b.State()
+	redact := service.RedactorFor(st)
+	item.Name = h.shown(item.Name, redact, auth.Session{})
+	h.reply(w, http.StatusOK, newRev, item)
+}
+
+func (h *handler) removeInterfacePolicy(w http.ResponseWriter, r *http.Request) {
+	mgr, ok := h.b.(interfacePolicyManager)
+	if !ok {
+		h.writeError(w, http.StatusServiceUnavailable, codeUnavailable, "interface policies are not supported")
+		return
+	}
+	rev, ok := h.revision(w, r)
+	if !ok {
+		return
+	}
+	newRev, err := mgr.RemoveInterfacePolicy(r.Context(), rev, r.PathValue("name"))
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	h.noContent(w, newRev)
+}
+
+func (h *handler) setWANInterface(w http.ResponseWriter, r *http.Request) {
+	mgr, ok := h.b.(interfacePolicyManager)
+	if !ok {
+		h.writeError(w, http.StatusServiceUnavailable, codeUnavailable, "WAN uplink selection is not supported")
+		return
+	}
+	rev, ok := h.revision(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		WANInterface string `json:"wan_interface"`
+	}
+	if !h.decode(w, r, &in) || h.maskedRequest(w, in) {
+		return
+	}
+	newRev, err := mgr.SetWANInterface(r.Context(), rev, in.WANInterface)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	st, _ := h.b.State()
+	h.reply(w, http.StatusOK, newRev, st.Network)
 }
