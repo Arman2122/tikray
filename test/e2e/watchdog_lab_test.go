@@ -269,10 +269,12 @@ func (f *routingLab) imageMarker(ctx context.Context, t *testing.T, row containe
 	// A bounded direct read still returns the exact signed marker bytes.
 	path := rosEscape(row.root + "/m3-qa-image-version")
 	command := `{:do { :local b ([/file/read file="` + path + `" offset=0 chunk-size=32 as-value]->"data"); :if ($b="` + want + `\n") do={:put "m3-runtime-marker-ok"} else={:if ([:len $b]>0) do={:put "m3-runtime-marker-different"}} } on-error={}}`
-	read, cancel := context.WithTimeout(ctx, 20*time.Second)
+	read, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	_, ok := poll(read, 20*time.Second, 250*time.Millisecond, func() bool {
-		out, err := f.CHR.RunPrivateFresh(read, command)
+	_, ok := poll(read, 30*time.Second, time.Second, func() bool {
+		attempt, done := context.WithTimeout(read, 10*time.Second)
+		out, err := f.CHR.RunPrivateFresh(attempt, command)
+		done()
 		if err == nil && strings.TrimSpace(out) == "m3-runtime-marker-different" {
 			t.Fatal("the extracted signed release marker positively differed from the requested version")
 		}

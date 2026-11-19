@@ -146,16 +146,22 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 	type pair [2]nativeFlowCounters
 	var markerLost atomic.Bool
 	cmd := []string{"/ip/firewall/connection/print", "=.proplist=.id,orig-packets,repl-packets,orig-bytes,repl-bytes,connection-mark,reply-src-address,reply-src-port", "?protocol=udp", "?src-address=" + address, "?src-port=31932", "?dst-address=198.51.100.254", "?dst-port=31931"}
-	sshQuery := `{:local rows [/ip/firewall/connection/find where src-address=[:toip "` + rosEscape(address) + `"] and protocol=udp and src-port=31932 and dst-address=198.51.100.254 and dst-port=31931 and connection-mark="` + mark + `"];:if ([:len $rows]=1) do={:local id [:pick $rows 0];:put ("m3-owner-row|" . [:tostr $id] . "|" . [/ip/firewall/connection/get $id orig-packets] . "|" . [/ip/firewall/connection/get $id repl-packets] . "|" . [/ip/firewall/connection/get $id orig-bytes] . "|" . [/ip/firewall/connection/get $id repl-bytes] . "|end")}}`
+	sshQuery := `{:local done false;:for n from=1 to=4 do={:if (!$done) do={:do {:local rows [/ip/firewall/connection/find where src-address=[:toip "` + rosEscape(address) + `"] and protocol=udp and src-port=31932 and dst-address=198.51.100.254 and dst-port=31931 and connection-mark="` + mark + `"];:if ([:len $rows]=1) do={:local id [:pick $rows 0];:put ("m3-owner-row|" . [:tostr $id] . "|" . [/ip/firewall/connection/get $id orig-packets] . "|" . [/ip/firewall/connection/get $id repl-packets] . "|" . [/ip/firewall/connection/get $id orig-bytes] . "|" . [/ip/firewall/connection/get $id repl-bytes] . "|end");:set done true}} on-error={};:if (!$done) do={:delay 150ms}}}}`
 	read := func(c context.Context, checkpoint bool) (pair, bool) {
 		var current pair
 		runSSH := f.CHR.RunPrivate
 		window := 7 * time.Second
+		interval := 200 * time.Millisecond
+		attemptLimit := 7 * time.Second
 		if checkpoint {
 			// Reimport and container-shell probes use their own sessions.
-			// The positive owner checkpoint also needs an independent read.
+			// The positive owner checkpoint also needs an independent read;
+			// space fresh SSH logins to avoid RouterOS's burst-login throttle
+			// and bound each dial so one stall cannot consume the full window.
 			runSSH = f.CHR.RunPrivateFresh
 			window = 45 * time.Second
+			interval = 2 * time.Second
+			attemptLimit = 12 * time.Second
 		}
 		bound, end := context.WithTimeout(c, window)
 		defer end()
@@ -164,7 +170,7 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 			reader = f.ownerSession(bound, t)
 			defer reader.Close()
 		}
-		_, got := poll(bound, window, 200*time.Millisecond, func() bool {
+		_, got := poll(bound, window, interval, func() bool {
 			rows, err := reader.CommandAt(bound, reader.Generation(), cmd)
 			if err != nil || len(rows) != 1 {
 				return false
@@ -183,7 +189,9 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 			if !apiOK {
 				return false
 			}
-			wire, err := runSSH(bound, sshQuery)
+			sshCtx, sshEnd := context.WithTimeout(bound, attemptLimit)
+			wire, err := runSSH(sshCtx, sshQuery)
+			sshEnd()
 			parts := ownerFlowFrame.FindStringSubmatch(wire)
 			if err != nil || len(parts) != 6 {
 				return false
