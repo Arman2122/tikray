@@ -1,0 +1,27 @@
+name: wiki-sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch used for repository-relative documentation links"
+        default: "main"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Publish docs/wiki to GitHub Wiki
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sync wiki pages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LINK_BRANCH: ${{ github.event.inputs.branch || github.ref_name }}
+        run: |
+          bash scripts/sync-wiki.sh \
+            --branch "$LINK_BRANCH" \
+            --wiki-url "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git"

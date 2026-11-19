@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Documentation & Wiki
+    url: https://github.com/Arman2122/tikray/blob/v1.0/docs/wiki/Home.md
+    about: Read the Installation, Offline Deployment, Protocol, and Troubleshooting guides first.
   - name: Security Vulnerability (Private)
     url: https://github.com/Arman2122/tikray/security/advisories/new
     about: Report security issues privately instead of opening a public issue.

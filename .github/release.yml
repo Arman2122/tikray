@@ -1,0 +1,42 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+    authors:
+      - dependabot
+  categories:
+    - title: Breaking Changes
+      labels:
+        - breaking
+        - breaking-change
+    - title: New Features
+      labels:
+        - enhancement
+        - feature
+    - title: RouterOS & Compatibility
+      labels:
+        - routeros
+        - xray-core
+        - compatibility
+    - title: Web UI & UX
+      labels:
+        - web-ui
+        - ui
+        - ux
+    - title: Security & Hardening
+      labels:
+        - security
+    - title: Performance & Optimization
+      labels:
+        - performance
+    - title: Bug Fixes
+      labels:
+        - bug
+        - fix
+    - title: Documentation & CI
+      labels:
+        - documentation
+        - ci
+    - title: Other Changes
+      labels:
+        - "*"

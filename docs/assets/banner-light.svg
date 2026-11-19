@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" width="1200" height="320" role="img" aria-label="tikray — First-class xray-core on MikroTik RouterOS v7">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="50%" stop-color="#f1f5f9"/>
+      <stop offset="100%" stop-color="#eef2ff"/>
+    </linearGradient>
+    <radialGradient id="glowCyan" cx="18%" cy="42%" r="44%">
+      <stop offset="0%" stop-color="#06b6d4" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#06b6d4" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowIndigo" cx="84%" cy="55%" r="46%">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#6366f1" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="50%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#4f46e5"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#cbd5e1" stroke-width="0.7" stroke-opacity="0.55"/>
+    </pattern>
+  </defs>
+
+  <!-- Card frame -->
+  <rect x="1" y="1" width="1198" height="318" rx="20" fill="url(#bg)" stroke="#cbd5e1" stroke-width="1.5"/>
+  <rect x="1" y="1" width="1198" height="318" rx="20" fill="url(#grid)"/>
+  <rect x="1" y="1" width="1198" height="318" rx="20" fill="url(#glowCyan)"/>
+  <rect x="1" y="1" width="1198" height="318" rx="20" fill="url(#glowIndigo)"/>
+
+  <!-- Decorative right-side live tunnel topology motif -->
+  <g transform="translate(765, 52)">
+    <rect x="0" y="0" width="382" height="216" rx="14" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e1" stroke-width="1.2"/>
+    <circle cx="18" cy="18" r="4.5" fill="#ef4444" fill-opacity="0.8"/>
+    <circle cx="32" cy="18" r="4.5" fill="#f59e0b" fill-opacity="0.8"/>
+    <circle cx="46" cy="18" r="4.5" fill="#10b981" fill-opacity="0.8"/>
+    <text x="64" y="22" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="11" fill="#64748b">tikray-topology · 172.31.255.0/29</text>
+    <line x1="0" y1="34" x2="382" y2="34" stroke="#e2e8f0" stroke-width="1"/>
+
+    <!-- Routing paths -->
+    <path d="M 74 88 C 110 88, 114 88, 146 88" fill="none" stroke="#0284c7" stroke-width="2.2" stroke-dasharray="5 4"/>
+    <path d="M 224 88 C 254 88, 258 66, 290 66" fill="none" stroke="#059669" stroke-width="2.2"/>
+    <path d="M 224 94 C 254 94, 258 148, 290 148" fill="none" stroke="url(#accent)" stroke-width="2.5"/>
+
+    <!-- Node: LAN -->
+    <rect x="18" y="64" width="58" height="48" rx="9" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.2"/>
+    <text x="47" y="85" text-anchor="middle" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="11.5" font-weight="700" fill="#0f172a">LAN</text>
+    <text x="47" y="100" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9.5" fill="#64748b">Smart</text>
+
+    <!-- Node: RouterOS -->
+    <rect x="146" y="60" width="78" height="56" rx="9" fill="#f0f9ff" stroke="#0284c7" stroke-width="1.4"/>
+    <text x="185" y="82" text-anchor="middle" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="11.5" font-weight="700" fill="#0f172a">RouterOS</text>
+    <text x="185" y="98" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9.5" fill="#0369a1">v7.25.1</text>
+
+    <!-- Node: Direct ISP -->
+    <rect x="290" y="46" width="74" height="40" rx="8" fill="#ecfdf5" stroke="#059669" stroke-opacity="0.7" stroke-width="1.2"/>
+    <text x="327" y="63" text-anchor="middle" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="10.5" font-weight="700" fill="#065f46">DIRECT</text>
+    <text x="327" y="77" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#047857">FastTrack</text>
+
+    <!-- Node: xray-core -->
+    <rect x="290" y="122" width="74" height="50" rx="9" fill="#eef2ff" stroke="#4f46e5" stroke-width="1.4"/>
+    <text x="327" y="143" text-anchor="middle" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="11" font-weight="700" fill="#1e1b4b">xray-core</text>
+    <text x="327" y="159" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#4338ca">REALITY</text>
+
+    <!-- Control container status strip -->
+    <rect x="18" y="144" width="234" height="52" rx="9" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+    <circle cx="34" cy="162" r="4" fill="#10b981"/>
+    <text x="45" y="166" font-family="ui-monospace, monospace" font-size="10.5" fill="#1e293b">tikray + tikray-runner</text>
+    <text x="30" y="184" font-family="ui-monospace, monospace" font-size="9.5" fill="#64748b">RAM: 48M + 24M + 128M · Trial Rollback</text>
+  </g>
+
+  <!-- Brand Mark -->
+  <g transform="translate(56, 62)">
+    <rect x="0" y="0" width="68" height="68" rx="16" fill="#ffffff" stroke="url(#accent)" stroke-width="2"/>
+    <path d="M 17 44 L 34 22 L 51 44" fill="none" stroke="url(#accent)" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 25 46 L 34 34 L 43 46" fill="none" stroke="#0284c7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>
+    <circle cx="34" cy="22" r="4.5" fill="#0284c7"/>
+    <circle cx="17" cy="44" r="3.5" fill="#2563eb"/>
+    <circle cx="51" cy="44" r="3.5" fill="#4f46e5"/>
+  </g>
+
+  <!-- Title & Tagline -->
+  <text x="144" y="109" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="56" font-weight="800" letter-spacing="-1.5" fill="#0f172a">tikray</text>
+  <rect x="310" y="76" width="62" height="24" rx="12" fill="#e0f2fe" stroke="#0284c7" stroke-opacity="0.45" stroke-width="1"/>
+  <text x="341" y="92" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" font-weight="700" fill="#0369a1">v1.0.0</text>
+
+  <text x="58" y="170" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="23" font-weight="600" fill="#1e293b">First-class <tspan fill="#0284c7">xray-core</tspan> proxy routing on <tspan fill="#4f46e5">MikroTik RouterOS v7</tspan></text>
+  <text x="58" y="202" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="15.5" fill="#475569">Native two-container architecture · Embedded 57 KB Web UI · Zero-downtime hot reloads · Auto-rollback</text>
+
+  <!-- Bottom Feature Pills -->
+  <g transform="translate(58, 232)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11.5" font-weight="600">
+    <rect x="0" y="0" width="176" height="32" rx="8" fill="#e0f2fe" stroke="#7dd3fc" stroke-width="1"/>
+    <circle cx="15" cy="16" r="3.5" fill="#0284c7"/>
+    <text x="27" y="20" fill="#075985">RouterOS 7.23 – 7.26+</text>
+
+    <rect x="188" y="0" width="142" height="32" rx="8" fill="#e0e7ff" stroke="#a5b4fc" stroke-width="1"/>
+    <circle cx="203" cy="16" r="3.5" fill="#4f46e5"/>
+    <text x="215" y="20" fill="#3730a3">xray-core 26.x</text>
+
+    <rect x="342" y="0" width="166" height="32" rx="8" fill="#d1fae5" stroke="#6ee7b7" stroke-width="1"/>
+    <circle cx="357" cy="16" r="3.5" fill="#059669"/>
+    <text x="369" y="20" fill="#065f46">VLESS · REALITY · ECH</text>
+
+    <rect x="520" y="0" width="152" height="32" rx="8" fill="#f3e8ff" stroke="#d8b4fe" stroke-width="1"/>
+    <circle cx="535" cy="16" r="3.5" fill="#7c3aed"/>
+    <text x="547" y="20" fill="#5b21b6">Offline-First UI</text>
+  </g>
+</svg>

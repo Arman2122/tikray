@@ -112,10 +112,26 @@ jobs:
             done
           done
 
+      - name: Prepare release notes body
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          base="https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_TAG}"
+          if [[ -f "docs/releases/${RELEASE_TAG}.md" ]]; then
+            sed -E \
+              -e "s|\(\.\./\.\./([^)]+)\)|(${base}/\1)|g" \
+              -e "s|\(\.\./([^)]+)\)|(${base}/docs/\1)|g" \
+              "docs/releases/${RELEASE_TAG}.md" > out/RELEASE_NOTES.md
+          else
+            printf 'See [CHANGELOG.md](%s/CHANGELOG.md) for full details.\n' \
+              "$base" > out/RELEASE_NOTES.md
+          fi
+
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          name: "tikray ${{ env.RELEASE_TAG }}"
+          body_path: out/RELEASE_NOTES.md
           generate_release_notes: true
           files: |
             out/*.tar
