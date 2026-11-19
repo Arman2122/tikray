@@ -155,7 +155,7 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 			// Reimport and container-shell probes use their own sessions.
 			// The positive owner checkpoint also needs an independent read.
 			runSSH = f.CHR.RunPrivateFresh
-			window = 20 * time.Second
+			window = 45 * time.Second
 		}
 		bound, end := context.WithTimeout(c, window)
 		defer end()

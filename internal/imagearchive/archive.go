@@ -87,6 +87,8 @@ func Inspect(ctx context.Context, r io.ReaderAt, size int64, component, arch, ve
 	raw := io.NewSectionReader(r, 0, size)
 	sum := sha256.New()
 	var block [ChunkSize]byte
+	var chainBuf [256]byte
+	hasChain := false
 	for offset := int64(0); offset < size; offset += ChunkSize {
 		if err := ctx.Err(); err != nil {
 			return Ref{}, Metadata{}, err
@@ -97,8 +99,19 @@ func Inspect(ctx context.Context, r io.ReaderAt, size int64, component, arch, ve
 		}
 		sum.Write(part)
 		h := sha512.Sum512(part)
-		mixed := sha512.Sum512([]byte(ref.Chain + hex.EncodeToString(h[:])))
-		ref.Chain = hex.EncodeToString(mixed[:])
+		var mixed [sha512.Size]byte
+		if !hasChain {
+			hex.Encode(chainBuf[:128], h[:])
+			mixed = sha512.Sum512(chainBuf[:128])
+			hasChain = true
+		} else {
+			hex.Encode(chainBuf[128:], h[:])
+			mixed = sha512.Sum512(chainBuf[:])
+		}
+		hex.Encode(chainBuf[:128], mixed[:])
+	}
+	if hasChain {
+		ref.Chain = string(chainBuf[:128])
 	}
 	ref.Digest = hex.EncodeToString(sum.Sum(nil))
 	type entry struct{ offset, size int64 }

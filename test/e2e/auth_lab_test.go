@@ -285,10 +285,15 @@ type authLabReply struct {
 
 func (a authLabClient) call(t *testing.T, ctx context.Context, method, path string, in any, want int) authLabReply {
 	t.Helper()
+	return a.callWithin(t, ctx, callTimeout, method, path, in, want)
+}
+
+func (a authLabClient) callWithin(t *testing.T, ctx context.Context, timeout time.Duration, method, path string, in any, want int) authLabReply {
+	t.Helper()
 	if a.http == nil {
 		t.Fatal("an earlier auth check did not establish this client")
 	}
-	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var body io.Reader
 	if in != nil {

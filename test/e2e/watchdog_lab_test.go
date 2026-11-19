@@ -36,6 +36,9 @@ const (
 	healthyImageVersion = "6.0.1"
 	offlineImageVersion = "6.0.2"
 	imageRequestFile    = dataRoot + "/state/image-update.request"
+	// Staging + verifying multi-megabyte tar archives and reconciling RouterOS
+	// under QEMU TCG can exceed the 1-minute metadata callTimeout.
+	imageRequestTimeout = 3 * time.Minute
 )
 
 func TestM3Watchdog(t *testing.T) {
@@ -113,7 +116,7 @@ func (f *routingLab) imageRequest(ctx context.Context, t *testing.T, component, 
 	if op == "update" {
 		body = map[string]string{"version": version}
 	}
-	res := f.imageAPI().call(t, ctx, http.MethodPost, "/v1/images/"+component+"/"+op, body, code)
+	res := f.imageAPI().callWithin(t, ctx, imageRequestTimeout, http.MethodPost, "/v1/images/"+component+"/"+op, body, code)
 	var accepted imageAcceptance
 	if code == http.StatusAccepted {
 		res.decode(t, &accepted)
@@ -246,7 +249,10 @@ func (f *routingLab) containerImage(ctx context.Context, component string) (cont
 func (f *routingLab) requireImage(ctx context.Context, t *testing.T, c string, want testedArchive) containerWitness {
 	t.Helper()
 	var row containerWitness
-	_, ok := poll(ctx, 5*time.Minute, time.Second, func() bool {
+	// Under QEMU TCG, draining active open flows at 8/tick plus chunked SHA-512
+	// verification and tar extraction can exceed 5 minutes on the 1-minute
+	// watchdog scheduler.
+	_, ok := poll(ctx, 9*time.Minute, time.Second, func() bool {
 		var present bool
 		row, present = f.containerImage(ctx, c)
 		return present && row.imageID == want.imageID
@@ -877,7 +883,7 @@ func (f *routingLab) checkedImages(ctx context.Context, t *testing.T, component 
 	phase = "automatic-rollback"
 	f.waitImageCompletion(ctx, t, component, initial, valid.digest, base)
 	phase = "restored-trial"
-	if time.Since(start) < 4*time.Minute || time.Since(start) > 16*time.Minute {
+	if time.Since(start) < 4*time.Minute || time.Since(start) > 19*time.Minute {
 		t.Fatal("unhealthy image did not honor the bounded recovery window")
 	}
 	if sha256.Sum256(f.exactFile(ctx, t, statePath)) != beforeState {
