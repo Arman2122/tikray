@@ -319,25 +319,20 @@
             <span class="kbd">Ctrl K</span>
           </button>
           {#if status}
-            <span
-              class="badge {status.health.level === 'healthy'
+            {@const lvl = status.health.level}
+            {@const tone =
+              lvl === 'ok'
                 ? 'ok'
-                : status.health.level === 'degraded'
+                : lvl === 'degraded'
                   ? 'warn'
-                  : status.health.level === 'down'
+                  : lvl === 'down' || lvl === 'outage'
                     ? 'danger'
-                    : ''}"
-            >
-              <span
-                class="dot {status.health.level === 'healthy'
-                  ? 'ok'
-                  : status.health.level === 'degraded'
-                    ? 'warn'
-                    : status.health.level === 'down'
-                      ? 'danger'
-                      : ''}"
-              ></span>
-              {status.health.level}
+                    : lvl === 'idle'
+                      ? 'accent'
+                      : ''}
+            <span class="badge {tone}">
+              <span class="dot {tone}"></span>
+              {lvl === 'ok' ? 'healthy' : lvl}
             </span>
           {/if}
           <button class="btn btn-sm" onclick={refreshAll}>

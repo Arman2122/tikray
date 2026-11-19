@@ -142,22 +142,23 @@ export interface ServerHealth {
 
 export interface HealthSnapshot {
   at?: string;
-  level: 'healthy' | 'degraded' | 'down' | 'unknown';
+  level: 'ok' | 'idle' | 'degraded' | 'outage' | 'down' | 'unknown';
   selected?: string;
   pinned?: string;
   runner: {
     reachable: boolean;
     state?: string;
+    xray_version?: string;
     routes_ok?: boolean;
     gateway_up?: boolean;
-    err?: string;
+    error?: string;
   };
   servers: ServerHealth[];
   probe: {
     ran?: boolean;
     ok?: boolean;
     delay?: number;
-    err?: string;
+    error?: string;
     at?: string;
   };
 }

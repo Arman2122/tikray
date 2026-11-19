@@ -3,12 +3,13 @@
 
   interface Props {
     title: string;
+    wide?: boolean;
     closable?: boolean;
     onClose?: () => void;
     children: Snippet;
   }
 
-  let { title, closable = true, onClose, children }: Props = $props();
+  let { title, wide = false, closable = true, onClose, children }: Props = $props();
 
   function handleWindowKey(e: KeyboardEvent): void {
     if (closable && e.key === 'Escape') {
@@ -26,7 +27,7 @@
 <svelte:window onkeydown={handleWindowKey} />
 
 <div class="modal-backdrop" role="presentation" onclick={handleBackdropClick}>
-  <div class="modal stack" role="dialog" aria-modal="true" aria-label={title} tabindex="-1">
+  <div class="modal {wide ? 'modal-wide' : ''} stack" role="dialog" aria-modal="true" aria-label={title} tabindex="-1">
     <div class="modal-header">
       <h3 class="card-title">{title}</h3>
       {#if closable && onClose}

@@ -1,10 +1,11 @@
 <script lang="ts">
   import { api, ApiError, type RefreshResult, type Server, type ServiceStatus, type State, type Subscription } from '../lib/api';
-  import { formatMs, formatTime, serverEndpoint } from '../lib/format';
+  import { formatMs, formatTime, friendlyError, serverEndpoint } from '../lib/format';
   import { inspectShareLink } from '../lib/linkPreview';
   import { toast } from '../lib/toast.svelte';
   import Icon from '../components/Icon.svelte';
   import Modal from '../components/Modal.svelte';
+  import ShareLinkEditor from '../components/ShareLinkEditor.svelte';
 
   interface Props {
     status: ServiceStatus | null;
@@ -20,7 +21,8 @@
 
   // Add Server modal
   let showAddServer = $state(false);
-  let addMode = $state<'link' | 'json'>('link');
+  let addMode = $state<'visual' | 'bulk' | 'json'>('visual');
+  let singleLinkInput = $state('');
   let linkInput = $state('');
   let serverName = $state('');
   let outboundJSON = $state('');
@@ -28,8 +30,11 @@
 
   // Edit Server modal
   let editingServer = $state<Server | null>(null);
+  let editTab = $state<'general' | 'link' | 'json'>('general');
   let editName = $state('');
+  let editDisabled = $state(false);
   let editLink = $state('');
+  let editOutboundJSON = $state('');
 
   // Add Subscription modal
   let showAddSub = $state(false);
@@ -68,11 +73,31 @@
     });
   });
 
+  function formatJSONField(raw: string): string | null {
+    try {
+      return JSON.stringify(JSON.parse(raw), null, 2);
+    } catch {
+      toast.warn('Invalid JSON — check syntax before formatting.');
+      return null;
+    }
+  }
+
   async function addServerSubmit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     saving = true;
     try {
-      if (addMode === 'link') {
+      if (addMode === 'visual') {
+        const line = singleLinkInput.trim();
+        if (!line) {
+          toast.warn('Paste a share link (vless://, trojan://, vmess://, ss://).');
+          return;
+        }
+        await api.addServer({
+          link: line,
+          name: serverName.trim() || undefined
+        });
+        toast.ok('Added server successfully.');
+      } else if (addMode === 'bulk') {
         const lines = linkInput
           .split(/\r?\n/)
           .map((l) => l.trim())
@@ -94,7 +119,7 @@
           } catch (err) {
             failed++;
             if (!firstErr) {
-              firstErr = err instanceof ApiError ? err.detail || err.message : 'Failed to add server';
+              firstErr = friendlyError(err, 'Failed to add server');
             }
           }
         }
@@ -121,12 +146,13 @@
         toast.ok(`Added server "${serverName.trim()}".`);
       }
       showAddServer = false;
+      singleLinkInput = '';
       linkInput = '';
       serverName = '';
       outboundJSON = '';
       await onRefresh();
     } catch (err) {
-      toast.err(err instanceof ApiError ? err.detail || err.message : 'Could not add server');
+      toast.err(friendlyError(err, 'Could not add server'));
     } finally {
       saving = false;
     }
@@ -156,8 +182,11 @@
 
   function openEditServer(srv: Server): void {
     editingServer = srv;
+    editTab = 'general';
     editName = srv.name;
+    editDisabled = Boolean(srv.disabled);
     editLink = '';
+    editOutboundJSON = '';
   }
 
   async function saveEditServer(e: SubmitEvent): Promise<void> {
@@ -165,12 +194,33 @@
     if (!editingServer) return;
     saving = true;
     try {
-      const patch: { name?: string; link?: string } = {};
+      const patch: { name?: string; disabled?: boolean; link?: string; outbound?: unknown } = {};
       if (editName.trim() && editName.trim() !== editingServer.name) {
         patch.name = editName.trim();
       }
-      if (editLink.trim()) {
+      if (editDisabled !== Boolean(editingServer.disabled)) {
+        patch.disabled = editDisabled;
+      }
+      if (editTab === 'link' && editLink.trim()) {
         patch.link = editLink.trim();
+      } else if (editTab === 'json' && editOutboundJSON.trim()) {
+        try {
+          patch.outbound = JSON.parse(editOutboundJSON);
+        } catch {
+          toast.err('Outbound must be valid JSON.');
+          return;
+        }
+      } else if (editTab === 'general') {
+        if (editLink.trim()) {
+          patch.link = editLink.trim();
+        } else if (editOutboundJSON.trim()) {
+          try {
+            patch.outbound = JSON.parse(editOutboundJSON);
+          } catch {
+            toast.err('Outbound must be valid JSON.');
+            return;
+          }
+        }
       }
       if (Object.keys(patch).length === 0) {
         editingServer = null;
@@ -181,7 +231,7 @@
       editingServer = null;
       await onRefresh();
     } catch (err) {
-      toast.err(err instanceof ApiError ? err.detail || err.message : 'Could not update server');
+      toast.err(friendlyError(err, 'Could not update server'));
     } finally {
       saving = false;
     }
@@ -340,6 +390,8 @@
                         <span style="font-size: 12px; color: var(--danger)">{srv.invalid}</span>
                       {:else if srv.untested}
                         <span style="font-size: 12px; color: var(--warn)">Untested (will verify when core runs)</span>
+                      {:else if hasFailedProbe && h?.last_error}
+                        <span style="font-size: 12px; color: var(--danger)">{h.last_error}</span>
                       {/if}
                     </div>
                   </td>
@@ -490,20 +542,34 @@
 
 <!-- Add Server Modal -->
 {#if showAddServer}
-  <Modal title="Add Proxy Server" onClose={() => (showAddServer = false)}>
+  <Modal title="Add Proxy Server" wide={true} onClose={() => (showAddServer = false)}>
     <div class="tabs">
-      <button class="tab {addMode === 'link' ? 'active' : ''}" onclick={() => (addMode = 'link')}>
-        Share Link(s)
+      <button type="button" class="tab {addMode === 'visual' ? 'active' : ''}" onclick={() => (addMode = 'visual')}>
+        Visual Link Editor
       </button>
-      <button class="tab {addMode === 'json' ? 'active' : ''}" onclick={() => (addMode = 'json')}>
+      <button type="button" class="tab {addMode === 'bulk' ? 'active' : ''}" onclick={() => (addMode = 'bulk')}>
+        Bulk Share Links
+      </button>
+      <button type="button" class="tab {addMode === 'json' ? 'active' : ''}" onclick={() => (addMode = 'json')}>
         Raw Xray Outbound JSON
       </button>
     </div>
 
     <form class="stack" onsubmit={addServerSubmit}>
-      {#if addMode === 'link'}
+      {#if addMode === 'visual'}
+        <ShareLinkEditor
+          bind:value={singleLinkInput}
+          idPrefix="add-sle"
+          placeholder="Paste vless://, trojan://, vmess://, or ss:// — all parameters unpack below for editing"
+          required={true}
+        />
         <div class="field">
-          <label for="srv-links">Share Link(s)</label>
+          <label for="srv-name-visual">Custom Display Name (optional)</label>
+          <input id="srv-name-visual" class="input" placeholder="Defaults to #remark from share link" bind:value={serverName} />
+        </div>
+      {:else if addMode === 'bulk'}
+        <div class="field">
+          <label for="srv-links">Share Link(s) — One Per Line</label>
           <textarea
             id="srv-links"
             class="textarea"
@@ -558,11 +624,24 @@
           <input id="json-name" class="input" placeholder="e.g. wireguard-eu" bind:value={serverName} required />
         </div>
         <div class="field">
-          <label for="json-body">Xray Outbound JSON Object</label>
+          <div class="row-between">
+            <label for="json-body">Xray Outbound JSON Object</label>
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              style="padding: 1px 7px; font-size: 11px"
+              onclick={() => {
+                const formatted = formatJSONField(outboundJSON);
+                if (formatted !== null) outboundJSON = formatted;
+              }}
+            >
+              Format JSON
+            </button>
+          </div>
           <textarea
             id="json-body"
             class="textarea"
-            style="min-height: 160px"
+            style="min-height: 190px"
             placeholder={'{"protocol":"vless","settings":{...},"streamSettings":{...}}'}
             bind:value={outboundJSON}
             required
@@ -582,25 +661,120 @@
 
 <!-- Edit Server Modal -->
 {#if editingServer}
-  <Modal title="Edit Server ({editingServer.id})" onClose={() => (editingServer = null)}>
+  {@const editEp = serverEndpoint(editingServer)}
+  {@const editHealth = healthMap.get(editingServer.id)}
+  {@const editPinned = stateData?.routing.pinned === editingServer.id}
+  <Modal title="Edit Server · {editingServer.name}" wide={true} onClose={() => (editingServer = null)}>
+    <!-- Live Server Summary Strip -->
+    <div class="editor-section" style="gap: 8px">
+      <div class="row-between" style="flex-wrap: wrap; gap: 8px">
+        <div class="row" style="gap: 8px; flex-wrap: wrap">
+          <span class="badge accent mono">{editEp.protocol}</span>
+          <span class="mono" style="font-size: 13px; font-weight: 600">{editEp.endpoint}</span>
+          <span class="mono hint" style="font-size: 11.5px">ID: {editingServer.id}</span>
+        </div>
+        <div class="row" style="gap: 6px; flex-wrap: wrap">
+          {#if editHealth?.alive}
+            <span class="badge ok tabular">Alive · {formatMs(editHealth.delay)}</span>
+          {:else if editHealth?.last_error}
+            <span class="badge danger">{editHealth.last_error}</span>
+          {:else}
+            <span class="badge warn">Pending probe</span>
+          {/if}
+          {#if editPinned}
+            <span class="badge accent">Pinned</span>
+          {/if}
+          <span class="badge">
+            {editingServer.subscription ? subMap.get(editingServer.subscription)?.name ?? 'Subscription' : 'Manual'}
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button type="button" class="tab {editTab === 'general' ? 'active' : ''}" onclick={() => (editTab = 'general')}>
+        General
+      </button>
+      <button type="button" class="tab {editTab === 'link' ? 'active' : ''}" onclick={() => (editTab = 'link')}>
+        Share Link &amp; Visual Settings
+      </button>
+      <button type="button" class="tab {editTab === 'json' ? 'active' : ''}" onclick={() => (editTab = 'json')}>
+        Raw Outbound JSON
+      </button>
+    </div>
+
     <form class="stack" onsubmit={saveEditServer}>
-      <div class="field">
-        <label for="edit-name">Display Name</label>
-        <input id="edit-name" class="input" bind:value={editName} required />
-      </div>
-      <div class="field">
-        <label for="edit-link">Replace Share Link (optional)</label>
-        <input
-          id="edit-link"
-          class="input mono"
-          placeholder="Leave empty to keep existing credentials"
+      {#if editTab === 'general'}
+        <div class="field">
+          <label for="edit-name">Display Name</label>
+          <input id="edit-name" class="input" bind:value={editName} required />
+        </div>
+
+        <label class="toggle" style="font-size: 13px">
+          <input type="checkbox" checked={!editDisabled} onchange={(e) => (editDisabled = !e.currentTarget.checked)} />
+          <span>Server enabled (participates in health observatory &amp; load balancing)</span>
+        </label>
+
+        <div class="alert" style="font-size: 12.5px">
+          <div class="row-between" style="flex-wrap: wrap; gap: 10px">
+            <span>
+              <strong>Zero-secret protection:</strong> Stored credentials (UUID, REALITY keys, PQ encryption) are
+              write-only and never sent back to the browser.
+            </span>
+            <button type="button" class="btn btn-sm" onclick={() => (editTab = 'link')}>
+              Edit Link / Settings →
+            </button>
+          </div>
+        </div>
+      {:else if editTab === 'link'}
+        <div class="field">
+          <label for="edit-name-link">Display Name</label>
+          <input id="edit-name-link" class="input" bind:value={editName} required />
+        </div>
+        <ShareLinkEditor
           bind:value={editLink}
+          idPrefix="edit-sle"
+          placeholder="Paste the share link to inspect and visually edit Host, Port, Flow, PQ Encryption, XHTTP Mode/Extra JSON, REALITY/TLS, SNI, ECH, PQV…"
         />
-      </div>
+        <span class="hint">
+          Leave the share link empty to keep existing credentials unchanged. Saving replaces the outbound via
+          zero-downtime hot reload.
+        </span>
+      {:else}
+        <div class="field">
+          <label for="edit-name-json">Display Name</label>
+          <input id="edit-name-json" class="input" bind:value={editName} required />
+        </div>
+        <div class="field">
+          <div class="row-between">
+            <label for="edit-json-body">Replacement Xray Outbound JSON</label>
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              style="padding: 1px 7px; font-size: 11px"
+              onclick={() => {
+                const formatted = formatJSONField(editOutboundJSON);
+                if (formatted !== null) editOutboundJSON = formatted;
+              }}
+            >
+              Format JSON
+            </button>
+          </div>
+          <textarea
+            id="edit-json-body"
+            class="textarea"
+            style="min-height: 200px"
+            placeholder={'{"protocol":"vless","settings":{...},"streamSettings":{...}}'}
+            bind:value={editOutboundJSON}
+          ></textarea>
+          <span class="hint">Replaces the server's xray-core outbound object directly (validated by xraypolicy).</span>
+        </div>
+      {/if}
+
       <div class="row" style="justify-content: flex-end">
         <button type="button" class="btn" onclick={() => (editingServer = null)}>Cancel</button>
         <button type="submit" class="btn btn-primary" disabled={saving}>
-          {saving ? 'Saving…' : 'Save Changes'}
+          {saving ? 'Saving & Reloading…' : 'Save Changes'}
         </button>
       </div>
     </form>

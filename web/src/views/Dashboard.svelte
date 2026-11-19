@@ -30,8 +30,27 @@
   let applying = $state(false);
 
   const healthLevel = $derived(status?.health.level ?? 'unknown');
+  const healthLabel = $derived(
+    healthLevel === 'ok'
+      ? 'Healthy'
+      : healthLevel === 'idle'
+        ? 'Idle'
+        : healthLevel === 'outage'
+          ? 'Outage'
+          : healthLevel === 'degraded'
+            ? 'Degraded'
+            : healthLevel === 'down'
+              ? 'Down'
+              : 'Unknown'
+  );
   const healthTone = $derived(
-    healthLevel === 'healthy' ? 'ok' : healthLevel === 'degraded' ? 'warn' : healthLevel === 'down' ? 'danger' : ''
+    healthLevel === 'ok'
+      ? 'ok'
+      : healthLevel === 'degraded'
+        ? 'warn'
+        : healthLevel === 'down' || healthLevel === 'outage'
+          ? 'danger'
+          : ''
   );
 
   const selectedServer = $derived.by(() => {
@@ -110,8 +129,8 @@
     <div class="stack" style="gap: 6px">
       <div class="row" style="gap: 10px">
         <span class="dot {healthTone}"></span>
-        <span style="font-size: 16px; font-weight: 700; text-transform: capitalize">
-          Proxy {healthLevel}
+        <span style="font-size: 16px; font-weight: 700">
+          Proxy {healthLabel}
         </span>
         {#if status}
           <span class="badge {status.applied ? 'ok' : 'warn'} tabular">
@@ -146,14 +165,14 @@
       <div class="hint">
         {#if status?.routeros?.degraded === 'bridge_repair'}
           Bridge network needs repair before policy writes resume.
-        {:else if status?.health.runner.err}
-          Runner: {status.health.runner.err}
-        {:else if status?.health.probe.ran && !status.health.probe.ok && status.health.probe.err}
-          Probe failed: {status.health.probe.err}
+        {:else if status?.health.runner.error}
+          Runner: {status.health.runner.error}
+        {:else if status?.health.probe.ran && !status.health.probe.ok && status.health.probe.error}
+          Probe failed: {status.health.probe.error}
         {:else if status?.health.runner.reachable}
           Runner {status.health.runner.state ?? 'running'} · Routes {status.health.runner.routes_ok ? 'OK' : 'pending'} · Gateway {status.health.runner.gateway_up ? 'UP' : 'down'}
           {#if status.health.probe.ran && status.health.probe.ok}
-            · E2E probe {formatMs(status.health.probe.delay)}
+            · E2E probe OK
           {/if}
         {:else}
           Waiting for runner heartbeat…

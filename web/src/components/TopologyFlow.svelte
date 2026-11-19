@@ -32,16 +32,16 @@
   );
 
   const exitTone = $derived(
-    status?.health.level === 'healthy'
+    status?.health.level === 'ok'
       ? 'ok'
       : status?.health.level === 'degraded'
         ? 'warn'
-        : selectedServer
+        : selectedServer || status?.health.level === 'outage'
           ? 'danger'
           : ''
   );
 
-  const flowActive = $derived(status?.health.level === 'healthy' || status?.health.level === 'degraded');
+  const flowActive = $derived(status?.health.level === 'ok' || status?.health.level === 'degraded');
 </script>
 
 <div class="card stack" style="gap: 12px">
