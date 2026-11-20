@@ -29,7 +29,7 @@
   <a href="#supported-routeros--hardware">Hardware</a> &nbsp;·&nbsp;
   <a href="#quick-start">Quick Start</a> &nbsp;·&nbsp;
   <a href="docs/wiki/Home.md">Wiki</a> &nbsp;·&nbsp;
-  <a href="docs/releases/v1.0.1.md">Release Notes</a>
+  <a href="docs/releases/v1.0.2.md">Release Notes</a>
 </p>
 
 </div>
@@ -312,8 +312,8 @@ tikray device set 192.168.88.25 smart --kill-switch        # Assign per-device o
 tikray device make-static 192.168.88.25                    # Convert bound RouterOS DHCP lease to static
 tikray policy default smart                                # Set LAN default policy (direct|smart|full)
 tikray core update latest                                  # Verify, trial & commit latest xray-core
-tikray geo update latest --profile iran                    # Update geoip/geosite + RouterOS domestic CIDRs
-tikray image update tikray v1.0.1                          # Blue/green container upgrade via watchdog
+tikray geo update latest                                   # Update geoip/geosite (default: iran / IR-Geo-DB) + domestic CIDRs
+tikray image update tikray v1.0.2                          # Blue/green container upgrade via watchdog
 tikray backup export --out backup.json                     # Encrypt full state (Argon2id + AES-256-GCM)
 tikray backup restore --in backup.json                     # Atomic restore (preserves managed bridge subnet)
 tikray events                                              # Stream redacted control-plane events
@@ -350,7 +350,7 @@ Read the full threat model in [`SECURITY.md`](SECURITY.md) and [`docs/architectu
 | [**Troubleshooting & Emergency Recovery**](docs/wiki/Troubleshooting-and-Emergency-Recovery.md) | `tikray-emergency-off`, password reset, bridge/NAT repair, `keep`/`purge` uninstall |
 | [**FAQ**](docs/wiki/FAQ.md) | Quick answers to the most common architectural & operational questions |
 | [**Architecture Deep Dive**](docs/architecture.md) · [**REST API v1**](docs/api.md) | Technical internals, reconciliation lifecycle & full JSON endpoint specification |
-| [**v1.0.1 Release Notes**](docs/releases/v1.0.1.md) · [**Changelog**](CHANGELOG.md) | Release highlights, artifact verification commands & version history |
+| [**v1.0.2 Release Notes**](docs/releases/v1.0.2.md) · [**Changelog**](CHANGELOG.md) | Release highlights, artifact verification commands & version history |
 
 ---
 

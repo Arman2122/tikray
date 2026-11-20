@@ -63,7 +63,7 @@ Once `tikray` is running, you never need SFTP or Winbox to update `xray-core` or
 Upload `geoip.dat`, `geosite.dat` (or `dlc.dat`), and `domestic-v4.txt` via **Updates & Inbox** (calls `POST /v1/inbox/geo/{profile}/{version}/{name}`), then apply the Geo update for that profile and version:
 
 ```sh
-tikray geo update 20261119 --profile iran
+tikray geo update v2026.11.20 --profile iran
 ```
 
 > **Security note:** Named API tokens (`tkr_*`) are intentionally forbidden (`403`) from uploading to `/v1/inbox/*`. Only signed-in admin sessions and the container-local root CLI can stage offline artifacts.

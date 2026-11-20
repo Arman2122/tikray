@@ -26,10 +26,10 @@ func TestUploadInboxCoreAndGeo(t *testing.T) {
 
 	// Upload geo assets for iran, v2fly, and custom.
 	geoBytes := []byte("geo-data-bytes")
-	if n, err := e.s.UploadInbox(t.Context(), "geo", "iran", "20261119", "geoip.dat", bytes.NewReader(geoBytes)); err != nil || n != int64(len(geoBytes)) {
+	if n, err := e.s.UploadInbox(t.Context(), "geo", "iran", "v2026.11.20", "geoip.dat", bytes.NewReader(geoBytes)); err != nil || n != int64(len(geoBytes)) {
 		t.Fatalf("UploadInbox geo iran = %d, %v", n, err)
 	}
-	if _, err := os.Stat(filepath.Join(e.data, "inbox", "geo", "iran", "20261119", "geoip.dat")); err != nil {
+	if _, err := os.Stat(filepath.Join(e.data, "inbox", "geo", "iran", "v2026.11.20", "geoip.dat")); err != nil {
 		t.Fatalf("iran geoip.dat missing: %v", err)
 	}
 	if _, err := e.s.UploadInbox(t.Context(), "geo", "v2fly", "20261119+20261118", "dlc.dat", bytes.NewReader(geoBytes)); err != nil {
@@ -52,8 +52,9 @@ func TestUploadInboxCoreAndGeo(t *testing.T) {
 		{"geo bad profile", "geo", "evil", "20261119", "geoip.dat", "abc"},
 		{"geo traversal", "geo", "custom", "../escape", "geoip.dat", "abc"},
 		{"v2fly geosite rejected", "geo", "v2fly", "20261119+20261119", "geosite.dat", "abc"},
-		{"iran dlc rejected", "geo", "iran", "20261119", "dlc.dat", "abc"},
-		{"iran domestic rejected", "geo", "iran", "20261119", "domestic-v4.txt", "1.2.3.0/24"},
+		{"iran numeric tag rejected", "geo", "iran", "20261119", "geoip.dat", "abc"},
+		{"iran dlc rejected", "geo", "iran", "v2026.11.20", "dlc.dat", "abc"},
+		{"iran domestic rejected", "geo", "iran", "v2026.11.20", "domestic-v4.txt", "1.2.3.0/24"},
 		{"oversized domestic", "geo", "custom", "rel-1", "domestic-v4.txt", strings.Repeat("a", maxInboxText+1)},
 	}
 	for _, tc := range badCases {

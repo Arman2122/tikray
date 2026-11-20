@@ -4,6 +4,14 @@ All notable changes to **tikray** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-11-20
+
+### Changed
+- **`Arman2122/IR-Geo-DB` as the Built-In & Default `iran` Geo Publisher (`internal/artifacts`, `internal/service`, `cmd/tikray`, `web/`)**:
+  - Switched the `iran` geo profile from `Chocolate4U/Iran-v2ray-rules` to [Arman2122/IR-Geo-DB](https://github.com/Arman2122/IR-Geo-DB) (rebuilt daily with RIPE-corrected Iranian IPv4 ranges, `geosite:ir`, `geoip:ir`, plus optional `geosite:ads`, `geosite:malware`, `geosite:phishing`, `geosite:cryptominers`, and `geoip:malware` categories).
+  - Verifies `geoip.dat` and `geosite.dat` against the release's `SHA256SUMS` manifest and validates `vYYYY.MM.DD` release tags (e.g. `v2026.11.20`).
+  - Made `iran` (`artifacts.DefaultGeoProfile`) the default geo profile for `GET /v1/geo`, `POST /v1/geo/update`, `tikray geo update latest` (when `--profile` is omitted), and the embedded Web UI (`Updates` view).
+
 ## [1.0.1] - 2026-11-20
 
 ### Added

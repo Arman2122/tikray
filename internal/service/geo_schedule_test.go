@@ -146,3 +146,19 @@ func TestGeoDailyFailureDoesNotLoop(t *testing.T) {
 		t.Fatal("failed publisher check was not retried next day")
 	}
 }
+
+func TestGeoDefaultsToIranProfile(t *testing.T) {
+	e := newEnv(t)
+	e.inSync()
+	e.s = e.newService(Config{})
+	info, err := e.s.Geo(t.Context())
+	if err != nil || info.Profile != "iran" || artifacts.DefaultGeoProfile != "iran" {
+		t.Fatalf("Geo().Profile = %q (err=%v), want %q", info.Profile, err, "iran")
+	}
+	// An explicit GeoUpdate with an empty profile resolves to iran (IR-Geo-DB),
+	// so invalid non-IR tags like 20261119 are refused while valid vYYYY.MM.DD
+	// tags pass profile/version validation.
+	if _, err := e.s.GeoUpdate(t.Context(), "", "20261119"); err == nil {
+		t.Fatal("empty profile did not enforce iran tag validation")
+	}
+}

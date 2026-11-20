@@ -141,7 +141,7 @@ func TestBackupAndInboxRoutes(t *testing.T) {
 		t.Fatalf("core inbox status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	r = httptest.NewRequest(http.MethodPost, "/v1/inbox/geo/iran/20261119/geoip.dat", strings.NewReader("geobytes"))
+	r = httptest.NewRequest(http.MethodPost, "/v1/inbox/geo/iran/v2026.11.20/geoip.dat", strings.NewReader("geobytes"))
 	r.Header.Set("Authorization", "Bearer "+testToken)
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)

@@ -364,7 +364,7 @@
       <form class="stack" onsubmit={runGeoUpdate}>
         <div class="form-inline">
           <select class="select form-inline-narrow" bind:value={geoProfile} aria-label="Geo profile">
-            <option value="iran">iran</option>
+            <option value="iran">iran (IR-Geo-DB · default)</option>
             <option value="v2fly">v2fly</option>
             <option value="loyalsoldier">loyalsoldier</option>
             <option value="custom">custom</option>
@@ -385,7 +385,7 @@
         {#if geoVersionMode === 'custom'}
           <input
             class="input mono"
-            placeholder={geoProfile === 'v2fly' ? 'e.g. 20261119+20261119' : 'e.g. 20261119'}
+            placeholder={geoProfile === 'iran' ? 'e.g. v2026.11.20' : geoProfile === 'v2fly' ? 'e.g. 20261119+20261119' : 'e.g. 20261119'}
             bind:value={geoCustomVersion}
             required
           />
@@ -427,7 +427,7 @@
                 <input
                   id="geo-ver"
                   class="input mono"
-                  placeholder={geoProfile === 'v2fly' ? '20261119+20261119' : '20261119'}
+                  placeholder={geoProfile === 'iran' ? 'v2026.11.20' : geoProfile === 'v2fly' ? '20261119+20261119' : '20261119'}
                   bind:value={geoInboxVersion}
                   required
                 />

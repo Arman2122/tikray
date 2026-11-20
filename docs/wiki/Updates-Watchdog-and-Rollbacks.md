@@ -9,7 +9,7 @@ One of `tikray`'s core design principles is **safe, independent updates**: updat
 | Lifecycle | Command / UI Action | Cryptographic Verification | Rollback Mechanism | Traffic Impact |
 |---|---|---|---|---|
 | **`xray-core`** | `tikray core update latest` | Upstream `.dgst` SHA-256 or ECDSA P-256 signed `index.json` | Deadline-backed runner trial auto-reverts to previous slot | ~1–2 s switch |
-| **Geo Data** | `tikray geo update latest --profile iran` | Upstream SHA-256 + `O_NOFOLLOW` immutable slot | Journaled rollback of both xray slot & RouterOS domestic address-list | Seamless |
+| **Geo Data** | `tikray geo update latest` *(defaults to `iran` / `IR-Geo-DB`)* | Upstream `SHA256SUMS` / `.sha256sum` + `O_NOFOLLOW` immutable slot | Journaled rollback of both xray slot & RouterOS domestic address-list | Seamless |
 | **`tikray` Control** | `tikray image update tikray v1.0.1` | `cosign verify-blob` + archive digest | RouterOS watchdog blue/green swap + `/healthz` revert | **Zero** |
 | **`tikray-runner`** | `tikray image update runner v1.0.1` | `cosign verify-blob` + archive digest | RouterOS watchdog swap + gateway ping revert | Brief container restart |
 

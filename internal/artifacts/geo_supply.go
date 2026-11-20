@@ -41,6 +41,10 @@ var (
 	errGeoConflict = errors.New("artifacts: conflicting installed geo slot")
 )
 
+// DefaultGeoProfile is the default geo publisher profile used when none is
+// explicitly configured or active.
+const DefaultGeoProfile = "iran"
+
 func ValidGeoProfile(s string) bool {
 	switch s {
 	case "iran", "v2fly", "loyalsoldier", "custom":
@@ -51,6 +55,31 @@ func ValidGeoProfile(s string) bool {
 
 func geoDate(s string) bool {
 	return len(s) >= 8 && len(s) <= 20 && strings.Trim(s, "0123456789") == ""
+}
+
+// geoIRTag matches IR-Geo-DB release tags such as v2026.11.20 (with an
+// optional numeric suffix like .1 or -1 for same-day rebuilds).
+func geoIRTag(s string) bool {
+	if len(s) < 11 || len(s) > 20 || s[0] != 'v' || s[5] != '.' || s[8] != '.' {
+		return false
+	}
+	digits := func(p string) bool {
+		return len(p) > 0 && strings.Trim(p, "0123456789") == ""
+	}
+	if !digits(s[1:5]) || !digits(s[6:8]) || !digits(s[9:11]) {
+		return false
+	}
+	if len(s) == 11 {
+		return true
+	}
+	return (s[11] == '.' || s[11] == '-') && digits(s[12:])
+}
+
+func validBuiltinGeoTag(profile, tag string) bool {
+	if profile == "iran" {
+		return geoIRTag(tag)
+	}
+	return geoDate(tag)
 }
 
 // ValidGeoTarget also accepts a missing profile when a caller has not yet
@@ -68,6 +97,8 @@ func ValidGeoTarget(profile, version string) bool {
 	switch profile {
 	case "custom":
 		return runnerapi.ValidGeoName(version)
+	case "iran":
+		return geoIRTag(version)
 	case "v2fly":
 		ip, site, ok := strings.Cut(version, "+")
 		return ok && geoDate(ip) && geoDate(site)
@@ -81,7 +112,7 @@ const geoRepo = "https://github.com/"
 func geoRepos(profile string) (ip, site string) {
 	switch profile {
 	case "iran":
-		ip = geoRepo + "Chocolate4U/Iran-v2ray-rules"
+		ip = geoRepo + "Arman2122/IR-Geo-DB"
 	case "loyalsoldier":
 		ip = geoRepo + "Loyalsoldier/v2ray-rules-dat"
 	case "v2fly":
@@ -177,7 +208,7 @@ func (c GeoSourceConfig) small(ctx context.Context, raw string) ([]byte, error) 
 	return out.Bytes(), nil
 }
 
-func (c GeoSourceConfig) latestTag(ctx context.Context, repo string) (string, error) {
+func (c GeoSourceConfig) latestTag(ctx context.Context, profile, repo string) (string, error) {
 	var tag string
 	err := c.upstream(ctx, func(h *http.Client) error {
 		probe, stop := context.WithTimeout(ctx, latestTimeout)
@@ -198,7 +229,7 @@ func (c GeoSourceConfig) latestTag(ctx context.Context, repo string) (string, er
 			return errGeoProof
 		}
 		tag = path.Base(loc.Path)
-		if !geoDate(tag) || loc.Path != strings.TrimSuffix(req.URL.Path, "/latest")+"/tag/"+tag {
+		if !validBuiltinGeoTag(profile, tag) || loc.Path != strings.TrimSuffix(req.URL.Path, "/latest")+"/tag/"+tag {
 			return errGeoProof
 		}
 		return nil
@@ -240,10 +271,10 @@ func (u *CoreUpdater) resolveGeo(ctx context.Context, profile, version string) (
 			tag = strings.TrimSpace(string(b))
 		} else {
 			ip, site := geoRepos(profile)
-			tag, err = c.latestTag(ctx, ip)
+			tag, err = c.latestTag(ctx, profile, ip)
 			if err == nil && profile == "v2fly" {
 				var v string
-				v, err = c.latestTag(ctx, site)
+				v, err = c.latestTag(ctx, profile, site)
 				tag += "+" + v
 			}
 		}
@@ -277,7 +308,6 @@ func checksumFile(b []byte, name string) (string, error) {
 	case 1:
 	case 2:
 		file := strings.TrimPrefix(fields[1], "*")
-		// The Iran publisher hashes from its build root as release/<name>.
 		if file != name && file != "release/"+name {
 			return "", errGeoProof
 		}
@@ -290,6 +320,44 @@ func checksumFile(b []byte, name string) (string, error) {
 	}
 	return sum, nil
 }
+
+// checksumManifest extracts required asset digests from a multi-file SHA256SUMS
+// document (standard sha256sum format: "<64-hex>  <filename>").
+func checksumManifest(b []byte, assets []geoAsset) (map[string]string, error) {
+	wantByFile := make(map[string]string, len(assets))
+	for _, a := range assets {
+		wantByFile[a.file] = a.local
+	}
+	found := make(map[string]string, len(assets))
+	for _, rawLine := range strings.Split(string(b), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return nil, errGeoProof
+		}
+		sum := strings.ToLower(fields[0])
+		if !isSHA256Hex(sum) {
+			return nil, errGeoProof
+		}
+		file := strings.TrimPrefix(strings.TrimPrefix(fields[1], "*"), "./")
+		local, ok := wantByFile[file]
+		if !ok {
+			continue
+		}
+		if _, dup := found[local]; dup {
+			return nil, errGeoProof
+		}
+		found[local] = sum
+	}
+	if len(found) != len(assets) {
+		return nil, errGeoProof
+	}
+	return found, nil
+}
+
 func (u *CoreUpdater) geoChecksums(ctx context.Context, r geoRelease, assets []geoAsset) (geoMeta, error) {
 	manifest := func(b []byte) (geoMeta, error) {
 		var m geoMeta
@@ -310,12 +378,24 @@ func (u *CoreUpdater) geoChecksums(ctx context.Context, r geoRelease, assets []g
 		return m, nil
 	}
 	var m geoMeta
-	if r.profile == "custom" {
+	switch r.profile {
+	case "custom":
 		b, e := u.GeoSource.small(ctx, geoURL(u.GeoSource.CustomURL, r.tag, metaFile))
 		if e == nil {
 			return manifest(b)
 		}
-	} else {
+	case "iran":
+		ipRepo, _ := geoRepos(r.profile)
+		b, e := u.GeoSource.small(ctx, geoURL(ipRepo, "releases", "download", r.tag, "SHA256SUMS"))
+		if e == nil {
+			sums, e := checksumManifest(b, assets)
+			if e != nil {
+				return geoMeta{}, errGeoProof
+			}
+			m.SHA256 = sums
+			return m, nil
+		}
+	default:
 		m.SHA256 = map[string]string{}
 		for _, a := range assets {
 			b, e := u.GeoSource.small(ctx, a.url+".sha256sum")
@@ -499,7 +579,7 @@ func (u *CoreUpdater) stageGeo(ctx context.Context, r geoRelease, fd int) (strin
 		site := "cn"
 		if r.profile == "iran" {
 			country = "IR"
-			site = "category-ir"
+			site = "ir"
 		}
 		m.Site, m.IP = []string{"geosite:" + site}, []string{"geoip:" + strings.ToLower(country)}
 		ps, e := geoIPRanges(ctx, filepath.Join(staged, "geoip.dat"), country)

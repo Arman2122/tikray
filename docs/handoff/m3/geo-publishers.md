@@ -3,22 +3,23 @@
 An update fetches a complete geo release into a new slot. The runner trials the selected data and rendered configuration, and the service verifies the associated RouterOS domestic list. The CLI can select an explicit profile or use the configured profile.
 
 ```sh
+tikray geo update latest                # defaults to --profile iran (Arman2122/IR-Geo-DB)
 tikray geo update latest --profile iran
 tikray geo rollback
 ```
 
-`TIKRAY_GEO_PROFILE` selects the publisher used when the profile is omitted. Without an explicit default, the service uses the managed profile from the active geo slot. A fresh installation with neither selection has no daily geo download. `TIKRAY_GEO_URL` is the trusted HTTPS root for the custom profile. `TIKRAY_GEO_MIRRORS` is a comma-separated list of HTTPS payload templates containing `{file}`, with optional `{version}` and `{arch}`.
+`TIKRAY_GEO_PROFILE` selects the publisher used when the profile is omitted. Without an explicit env override, scheduled daily checks follow the managed profile from the active geo slot (a fresh installation with neither selection stays quiet until a geo slot is installed), while explicit `tikray geo update` requests default to `iran`. `TIKRAY_GEO_URL` is the trusted HTTPS root for the custom profile. `TIKRAY_GEO_MIRRORS` is a comma-separated list of HTTPS payload templates containing `{file}`, with optional `{version}` and `{arch}`.
 
 | Profile | Release selector | Payloads and domestic matchers |
 |---|---|---|
-| `iran` | Numeric release tag, or `latest` | `geoip.dat` and `geosite.dat` from [Chocolate4U/Iran-v2ray-rules](https://github.com/Chocolate4U/Iran-v2ray-rules/releases). Uses `geoip:ir` and `geosite:category-ir`. |
+| `iran` *(default)* | `vYYYY.MM.DD` tag (e.g. `v2026.11.20`), or `latest` | `geoip.dat` and `geosite.dat` verified against `SHA256SUMS` from [Arman2122/IR-Geo-DB](https://github.com/Arman2122/IR-Geo-DB/releases). Uses `geoip:ir` and `geosite:ir` (also includes `geosite:ads`, `geosite:malware`, `geosite:phishing`, `geosite:cryptominers`, `geoip:malware`). |
 | `loyalsoldier` | Numeric release tag, or `latest` | Both data files from [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat/releases). Uses `geoip:cn` and `geosite:cn`. |
 | `v2fly` | `<geoip-tag>+<domain-list-tag>`, or `latest` | The two independent publishers release on different schedules. Uses `geoip.dat` from [v2fly/geoip](https://github.com/v2fly/geoip/releases) and `dlc.dat` from [v2fly/domain-list-community](https://github.com/v2fly/domain-list-community/releases), installed as `geosite.dat`. Uses `geoip:cn` and `geosite:cn`. |
 | `custom` | A publisher tag, or `latest` | A three-file bundle and its publisher manifest from the configured HTTPS root. The manifest supplies the matchers. |
 
-A numeric tag has 8–20 decimal digits. A custom tag has 1–64 ASCII letters, digits, periods, underscores or hyphens, starts with a letter or digit and contains no `..`. For pinned v2fly updates supply **both** tags, for example `202611080027+20261115005626`. The mirror's `{version}` is the tag of the individual upstream asset.
+An `iran` tag uses `vYYYY.MM.DD` (optionally followed by `.N` or `-N` for same-day rebuilds). A numeric tag for `loyalsoldier` / `v2fly` has 8–20 decimal digits. A custom tag has 1–64 ASCII letters, digits, periods, underscores or hyphens, starts with a letter or digit and contains no `..`. For pinned v2fly updates supply **both** tags, for example `202611080027+20261115005626`. The mirror's `{version}` is the tag of the individual upstream asset.
 
-For built-in profiles tikray obtains each asset's published `.sha256sum` over HTTPS, directly or through a healthy proxy. It decodes the selected country's IPv4 prefixes from that verified GeoIP file, then records the SHA-256 of the generated domestic text. For every payload the fallback order is publisher, publisher over the healthy proxy, configured mirrors, then the local inbox.
+For built-in profiles tikray obtains the release's published `SHA256SUMS` (`iran`) or per-asset `.sha256sum` (`loyalsoldier`, `v2fly`) over HTTPS, directly or through a healthy proxy. It decodes the selected country's IPv4 prefixes from that verified GeoIP file, then records the SHA-256 of the generated domestic text. For every payload the fallback order is publisher, publisher over the healthy proxy, configured mirrors, then the local inbox.
 
 ## Custom publisher layout
 

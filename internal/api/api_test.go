@@ -104,7 +104,7 @@ func (f *fakeBackend) Geo(context.Context) (service.GeoInfo, error) {
 	return service.GeoInfo{
 		Active:  "ir-20261119",
 		Profile: "iran",
-		Slots:   []artifacts.GeoSlotInfo{{Slot: "ir-20261119", Profile: "iran", Site: []string{"geosite:category-ir"}, IP: []string{"geoip:ir"}, PrefixCount: 42}},
+		Slots:   []artifacts.GeoSlotInfo{{Slot: "ir-20261119", Profile: "iran", Site: []string{"geosite:ir"}, IP: []string{"geoip:ir"}, PrefixCount: 42}},
 		History: []artifacts.Result{{Kind: artifacts.KindGeo, To: "ir-20261119", Outcome: runnerapi.OutcomeCommitted, At: t0}},
 	}, nil
 }

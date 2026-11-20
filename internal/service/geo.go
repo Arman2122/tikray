@@ -65,6 +65,9 @@ func (s *Service) Geo(ctx context.Context) (GeoInfo, error) {
 			}
 		}
 	}
+	if info.Profile == "" {
+		info.Profile = artifacts.DefaultGeoProfile
+	}
 	return info, nil
 }
 
@@ -150,6 +153,9 @@ func (s *Service) geoOperation(ctx context.Context, profile, version string, rol
 			profile, err = s.selectedGeoProfile(ctx)
 			if err != nil {
 				return artifacts.Result{}, err
+			}
+			if profile == "" {
+				profile = artifacts.DefaultGeoProfile
 			}
 		}
 		if !artifacts.ValidGeoTarget(profile, version) || !artifacts.ValidGeoProfile(profile) {

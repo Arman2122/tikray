@@ -136,25 +136,32 @@ func TestGeoBuiltinsUseVerifiedCountryData(t *testing.T) {
 				ip = strings.Replace(ip, "IR", "CN", 1)
 				site = strings.Replace(site, "IR", "CN", 1)
 			}
-			if profile == "iran" {
-				site = strings.Replace(site, "\x0e\x0a\x02IR", "\x17\x0a\x0bCATEGORY-IR", 1)
-			}
 			content := map[string]string{"geoip.dat": ip, "geosite.dat": site, "dlc.dat": site}
 			version := "20261023"
-			if profile == "v2fly" {
+			switch profile {
+			case "iran":
+				version = "v2026.11.20"
+			case "v2fly":
 				version += "+20261022"
 			}
 			var seen []string
 			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				file := filepath.Base(r.URL.Path)
 				seen = append(seen, r.URL.Path)
+				if profile == "iran" && r.URL.Path == "/Arman2122/IR-Geo-DB/releases/latest" {
+					w.Header().Set("Location", "https://github.com/Arman2122/IR-Geo-DB/releases/tag/"+version)
+					w.WriteHeader(http.StatusFound)
+					return
+				}
+				if profile == "iran" && file == "SHA256SUMS" {
+					fmt.Fprintf(w, "%x  ir-ipv4.txt\n", sha256.Sum256([]byte("192.0.2.0/24\n")))
+					fmt.Fprintf(w, "%x  geoip.dat\n", sha256.Sum256([]byte(content["geoip.dat"])))
+					fmt.Fprintf(w, "%x  geosite.dat\n", sha256.Sum256([]byte(content["geosite.dat"])))
+					return
+				}
 				if strings.HasSuffix(file, ".sha256sum") {
 					name := strings.TrimSuffix(file, ".sha256sum")
-					publishedName := name
-					if profile == "iran" {
-						publishedName = "release/" + name
-					}
-					fmt.Fprintf(w, "%x  %s\n", sha256.Sum256([]byte(content[name])), publishedName)
+					fmt.Fprintf(w, "%x  %s\n", sha256.Sum256([]byte(content[name])), name)
 					return
 				}
 				if body, ok := content[file]; ok {
@@ -169,7 +176,11 @@ func TestGeoBuiltinsUseVerifiedCountryData(t *testing.T) {
 				return rec.Result(), nil
 			})}
 			u := CoreUpdater{Data: t.TempDir(), GeoSource: GeoSourceConfig{Direct: client}}
-			slot, err := u.StageGeo(context.Background(), profile, version)
+			target := version
+			if profile == "iran" {
+				target = "latest"
+			}
+			slot, err := u.StageGeo(context.Background(), profile, target)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -177,10 +188,55 @@ func TestGeoBuiltinsUseVerifiedCountryData(t *testing.T) {
 			if err != nil || len(g.Site) != 1 || !slices.Equal(ps, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}) {
 				t.Fatal("builtin did not derive verified IPv4")
 			}
+			if profile == "iran" {
+				if !slices.Equal(g.Site, []string{"geosite:ir"}) || !slices.Equal(g.IP, []string{"geoip:ir"}) {
+					t.Fatalf("iran matchers = site:%v ip:%v, want geosite:ir + geoip:ir", g.Site, g.IP)
+				}
+				for _, wantPath := range []string{
+					"/Arman2122/IR-Geo-DB/releases/latest",
+					"/Arman2122/IR-Geo-DB/releases/download/v2026.11.20/SHA256SUMS",
+					"/Arman2122/IR-Geo-DB/releases/download/v2026.11.20/geoip.dat",
+					"/Arman2122/IR-Geo-DB/releases/download/v2026.11.20/geosite.dat",
+				} {
+					if !slices.Contains(seen, wantPath) {
+						t.Fatalf("iran did not request %s (seen %v)", wantPath, seen)
+					}
+				}
+			}
 			if profile == "v2fly" && (!slices.Contains(seen, "/v2fly/domain-list-community/releases/download/20261022/dlc.dat") || !slices.Contains(seen, "/v2fly/geoip/releases/download/20261023/geoip.dat")) {
 				t.Fatal("v2fly did not use both pinned publishers")
 			}
 		})
+	}
+}
+
+func TestGeoIranTagAndManifestValidation(t *testing.T) {
+	for _, valid := range []string{"latest", "v2026.11.20", "v2026.11.20.1", "v2026.11.20-1"} {
+		if !ValidGeoTarget("iran", valid) {
+			t.Fatalf("ValidGeoTarget(iran, %q) = false, want true", valid)
+		}
+	}
+	for _, invalid := range []string{"20261120", "v2026.11", "v2026.11.20..1", "../v2026.11.20", "v2026.11.20-rc1"} {
+		if ValidGeoTarget("iran", invalid) {
+			t.Fatalf("ValidGeoTarget(iran, %q) = true, want false", invalid)
+		}
+	}
+	assets := []geoAsset{{local: "geoip.dat", file: "geoip.dat"}, {local: "geosite.dat", file: "geosite.dat"}}
+	h1 := strings.Repeat("a", 64)
+	h2 := strings.Repeat("b", 64)
+	sums, err := checksumManifest([]byte(h1+"  geoip.dat\n"+h2+" *./geosite.dat\n"), assets)
+	if err != nil || sums["geoip.dat"] != h1 || sums["geosite.dat"] != h2 {
+		t.Fatalf("valid SHA256SUMS refused: %v %v", sums, err)
+	}
+	for _, bad := range []string{
+		h1 + "  geoip.dat\n",                                        // missing geosite.dat
+		h1 + "  geoip.dat\n" + h2 + "  geoip.dat\n" + h2 + "  geosite.dat\n", // duplicate geoip.dat
+		"not-hex  geoip.dat\n" + h2 + "  geosite.dat\n",            // malformed digest
+		h1 + "  geoip.dat  extra\n" + h2 + "  geosite.dat\n",       // malformed fields
+	} {
+		if _, err := checksumManifest([]byte(bad), assets); err == nil {
+			t.Fatalf("malformed SHA256SUMS accepted: %q", bad)
+		}
 	}
 }
 

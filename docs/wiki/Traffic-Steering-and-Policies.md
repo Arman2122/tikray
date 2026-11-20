@@ -60,7 +60,7 @@ Under **Routing & DNS** (or `PUT /v1/routing` and `PUT /v1/dns`):
 - **Pinned Server:** Lock traffic to a specific server, or leave automatic health-based failover enabled (powered by the continuous health observatory probing your configured `probe_url`).
 - **Ordered Custom Rules:** Match domains (`domain:`, `full:`, `keyword:`, `geosite:`) or IPs/CIDRs (`geoip:`, `1.2.3.0/24`) and send them `proxy`, `direct`, or `block`.
 - **Domestic Extras & Block List:** Add extra local domains/CIDRs that should always stay direct, or block ads/trackers cleanly at the router.
-- **Geo Profiles:** Choose `iran`, `v2fly`, `loyalsoldier`, or `custom` — `tikray` keeps both xray's `geoip.dat`/`geosite.dat` and RouterOS's domestic IPv4 address-list synchronized inside a single atomic rollbackable transaction.
+- **Geo Profiles:** Defaults to `iran` (powered by [Arman2122/IR-Geo-DB](https://github.com/Arman2122/IR-Geo-DB), rebuilt daily with RIPE-corrected Iranian IPv4 ranges, `geosite:ir`, `geoip:ir`, and optional ad/malware/phishing sets), or switch to `v2fly`, `loyalsoldier`, or `custom` — `tikray` keeps both xray's `geoip.dat`/`geosite.dat` and RouterOS's domestic IPv4 address-list synchronized inside a single atomic rollbackable transaction.
 - **DNS Configuration:**
   - **Remote DNS** (DoH presets such as Cloudflare/Quad9/Google or custom HTTPS/IPv4 resolvers) resolved safely through the tunnel for proxied destinations.
   - **Domestic DNS** (optional IPv4 resolver) for fast local resolution of domestic domains.

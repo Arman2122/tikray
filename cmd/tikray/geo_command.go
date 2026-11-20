@@ -25,7 +25,7 @@ func (c *cli) geoCommand(ctx context.Context, args []string) int {
 		return c.geoStatusCommand(ctx, args[1:])
 	case "update":
 		fs := c.newFlagSet("geo update", "geo update <version|latest> [--profile NAME]")
-		profile := fs.String("profile", "", "geo publisher profile: v2fly, loyalsoldier, iran or custom")
+		profile := fs.String("profile", "", "geo publisher profile: iran (default), v2fly, loyalsoldier, or custom")
 		// flag.FlagSet otherwise copies an unknown flag into stderr.
 		fs.SetOutput(io.Discard)
 		pos, code, ok := c.parse(fs, args[1:], 1)
