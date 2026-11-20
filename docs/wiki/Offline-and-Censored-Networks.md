@@ -74,7 +74,7 @@ tikray geo update 20261119 --profile iran
 
 When GitHub is blocked on your ISP's WAN but you already have at least one working proxy server configured:
 - `tikray core update latest` and `tikray geo update latest` automatically fall back to fetching through the active `xray-core` SOCKS proxy if direct WAN fetch fails.
-- You can also configure private mirrors via container environment variables on `tikray:ctl`:
+- You can also configure private mirrors via container environment variables on the `tikray` control container (`comment="tikray:tikray"`):
   - `TIKRAY_MIRRORS` — Comma-separated mirror base URLs for `xray-core` releases
   - `TIKRAY_INDEX_URLS` — Comma-separated URLs for signed `index.json` / `index.json.sig`
   - `TIKRAY_INDEX_PUBKEY_FILE` — Path to the ECDSA P-256 public key PEM (defaults to `/data/state/index.pub`)

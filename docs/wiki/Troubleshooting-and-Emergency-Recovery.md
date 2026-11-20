@@ -24,13 +24,13 @@ If you ever suspect `tikray` is blocking traffic or you need immediate direct WA
 You do **not** need to reinstall or lose your servers/policies. Run inside the control container:
 
 ```routeros
-/container/shell [find comment="tikray:ctl"] cmd="tikray admin reset"
+/container/shell [find comment="tikray:tikray"] cmd="tikray admin reset"
 ```
 
 - Clears the admin password and active browser sessions (your servers, policies, and named API tokens remain intact).
 - Generates a fresh one-time setup code — retrieve it via:
   ```routeros
-  /container/shell [find comment="tikray:ctl"] cmd="tikray setup-code"
+  /container/shell [find comment="tikray:tikray"] cmd="tikray setup-code"
   ```
 - Open the Web UI to claim your new admin password.
 

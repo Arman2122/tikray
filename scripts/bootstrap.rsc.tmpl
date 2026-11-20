@@ -1,0 +1,129 @@
+# tikray fast bootstrapper for MikroTik RouterOS v7
+# Auto-detects CPU architecture and RouterOS release line, verifies prerequisites,
+# downloads the matching signed container archives and verified install script from
+# the pinned GitHub Release, and runs /import (which verifies every 16 KiB SHA-512
+# chunk before creating any containers or router rules).
+#
+# Optional globals (set in the same terminal before /import):
+#   :global tikrayDisk "disk1"             # ext4 storage mount-point
+#   :global tikrayDir "tikray"             # folder name (tikray or tikray-<name>)
+#   :global tikraySubnet "172.31.255.0/29" # dedicated private container /29
+#   :global tikrayLanList "LAN"            # existing LAN interface list
+#   :global tikrayWanList "WAN"            # existing WAN interface list
+#   :global tikrayCore "latest"            # xray-core version or "latest"
+#   :global tikrayCheckCert true           # enforce RouterOS CA verification on fetch
+#   :global tikrayBaseURL "https://..."    # override HTTPS mirror base URL
+{
+    :global tikrayDisk
+    :global tikrayDir
+    :global tikrayBaseURL
+    :global tikrayCheckCert
+
+    :local disk $tikrayDisk
+    :local dir $tikrayDir
+    :local baseURL $tikrayBaseURL
+    :local checkCert ($tikrayCheckCert = true)
+
+    :if ([:typeof $disk] = "nothing") do={ :set disk "disk1" }
+    :if ([:typeof $dir] = "nothing") do={ :set dir "tikray" }
+    :if ([:typeof $baseURL] = "nothing") do={ :set baseURL "@TIKRAY_RELEASE_BASE@" }
+
+    :while (([:len $baseURL] > 0) and ([:pick $baseURL ([:len $baseURL] - 1) [:len $baseURL]] = "/")) do={
+        :set baseURL [:pick $baseURL 0 ([:len $baseURL] - 1)]
+    }
+    :if ([:pick $baseURL 0 8] != "https://") do={
+        :error "tikray: tikrayBaseURL must start with https://"
+    }
+    :if (!($disk ~ "^[A-Za-z0-9][A-Za-z0-9_-]*\$")) do={
+        :error "tikray: invalid tikrayDisk name"
+    }
+    :if (!(($dir = "tikray") or ($dir ~ "^tikray-[A-Za-z0-9_][A-Za-z0-9_-]*\$"))) do={
+        :error "tikray: tikrayDir must be tikray or tikray-<name>"
+    }
+
+    :local arch [/system/resource/get architecture-name]
+    :local board [/system/resource/get board-name]
+    :if ($arch = "x86_64") do={
+        :if (($board != "CHR") and ([:pick $board 0 4] != "CHR ")) do={
+            :error "tikray: x86_64 requires RouterOS CHR"
+        }
+        :set arch "amd64"
+    }
+    :if (($arch != "arm64") and ($arch != "amd64")) do={
+        :error ("tikray: unsupported architecture '" . $arch . "' (requires arm64 or x86_64 CHR)")
+    }
+
+    :local installed [:tostr [/system/resource/get version]]
+    :local version [:pick $installed 0 [:find ($installed . " ") " "]]
+    :if (($installed != $version) and ($installed != ($version . " (stable)")) and ($installed != ($version . " (long-term)"))) do={
+        :error ("tikray: unsupported RouterOS channel '" . $installed . "' (requires stable or long-term)")
+    }
+
+    :local line ""
+    :if ($version ~ "^7\\.25(\\.[1-9][0-9]*)?\$") do={ :set line "7.25.1" }
+    :if ($version ~ "^7\\.24\\.([6-9]|[1-9][0-9]+)\$") do={ :set line "7.24.6" }
+    :if ($version ~ "^7\\.23\\.([8-9]|[1-9][0-9]+)\$") do={ :set line "7.23.8" }
+    :if ($line = "") do={
+        :error ("tikray: no pre-packaged installer for RouterOS " . $version . " (supported: 7.25.x, 7.24.6+, 7.23.8+; for 7.26+ package with cmd/tikray-installer)")
+    }
+
+    :if ([:len [/system/package/find where name="container" and !disabled]] != 1) do={
+        :error "tikray: install the MikroTik 'container' extra package matching your RouterOS version and reboot first"
+    }
+    :if ([:tostr [/system/package/get [find where name="container" and !disabled] version]] != $version) do={
+        :error "tikray: container package version must match the running RouterOS version"
+    }
+    :if (![/system/device-mode/get container]) do={
+        :put "tikray: container device-mode is disabled. Enable it first with:"
+        :put "  /system/device-mode/update container=yes"
+        :error "tikray: enable container device-mode, confirm as prompted, then re-run /import file-name=tikray-bootstrap.rsc"
+    }
+    :if ([:len [/disk/find where mount-point=$disk and fs="ext4"]] != 1) do={
+        :put ("tikray: no mounted ext4 disk found at '" . $disk . "'.")
+        :foreach d in=[/disk/find where fs="ext4"] do={
+            :put ("  Found ext4 disk: " . [/disk/get $d mount-point] . " -> set :global tikrayDisk \"" . [/disk/get $d mount-point] . "\"")
+        }
+        :error ("tikray: mounted ext4 disk '" . $disk . "' not found (run /disk/print)")
+    }
+    :if (![/ip/dns/get allow-remote-requests]) do={
+        :put "tikray: router DNS is disabled. Enable it first with:"
+        :put "  /ip/dns/set allow-remote-requests=yes"
+        :error "tikray: enable router DNS (allow-remote-requests=yes) before installing"
+    }
+
+    :local base ($disk . "/" . $dir)
+    :local imgDir ($base . "/images")
+    :if ([:len [/file/find where name=$base]] = 0) do={ /file/add name=$base type=directory }
+    :if ([:len [/file/find where name=$base and type=directory]] != 1) do={ :error ("tikray: path conflict at " . $base) }
+    :if ([:len [/file/find where name=$imgDir]] = 0) do={ /file/add name=$imgDir type=directory }
+    :if ([:len [/file/find where name=$imgDir and type=directory]] != 1) do={ :error ("tikray: path conflict at " . $imgDir) }
+
+    :local fetchFile do={
+        :local url $1
+        :local dst $2
+        :local verify $3
+        :put ("tikray: downloading " . $dst . " ...")
+        :if ($verify) do={
+            /tool/fetch url=$url check-certificate=yes dst-path=$dst
+        } else={
+            /tool/fetch url=$url check-certificate=no dst-path=$dst
+        }
+        :local waited 0
+        :while (([:len [/file/find where name=$dst]] != 1) and ($waited < 5)) do={
+            :delay 1s
+            :set waited ($waited + 1)
+        }
+        :if ([:len [/file/find where name=$dst]] != 1) do={
+            :error ("tikray: download did not create " . $dst)
+        }
+    }
+
+    :local scriptPath ($disk . "/tikray-install.rsc")
+    :put ("tikray: RouterOS " . $version . " (" . $arch . ") -> using " . $line . " release installer from " . $baseURL)
+    $fetchFile ($baseURL . "/tikray-" . $arch . ".tar") ($imgDir . "/tikray-" . $arch . ".tar") $checkCert
+    $fetchFile ($baseURL . "/tikray-runner-" . $arch . ".tar") ($imgDir . "/tikray-runner-" . $arch . ".tar") $checkCert
+    $fetchFile ($baseURL . "/install-" . $line . "-" . $arch . ".rsc") $scriptPath $checkCert
+
+    :put "tikray: verifying 16 KiB SHA-512 archive digests and provisioning containers (this takes 1-3 minutes)..."
+    /import file-name=$scriptPath
+}

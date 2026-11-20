@@ -43,15 +43,33 @@ This guide walks through installing **tikray** on a MikroTik RouterOS v7 router 
 
 ---
 
-## 2. Obtain or Package a Verified Installer
+## 2. Fast Install Directly on MikroTik (Recommended — No Go Required)
 
-Every RouterOS installer embeds the exact container archive byte lengths and **16 KiB chunked SHA-512 digests** verified by RouterOS before importing containers.
+Every GitHub Release ships signed multi-arch container archives (`tikray-{arm64,amd64}.tar`, `tikray-runner-{arm64,amd64}.tar`), Cosign signatures (`*.tar.sig` + `publisher.pub`), pre-packaged installers (`install-7.25.1-{arm64,amd64}.rsc`, `install-7.24.6-{arm64,amd64}.rsc`, `install-7.23.8-{arm64,amd64}.rsc`), `uninstall.rsc`, and an auto-detecting `bootstrap.rsc`.
 
-### Option A — Use a Signed Release Installer
-Download the matching `install-<routeros-version>-<arch>.rsc` and `SHA256SUMS` from GitHub Releases and verify its checksum before use.
+Open **WinBox → New Terminal** (or SSH to your router) and paste:
 
-### Option B — Package Your Own Installer from Signed Archives
-Place `tikray-<arch>.tar`, `tikray-<arch>.tar.sig`, `tikray-runner-<arch>.tar`, and `tikray-runner-<arch>.tar.sig` in `./release-images`, obtain `publisher.pub` out-of-band, and run:
+```routeros
+/tool/fetch url="https://github.com/Arman2122/tikray/releases/latest/download/bootstrap.rsc" dst-path="tikray-bootstrap.rsc"
+/import file-name="tikray-bootstrap.rsc"
+```
+
+`tikray-bootstrap.rsc` checks your architecture, RouterOS release line, `container` package, `device-mode`, ext4 disk, and router DNS before downloading the matching `.tar` archives and verified `install-*.rsc` directly onto your ext4 disk (`disk1`), then runs `/import`. The packaged installer verifies every **16 KiB SHA-512 chunk** before importing containers.
+
+> **Using a custom disk, subnet, or interface lists?** Set the optional globals in the same terminal before `/import file-name="tikray-bootstrap.rsc"`:
+> ```routeros
+> :global tikrayDisk "usb1"
+> :global tikraySubnet "172.31.254.0/29"
+> :global tikrayLanList "HOME-LAN"
+> :global tikrayWanList "ISP-WAN"
+> /import file-name="tikray-bootstrap.rsc"
+> ```
+> If you have imported Mozilla root CA certificates into RouterOS, also set `:global tikrayCheckCert true` (and add `check-certificate=yes` to the `/tool/fetch` line) to enforce TLS CA verification during bootstrap.
+
+### Manual Download or Packaging (Advanced / Custom Mirror / RouterOS 7.26+)
+
+- **Manual WinBox / WebFig Upload (Zero Go):** Download `install-<line>-<arch>.rsc`, `tikray-<arch>.tar`, `tikray-runner-<arch>.tar`, and `SHA256SUMS` from [GitHub Releases](https://github.com/Arman2122/tikray/releases/latest), verify checksums locally, upload the `.tar` files to `disk1/tikray/images/` and the installer to `disk1/tikray-install.rsc`, then run `/import file-name="disk1/tikray-install.rsc"`.
+- **Package Your Own Installer with Go:** Place `tikray-<arch>.tar`, `tikray-<arch>.tar.sig`, `tikray-runner-<arch>.tar`, and `tikray-runner-<arch>.tar.sig` in `./release-images`, obtain `publisher.pub` out-of-band, and run:
 
 ```sh
 go run ./cmd/tikray-installer \
@@ -63,23 +81,16 @@ go run ./cmd/tikray-installer \
 ```
 
 - Use `-arch amd64` for x86_64 CHR.
-- For one-paste online deployment, pass `-release-base https://<your-release-host>/<release-dir>` pointing to a **non-redirecting HTTPS static host** (such as GitHub Pages or your own static HTTPS server).
-  > **Why not `github.com/.../releases/download` directly?** GitHub's release download URLs return HTTP 302 redirects to signed object-storage URLs. Because RouterOS can log redirect `Location` headers and the installer enforces `http-max-redirect-count=0`, the packager rejects redirecting release bases intentionally.
+- For self-hosted one-paste deployment, pass `-release-base https://<your-release-host>/<release-dir>` pointing to a **non-redirecting HTTPS static host** (such as GitHub Pages or your own static HTTPS server).
+  > **Why doesn't `install.rsc` fetch from `github.com/.../releases/download` directly?** GitHub's release download URLs return HTTP 302 redirects to signed object-storage URLs. Because RouterOS can log redirect `Location` headers and `install.rsc` itself enforces `http-max-redirect-count=0`, `bootstrap.rsc` stages the archives into `disk1/tikray/images/` first and hands off to the unmodified, chunk-verified `install-<line>-<arch>.rsc`.
 
 ---
 
-## 3. Run the Installer on RouterOS
-
-### Online One-Paste (Trusted Static HTTPS Origin)
-Ensure RouterOS trusts the release host's TLS CA, then paste into the RouterOS terminal:
-
-```routeros
-{ :local dl [/tool/fetch url="https://<your-release-host>/<release-dir>/install.rsc" check-certificate=yes http-max-redirect-count=0 dst-path=tikray-install.rsc as-value]; :if (($dl->"status") != "finished") do={ :error "Installer download failed" }; /import file-name=tikray-install.rsc }
-```
+## 3. Installer Options & What It Provisions
 
 ### Customizing Non-Secret Installer Defaults
 
-Override any of these global variables in the **same terminal session** before `/import file-name=tikray-install.rsc`:
+Override any of these global variables in the **same terminal session** before `/import file-name="tikray-bootstrap.rsc"` (or `/import file-name="disk1/tikray-install.rsc"`):
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -92,21 +103,13 @@ Override any of these global variables in the **same terminal session** before `
 | `tikrayOffline` | `false` | Set `true` for air-gapped installation from staged disk files |
 | `tikrayShowSetup` | `false` | Optional interactive mode to print setup code at install end |
 | `tikrayReuseID` | `""` | Previous public installation ID when reinstalling onto kept `/data` |
-
-Example with custom disk, subnet, and interface lists:
-
-```routeros
-:global tikrayDisk "usb1"
-:global tikraySubnet "172.31.254.0/29"
-:global tikrayLanList "HOME-LAN"
-:global tikrayWanList "ISP-WAN"
-/import file-name=tikray-install.rsc
-```
+| `tikrayCheckCert` | `false` | Bootstrap only: pass `check-certificate=yes` to `/tool/fetch` |
+| `tikrayBaseURL` | release tag URL | Bootstrap only: override HTTPS mirror URL for release assets |
 
 ### What the Installer Provisions Safely
 - Dedicated private bridge `tikray` (`protocol-mode=none`, `arp=reply-only`, static ARP/FDB bindings, disabled MAC learning & unknown-unicast flooding).
 - Scoped `tikray` RouterOS API-SSL account + certificate pinning receipt in `/data/state/routeros.json`.
-- Both containers (`tikray:ctl` and `tikray:runner`) mounted to `/data` on your ext4 volume.
+- Both containers (`tikray` tagged `tikray:tikray` and `tikray-runner` tagged `tikray:runner`) mounted to `/data` on your ext4 volume.
 - Native `tikray-watchdog` scheduler (1-minute health checks with exponential backoff) and `tikray-emergency-off` script.
 - Return-traffic isolation rules above FastTrack and permissive owner rules.
 - Preserves your existing RouterOS firewall, NAT, registry, and disk layout (refuses conflicting mounts or ports).
@@ -116,13 +119,13 @@ Example with custom disk, subnet, and interface lists:
 ## 4. First-Run Setup & Certificate Verification
 
 At completion, the installer prints:
-1. Your LAN HTTPS URL (for example `https://192.168.88.1` or the control container's address).
+1. Your LAN HTTPS URL (for example `https://172.31.255.2/`).
 2. The control plane's **self-signed TLS certificate SHA-256 fingerprint**.
 
 Retrieve your one-time 12-character setup code from inside the control container:
 
 ```routeros
-/container/shell [find comment="tikray:ctl"] cmd="tikray setup-code"
+/container/shell [find comment="tikray:tikray"] cmd="tikray setup-code"
 ```
 
 1. Open the printed HTTPS URL in your browser and compare the certificate SHA-256 fingerprint against the installer output.
@@ -133,7 +136,7 @@ Retrieve your one-time 12-character setup code from inside the control container
 
 ## 5. Post-Install Verification Checklist
 
-Run a quick check from the Web UI or inside `tikray:ctl`:
+Run a quick check from the Web UI or inside the `tikray` control container:
 
 ```sh
 tikray status

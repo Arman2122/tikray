@@ -1,5 +1,18 @@
 # Installing on RouterOS
 
+### Fast Install Directly on MikroTik (No Go Required)
+
+Each GitHub Release publishes signed container archives, `publisher.pub`, pre-packaged installers (`install-7.25.1-{arm64,amd64}.rsc`, `install-7.24.6-{arm64,amd64}.rsc`, `install-7.23.8-{arm64,amd64}.rsc`), `uninstall.rsc`, and an auto-detecting `bootstrap.rsc`. Paste into WinBox Terminal or RouterOS SSH:
+
+```routeros
+/tool/fetch url="https://github.com/Arman2122/tikray/releases/latest/download/bootstrap.rsc" dst-path="tikray-bootstrap.rsc"
+/import file-name="tikray-bootstrap.rsc"
+```
+
+`bootstrap.rsc` verifies prerequisites, downloads the release's matching `.tar` archives and verified `install-*.rsc` onto `disk1`, and imports it (which verifies every 16 KiB SHA-512 chunk before creating containers).
+
+### Packaging Manually with `tikray-installer`
+
 The [M3 ledger](../docs/handoff/m3/ledger.md) records installer validation against the pinned RouterOS releases and the signing identity used for the lab artifacts.
 
 Build an installer for the router's installed version and CPU from an authenticated image pair. The packager uses `cosign verify-blob` with an independently obtained publisher public key. Supply the Docker-save images and detached signatures in one directory, for example `tikray-arm64.tar`, `tikray-arm64.tar.sig`, `tikray-runner-arm64.tar` and `tikray-runner-arm64.tar.sig`.

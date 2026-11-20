@@ -4,6 +4,21 @@ All notable changes to **tikray** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-11-20
+
+### Added
+- **Two-Line Fast Install Directly on MikroTik RouterOS v7 (Zero Go Required)**:
+  - Every GitHub Release now publishes signed multi-arch container archives (`*.tar` + `*.tar.sig` + `publisher.pub`), pre-packaged chunk-verified installers for all supported RouterOS release lines (`install-7.25.1-{arm64,amd64}.rsc`, `install-7.24.6-{arm64,amd64}.rsc`, `install-7.23.8-{arm64,amd64}.rsc`), `uninstall.rsc`, and an auto-detecting `bootstrap.rsc` (`scripts/bootstrap.rsc.tmpl`).
+  - Users can install directly from WinBox Terminal or RouterOS SSH by pasting two `/tool/fetch` + `/import` commands; `bootstrap.rsc` auto-detects architecture and RouterOS release line, checks prerequisites before downloading, stages archives onto `disk1`, and runs the 16 KiB SHA-512 verified installer.
+- **Release Pipeline Hardening (`.github/workflows/release.yml`)**:
+  - Always signs container archives (using `TIKRAY_RELEASE_COSIGN_KEY` when configured, or an ephemeral ECDSA P-256 keypair verified with `cosign verify-blob --offline` otherwise), packages all 6 RouterOS installers (`7.25.1`, `7.24.6`, `7.23.8` × `arm64`, `amd64`), renders tag-pinned `bootstrap.rsc`, and includes all artifacts in `SHA256SUMS`.
+
+### Fixed
+- **Documentation Container Tag**: Fixed `tikray setup-code` and `tikray admin reset` copy-paste examples across `README.md` and Wiki guides to match the actual RouterOS control container comment (`comment="tikray:tikray"`).
+- **Image Archive & RouterOS CHR Acceptance Stability**:
+  - Eliminated per-16 KiB chunk heap allocations in `internal/imagearchive/archive.go` (reusing a single buffer + SHA-512 hasher).
+  - Switched `monitorForeignFlow` SSH reads to atomic `/ip/firewall/connection/print detail as-value` snapshots (immune to RouterOS 7.24.6 conntrack churn), tolerated trailing RouterOS console notices in `installOutput`, combined `readOwnerRules` into a single fresh SSH session to prevent login bursts, and widened QEMU TCG image staging/polling timeouts in CHR acceptance tests.
+
 ## [1.0.0] - 2026-11-19
 
 First production open-source release of **tikray** for MikroTik RouterOS v7.

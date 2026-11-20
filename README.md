@@ -29,7 +29,7 @@
   <a href="#supported-routeros--hardware">Hardware</a> &nbsp;·&nbsp;
   <a href="#quick-start">Quick Start</a> &nbsp;·&nbsp;
   <a href="docs/wiki/Home.md">Wiki</a> &nbsp;·&nbsp;
-  <a href="docs/releases/v1.0.0.md">Release Notes</a>
+  <a href="docs/releases/v1.0.1.md">Release Notes</a>
 </p>
 
 </div>
@@ -202,9 +202,56 @@ Tested from **`xray-core v26.1.18`** through **`v26.11.9`**, with automatic vers
 
 ## Quick Start
 
-> Prerequisites: RouterOS v7 (`7.23.8+`), the matching MikroTik `container` package, container `device-mode` enabled, and an ext4-formatted disk (`disk1`). See the complete [**Installation Guide**](docs/wiki/Installation-Guide.md) and [`routeros/README.md`](routeros/README.md).
+> **Prerequisites on MikroTik RouterOS v7 (`7.23.8+`, `7.24.6+`, or `7.25.x`):** install the matching MikroTik `container` extra package, enable container `device-mode` (`/system/device-mode/update container=yes`), enable router DNS (`/ip/dns/set allow-remote-requests=yes`), and have an ext4-formatted disk mounted (`disk1` by default — check `/disk/print`). See the full [**Installation Guide**](docs/wiki/Installation-Guide.md) for step-by-step preparation.
 
-### 1. Package or Download the Signed Installer
+### 1. Fast Install Directly on MikroTik (No Go or PC Required)
+
+Open **WinBox → New Terminal** (or SSH to your router) and paste these two commands:
+
+```routeros
+/tool/fetch url="https://github.com/Arman2122/tikray/releases/latest/download/bootstrap.rsc" dst-path="tikray-bootstrap.rsc"
+/import file-name="tikray-bootstrap.rsc"
+```
+
+**What this does automatically:**
+- Detects your router architecture (`arm64` or `x86_64` CHR) and RouterOS v7 release line (`7.25.x`, `7.24.6+`, or `7.23.8+`), checking prerequisites before downloading anything.
+- Downloads the matching signed `tikray-<arch>.tar`, `tikray-runner-<arch>.tar`, and pre-packaged `install-<line>-<arch>.rsc` directly onto your ext4 disk (`disk1`), avoiding internal flash wear.
+- Runs the verified installer, which checks every **16 KiB SHA-512 chunk** and Cosign public key before creating the isolated private bridge, firewall rules, API-SSL cert pin, containers, watchdog, and bringing up the Web UI.
+
+<details>
+<summary><strong>Customize Disk, Subnet, LAN/WAN Lists, Mirror URL, or Enforce TLS CA Check</strong></summary>
+
+Set any optional global variable in the **same terminal session** before running `/import file-name="tikray-bootstrap.rsc"`:
+
+```routeros
+:global tikrayDisk "usb1"                  # default: "disk1" (ext4 mount-point from /disk/print)
+:global tikraySubnet "172.31.254.0/29"     # default: "172.31.255.0/29"
+:global tikrayLanList "LAN"                # default: "LAN"
+:global tikrayWanList "WAN"                # default: "WAN"
+:global tikrayCheckCert true               # enforce RouterOS CA verification (if Mozilla CAs are imported)
+# :global tikrayBaseURL "https://mirror.example/tikray"  # optional HTTPS mirror
+/import file-name="tikray-bootstrap.rsc"
+```
+
+</details>
+
+<details>
+<summary><strong>Air-Gapped / Censored-Network Offline Install (Still No Go Required)</strong></summary>
+
+Download `install-<line>-<arch>.rsc`, `tikray-<arch>.tar`, and `tikray-runner-<arch>.tar` from [**GitHub Releases**](https://github.com/Arman2122/tikray/releases/latest) (verify with `SHA256SUMS` + `publisher.pub`), upload the `.tar` files to `disk1/tikray/images/` and `install-*.rsc` to `disk1/tikray-install.rsc` via WinBox/WebFig (plus the upstream `xray-core` zip and signed `index.json` into `disk1/tikray/data/inbox/`), then run:
+
+```routeros
+:global tikrayCore "26.11.9"; :global tikrayOffline true; /import file-name="disk1/tikray-install.rsc"
+```
+
+See the full [**Offline & Censored Networks Guide**](docs/wiki/Offline-and-Censored-Networks.md) for staging details.
+
+</details>
+
+<details>
+<summary><strong>Advanced: Package Manually with Go (Custom Signing Key, Non-Redirecting HTTPS Mirror, or RouterOS 7.26+)</strong></summary>
+
+If you want to package an installer from source with your own Cosign key, target a custom non-redirecting HTTPS static mirror (`-release-base`), or generate an installer for a newer `7.26+` RouterOS branch:
 
 ```sh
 go run ./cmd/tikray-installer \
@@ -215,54 +262,37 @@ go run ./cmd/tikray-installer \
   -out ./install.rsc
 ```
 
-### 2. Import on MikroTik RouterOS
-
-<details open>
-<summary><strong>Option A — Online One-Paste Install (Trusted HTTPS Release Origin)</strong></summary>
-
-```routeros
-{ :local dl [/tool/fetch url="https://<your-release-host>/install.rsc" check-certificate=yes http-max-redirect-count=0 dst-path=tikray-install.rsc as-value]; :if (($dl->"status") != "finished") do={ :error "Download failed" }; /import file-name=tikray-install.rsc }
-```
+See [`routeros/README.md`](routeros/README.md) for full packager options.
 
 </details>
 
-<details>
-<summary><strong>Option B — Air-Gapped / Censored-Network Offline Install</strong></summary>
+### 2. Claim Administrator & Open Web UI
 
-Upload `install.rsc`, `tikray-arm64.tar`, and `tikray-runner-arm64.tar` into `disk1/tikray/images/` (plus the upstream `xray-core` zip and signed `index.json` into `disk1/tikray/data/inbox/`), then run:
+At completion, the installer prints the LAN HTTPS URL (for example `https://172.31.255.2/`) and the self-signed TLS certificate SHA-256 fingerprint. Fetch your one-time setup code inside the control container:
 
 ```routeros
-:global tikrayCore "26.11.9"; :global tikrayOffline true; /import file-name=tikray-install.rsc
+/container/shell [find comment="tikray:tikray"] cmd="tikray setup-code"
 ```
 
-See the full [**Offline & Censored Networks Guide**](docs/wiki/Offline-and-Censored-Networks.md) for staging details.
+Open the printed HTTPS URL in your browser, compare the certificate SHA-256 fingerprint, enter the setup code, and create your admin account.
 
-</details>
-
-### 3. Claim Administrator & Open Web UI
-
-The installer prints the LAN HTTPS URL and self-signed TLS certificate SHA-256 fingerprint. Fetch your one-time setup code inside the control container:
-
-```routeros
-/container/shell [find comment="tikray:ctl"] cmd="tikray setup-code"
-```
-
-Open `https://<router-ip>` in your browser, verify the certificate fingerprint, enter the setup code, and create your admin account.
-
-### 4. Emergency Off & Clean Removal
+### 3. Emergency Off & Clean Removal
 
 <details>
-<summary><strong>Emergency Off (Works Even With Both Containers Stopped) &amp; Keep/Purge Uninstall</strong></summary>
+<summary><strong>Emergency Off (Works Even With Both Containers Stopped) &amp; Fast Keep/Purge Uninstall</strong></summary>
 
 ```routeros
-# Immediately suspend all steering & kill switches while keeping owner firewall intact:
+# Immediately suspend all steering & kill switches while keeping your owner firewall intact:
 /system/script/run tikray-emergency-off
 
+# Download the official uninstaller directly on MikroTik:
+/tool/fetch url="https://github.com/Arman2122/tikray/releases/latest/download/uninstall.rsc" dst-path="tikray-uninstall.rsc"
+
 # Clean uninstall — keeps /data (servers, admin, TLS identity, core slots) by default:
-:global tikrayUninstallData "keep"; /import file-name=uninstall.rsc
+:global tikrayUninstallData "keep"; /import file-name="tikray-uninstall.rsc"
 
 # Full removal including /data:
-:global tikrayUninstallData "purge"; /import file-name=uninstall.rsc
+:global tikrayUninstallData "purge"; /import file-name="tikray-uninstall.rsc"
 ```
 
 </details>
@@ -283,7 +313,7 @@ tikray device make-static 192.168.88.25                    # Convert bound Route
 tikray policy default smart                                # Set LAN default policy (direct|smart|full)
 tikray core update latest                                  # Verify, trial & commit latest xray-core
 tikray geo update latest --profile iran                    # Update geoip/geosite + RouterOS domestic CIDRs
-tikray image update tikray v1.0.0                          # Blue/green container upgrade via watchdog
+tikray image update tikray v1.0.1                          # Blue/green container upgrade via watchdog
 tikray backup export --out backup.json                     # Encrypt full state (Argon2id + AES-256-GCM)
 tikray backup restore --in backup.json                     # Atomic restore (preserves managed bridge subnet)
 tikray events                                              # Stream redacted control-plane events
@@ -320,7 +350,7 @@ Read the full threat model in [`SECURITY.md`](SECURITY.md) and [`docs/architectu
 | [**Troubleshooting & Emergency Recovery**](docs/wiki/Troubleshooting-and-Emergency-Recovery.md) | `tikray-emergency-off`, password reset, bridge/NAT repair, `keep`/`purge` uninstall |
 | [**FAQ**](docs/wiki/FAQ.md) | Quick answers to the most common architectural & operational questions |
 | [**Architecture Deep Dive**](docs/architecture.md) · [**REST API v1**](docs/api.md) | Technical internals, reconciliation lifecycle & full JSON endpoint specification |
-| [**v1.0.0 Release Notes**](docs/releases/v1.0.0.md) · [**Changelog**](CHANGELOG.md) | Release highlights, artifact verification commands & version history |
+| [**v1.0.1 Release Notes**](docs/releases/v1.0.1.md) · [**Changelog**](CHANGELOG.md) | Release highlights, artifact verification commands & version history |
 
 ---
 

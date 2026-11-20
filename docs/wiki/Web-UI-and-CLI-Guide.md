@@ -31,7 +31,7 @@ Access the Web UI at `https://<router-ip>` (printed at installation). It is comp
 
 ## 2. Complete `tikray` CLI Reference
 
-Run `tikray` directly inside the control container (`/container/shell [find comment="tikray:ctl"] cmd="tikray ..."`) or remotely from any Linux/macOS/WSL workstation.
+Run `tikray` directly inside the control container (`/container/shell [find comment="tikray:tikray"] cmd="tikray ..."`) or remotely from any Linux/macOS/WSL workstation.
 
 ### Remote CLI Setup (Certificate-Pinned)
 Create a named API token in **Settings → API Tokens** (or via `tikray token create ci-monitor --expires 720h`), then export:

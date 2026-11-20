@@ -61,34 +61,53 @@ jobs:
         run: |
           go run ./cmd/tikray-installer -uninstall-out out/uninstall.rsc
 
-      - name: Sign archives and package RouterOS installers (when release key is configured)
+      - name: Sign archives and package RouterOS installers
         env:
           COSIGN_PASSWORD: ${{ secrets.TIKRAY_RELEASE_COSIGN_PASSWORD }}
           COSIGN_PRIVATE_KEY: ${{ secrets.TIKRAY_RELEASE_COSIGN_KEY }}
         run: |
-          if [[ -z "${COSIGN_PRIVATE_KEY:-}" ]]; then
-            echo "TIKRAY_RELEASE_COSIGN_KEY is not configured; skipping Cosign archive signing and packaged installers."
-            exit 0
-          fi
           umask 077
-          printf '%s' "$COSIGN_PRIVATE_KEY" > "$RUNNER_TEMP/release.key"
-          cosign public-key --key "$RUNNER_TEMP/release.key" > out/publisher.pub
-          for f in out/tikray-arm64.tar out/tikray-amd64.tar out/tikray-runner-arm64.tar out/tikray-runner-amd64.tar; do
-            cosign sign-blob --yes --tlog-upload=false --key "$RUNNER_TEMP/release.key" --output-signature "$f.sig" "$f"
-          done
-          for ver in 7.25.1 7.24.6; do
+          trap 'rm -f "$RUNNER_TEMP/release.key"' EXIT
+          if [[ -n "${COSIGN_PRIVATE_KEY:-}" ]]; then
+            printf '%s' "$COSIGN_PRIVATE_KEY" > "$RUNNER_TEMP/release.key"
+            cosign public-key --key "$RUNNER_TEMP/release.key" > out/publisher.pub
+            for f in out/tikray-arm64.tar out/tikray-amd64.tar out/tikray-runner-arm64.tar out/tikray-runner-amd64.tar; do
+              cosign sign-blob --yes --tlog-upload=false --key "$RUNNER_TEMP/release.key" --output-signature "$f.sig" "$f"
+            done
+          else
+            echo "TIKRAY_RELEASE_COSIGN_KEY not configured; generating ephemeral ECDSA P-256 release signing key for this release."
+            openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 -out "$RUNNER_TEMP/release.key"
+            openssl pkey -in "$RUNNER_TEMP/release.key" -pubout -out out/publisher.pub
+            for f in out/tikray-arm64.tar out/tikray-amd64.tar out/tikray-runner-arm64.tar out/tikray-runner-amd64.tar; do
+              openssl dgst -sha256 -sign "$RUNNER_TEMP/release.key" "$f" | openssl base64 -A > "$f.sig"
+              cosign verify-blob --key out/publisher.pub --signature "$f.sig" --offline --insecure-ignore-tlog "$f" >/dev/null
+            done
+          fi
+          rm -f "$RUNNER_TEMP/release.key"
+          umask 022
+          chmod 0644 out/publisher.pub out/*.tar.sig
+          go build -o "$RUNNER_TEMP/tikray-installer" ./cmd/tikray-installer
+          for ver in 7.25.1 7.24.6 7.23.8; do
             for arch in arm64 amd64; do
-              go run ./cmd/tikray-installer \
+              "$RUNNER_TEMP/tikray-installer" \
                 -version "$ver" -arch "$arch" \
                 -images out -key out/publisher.pub \
                 -out "out/install-${ver}-${arch}.rsc"
             done
           done
-          rm -f "$RUNNER_TEMP/release.key"
+
+      - name: Render MikroTik fast bootstrap script
+        run: |
+          release_base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
+          sed "s|@TIKRAY_RELEASE_BASE@|${release_base}|g" scripts/bootstrap.rsc.tmpl > out/bootstrap.rsc
+          if grep -q '@TIKRAY_' out/bootstrap.rsc; then
+            echo "Unexpanded placeholder in out/bootstrap.rsc" >&2
+            exit 1
+          fi
 
       - name: Generate SHA256SUMS
         run: |
-          (cd out && sha256sum *.tar *.tar.sig *.rsc publisher.pub 2>/dev/null || sha256sum *.tar *.rsc) > out/SHA256SUMS
+          (cd out && sha256sum *.tar *.tar.sig *.rsc publisher.pub) > out/SHA256SUMS
 
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@v0
