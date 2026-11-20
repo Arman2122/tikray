@@ -340,20 +340,38 @@ var sourceError = regexp.MustCompile(`:error +"(tikray: [^"\\]+)"`)
 var importPosition = regexp.MustCompile(`line ([0-9]{1,7}) column ([0-9]{1,7})`)
 
 func installOutput(wire string) (string, error) {
-	s := strings.TrimSpace(wire)
-	i := strings.LastIndexByte(s, '\n')
-	last := strings.TrimSpace(s[i+1:])
-	if last == "m3-import-ok" {
-		if i < 0 {
-			return "", nil
+	s := strings.ReplaceAll(wire, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	lines := strings.Split(s, "\n")
+	okIdx, errIdx := -1, -1
+	var rawErr []byte
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "m3-import-ok":
+			if okIdx >= 0 || errIdx >= 0 {
+				return "", errors.New("installer acknowledgement missing (ambiguous)")
+			}
+			okIdx = i
+		case strings.HasPrefix(trimmed, "m3-import-error="):
+			raw, e := base64.StdEncoding.DecodeString(strings.TrimPrefix(trimmed, "m3-import-error="))
+			if e != nil || okIdx >= 0 || errIdx >= 0 {
+				return "", errors.New("installer acknowledgement missing (ambiguous)")
+			}
+			errIdx = i
+			rawErr = raw
 		}
-		return strings.TrimSpace(s[:i]), nil
 	}
-	raw, e := base64.StdEncoding.DecodeString(strings.TrimPrefix(last, "m3-import-error="))
-	if !strings.HasPrefix(last, "m3-import-error=") || e != nil {
-		return "", errors.New("installer acknowledgement missing")
+	if okIdx >= 0 {
+		return strings.TrimSpace(strings.Join(lines[:okIdx], "\n")), nil
 	}
-	msg := string(raw)
+	if errIdx < 0 {
+		if strings.TrimSpace(s) == "" {
+			return "", errors.New("installer acknowledgement missing (empty)")
+		}
+		return "", errors.New("installer acknowledgement missing (unframed)")
+	}
+	msg := string(rawErr)
 	// Only role/property strings present in the reviewed source are safe to
 	// render. An unrecognized peer string stays behind the fixed category.
 	if strings.Contains(msg, "tikray: object conflict") {
@@ -421,28 +439,78 @@ func (f *installLab) ownerPortForward(ctx context.Context, t *testing.T) {
 	}
 }
 
+var ownerRuleMenus = []string{"/ip/firewall/filter", "/ip/firewall/nat", "/ipv6/firewall/filter"}
+
 // Keep actual row IDs and order in memory. The harness fixture adds new
 // witnesses later, so they may be interspersed with the original rows.
+// Read all three menus in one fresh SSH session to avoid login bursts
+// immediately before installer reimport or owner-flow checkpoints.
 func (f *installLab) readOwnerRules(ctx context.Context, t *testing.T) []string {
 	t.Helper()
-	var result []string
-	for _, menu := range []string{"/ip/firewall/filter", "/ip/firewall/nat", "/ipv6/firewall/filter"} {
-		cmd := fmt.Sprintf(`{:local n 0; :foreach id in=[%s/find where comment~"^lab:"] do={:local r [%s/get $id]; :put (%q . $id . "|" . ($r->"comment") . "|" . ($r->"chain") . "|" . ($r->"action") . "|" . [:tostr ($r->"disabled")]); :set n ($n+1)}; :put ("m3-owner-rule-count=" . $n)}`, menu, menu, menu+"|")
-		var rows []string
-		wait, cancel := context.WithTimeout(ctx, 25*time.Second)
-		_, ok := poll(wait, 25*time.Second, 500*time.Millisecond, func() bool {
-			wire, err := f.CHR.RunPrivateFresh(wait, cmd)
-			var framed bool
-			rows, framed = readOwnerRuleFrame(menu, wire)
-			return err == nil && framed
-		})
-		cancel()
-		if !ok {
-			t.Fatal("complete owner firewall witness unavailable")
+	var script strings.Builder
+	script.WriteString("{ ")
+	for i, menu := range ownerRuleMenus {
+		if i > 0 {
+			script.WriteString("; ")
 		}
-		result = append(result, rows...)
+		fmt.Fprintf(&script, `{ :local n 0; :foreach id in=[%s/find where comment~"^lab:"] do={:local r [%s/get $id]; :put (%q . $id . "|" . ($r->"comment") . "|" . ($r->"chain") . "|" . ($r->"action") . "|" . [:tostr ($r->"disabled")]); :set n ($n+1)}; :put ("m3-owner-rule-menu=%s|" . $n) }`, menu, menu, menu+"|", menu)
+	}
+	script.WriteString(" }")
+	cmd := script.String()
+	var result []string
+	wait, cancel := context.WithTimeout(ctx, 35*time.Second)
+	_, ok := poll(wait, 35*time.Second, 2*time.Second, func() bool {
+		attempt, end := context.WithTimeout(wait, 15*time.Second)
+		wire, err := f.CHR.RunPrivateFresh(attempt, cmd)
+		end()
+		var framed bool
+		result, framed = readAllOwnerRulesFrame(ownerRuleMenus, wire)
+		return err == nil && framed
+	})
+	cancel()
+	if !ok {
+		t.Fatal("complete owner firewall witness unavailable")
 	}
 	return result
+}
+
+func readAllOwnerRulesFrame(menus []string, wire string) ([]string, bool) {
+	byMenu := make(map[string][]string, len(menus))
+	counts := make(map[string]int, len(menus))
+	for _, menu := range menus {
+		counts[menu] = -1
+	}
+	for _, line := range strings.Split(wire, "\n") {
+		row := strings.TrimSpace(line)
+		if value, ok := strings.CutPrefix(row, "m3-owner-rule-menu="); ok {
+			menu, num, ok := strings.Cut(value, "|")
+			n, err := strconv.Atoi(num)
+			prev, known := counts[menu]
+			if !ok || !known || prev >= 0 || err != nil || n < 0 {
+				return nil, false
+			}
+			counts[menu] = n
+			continue
+		}
+		for _, menu := range menus {
+			if strings.HasPrefix(row, menu+"|") {
+				fields := strings.Split(row, "|")
+				if len(fields) != 6 || !strings.HasPrefix(fields[1], "*") || !strings.HasPrefix(fields[2], "lab:") {
+					return nil, false
+				}
+				byMenu[menu] = append(byMenu[menu], row)
+				break
+			}
+		}
+	}
+	var all []string
+	for _, menu := range menus {
+		if counts[menu] < 0 || len(byMenu[menu]) != counts[menu] {
+			return nil, false
+		}
+		all = append(all, byMenu[menu]...)
+	}
+	return all, true
 }
 
 func readOwnerRuleFrame(menu, wire string) ([]string, bool) {

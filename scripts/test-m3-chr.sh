@@ -112,9 +112,9 @@ if ((rc != 0)); then
     if [[ $pattern == *TestM3Watchdog* ]]; then
         grep -oE '(active owner (LAN|bridge) API|owner (LAN|bridge) API (baseline|readback)): (session changed|command timed out|command unavailable|missing affirmative reply)$' "$run/harness.log" >&2 || true
         grep -oE 'independent image witness: owner_session=(true|false) native_row=(true|false) row_id=(true|false) image=(true|false) process=(true|false) selection=(true|false)$' "$run/harness.log" >&2 || true
-        grep -oE 'packaged installer import failed: (installer acknowledgement missing|private installer execution failed)$' "$run/harness.log" >&2 || true
+        grep -oE 'packaged installer import failed: (installer acknowledgement missing( \((empty|unframed|ambiguous)\))?|private installer execution failed)$' "$run/harness.log" >&2 || true
         grep -oE '(original owner LAN SSH transport was lost|owner LAN SSH command failed|the unrelated stream did not receive two fresh UDP replies|cannot verify the current committed runner selection)$' "$run/harness.log" >&2 || true
-        grep -oE 'unrelated connection continuity failed: monitor=(true|false) read=(true|false) api_id=(true|false) ssh_id=(true|false)( (api|ssh)_counts=\[[0-9 ]+\]->\[[0-9 ]+\]){2}$' "$run/harness.log" >&2 || true
+        grep -oE 'unrelated connection continuity failed: monitor=(true|false) read=(true|false) api_id=(true|false) ssh_id=(true|false)( ssh_err=(none|dial|session|timeout|ros-error|empty|unframed|other))?( (api|ssh)_counts=\[[0-9 ]+\]->\[[0-9 ]+\]){2}$' "$run/harness.log" >&2 || true
         grep -oE '(missing or ambiguous (runner|control-start) control-side witness \([0-9]+ received bytes\)|private file returned no complete size-checked witness)$' "$run/harness.log" >&2 || true
         grep -oF -e 'complete owner firewall witness unavailable' -e "installation changed an owner's firewall rule or its order" "$run/harness.log" >&2 || true
         grep -oF -e 'signed negative control never actually started' -e 'unhealthy candidate not positively installed' -e 'unhealthy candidate cleared the request' -e 'unhealthy runner positive ping control missing' -e 'a mere ping admitted a runner without its data path' -e 'unverified running runner failed its open WAN or closed leak check' "$run/harness.log" >&2 || true

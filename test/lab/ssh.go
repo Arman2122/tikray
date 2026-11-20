@@ -112,18 +112,26 @@ func (c *CHR) RunPrivate(ctx context.Context, cmd string) (string, error) {
 	return c.run(ctx, cmd, true)
 }
 
+// Fixed non-secret error sentinels returned by RunPrivate / RunPrivateFresh so
+// callers can classify transport failures without leaking router output.
+var (
+	ErrPrivateDial    = errors.New("lab: private owner connection failed")
+	ErrPrivateSession = errors.New("lab: private owner session failed")
+	ErrPrivateCommand = errors.New("lab: private RouterOS command failed")
+)
+
 // RunPrivateFresh gives an owner import its own SSH connection. The regular
 // session may still have asynchronous console output from a container shell.
 // Reserve this for operations crossing that boundary to keep logins infrequent.
 func (c *CHR) RunPrivateFresh(ctx context.Context, cmd string) (string, error) {
 	cl, err := c.dial(ctx)
 	if err != nil {
-		return "", errors.New("lab: private owner connection failed")
+		return "", ErrPrivateDial
 	}
 	defer cl.Close()
 	s, err := newSession(ctx, cl)
 	if err != nil {
-		return "", errors.New("lab: private owner session failed")
+		return "", ErrPrivateSession
 	}
 	return executeSession(ctx, s, cmd, true)
 }
@@ -168,7 +176,7 @@ func commandOutput(cmd string, raw []byte, exit error, private bool) (string, er
 	out := strings.ReplaceAll(string(raw), "\r", "")
 	rosFailed := rosError.MatchString(out)
 	if private && (exit != nil || rosFailed) {
-		return "", errors.New("lab: private RouterOS command failed")
+		return "", ErrPrivateCommand
 	}
 	if exit != nil {
 		return out, fmt.Errorf("%s: %w: %s", cmd, exit, out)

@@ -137,4 +137,20 @@ func TestOwnerRuleFrameRequiresCompleteReply(t *testing.T) {
 			t.Fatal("incomplete or ambiguous owner inventory was accepted")
 		}
 	}
+	allMenus := []string{"/ip/firewall/filter", "/ip/firewall/nat", "/ipv6/firewall/filter"}
+	natRow := "/ip/firewall/nat|*2|lab:owner-service|dstnat|dst-nat|false"
+	combined := "console notice\n" + row + "\nm3-owner-rule-menu=/ip/firewall/filter|1\n" + natRow + "\nm3-owner-rule-menu=/ip/firewall/nat|1\nm3-owner-rule-menu=/ipv6/firewall/filter|0\n"
+	all, ok := readAllOwnerRulesFrame(allMenus, combined)
+	if !ok || len(all) != 2 || all[0] != row || all[1] != natRow {
+		t.Fatal("combined owner rule frame was not recognized")
+	}
+	for _, invalid := range []string{
+		row + "\nm3-owner-rule-menu=/ip/firewall/filter|1\n",
+		combined + "m3-owner-rule-menu=/ipv6/firewall/filter|0\n",
+		row + "\nm3-owner-rule-menu=/ip/firewall/filter|2\nm3-owner-rule-menu=/ip/firewall/nat|0\nm3-owner-rule-menu=/ipv6/firewall/filter|0\n",
+	} {
+		if _, ok := readAllOwnerRulesFrame(allMenus, invalid); ok {
+			t.Fatal("incomplete or duplicate combined owner inventory was accepted")
+		}
+	}
 }

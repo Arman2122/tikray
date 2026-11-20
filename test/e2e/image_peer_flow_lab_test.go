@@ -6,14 +6,18 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Arman2122/tikray/test/lab"
 )
 
 // Fresh tuples do not exercise the cached NAT decision of an already
@@ -146,9 +150,31 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 	type pair [2]nativeFlowCounters
 	var markerLost atomic.Bool
 	cmd := []string{"/ip/firewall/connection/print", "=.proplist=.id,orig-packets,repl-packets,orig-bytes,repl-bytes,connection-mark,reply-src-address,reply-src-port", "?protocol=udp", "?src-address=" + address, "?src-port=31932", "?dst-address=198.51.100.254", "?dst-port=31931"}
-	sshQuery := `{:local done false;:for n from=1 to=4 do={:if (!$done) do={:do {:local rows [/ip/firewall/connection/find where src-address=[:toip "` + rosEscape(address) + `"] and protocol=udp and src-port=31932 and dst-address=198.51.100.254 and dst-port=31931 and connection-mark="` + mark + `"];:if ([:len $rows]=1) do={:local id [:pick $rows 0];:put ("m3-owner-row|" . [:tostr $id] . "|" . [/ip/firewall/connection/get $id orig-packets] . "|" . [/ip/firewall/connection/get $id repl-packets] . "|" . [/ip/firewall/connection/get $id orig-bytes] . "|" . [/ip/firewall/connection/get $id repl-bytes] . "|end");:set done true}} on-error={};:if (!$done) do={:delay 150ms}}}}`
-	read := func(c context.Context, checkpoint bool) (pair, bool) {
+	// Use an atomic print detail as-value snapshot instead of find + 4x get:
+	// under heavy conntrack churn on LTS RouterOS, expiring unrelated UDP
+	// rows can trap follow-up get $id lookups mid-read.
+	sshQuery := `{:local done false;:for n from=1 to=12 do={:if (!$done) do={:do {:local rows [/ip/firewall/connection/print detail as-value where src-address=[:toip "` + rosEscape(address) + `"] and protocol=udp and src-port=31932 and dst-address=198.51.100.254 and dst-port=31931 and connection-mark="` + mark + `"];:if ([:len $rows]=1) do={:local r [:pick $rows 0];:put ("m3-owner-row|" . [:tostr ($r->".id")] . "|" . [:tostr ($r->"orig-packets")] . "|" . [:tostr ($r->"repl-packets")] . "|" . [:tostr ($r->"orig-bytes")] . "|" . [:tostr ($r->"repl-bytes")] . "|end");:set done true}} on-error={};:if (!$done) do={:delay 150ms}}}}`
+	classifySSHErr := func(err error, wire string) string {
+		switch {
+		case errors.Is(err, lab.ErrPrivateDial):
+			return "dial"
+		case errors.Is(err, lab.ErrPrivateSession):
+			return "session"
+		case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+			return "timeout"
+		case errors.Is(err, lab.ErrPrivateCommand):
+			return "ros-error"
+		case err != nil:
+			return "other"
+		case strings.TrimSpace(wire) == "":
+			return "empty"
+		default:
+			return "unframed"
+		}
+	}
+	read := func(c context.Context, checkpoint bool) (pair, bool, string) {
 		var current pair
+		lastSSHErr := "none"
 		runSSH := f.CHR.RunPrivate
 		window := 7 * time.Second
 		interval := 200 * time.Millisecond
@@ -157,11 +183,11 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 			// Reimport and container-shell probes use their own sessions.
 			// The positive owner checkpoint also needs an independent read;
 			// space fresh SSH logins to avoid RouterOS's burst-login throttle
-			// and bound each dial so one stall cannot consume the full window.
+			// and allow enough handshake budget under emulated QEMU TCG load.
 			runSSH = f.CHR.RunPrivateFresh
-			window = 45 * time.Second
+			window = 60 * time.Second
 			interval = 2 * time.Second
-			attemptLimit = 12 * time.Second
+			attemptLimit = 25 * time.Second
 		}
 		bound, end := context.WithTimeout(c, window)
 		defer end()
@@ -194,15 +220,21 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 			sshEnd()
 			parts := ownerFlowFrame.FindStringSubmatch(wire)
 			if err != nil || len(parts) != 6 {
+				lastSSHErr = classifySSHErr(err, wire)
 				return false
 			}
 			var sshOK bool
 			current[1], sshOK = flowCounters(parts[1], mark, parts[2:])
+			if !sshOK {
+				lastSSHErr = "unframed"
+			} else {
+				lastSSHErr = "none"
+			}
 			return sshOK
 		})
-		return current, got
+		return current, got, lastSSHErr
 	}
-	first, ok := read(ctx, true)
+	first, ok, _ := read(ctx, true)
 	if !ok {
 		t.Fatal("two independent owner sessions could not verify the unrelated flow")
 	}
@@ -220,14 +252,14 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 	go func() {
 		defer close(done)
 		prev := first
-		tick := time.NewTicker(2 * time.Second)
+		tick := time.NewTicker(3 * time.Second)
 		defer tick.Stop()
 		for {
 			select {
 			case <-monitor.Done():
 				return
 			case <-tick.C:
-				now, ok := read(monitor, false)
+				now, ok, _ := read(monitor, false)
 				if markerLost.Load() || ok && (!now[0].continued(prev[0]) || !now[1].continued(prev[1])) {
 					if monitor.Err() == nil {
 						failed.Store(true)
@@ -253,9 +285,9 @@ func (f *routingLab) monitorForeignFlow(ctx context.Context, t *testing.T, addre
 		if _, ok := poll(ctx, 10*time.Second, 200*time.Millisecond, func() bool { return echoes() >= start+2 }); !ok {
 			t.Fatal("the unrelated stream did not receive two fresh UDP replies")
 		}
-		now, ok := read(ctx, true)
+		now, ok, sshErr := read(ctx, true)
 		if failed.Load() || markerLost.Load() || !ok || !now[0].continued(first[0]) || !now[1].continued(first[1]) || now[0].values[1] <= first[0].values[1] || now[1].values[1] <= first[1].values[1] {
-			t.Fatalf("unrelated connection continuity failed: monitor=%t read=%t api_id=%t ssh_id=%t api_counts=%v->%v ssh_counts=%v->%v", !failed.Load(), ok, now[0].id == first[0].id, now[1].id == first[1].id, first[0].values, now[0].values, first[1].values, now[1].values)
+			t.Fatalf("unrelated connection continuity failed: monitor=%t read=%t api_id=%t ssh_id=%t ssh_err=%s api_counts=%v->%v ssh_counts=%v->%v", !failed.Load(), ok, now[0].id == first[0].id, now[1].id == first[1].id, sshErr, first[0].values, now[0].values, first[1].values, now[1].values)
 		}
 	}
 }

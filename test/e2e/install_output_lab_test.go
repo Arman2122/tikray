@@ -45,6 +45,18 @@ func TestPrivateImportFailureHidesOutput(t *testing.T) {
 	if out, err := installOutput("successful terminal text\nm3-import-ok"); err != nil || out != "successful terminal text" {
 		t.Fatal("success acknowledgement lost terminal output")
 	}
+	if out, err := installOutput("successful terminal text\r\nm3-import-ok\r\nconsole closed\r\n"); err != nil || out != "successful terminal text" {
+		t.Fatal("success acknowledgement failed with trailing console notice")
+	}
+	if out, err := installOutput("m3-import-ok\nm3-import-ok"); err == nil || out != "" {
+		t.Fatal("duplicate success acknowledgement was accepted")
+	}
+	if out, err := installOutput("m3-import-ok\nm3-import-error=" + base64.StdEncoding.EncodeToString([]byte("unexpected"))); err == nil || out != "" {
+		t.Fatal("conflicting import acknowledgements were accepted")
+	}
+	if out, err := installOutput("   "); err == nil || out != "" || err.Error() != "installer acknowledgement missing (empty)" {
+		t.Fatal("empty import output did not report empty acknowledgement category")
+	}
 }
 
 func TestInstallProbeEvidenceIsFramed(t *testing.T) {
